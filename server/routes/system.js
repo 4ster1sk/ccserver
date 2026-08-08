@@ -235,13 +235,49 @@ function getCpuModel() {
 
 const cpuModel = getCpuModel();
 
+// --- Storage info ---
+
+const EXCLUDE_FS = new Set(['tmpfs', 'devtmpfs', 'udev', 'squashfs', 'overlay', 'ramfs', 'cgroup', 'cgroup2', 'sysfs', 'proc', 'devpts', 'securityfs', 'pstore', 'efivarfs', 'bpf', 'autofs', 'mqueue', 'hugetlbfs', 'fusectl', 'configfs', 'debugfs', 'tracefs']);
+
+async function getStorageInfo() {
+  try {
+    const { stdout } = await execFileAsync('df', ['-P', '-B1'], { timeout: 5000 });
+    const lines = stdout.trim().split('\n').slice(1);
+    const entries = [];
+    for (const line of lines) {
+      const parts = line.split(/\s+/);
+      if (parts.length < 6) continue;
+      const [device, total, used, available, , mount] = parts;
+      const fsType = device.startsWith('/dev/') ? null : device;
+      if (fsType && EXCLUDE_FS.has(fsType)) continue;
+      if (!device.startsWith('/dev/')) continue;
+      const toMb = (b) => Math.round(parseInt(b, 10) / 1024 / 1024);
+      const totalMb = toMb(total);
+      if (totalMb === 0) continue;
+      const usedMb = toMb(used);
+      entries.push({
+        mount,
+        device: device.replace('/dev/', ''),
+        total: totalMb,
+        used: usedMb,
+        available: toMb(available),
+        usedPct: Math.round((usedMb / totalMb) * 1000) / 10,
+      });
+    }
+    return entries;
+  } catch {
+    return [];
+  }
+}
+
 export async function systemRoute(fastify, opts) {
   fastify.get('/system-stats', async (request) => {
-    const [cpuUsage, memory, gpu, loadUptime] = await Promise.all([
+    const [cpuUsage, memory, gpu, loadUptime, storage] = await Promise.all([
       getCpuUsage(),
       getMemory(),
       getGpuInfo(),
       getLoadAndUptime(),
+      getStorageInfo(),
     ]);
     const wantIpmi = request.query.ipmi === '1';
     const ipmi = wantIpmi ? requestIpmi() : null;
@@ -254,6 +290,7 @@ export async function systemRoute(fastify, opts) {
         usage: cpuUsage,
       },
       memory,
+      storage,
       temperatures,
       gpu,
       ipmi,

@@ -200,6 +200,24 @@ export default function SystemMonitor({ visible }) {
           )}
         </div>
 
+        {/* Storage Section */}
+        {data.storage && data.storage.length > 0 && (
+          <div className="monitor-card">
+            <div className="monitor-card-title">Storage</div>
+            {data.storage.map((s) => (
+              <Bar
+                key={s.mount}
+                value={s.used}
+                max={s.total}
+                label={s.mount}
+                sublabel={s.device}
+                color={usageColor(s.usedPct)}
+                format={`${formatMb(s.used)} / ${formatMb(s.total)}`}
+              />
+            ))}
+          </div>
+        )}
+
         {/* Temperature Section */}
         <div className="monitor-card">
           <div className="monitor-card-title">Temperatures</div>
