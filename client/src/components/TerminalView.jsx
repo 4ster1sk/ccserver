@@ -290,9 +290,26 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
 
   useEffect(() => {
     const isMobile = 'ontouchstart' in window;
+
+    // Narrow screens: keep the terminal wide enough for the TUI's bottom
+    // chrome (opencode's prompt meta row — agent · model · provider — wraps
+    // to 2-3 lines below ~65 columns, eating most of the screen), shrinking
+    // the font instead of letting the UI wrap.
+    const MIN_TERMINAL_COLS = 68;
+    const MIN_FONT_SIZE = 9;
+    const MAX_FONT_SIZE = 14;
+    const CHAR_RATIO = 0.602; // measured advance width for the mono stack
+    const pickFontSize = (width) => {
+      const natural = isMobile ? 12 : MAX_FONT_SIZE;
+      if (!width) return natural;
+      if (width / (natural * CHAR_RATIO) >= MIN_TERMINAL_COLS) return natural;
+      const shrunk = Math.floor((width / (MIN_TERMINAL_COLS * CHAR_RATIO)) * 10) / 10;
+      return Math.max(MIN_FONT_SIZE, Math.min(natural, shrunk));
+    };
+
     const term = new Terminal({
       cursorBlink: true,
-      fontSize: isMobile ? 12 : 14,
+      fontSize: pickFontSize(terminalRef.current?.clientWidth),
       fontFamily: "'JetBrains Mono', 'Fira Code', 'Cascadia Code', Menlo, monospace",
       theme: xtermThemeRef.current,
       scrollSensitivity: isMobile ? 3 : 1,
@@ -306,6 +323,17 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
     term.loadAddon(webLinksAddon);
     term.open(terminalRef.current);
     fitAddon.fit();
+
+    // Re-fit after the font size is corrected so the pty gets the adjusted
+    // column count.
+    const correctFontSize = () => {
+      const fs = pickFontSize(terminalRef.current?.clientWidth);
+      if (fs !== term.options.fontSize) {
+        term.options.fontSize = fs;
+        fitAddon.fit();
+      }
+    };
+    correctFontSize();
 
     // OSC 52 (clipboard) extraction: apps like opencode write the clipboard
     // via OSC 52, which xterm.js ignores. Handle it here and strip the
@@ -617,6 +645,11 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
     }, PING_INTERVAL_MS);
 
     const handleResize = () => {
+      // Recompute the font first so the fit sees the corrected columns.
+      const fs = pickFontSize(terminalRef.current?.clientWidth);
+      if (fs !== term.options.fontSize) {
+        term.options.fontSize = fs;
+      }
       fitAddon.fit();
       const dims = fitAddon.proposeDimensions();
       const ws = wsRef.current;
