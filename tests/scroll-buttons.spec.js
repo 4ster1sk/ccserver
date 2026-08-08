@@ -50,6 +50,9 @@ test('scroll buttons send opencode\'s message-scroll keys', async ({ page }) => 
   // opencode, so select it explicitly via the launch modal.
   await page.locator('.open-split-caret').click();
   await page.locator('.open-menu-item', { hasText: 'opencode' }).click();
+  // The launch modal (7bd350b) decoupled choosing options from launching:
+  // selecting the app only picks it, the explicit 起動 button starts it.
+  await page.getByRole('button', { name: '起動', exact: true }).click();
 
   // Wait for the opencode TUI to come up (mouse tracking = it owns scrolling).
   await expect.poll(

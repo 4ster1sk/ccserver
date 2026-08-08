@@ -431,6 +431,11 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
     // mouse sequences, which scroll the TUI's internal conversation history;
     // without tracking (shells, claude) it scrolls its own buffer instead.
     //
+    // opencode routes those wheel events by position: over the prompt band
+    // (the bottom rows of the TUI) they scroll the prompt editor, not the
+    // log. Drags there are clamped to a top row via clampedWheelClientY so
+    // they still scroll the conversation.
+    //
     // Text selection is a separate, explicit mode (see `selectionMode`)
     // rather than a long-press gesture -- a PWA gets no OS haptic feedback,
     // so there was no way to tell a long-press had actually landed. While
@@ -446,6 +451,25 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
     // would for a real mouse. A floating "コピー" button appears afterward
     // since iOS has no native copy menu for a canvas selection either.
     const HANDLE_HIT_RADIUS = 28;
+    // opencode's TUI hit-tests wheel events by position (the SGR row/col), so
+    // a wheel over the prompt band at the bottom of the screen scrolls the
+    // prompt editor's own viewport, never the conversation. Clamp the
+    // synthetic wheel's Y to a top row of the terminal -- the conversation
+    // scrollbox fills everything above the prompt (see routes/session in the
+    // opencode source) -- so touch drags on the prompt band scroll the log
+    // instead. Fixed band height for now; tune PROMPT_BAND_ROWS if opencode's
+    // prompt layout grows.
+    const PROMPT_BAND_ROWS = 10;
+    const CLAMP_WHEEL_ROW = 2;
+    const clampedWheelClientY = (clientY) => {
+      if (appRef.current !== 'opencode') return clientY;
+      const rect = containerEl.getBoundingClientRect();
+      const cellHeight = rect.height / term.rows;
+      if (cellHeight <= 0) return clientY;
+      const row = Math.floor((clientY - rect.top) / cellHeight);
+      if (row < term.rows - PROMPT_BAND_ROWS) return clientY;
+      return rect.top + CLAMP_WHEEL_ROW * cellHeight;
+    };
     let touchStartX = 0;
     let touchStartY = 0;
     let touchScrolling = false;
@@ -558,7 +582,9 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
         term.element.dispatchEvent(new WheelEvent('wheel', {
           deltaY: dy,
           clientX: touch.clientX,
-          clientY: touch.clientY,
+          // Clamp Y out of the prompt band (see clampedWheelClientY) so the
+          // wheel always lands on the conversation scrollbox.
+          clientY: clampedWheelClientY(touch.clientY),
           bubbles: true,
           cancelable: true,
         }));

@@ -50,6 +50,9 @@ test('touch drag sends SGR wheel events to the opencode TUI', async ({ page, con
   // opencode, so select it explicitly via the launch modal.
   await page.locator('.open-split-caret').click();
   await page.locator('.open-menu-item', { hasText: 'opencode' }).click();
+  // The launch modal (7bd350b) decoupled choosing options from launching:
+  // selecting the app only picks it, the explicit 起動 button starts it.
+  await page.getByRole('button', { name: '起動', exact: true }).click();
 
   // Wait for the TUI to enable mouse tracking (it then owns the wheel).
   await expect.poll(
@@ -70,6 +73,68 @@ test('touch drag sends SGR wheel events to the opencode TUI', async ({ page, con
   // The drag must produce wheel-mouse input (SGR buttons 64 up / 65 down).
   await expect.poll(() =>
     inputFrames.some((d) => /\x1b\[<6[45];/.test(d)),
+    { timeout: 5_000 }
+  ).toBe(true);
+});
+
+test('touch drag over the prompt band is clamped to the log rows', async ({ page, context }) => {
+  test.skip(!hasOpencode(), 'opencode CLI not installed on this machine');
+
+  await page.addInitScript(() => {
+    localStorage.setItem('ccserver-last-dir', '/tmp/opencode');
+  });
+
+  const inputFrames = [];
+  let outputStream = '';
+  page.on('websocket', (ws) => {
+    ws.on('framesent', (event) => {
+      try {
+        const msg = JSON.parse(event.payload);
+        if (msg.type === 'input') inputFrames.push(msg.data);
+      } catch { /* non-JSON frame */ }
+    });
+    ws.on('framereceived', (event) => {
+      try {
+        const msg = JSON.parse(event.payload);
+        if (msg.type === 'output') outputStream += msg.data;
+      } catch { /* non-JSON frame */ }
+    });
+  });
+
+  await page.goto('/');
+  await page.locator('.open-split-caret').click();
+  await page.locator('.open-menu-item', { hasText: 'opencode' }).click();
+  // The launch modal (7bd350b) decoupled choosing options from launching:
+  // selecting the app only picks it, the explicit 起動 button starts it.
+  await page.getByRole('button', { name: '起動', exact: true }).click();
+
+  await expect.poll(
+    () => outputStream.includes('\x1b[?1006h'),
+    { timeout: 45_000 }
+  ).toBe(true);
+
+  // opencode hit-tests wheel events by position, so a wheel over the prompt
+  // band would scroll the prompt editor, not the log. TerminalView clamps
+  // the synthetic wheel's Y to a top row, and the SGR row is what proves it:
+  // reports from a band drag must carry row <= 3 instead of the touch's own
+  // (bottom) row. Move in small steps so several wheel events are emitted
+  // while the finger is still inside the band.
+  const client = await context.newCDPSession(page);
+  const box = await page.locator('.terminal-container').boundingBox();
+  const x = box.x + box.width / 2;
+  const yStart = box.y + box.height * 0.92;
+  await client.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x, y: yStart }] });
+  for (let i = 1; i <= 5; i++) {
+    await client.send('Input.dispatchTouchEvent', {
+      type: 'touchMove',
+      touchPoints: [{ x, y: yStart - i * 24 }],
+    });
+  }
+  await client.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+
+  // Clamped wheel report: \x1b[<64;col;rowM / \x1b[<65;col;rowM, row <= 3.
+  await expect.poll(() =>
+    inputFrames.some((d) => /\x1b\[<6[45];\d+;[123]M/.test(d)),
     { timeout: 5_000 }
   ).toBe(true);
 });
