@@ -100,6 +100,14 @@ export function loadSandboxConfig() {
   }
   const docker = raw.docker !== false; // default on
   const gpg = raw.gpg === true;        // forward gpg-agent + ~/.gnupg (opt-in)
+  // Forward the host's ssh-agent socket (opt-in, like gpg). Not needed for
+  // HTTPS git (gitBroker handles that entirely host-side, see below) or for
+  // commit signing (that's the gpg flag above); this only matters for SSH git
+  // remotes or running `ssh` directly inside the sandbox. Off by default
+  // because a forwarded agent is real standing access to the host's keys for
+  // the whole sandboxed process, not just git -- see the docker+gitBroker
+  // bypass warning below for how much a live agent socket widens the hole.
+  const sshAgent = raw.sshAgent === true;
   // Repo-scoped git credential broker: HTTPS credential helper + SSH gate,
   // both checked against the session cwd's own repo + submodules, and gh
   // CLI disabled (its API calls can't be repo-scoped without TLS
@@ -112,7 +120,7 @@ export function loadSandboxConfig() {
   // How to launch claude. Overridable because the install location is
   // environment-specific (see resolveClaude). Env var wins over the config file.
   const claudeBin = process.env.CCSERVER_CLAUDE_BIN || (typeof raw.claudeBin === 'string' ? raw.claudeBin : null);
-  return { docker, gpg, gitBroker, binds, env, claudeBin, configPath };
+  return { docker, gpg, sshAgent, gitBroker, binds, env, claudeBin, configPath };
 }
 
 // Locate an executable named `cmd` on the given PATH (or return it as-is if
@@ -546,11 +554,12 @@ export function buildMinimalSandboxSpawn({ cwd, targetCommand }) {
 // Returns { command, args } for pty.spawn, wrapping the given target command
 // (e.g. ['claude', '--resume', id] or ['/bin/bash']) in the sandbox.
 export function buildSandboxSpawn({ cwd, targetCommand }) {
-  const { docker: cfgDocker, gpg, gitBroker: gitBrokerEnabled, binds, env, claudeBin } = loadSandboxConfig();
+  const { docker: cfgDocker, gpg, sshAgent, gitBroker: gitBrokerEnabled, binds, env, claudeBin } = loadSandboxConfig();
   const docker = cfgDocker && dockerSandboxAvailable();
 
-  // An explicit env.SSH_AUTH_SOCK in the config wins; otherwise auto-discover.
-  const authSock = env.SSH_AUTH_SOCK || discoverSshAuthSock();
+  // ssh-agent forwarding is opt-in (see loadSandboxConfig). When on, an
+  // explicit env.SSH_AUTH_SOCK in the config wins; otherwise auto-discover.
+  const authSock = sshAgent ? (env.SSH_AUTH_SOCK || discoverSshAuthSock()) : null;
 
   // Unique per launch (docker only); returned so the caller can remove it on
   // teardown. See newStateDir().
@@ -566,16 +575,16 @@ export function buildSandboxSpawn({ cwd, targetCommand }) {
   // filesystem. When docker is also on, code inside the sandbox can run its
   // own containers via the nested dockerd (see sandbox-entrypoint.sh); those
   // containers get their own image filesystem and do NOT inherit the ssh/gh
-  // wrapper binds, and can mount the forwarded SSH_AUTH_SOCK (bound at a
-  // fixed, discoverable path) directly, reaching the real ssh binary with
-  // the real forwarded agent, unscoped. This is a materially easier bypass
-  // than the ssh-agent-protocol one documented in the README, so surface it
-  // loudly rather than let the docker+gitBroker combination look like a
-  // hard boundary it isn't. See README "Known limitations".
-  if (docker && gitBroker) {
+  // wrapper binds. This only turns into a live-credential bypass when
+  // ssh-agent forwarding is also on (authSock set): a nested container can
+  // then mount the forwarded socket (bound at a fixed, discoverable path)
+  // directly, reaching the real ssh binary with the real forwarded agent,
+  // unscoped. sshAgent defaults to off precisely to keep this door shut; see
+  // README "Known limitations" before turning it on alongside docker.
+  if (docker && gitBroker && authSock) {
     console.warn(
-      '[sandbox] docker + gitBroker are both enabled: a process inside the sandbox can '
-      + 'use `docker run` to bypass the git credential broker entirely (nested containers '
+      '[sandbox] docker + gitBroker + sshAgent are all enabled: a process inside the sandbox '
+      + 'can use `docker run` to bypass the git credential broker entirely (nested containers '
       + "don't inherit the ssh wrapper and can mount the forwarded ssh-agent socket "
       + 'directly). See README "Known limitations" before relying on gitBroker as a hard boundary.',
     );
