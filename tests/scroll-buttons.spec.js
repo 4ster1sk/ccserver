@@ -1,11 +1,28 @@
 import { test, expect } from '@playwright/test';
+import { execFileSync } from 'node:child_process';
 
 // The scroll buttons (up/down/Top/Btm) scroll xterm.js's own buffer, which is
 // frozen under opencode's TUI (alt screen + mouse tracking). For opencode
 // sessions they must instead drive the TUI's internal conversation scroll via
 // its message-scroll keybindings: pageup/pagedown (half page), ctrl+g
 // (first message), ctrl+alt+g (last message).
+
+// opencode isn't installed on every machine this suite runs on (e.g. this
+// repo's plain ubuntu-latest CI runner has neither claude nor opencode) --
+// the webServer this test drives runs on the same machine, so a local check
+// is a valid proxy for whether the server can actually spawn it.
+function hasOpencode() {
+  try {
+    execFileSync('which', ['opencode'], { stdio: 'ignore' });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 test('scroll buttons send opencode\'s message-scroll keys', async ({ page }) => {
+  test.skip(!hasOpencode(), 'opencode CLI not installed on this machine');
+
   await page.addInitScript(() => {
     localStorage.setItem('ccserver-last-dir', '/tmp/opencode');
   });
@@ -28,7 +45,11 @@ test('scroll buttons send opencode\'s message-scroll keys', async ({ page }) => 
   });
 
   await page.goto('/');
-  await page.locator('.open-split-main').click();
+  // The default launched app is now configurable (sandbox.config.json's
+  // defaultApp, "claude" unless set) and no longer guaranteed to be
+  // opencode, so select it explicitly via the launch modal.
+  await page.locator('.open-split-caret').click();
+  await page.locator('.open-menu-item', { hasText: 'opencode' }).click();
 
   // Wait for the opencode TUI to come up (mouse tracking = it owns scrolling).
   await expect.poll(

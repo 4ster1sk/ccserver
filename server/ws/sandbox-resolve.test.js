@@ -20,25 +20,25 @@ function resolvesToRealBinary(command) {
   return SANDBOX_PATH.split(':').some((dir) => dir && existsSync(join(dir, command)));
 }
 
-test('resolveApp finds claude via SANDBOX_PATH or its fallback dirs', () => {
+// Neither agent CLI is guaranteed to be installed on every machine this suite
+// runs on -- notably, plain CI runners (e.g. this repo's ubuntu-latest
+// GitHub Actions job) have neither. Skip rather than fail when an app is
+// genuinely absent everywhere resolveApp looks, for either app.
+function isInstalled(app) {
+  return resolvesToRealBinary(resolveApp(app).command);
+}
+
+test('resolveApp finds claude via SANDBOX_PATH or its fallback dirs', { skip: !isInstalled('claude') }, () => {
   const r = resolveApp('claude');
   assert.ok(resolvesToRealBinary(r.command), `command does not resolve to a real binary: ${r.command}`);
 });
 
-test('resolveApp finds opencode via SANDBOX_PATH or its fallback dirs', { skip: !anyOpencodeInstall() }, () => {
+test('resolveApp finds opencode via SANDBOX_PATH or its fallback dirs', { skip: !isInstalled('opencode') }, () => {
   const r = resolveApp('opencode');
   assert.ok(resolvesToRealBinary(r.command), `command does not resolve to a real binary: ${r.command}`);
 });
 
-// opencode isn't installed on every machine this test suite runs on (unlike
-// claude, which this project assumes); skip rather than fail when it's
-// genuinely absent everywhere resolveApp looks.
-function anyOpencodeInstall() {
-  const r = resolveApp('opencode');
-  return resolvesToRealBinary(r.command);
-}
-
-test('resolveApp keeps the bare command name when SANDBOX_PATH resolves it', () => {
+test('resolveApp keeps the bare command name when SANDBOX_PATH resolves it', { skip: !isInstalled('claude') }, () => {
   const r = resolveApp('claude');
   // /usr/bin, /bin etc. are all on SANDBOX_PATH, so a claude install visible
   // there (the common case) should resolve to the bare name, not an absolute
