@@ -401,14 +401,14 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onSessionClick, 
             <div className="open-menu-label">アプリ</div>
             <div
               className="open-menu-item"
-              onClick={() => { chooseApp('claude'); setOpenMenuOpen(false); onOpen(currentPath, { sandbox: sandboxDefault, sandboxOpts, app: 'claude' }); }}
+              onClick={() => chooseApp('claude')}
             >
               <span className="open-menu-check">{appDefault === 'claude' ? '✓' : ''}</span>
               Claude Code
             </div>
             <div
               className="open-menu-item"
-              onClick={() => { chooseApp('opencode'); setOpenMenuOpen(false); onOpen(currentPath, { sandbox: sandboxDefault, sandboxOpts, app: 'opencode' }); }}
+              onClick={() => chooseApp('opencode')}
             >
               <span className="open-menu-check">{appDefault === 'opencode' ? '✓' : ''}</span>
               opencode
@@ -416,14 +416,14 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onSessionClick, 
             <div className="open-menu-sep" />
             <div
               className="open-menu-item"
-              onClick={() => { chooseSandbox(false); setOpenMenuOpen(false); onOpen(currentPath, { sandbox: false, sandboxOpts, app: appDefault }); }}
+              onClick={() => chooseSandbox(false)}
             >
               <span className="open-menu-check">{!sandboxDefault ? '✓' : ''}</span>
               通常起動
             </div>
             <div
               className="open-menu-item"
-              onClick={() => { chooseSandbox(true); setOpenMenuOpen(false); onOpen(currentPath, { sandbox: true, sandboxOpts, app: appDefault }); }}
+              onClick={() => chooseSandbox(true)}
             >
               <span className="open-menu-check">{sandboxDefault ? '✓' : ''}</span>
               🔒 サンドボックスで起動
@@ -451,7 +451,13 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onSessionClick, 
               GPG/ssh-agentは既定オフ、このディレクトリ ({currentPath}) に記憶されます。
             </p>
             <div className="resume-actions">
-              <button className="btn btn-secondary" onClick={() => setOpenMenuOpen(false)}>閉じる</button>
+              <button className="btn btn-secondary" onClick={() => setOpenMenuOpen(false)}>キャンセル</button>
+              <button
+                className="btn btn-primary"
+                onClick={() => { setOpenMenuOpen(false); onOpen(currentPath, { sandbox: sandboxDefault, sandboxOpts, app: appDefault }); }}
+              >
+                起動
+              </button>
             </div>
           </div>
         </div>
