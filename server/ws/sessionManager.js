@@ -11,7 +11,6 @@ import {
   extractResumeSessionId,
   detectPermissionPrompt,
 } from './appLaunch.js';
-import { createOutputTransform } from './outputTransform.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const SAVED_SESSIONS_PATH = join(__dirname, '..', '..', '.saved-sessions.json');
@@ -107,28 +106,21 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox
         CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN: '1',
         CLAUDE_CODE_DISABLE_MOUSE_CLICKS: '1',
       }),
-      // opencode enables full mouse tracking (DECSET 1000/1002/1003/1006) which
-      // makes xterm.js forward every mouse event to the app — text selection
-      // (and thus copy) becomes impossible. OPENCODE_DISABLE_MOUSE turns that
-      // off so the browser's selection/copy works again. There is no env var
-      // for opencode's alternate screen; see outputTransform.js.
-      ...(sessionApp === 'opencode' ? { OPENCODE_DISABLE_MOUSE: '1' } : {}),
+      // opencode is left with full mouse capture (its default): the TUI keeps
+      // the whole conversation in an internal scrollable area that the wheel
+      // scrolls natively, and its own drag-selection + copy-on-select writes
+      // to the browser clipboard via OSC 52 (handled client-side).
     },
   });
   } catch (err) {
     return { sessionId: id, session: null, error: `Failed to spawn "${command}": ${err.message}` };
   }
 
-  // opencode rewrites the pty output stream (alt-screen removal, scrollback
-  // paging etc.); null for other apps. Rows feed the frame-size heuristic.
-  const outputTransform = createOutputTransform(sessionApp, rows);
-
   const session = {
     id,
     cwd,
     shell: !!shell,
     app: sessionApp,
-    outputTransform,
     sandbox: useSandbox,
     sandboxOpts: useSandbox ? (sandboxOpts || null) : null, // per-launch gpg/sshAgent override, for schedule/resume replay
     sandboxStateDir, // rootlesskit state dir to remove on teardown (docker only)
@@ -157,7 +149,7 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox
   };
 
   ptyProcess.onData((rawData) => {
-    const data = outputTransform ? outputTransform.transform(rawData) : rawData;
+    const data = rawData;
     appendToBuffer(session, data);
 
     if (session.socket && session.socket.readyState === 1) {
