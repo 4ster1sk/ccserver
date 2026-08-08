@@ -48,6 +48,21 @@ function defaultApp() {
 export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox, sandboxOpts, app, resumeLast }) {
   const id = randomUUID();
 
+  // claude (and likely opencode) aborts immediately (SIGABRT, exit 134, no
+  // output at all) when launched with the filesystem root as cwd -- refuse
+  // with a clear error instead of the opaque crash. Reachable via the
+  // directory browser's own "/" fallback (used until the home-dir fetch
+  // resolves, or if the user navigates all the way up and launches there),
+  // not just automated/edge-case callers. Shells are unaffected: plain
+  // /bin/bash starts fine at /.
+  if (!shell && cwd === '/') {
+    return {
+      sessionId: id,
+      session: null,
+      error: 'Cannot launch in the filesystem root (/) -- claude aborts immediately there. Choose a working directory first.',
+    };
+  }
+
   // Which agent CLI this session runs. Shell sessions have no app.
   const sessionApp = shell ? null : (isValidApp(app) ? app : defaultApp());
 
