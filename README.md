@@ -23,6 +23,7 @@ VS Code のようにフォルダを選択し、ブラウザ内のターミナル
 - npm >= 9
 - [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) (`/usr/bin/claude`)
 - C++ コンパイラ（node-pty のビルドに必要。Arch: `base-devel`、Ubuntu: `build-essential`）
+- ([opencode](https://opencode.ai/) — 任意。入っていれば起動アプリとして選べます)
 
 ## セットアップ
 
@@ -67,10 +68,21 @@ PORT=8080 NODE_ENV=production node server/index.js
 
 1. ディレクトリブラウザでフォルダを選択
    - **シングルクリック** → フォルダ内に移動
-   - **ダブルクリック** → そのフォルダで Claude Code を起動
-   - **Open with Claude Code** ボタン → 現在のディレクトリで起動
-2. ブラウザ内ターミナルで Claude Code を操作
+   - **ダブルクリック** → そのフォルダで起動 (Claude Code / opencode は下記参照)
+   - **Claude Code ボタン** → 現在のディレクトリで起動
+2. ブラウザ内ターミナルで操作
 3. **Back** ボタンでディレクトリ選択に戻る
+
+### アプリの選択 (Claude Code / opencode)
+
+「Claude Code」ボタン右の **▼** から開くモーダルで、起動するエージェント CLI (Claude Code / [opencode](https://opencode.ai/)) と通常起動/サンドボックスを選べます。選択はブラウザに記憶され (`localStorage`)、次回以降の既定になります。opencode を選んだ場合:
+
+- **クリップボード同期 (OSC 52)**: opencode がターミナルに書き込む OSC 52 シーケンスをブラウザが解釈し、システムクリップボードへ反映します (xterm.js は OSC 52 を無視するため、ccserver 側で処理)。
+- **TUI ネイティブスクロール**: opencode は独自の代替画面バッファでスクロールするため (xterm.js 自体のスクロールバックは効きません)、マウスホイール/タッチドラッグは合成ホイールイベントとして、ターミナル下部のスクロールボタンは opencode のメッセージスクロールキー (PageUp/PageDown, Ctrl+G/Ctrl+Alt+G) として中継されます。
+- **列数の確保**: 狭い画面 (スマホ等) では、opencode のプロンプト表示 (agent · model · provider 行) が折り返して画面の大半を占領しないよう、68 列を下限にフォントサイズを自動で縮小します。
+- Usage ボタンは Claude Code の `/usage` 専用のため、opencode セッションでは非表示になります。
+
+新規セッションの既定アプリは `sandbox.config.json` の `defaultApp` で設定できます (未設定なら `claude`)。ブラウザ側で一度でも明示的に選ぶと、そちらが優先されます。
 
 ### 予約プロンプト (タイマー)
 
@@ -142,14 +154,16 @@ cp server/sandbox.config.example.json server/sandbox.config.json
   "sshAgent": false,
   "gitBroker": true,
   "binds": [],
-  "env": {}
+  "env": {},
+  "defaultApp": "claude"
 }
 ```
 
 - `gpg`/`sshAgent` はここではサーバー全体の既定値。起動メニューのチェックボックス (ディレクトリ単位で `localStorage` に記憶) で個別に上書きした場合はそちらが優先されます (上記参照)。`sshAgent` は SSH の git remote を使う、またはサンドボックス内から素の `ssh` を叩きたいときだけ有効化してください。
 - `binds` の `mode` は `ro` (既定) か `rw`。存在しないパスはスキップされます。`~` はホームに展開。ただし `~/.ssh` と `~/.config/gh` は `gitBroker` の設定に関わらず常にブロックされます (上記参照)。
 - `env` でサンドボックス内の環境変数を追加できます (例: `sshAgent: true` のときに `SSH_AUTH_SOCK` を明示指定して自動検出を上書き)。
-- `claudeBin` で claude の起動方法を指定できます (環境変数 `CCSERVER_CLAUDE_BIN` が優先)。既定は自動検出で、`claude` を PATH から解決し、ラッパー (例: `/usr/bin/claude` → `/opt/claude-code/bin/claude`) の場合は実体のインストール先を辿ってサンドボックスへ自動的に公開します。自動検出で外れる場所に claude がある場合や、特定ビルドに固定したい場合のみ絶対パスで指定してください。
+- `defaultApp` (既定 `"claude"`): 新規セッションの既定エージェント (`"claude"` か `"opencode"`)。起動 UI で明示的に選んだ後はブラウザの `localStorage` の選択が優先され (上記「アプリの選択」参照)、この値は初回表示時の見た目とサーバー側フォールバック (予約プロンプトの自動再開など、クライアントが `app` を指定しない経路) にのみ使われます。
+- `claudeBin` で claude の起動方法を指定できます (環境変数 `CCSERVER_CLAUDE_BIN` が優先)。既定は自動検出で、`claude`/`opencode` を PATH から解決し、ラッパー (例: `/usr/bin/claude` → `/opt/claude-code/bin/claude`) の場合は実体のインストール先を辿ってサンドボックスへ自動的に公開します。自動検出で外れる場所に claude がある場合や、特定ビルドに固定したい場合のみ絶対パスで指定してください。opencode は PATH に加えて `~/.opencode/bin` も自動探索します。
 - サンドボックスは Linux 限定です。同じプロジェクトを 2 つのサンドボックスで同時に開いた場合、docker の data-root 競合を避けるため 2 つ目は docker 無しで起動します。
 
 ### 仕組み (docker と gpg の両立)
@@ -169,7 +183,9 @@ ccserver/
 ├── docs/
 │   └── ccserver.service
 ├── tests/
-│   └── close-confirm.spec.js       # Playwright E2E
+│   ├── close-confirm.spec.js       # Playwright E2E
+│   ├── mobile-scroll.spec.js       # opencode TUI: タッチドラッグ→合成ホイールイベント
+│   └── scroll-buttons.spec.js      # opencode TUI: スクロールボタン→メッセージスクロールキー
 ├── server/
 │   ├── package.json
 │   ├── index.js                    # Fastify エントリポイント (トークン認証・静的配信含む)
@@ -179,11 +195,12 @@ ccserver/
 │   │   ├── dirs.js                 # GET/POST /api/dirs, GET /api/dirs/home
 │   │   ├── sessions.js             # GET/DELETE /api/sessions...
 │   │   ├── files.js                # GET/POST /api/files (アップロード/ダウンロード)
-│   │   ├── system.js               # GET /api/system-stats (CPU/メモリ/温度/GPU/IPMI)
+│   │   ├── system.js               # GET /api/system-stats (CPU/メモリ/温度/GPU/IPMI/ストレージ)
 │   │   └── usage.js                # GET /api/usage
 │   └── ws/
 │       ├── terminal.js             # WebSocket + node-pty ブリッジ (/ws/terminal)
 │       ├── sessionManager.js       # セッション・予約プロンプトの状態管理/永続化
+│       ├── appLaunch.js            # アプリ非依存の起動ロジック (resume引数・permission検出等)
 │       ├── sandbox.js              # bwrap + rootless docker サンドボックス構築
 │       ├── sandbox-entrypoint.sh
 │       ├── sandbox-gh-wrapper.cjs         # サンドボックス内 gh をブローカー中継に差し替え
@@ -191,7 +208,7 @@ ccserver/
 │       ├── sandbox-git-credential-helper.cjs
 │       ├── sandbox-gitconfig / sandbox-known-hosts / sandbox-ssh-config
 │       ├── git-broker.js           # サンドボックス外で動く、リポジトリスコープの認証情報ブローカー
-│       └── ghAllowlist.js / gitAllowlist.js  (+ 各 *.test.js, sandbox-gh-wrapper.test.js)
+│       └── ghAllowlist.js / gitAllowlist.js  (+ 各 *.test.js, appLaunch.test.js, sandbox-resolve.test.js)
 └── client/
     ├── package.json
     ├── index.html
@@ -200,6 +217,7 @@ ccserver/
         ├── main.jsx / App.jsx
         ├── auth.js                 # トークン認証 (CCSERVER_TOKEN)
         ├── themes.js
+        ├── osc52.js                # OSC 52 クリップボード同期のパーサ (+ server/ws/osc52.test.js)
         ├── hooks/
         │   └── useNotifications.js
         ├── components/
@@ -226,7 +244,7 @@ CCSERVER_TOKEN=some-secret NODE_ENV=production node server/index.js
 | メソッド | パス | 説明 |
 |---|---|---|
 | GET | `/api/dirs?path=<path>&showHidden=1` | 指定パスのサブディレクトリ/ファイル一覧 |
-| GET | `/api/dirs/home` | サーバーのホームディレクトリを返す |
+| GET | `/api/dirs/home` | `{ home, defaultApp }` — サーバーのホームディレクトリと、設定ファイルの既定起動アプリ |
 | POST | `/api/dirs` | `{ parent, name }` でフォルダ作成 |
 | GET | `/api/sessions` | 実行中セッション + 保存済み (未起動) セッションの一覧 |
 | DELETE | `/api/sessions/:id` | セッションを終了する (予約プロンプトも解除) |
@@ -257,7 +275,7 @@ JSON メッセージでターミナル I/O とセッション管理 (アタッ�
 
 | 方向 | type | フィールド | 説明 |
 |------|------|-----------|------|
-| → | `init` | `cwd`, `cols`, `rows`, `claudeSessionId?`, `shell?`, `sandbox?` | 新規セッションを起動 (既定は Claude Code、`shell: true` で素のシェル) |
+| → | `init` | `cwd`, `cols`, `rows`, `claudeSessionId?`, `shell?`, `sandbox?`, `sandboxOpts?`, `app?`, `resume?` | 新規セッションを起動 (`app`: `"claude"` (既定) か `"opencode"`、`shell: true` で素のシェル、`resume: true` で opencode の最終セッションに再開) |
 | → | `attach` | `sessionId`, `cols?`, `rows?` | 既存セッションに再接続 (出力バッファを `replay` で再送) |
 | → | `input` | `data` | キーボード入力 |
 | → | `resize` | `cols`, `rows` | ターミナルリサイズ |
