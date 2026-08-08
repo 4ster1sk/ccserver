@@ -681,6 +681,17 @@ body {
   touch-action: none;
 }
 
+/* opencode draws in the alternate screen: xterm.js keeps no scrollback for
+   it, so the native scrollbar would be an empty, misleading track. Hide it
+   and pin the viewport to the bottom instead (see pinToBottom in
+   TerminalView) — all scrolling happens inside the TUI itself. */
+.terminal-container.tui-scroll .xterm-viewport {
+  overflow-y: hidden;
+}
+.terminal-container.tui-scroll .xterm-viewport::-webkit-scrollbar {
+  display: none;
+}
+
 /* Keyboard open - hide chrome to maximize terminal space */
 .terminal-view.keyboard-open .terminal-header {
   display: none;

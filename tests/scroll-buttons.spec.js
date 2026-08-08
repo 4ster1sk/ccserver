@@ -36,6 +36,16 @@ test('scroll buttons send opencode\'s message-scroll keys', async ({ page }) => 
     { timeout: 45_000 }
   ).toBe(true);
 
+  // The console's own scrollbar is meaningless for the TUI (its buffer is
+  // frozen in the alternate screen): the container hides it and pins the
+  // viewport to the bottom.
+  await expect(page.locator('.terminal-container')).toHaveClass(/tui-scroll/);
+  const viewportOverflow = await page.evaluate(() => {
+    const vp = document.querySelector('.terminal-container.tui-scroll .xterm-viewport');
+    return vp ? getComputedStyle(vp).overflowY : null;
+  });
+  expect(viewportOverflow).toBe('hidden');
+
   const hasInput = (seq) => inputFrames.some((d) => d === seq);
   const mark = (seq) => {
     const before = inputFrames.length;

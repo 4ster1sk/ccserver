@@ -324,6 +324,15 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
     term.open(terminalRef.current);
     fitAddon.fit();
 
+    // opencode draws in the alternate screen, so xterm.js's buffer never has
+    // scrollable content — pin the viewport to the bottom after every write
+    // so a transient scroll (resize, buffer switch on exit/reconnect) can't
+    // leave the TUI shifted out of view. Its own scrollbar is hidden via the
+    // .tui-scroll class on the container.
+    const pinToBottom = () => {
+      if (appRef.current === 'opencode') term.scrollToBottom();
+    };
+
     // Re-fit after the font size is corrected so the pty gets the adjusted
     // column count.
     const correctFontSize = () => {
@@ -334,6 +343,7 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
       }
     };
     correctFontSize();
+    pinToBottom();
 
     // OSC 52 (clipboard) extraction: apps like opencode write the clipboard
     // via OSC 52, which xterm.js ignores. Handle it here and strip the
@@ -483,6 +493,7 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
             break;
           case 'output':
             term.write(osc52.process(msg.data));
+            pinToBottom();
             break;
           case 'auto_yes':
             setAutoYesLog((prev) => [...prev, msg.entry]);
@@ -519,10 +530,12 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
           }
           case 'replay':
             term.write(osc52.process(msg.data));
+            pinToBottom();
             break;
           case 'exit': {
             term.writeln('');
             term.writeln(`\r\n[Process exited with code ${msg.exitCode}]`);
+            pinToBottom();
             sessionStorage.removeItem(storageKey);
             sessionIdRef.current = null;
             if (onExitedRef.current) onExitedRef.current(true);
@@ -651,6 +664,7 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
         term.options.fontSize = fs;
       }
       fitAddon.fit();
+      pinToBottom();
       const dims = fitAddon.proposeDimensions();
       const ws = wsRef.current;
       if (dims && ws && ws.readyState === WebSocket.OPEN) {
@@ -1085,7 +1099,10 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
           {scheduleError && <div className="scheduler-error">{scheduleError}</div>}
         </div>
       )}
-      <div className="terminal-container" ref={terminalRef} />
+      {/* opencode's TUI owns the conversation: the container hides xterm.js's
+          empty scrollbar (.tui-scroll) and pinToBottom keeps the viewport at
+          the bottom. */}
+      <div className={`terminal-container${app === 'opencode' ? ' tui-scroll' : ''}`} ref={terminalRef} />
       {!keyboardOpen && (
         <div className="terminal-scroll-controls">
           {/* opencode's TUI owns the conversation (mouse tracking + internal
