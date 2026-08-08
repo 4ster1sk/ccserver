@@ -32,28 +32,30 @@ export default function App() {
     saveThemeId(themeId);
   }, [themeId]);
 
-  const openTerminalTab = useCallback((dirPath, { claudeSessionId = null, shell = false, sessionId = null, attachSessionId = null, sandbox = false, sandboxOpts = null } = {}) => {
+  const openTerminalTab = useCallback((dirPath, { claudeSessionId = null, shell = false, sessionId = null, attachSessionId = null, sandbox = false, sandboxOpts = null, app = 'claude', resume = false } = {}) => {
     const id = `terminal-${++tabIdCounter}`;
     const dirName = dirPath.split(/[/\\]/).filter(Boolean).pop() || dirPath;
     const label = shell ? `$ ${dirName}` : dirName;
     setTabs((prev) => [
       ...prev,
-      { id, type: 'terminal', label, cwd: dirPath, claudeSessionId, shell, sessionId, attachSessionId, sandbox, sandboxOpts, exited: false },
+      { id, type: 'terminal', label, cwd: dirPath, claudeSessionId, shell, sessionId, attachSessionId, sandbox, sandboxOpts, app, resume, exited: false },
     ]);
     setActiveTabId(id);
     setLastDir(dirPath);
   }, []);
 
-  const handleOpen = useCallback((dirPath, { sandbox = false, sandboxOpts = null, skipResumePrompt = false } = {}) => {
-    if (!skipResumePrompt) {
-      const savedSessionId = localStorage.getItem(`ccserver-claude-resume:${dirPath}`);
+  const handleOpen = useCallback((dirPath, { sandbox = false, sandboxOpts = null, app = 'claude', resume = false, skipResumePrompt = false } = {}) => {
+    // Only claude sessions carry a resumable conversation id (opencode resumes
+    // the last session of the project itself via -c).
+    if (!skipResumePrompt && app === 'claude') {
+      const savedSessionId = localStorage.getItem(`ccserver-resume:claude:${dirPath}`);
       if (savedSessionId) {
         pendingOpenRef.current = dirPath;
-        setResumePrompt({ cwd: dirPath, sessionId: savedSessionId, sandbox, sandboxOpts });
+        setResumePrompt({ cwd: dirPath, sessionId: savedSessionId, sandbox, sandboxOpts, app });
         return;
       }
     }
-    openTerminalTab(dirPath, { sandbox, sandboxOpts });
+    openTerminalTab(dirPath, { sandbox, sandboxOpts, app, resume });
   }, [openTerminalTab]);
 
   const handleOpenShell = useCallback((dirPath) => {
@@ -67,12 +69,12 @@ export default function App() {
       setActiveTabId(existingTab.id);
       return;
     }
-    openTerminalTab(session.cwd, { shell: !!session.shell, sessionId: session.id, attachSessionId: session.id });
+    openTerminalTab(session.cwd, { shell: !!session.shell, sessionId: session.id, attachSessionId: session.id, app: session.app === 'opencode' ? 'opencode' : 'claude' });
   }, [tabs, openTerminalTab]);
 
   const handleResume = useCallback(() => {
     if (resumePrompt) {
-      openTerminalTab(resumePrompt.cwd, { claudeSessionId: resumePrompt.sessionId, sandbox: resumePrompt.sandbox, sandboxOpts: resumePrompt.sandboxOpts });
+      openTerminalTab(resumePrompt.cwd, { claudeSessionId: resumePrompt.sessionId, sandbox: resumePrompt.sandbox, sandboxOpts: resumePrompt.sandboxOpts, app: resumePrompt.app || 'claude' });
       setResumePrompt(null);
       pendingOpenRef.current = null;
     }
@@ -80,8 +82,8 @@ export default function App() {
 
   const handleNewSession = useCallback(() => {
     if (resumePrompt) {
-      localStorage.removeItem(`ccserver-claude-resume:${resumePrompt.cwd}`);
-      openTerminalTab(resumePrompt.cwd, { sandbox: resumePrompt.sandbox, sandboxOpts: resumePrompt.sandboxOpts });
+      localStorage.removeItem(`ccserver-resume:claude:${resumePrompt.cwd}`);
+      openTerminalTab(resumePrompt.cwd, { sandbox: resumePrompt.sandbox, sandboxOpts: resumePrompt.sandboxOpts, app: resumePrompt.app || 'claude' });
       setResumePrompt(null);
       pendingOpenRef.current = null;
     }
@@ -145,6 +147,9 @@ export default function App() {
     ));
   }, []);
 
+  const activeTab = tabs.find((t) => t.id === activeTabId);
+  const usageHidden = activeTab?.type === 'terminal' && activeTab.app === 'opencode';
+
   return (
     <div className="app">
       <div className="tab-bar">
@@ -176,7 +181,7 @@ export default function App() {
         ))}
         <div className="tab-bar-spacer" />
         </div>
-        <UsageButton />
+        <UsageButton hidden={usageHidden} />
       </div>
       <div className="tab-content">
         <div style={{ display: activeTabId === 'browser' ? 'flex' : 'none', height: '100%', flexDirection: 'column' }}>
@@ -200,6 +205,8 @@ export default function App() {
                   shell={tab.shell}
                   sandbox={tab.sandbox}
                   sandboxOpts={tab.sandboxOpts}
+                  app={tab.app || 'claude'}
+                  resume={!!tab.resume}
                   notify={notify}
                   notifyEnabled={notifyEnabled}
                   notifyPermission={notifyPermission}

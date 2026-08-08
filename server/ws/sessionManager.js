@@ -4,7 +4,14 @@ import { execFileSync } from 'node:child_process';
 import { writeFileSync, readFileSync, unlinkSync, rmSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { buildSandboxSpawn, resolveClaude, sandboxAvailable } from './sandbox.js';
+import { buildSandboxSpawn, resolveApp, sandboxAvailable, loadSandboxConfig } from './sandbox.js';
+import {
+  isValidApp,
+  appResumeArgs,
+  extractResumeSessionId,
+  detectPermissionPrompt,
+} from './appLaunch.js';
+import { createOutputTransform } from './outputTransform.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const SAVED_SESSIONS_PATH = join(__dirname, '..', '..', '.saved-sessions.json');
@@ -26,23 +33,24 @@ function resolveCommand(cmd) {
   }
 }
 
-function stripAnsi(str) {
-  // eslint-disable-next-line no-control-regex
-  return str.replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, '');
+function extractResumeId(session) {
+  return extractResumeSessionId(session.app, session.outputBuffer.slice(-50).join(''));
 }
 
-function extractClaudeSessionId(outputBuffer) {
-  const recentOutput = outputBuffer.slice(-50).join('');
-  const clean = stripAnsi(recentOutput);
-
-  const matches = [...clean.matchAll(/claude\s+(?:--resume|-r)\s+([a-zA-Z0-9_-]+)/gi)];
-  if (matches.length > 0) return matches[matches.length - 1][1];
-
-  return null;
+// Which agent new sessions launch when the client doesn't request one
+// (legacy scheduled prompts, or a client that predates app selection).
+// Config-driven rather than a hardcoded constant, per sandbox.config.json's
+// gitignored-real-file / committed-.example.json pattern -- so the default
+// lives in the (untracked) config, not in committed source.
+function defaultApp() {
+  return loadSandboxConfig().defaultApp === 'opencode' ? 'opencode' : 'claude';
 }
 
-export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox, sandboxOpts }) {
+export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox, sandboxOpts, app, resumeLast }) {
   const id = randomUUID();
+
+  // Which agent CLI this session runs. Shell sessions have no app.
+  const sessionApp = shell ? null : (isValidApp(app) ? app : defaultApp());
 
   const { SSH_AUTH_SOCK, SSH_AGENT_PID, ...cleanEnv } = process.env;
 
@@ -51,8 +59,8 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox
     command = process.env.SHELL || (process.platform === 'win32' ? 'powershell.exe' : '/bin/bash');
     args = [];
   } else {
-    command = resolveClaude().command;
-    args = claudeSessionId ? ['--resume', claudeSessionId] : [];
+    command = resolveApp(sessionApp).command;
+    args = appResumeArgs(sessionApp, claudeSessionId, { resumeLast });
   }
   command = resolveCommand(command);
 
@@ -65,7 +73,7 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox
   let sandboxGitBrokerDir = null;
   if (sandbox && process.platform !== 'win32' && sandboxAvailable()) {
     try {
-      const spawn = buildSandboxSpawn({ cwd, targetCommand: [command, ...args], sandboxOpts });
+      const spawn = buildSandboxSpawn({ cwd, targetCommand: [command, ...args], app: sessionApp, sandboxOpts });
       command = spawn.command;
       args = spawn.args;
       sandboxStateDir = spawn.stateDir || null;
@@ -95,20 +103,32 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox
       // disabling it lets scrollback accumulate again. DISABLE_MOUSE_CLICKS
       // additionally hands the scroll wheel back to xterm.js. Only affects
       // ccserver-launched claude; shells are left untouched.
-      ...(shell ? {} : {
+      ...(shell || sessionApp !== 'claude' ? {} : {
         CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN: '1',
         CLAUDE_CODE_DISABLE_MOUSE_CLICKS: '1',
       }),
+      // opencode enables full mouse tracking (DECSET 1000/1002/1003/1006) which
+      // makes xterm.js forward every mouse event to the app — text selection
+      // (and thus copy) becomes impossible. OPENCODE_DISABLE_MOUSE turns that
+      // off so the browser's selection/copy works again. There is no env var
+      // for opencode's alternate screen; see outputTransform.js.
+      ...(sessionApp === 'opencode' ? { OPENCODE_DISABLE_MOUSE: '1' } : {}),
     },
   });
   } catch (err) {
     return { sessionId: id, session: null, error: `Failed to spawn "${command}": ${err.message}` };
   }
 
+  // opencode rewrites the pty output stream (alt-screen removal, scrollback
+  // paging etc.); null for other apps. Rows feed the frame-size heuristic.
+  const outputTransform = createOutputTransform(sessionApp, rows);
+
   const session = {
     id,
     cwd,
     shell: !!shell,
+    app: sessionApp,
+    outputTransform,
     sandbox: useSandbox,
     sandboxOpts: useSandbox ? (sandboxOpts || null) : null, // per-launch gpg/sshAgent override, for schedule/resume replay
     sandboxStateDir, // rootlesskit state dir to remove on teardown (docker only)
@@ -136,7 +156,8 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox
     pendingInjection: null, // { text, at } — scheduled prompt awaiting a freshly-resumed session
   };
 
-  ptyProcess.onData((data) => {
+  ptyProcess.onData((rawData) => {
+    const data = outputTransform ? outputTransform.transform(rawData) : rawData;
     appendToBuffer(session, data);
 
     if (session.socket && session.socket.readyState === 1) {
@@ -180,8 +201,9 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox
         }
       }, IDLE_TIMEOUT_MS);
 
-      // Auto-yes detection for Claude Code CLI permission prompts
-      // Claude Code uses Ink Select UI — Enter accepts the focused option (default: Yes)
+      // Auto-yes detection for agent permission prompts. claude uses Ink's
+      // Select UI; opencode renders a "Permission required" box — in both,
+      // Enter accepts the default (approve), so the response is the same.
       if (session.autoYes) {
         // Strip all ANSI escape sequences
         const ansiRe = /\x1b(?:\[[0-9;?]*[a-zA-Z]|\][^\x07\x1b]*(?:\x07|\x1b\\)?|[()][A-Z0-9]|[>=<]|#[0-9])/g;
@@ -194,10 +216,7 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox
         const buf = session.autoYesBuf;
         // Ink renders text with cursor positioning, so spaces may be missing after ANSI strip
         const bufNoSpace = buf.replace(/\s+/g, '');
-        const hasPermissionPrompt =
-          /Doyouwantto(proceed|makethisedit|use)/i.test(bufNoSpace) ||
-          /Yes,allow/i.test(bufNoSpace) ||
-          /Claudewantsto(fetch|search|call)/i.test(bufNoSpace);
+        const hasPermissionPrompt = detectPermissionPrompt(session.app, bufNoSpace);
         if (hasPermissionPrompt) {
           if (session.autoYesPending) clearTimeout(session.autoYesPending);
           session.autoYesPending = setTimeout(() => {
@@ -210,21 +229,25 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox
             // Extract a meaningful description from the buffer
             const noSpace = cleanBuf.replace(/\s/g, '');
             let promptLine = 'permission prompt';
-            const editMatch = noSpace.match(/makethiseditto\s*(\S+)/i);
-            const fetchMatch = noSpace.match(/Claudewantstofetchcontentfrom\s*(\S+)/i);
-            const searchMatch = noSpace.match(/Claudewantstosearchthewebfor:\s*(.+?)(?:\}|$)/i);
-            if (editMatch) {
-              promptLine = `Edit: ${editMatch[1]}`;
-            } else if (fetchMatch) {
-              promptLine = `Fetch: ${fetchMatch[1]}`;
-            } else if (searchMatch) {
-              promptLine = `Web Search: ${searchMatch[1]}`;
-            } else if (/Doyouwanttoproceed/i.test(noSpace)) {
-              // Try to find tool name from nearby text like "Bash(...)" or "Read(...)"
-              const toolMatch = noSpace.match(/(Bash|Read|Write|Edit|Glob|Grep|WebFetch|WebSearch|NotebookEdit)\(/i);
-              promptLine = toolMatch ? `${toolMatch[1]} (auto-approved)` : 'Tool use (auto-approved)';
+            if (session.app === 'opencode') {
+              promptLine = 'Permission prompt (auto-approved)';
             } else {
-              promptLine = cleanBuf.slice(0, 80) || 'permission prompt';
+              const editMatch = noSpace.match(/makethiseditto\s*(\S+)/i);
+              const fetchMatch = noSpace.match(/Claudewantstofetchcontentfrom\s*(\S+)/i);
+              const searchMatch = noSpace.match(/Claudewantstosearchthewebfor:\s*(.+?)(?:\}|$)/i);
+              if (editMatch) {
+                promptLine = `Edit: ${editMatch[1]}`;
+              } else if (fetchMatch) {
+                promptLine = `Fetch: ${fetchMatch[1]}`;
+              } else if (searchMatch) {
+                promptLine = `Web Search: ${searchMatch[1]}`;
+              } else if (/Doyouwanttoproceed/i.test(noSpace)) {
+                // Try to find tool name from nearby text like "Bash(...)" or "Read(...)"
+                const toolMatch = noSpace.match(/(Bash|Read|Write|Edit|Glob|Grep|WebFetch|WebSearch|NotebookEdit)\(/i);
+                promptLine = toolMatch ? `${toolMatch[1]} (auto-approved)` : 'Tool use (auto-approved)';
+              } else {
+                promptLine = cleanBuf.slice(0, 80) || 'permission prompt';
+              }
             }
             const entry = { time: Date.now(), prompt: promptLine };
             session.autoYesLog.push(entry);
@@ -247,7 +270,10 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox
     session.exitCode = exitCode;
     session.exitSignal = signal;
     if (!session.shell) {
-      session.claudeSessionId = extractClaudeSessionId(session.outputBuffer);
+      session.claudeSessionId = extractResumeSessionId(
+        session.app,
+        session.outputBuffer.slice(-50).join('')
+      );
     }
 
     // Keep any pending scheduled prompt alive across this exit: refresh its
@@ -326,6 +352,7 @@ function persistSchedules() {
         sandbox: !!s.sandbox,
         sandboxOpts: s.sandboxOpts || null,
         shell: !!s.shell,
+        app: s.app || 'claude',
         claudeSessionId: s.claudeSessionId || null,
       });
     }
@@ -339,11 +366,11 @@ function persistSchedules() {
   }
 }
 
-// Best-known Claude conversation id for resuming this session later.
+// Best-known conversation id for resuming this session later.
 function resumeIdForSession(session) {
   if (!session) return null;
   if (session.claudeSessionId) return session.claudeSessionId;
-  const extracted = extractClaudeSessionId(session.outputBuffer);
+  const extracted = extractResumeId(session);
   if (extracted) return extracted;
   return session.startedClaudeSessionId || null;
 }
@@ -431,7 +458,8 @@ function fireSchedule(scheduleId) {
   // 2) Otherwise any live session for the same project (user reopened it).
   if (!target) {
     for (const s of sessions.values()) {
-      if (!s.exited && s.ptyProcess && s.cwd === entry.cwd && s.shell === entry.shell) {
+      if (!s.exited && s.ptyProcess && s.cwd === entry.cwd
+        && s.shell === entry.shell && s.app === entry.app) {
         target = s;
         break;
       }
@@ -446,6 +474,8 @@ function fireSchedule(scheduleId) {
   }
 
   // 3) No live session — auto-resume the conversation, then inject once ready.
+  // opencode has no session id in its TUI output, so resume the last session
+  // of the project instead of a specific one.
   const res = createSession({
     cwd: entry.cwd,
     cols: 80,
@@ -454,6 +484,8 @@ function fireSchedule(scheduleId) {
     shell: entry.shell,
     sandbox: entry.sandbox,
     sandboxOpts: entry.sandboxOpts,
+    app: entry.app,
+    resumeLast: entry.app === 'opencode',
   });
   if (!res?.session) return;
   const session = res.session;
@@ -492,6 +524,7 @@ export function setScheduledPrompt(id, at, text) {
     sandbox: !!session.sandbox,
     sandboxOpts: session.sandboxOpts || null,
     shell: !!session.shell,
+    app: session.app || 'claude',
     claudeSessionId: resumeIdForSession(session),
     sessionId: id,
     timer: setTimeout(() => fireSchedule(scheduleId), delay),
@@ -543,6 +576,8 @@ export function restoreSchedules() {
       sandbox: !!e.sandbox,
       sandboxOpts: e.sandboxOpts || null,
       shell: !!e.shell,
+      // Legacy persisted schedules predate the app field and were claude.
+      app: isValidApp(e.app) ? e.app : 'claude',
       claudeSessionId: e.claudeSessionId || null,
       sessionId: null,
       timer: null,
@@ -570,6 +605,7 @@ export function listSessions() {
       shell: session.shell,
       sandbox: session.sandbox,
       sandboxOpts: session.sandboxOpts || null,
+      app: session.app,
     });
   }
   return result;
@@ -701,14 +737,16 @@ export function gracefulShutdown() {
     const finish = () => {
       const savedSessions = [];
       for (const [, session] of sessions) {
-        const claudeId = session.claudeSessionId
-          || extractClaudeSessionId(session.outputBuffer);
-        if (claudeId) {
+        const claudeId = session.claudeSessionId || extractResumeId(session);
+        // claude sessions are saved when their resume id is known; opencode
+        // sessions are always saved (resume happens via `opencode -c`).
+        if (claudeId || session.app === 'opencode') {
           savedSessions.push({
             cwd: session.cwd,
-            claudeSessionId: claudeId,
+            claudeSessionId: claudeId || null,
             sandbox: !!session.sandbox,
             sandboxOpts: session.sandboxOpts || null,
+            app: session.app || 'claude',
           });
         }
       }

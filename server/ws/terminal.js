@@ -56,6 +56,8 @@ export async function terminalWs(fastify, opts) {
             shell: !!msg.shell,
             sandbox: !!msg.sandbox,
             sandboxOpts: msg.sandboxOpts || null,
+            app: msg.app || null,
+            resumeLast: !!msg.resume,
           });
 
           if (result.error) {
@@ -148,6 +150,7 @@ export async function terminalWs(fastify, opts) {
             session.ptyProcess.resize(msg.cols, msg.rows);
             session.cols = msg.cols;
             session.rows = msg.rows;
+            session.outputTransform?.setRows?.(msg.rows);
           }
 
           // Send auto-yes state on attach
@@ -191,6 +194,7 @@ export async function terminalWs(fastify, opts) {
               session.ptyProcess.resize(msg.cols, msg.rows);
               session.cols = msg.cols;
               session.rows = msg.rows;
+              session.outputTransform?.setRows?.(msg.rows);
             }
           }
           break;

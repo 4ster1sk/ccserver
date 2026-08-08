@@ -24,7 +24,7 @@ function fmtAge(updatedAt) {
   return `${Math.round(m / 60)}時間前`;
 }
 
-export default function UsageButton() {
+export default function UsageButton({ hidden = false }) {
   const [open, setOpen] = useState(false);
   const [data, setData] = useState(null);   // { usage, updatedAt, error, ... }
   const [loading, setLoading] = useState(false);
@@ -70,6 +70,10 @@ export default function UsageButton() {
   const limits = data?.usage?.limits || [];
   const session = limits.find((l) => /session/i.test(l.label)) || limits[0];
   const now = Date.now();
+
+  // The Usage popover reads Claude Code's /usage; it carries no meaning for
+  // opencode sessions, so hide it there.
+  if (hidden) return null;
 
   return (
     <div className="usage-picker" ref={wrapRef}>

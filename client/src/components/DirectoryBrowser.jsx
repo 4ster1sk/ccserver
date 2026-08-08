@@ -4,6 +4,7 @@ import { authFetch, getToken } from '../auth.js';
 const LAST_DIR_KEY = 'ccserver-last-dir';
 const SANDBOX_KEY = 'ccserver-sandbox-default';
 const SANDBOX_OPTS_PREFIX = 'ccserver-sandbox-opts:';
+const APP_KEY = 'ccserver-app-default';
 
 // Per-directory opt-in sandbox flags (gpg / sshAgent), remembered separately
 // per cwd rather than as one server-wide default -- see server/sandbox.config.json's
@@ -52,12 +53,23 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onSessionClick, 
   const fileInputRef = useRef(null);
   const dragCountRef = useRef(0);
   const [sandboxDefault, setSandboxDefault] = useState(() => localStorage.getItem(SANDBOX_KEY) === '1');
+  // 'claude' until the server's configured default (sandbox.config.json's
+  // "defaultApp") arrives via /api/dirs/home, or the user picks explicitly.
+  const [appDefault, setAppDefault] = useState(() => {
+    const saved = localStorage.getItem(APP_KEY);
+    return saved === 'opencode' || saved === 'claude' ? saved : 'claude';
+  });
   const [openMenuOpen, setOpenMenuOpen] = useState(false);
   const [sandboxOpts, setSandboxOpts] = useState(() => loadSandboxOpts(currentPath));
 
   const chooseSandbox = useCallback((val) => {
     setSandboxDefault(val);
     localStorage.setItem(SANDBOX_KEY, val ? '1' : '0');
+  }, []);
+
+  const chooseApp = useCallback((val) => {
+    setAppDefault(val);
+    localStorage.setItem(APP_KEY, val);
   }, []);
 
   // gpg/sshAgent are remembered per directory, not globally -- reload whenever
@@ -99,6 +111,11 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onSessionClick, 
       setHomeDir(data.home);
       if (!initialPath && !localStorage.getItem(LAST_DIR_KEY)) {
         setCurrentPath(data.home);
+      }
+      // Seed the app picker from the server's configured default, but only
+      // if the user hasn't explicitly picked one on this browser yet.
+      if (!localStorage.getItem(APP_KEY) && (data.defaultApp === 'opencode' || data.defaultApp === 'claude')) {
+        setAppDefault(data.defaultApp);
       }
     }).catch(() => {});
   }, []);
@@ -161,13 +178,21 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onSessionClick, 
   }, [onSessionClick]);
 
   const handleSavedSessionClick = useCallback((saved) => {
-    const claudeResumeKey = `ccserver-claude-resume:${saved.cwd}`;
-    localStorage.setItem(claudeResumeKey, saved.claudeSessionId);
+    const app = saved.app === 'opencode' ? 'opencode' : 'claude';
     // Preserve the session's original sandbox setting; fall back to the current
     // default only for legacy saved entries that predate the persisted flag.
     const sandbox = saved.sandbox ?? sandboxDefault;
     const opts = saved.sandboxOpts ?? loadSandboxOpts(saved.cwd);
-    onOpen(saved.cwd, { sandbox, sandboxOpts: opts });
+    if (app === 'opencode') {
+      // opencode sessions resume the last session of the project via -c.
+      onOpen(saved.cwd, { sandbox, sandboxOpts: opts, app, resume: true });
+      return;
+    }
+    const claudeResumeKey = `ccserver-resume:claude:${saved.cwd}`;
+    if (saved.claudeSessionId) {
+      localStorage.setItem(claudeResumeKey, saved.claudeSessionId);
+    }
+    onOpen(saved.cwd, { sandbox, sandboxOpts: opts, app: 'claude' });
   }, [onOpen, sandboxDefault]);
 
   const handleDeleteSession = useCallback(async (session) => {
@@ -279,7 +304,7 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onSessionClick, 
     >
       <div className="browser-header">
         <h1>Select a Directory</h1>
-        <p className="subtitle">Choose a working directory for Claude Code</p>
+        <p className="subtitle">Choose a working directory</p>
       </div>
 
       <nav className="breadcrumbs">
@@ -347,10 +372,10 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onSessionClick, 
         <div className="open-split">
           <button
             className="btn btn-primary open-btn open-split-main"
-            onClick={() => onOpen(currentPath, { sandbox: sandboxDefault, sandboxOpts })}
+            onClick={() => onOpen(currentPath, { sandbox: sandboxDefault, sandboxOpts, app: appDefault })}
             title={sandboxDefault ? 'サンドボックスで起動' : '通常起動'}
           >
-            {sandboxDefault ? '🔒 Claude Code' : 'Claude Code'}
+            {sandboxDefault ? '🔒 ' : ''}{appDefault === 'opencode' ? 'opencode' : 'Claude Code'}
           </button>
           <button
             className="btn btn-primary open-btn open-split-caret"
@@ -373,16 +398,32 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onSessionClick, 
         <div className="resume-overlay" onClick={() => setOpenMenuOpen(false)}>
           <div className="resume-dialog" onClick={(e) => e.stopPropagation()}>
             <h3>起動方法を選択</h3>
+            <div className="open-menu-label">アプリ</div>
             <div
               className="open-menu-item"
-              onClick={() => { chooseSandbox(false); setOpenMenuOpen(false); onOpen(currentPath, { sandbox: false }); }}
+              onClick={() => { chooseApp('claude'); setOpenMenuOpen(false); onOpen(currentPath, { sandbox: sandboxDefault, sandboxOpts, app: 'claude' }); }}
+            >
+              <span className="open-menu-check">{appDefault === 'claude' ? '✓' : ''}</span>
+              Claude Code
+            </div>
+            <div
+              className="open-menu-item"
+              onClick={() => { chooseApp('opencode'); setOpenMenuOpen(false); onOpen(currentPath, { sandbox: sandboxDefault, sandboxOpts, app: 'opencode' }); }}
+            >
+              <span className="open-menu-check">{appDefault === 'opencode' ? '✓' : ''}</span>
+              opencode
+            </div>
+            <div className="open-menu-sep" />
+            <div
+              className="open-menu-item"
+              onClick={() => { chooseSandbox(false); setOpenMenuOpen(false); onOpen(currentPath, { sandbox: false, sandboxOpts, app: appDefault }); }}
             >
               <span className="open-menu-check">{!sandboxDefault ? '✓' : ''}</span>
               通常起動
             </div>
             <div
               className="open-menu-item"
-              onClick={() => { chooseSandbox(true); setOpenMenuOpen(false); onOpen(currentPath, { sandbox: true, sandboxOpts }); }}
+              onClick={() => { chooseSandbox(true); setOpenMenuOpen(false); onOpen(currentPath, { sandbox: true, sandboxOpts, app: appDefault }); }}
             >
               <span className="open-menu-check">{sandboxDefault ? '✓' : ''}</span>
               🔒 サンドボックスで起動
@@ -462,7 +503,9 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onSessionClick, 
               </span>
               <span className="session-cwd">{session.cwd}</span>
               <span className="session-status active">
-                {session.shell ? 'shell' : session.connected ? 'connected' : 'idle'}
+                {session.shell
+                  ? 'shell'
+                  : `${session.app === 'opencode' ? 'opencode' : 'claude'} · ${session.connected ? 'connected' : 'idle'}`}
               </span>
               <button
                 className="btn btn-secondary session-delete-btn"
@@ -486,7 +529,9 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onSessionClick, 
             >
               <span className="session-icon">{'\u21BB'}</span>
               <span className="session-cwd">{saved.cwd}</span>
-              <span className="session-status resumable">resumable</span>
+              <span className="session-status resumable">
+                {saved.app === 'opencode' ? 'opencode' : 'claude'} · resumable
+              </span>
               <button
                 className="btn btn-secondary session-delete-btn"
                 onClick={(e) => { e.stopPropagation(); handleDeleteSavedSession(i); }}
@@ -512,7 +557,7 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onSessionClick, 
               key={dir.path}
               className="dir-item"
               onClick={() => navigateTo(dir.path)}
-              onDoubleClick={() => onOpen(dir.path, { sandbox: sandboxDefault, sandboxOpts: loadSandboxOpts(dir.path) })}
+              onDoubleClick={() => onOpen(dir.path, { sandbox: sandboxDefault, sandboxOpts: loadSandboxOpts(dir.path), app: appDefault })}
               role="button"
               tabIndex={0}
               onKeyDown={(e) => {

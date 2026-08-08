@@ -142,7 +142,7 @@ function which(cmd, pathEnv = SANDBOX_PATH) {
   return null;
 }
 
-// Given the host path of the claude launcher, return the directory that must be
+// Given the host path of an agent launcher, return the directory that must be
 // exposed read-only inside the sandbox for it to actually run — or null if it
 // already lives under an always-exposed tree.
 //
@@ -151,7 +151,7 @@ function which(cmd, pathEnv = SANDBOX_PATH) {
 // (e.g. /opt/claude-code/bin/claude). The sandbox binds /usr but not /opt, so
 // the wrapper runs while its target is missing -> exit 127 ("No such file or
 // directory"). We follow the wrapper to the real binary and bind its tree.
-function claudeInstallDir(onHost) {
+function appInstallDir(onHost) {
   let real = onHost;
   try { real = realpathSync(onHost); } catch { /* keep as given */ }
 
@@ -180,23 +180,70 @@ function claudeInstallDir(onHost) {
   return dir;
 }
 
-// Resolve how launches should invoke claude, plus the host path (if any) that
-// must be exposed read-only in the sandbox for that invocation to work.
-//   command    - argv[0] to run (the configured override, else "claude" so the
-//                sandbox's PATH resolves it)
-//   installDir - extra ro-bind so the resolved binary is present, or null
-// Override with CCSERVER_CLAUDE_BIN or "claudeBin" in the sandbox config when
-// claude lives somewhere non-standard.
-export function resolveClaude(configuredBin = loadSandboxConfig().claudeBin) {
-  const command = configuredBin || (process.platform === 'win32' ? 'claude.exe' : 'claude');
-  const onHost = which(command);
-  return { command, installDir: onHost ? claudeInstallDir(onHost) : null };
+// Locate an agent CLI even when the server runs under a bare PATH that misses
+// the install (e.g. systemd's default PATH lacks nvm's bin and ~/.local/bin):
+// PATH first (bare name works inside the sandbox too), then the server
+// process's own bin dir (node itself came from nvm), ~/.local/bin, and any
+// app-specific extras. Returns { command, path } where `command` is the bare
+// name when PATH resolves it, else an absolute path — or null if not found.
+function resolveAgentCommand(cmd, extraDirs = []) {
+  const onPath = which(cmd);
+  if (onPath) return { command: cmd, path: onPath };
+
+  const candidates = [
+    dirname(process.execPath),
+    join(HOME, '.local', 'bin'),
+    ...extraDirs,
+  ];
+  for (const dir of candidates) {
+    const p = join(dir, cmd);
+    try {
+      const st = statSync(p);
+      if (st.isFile() && (st.mode & 0o111)) return { command: p, path: p };
+    } catch { /* not here */ }
+  }
+  return null;
 }
 
-// Swap a leading bare `claude` in a target command for the resolved launcher,
-// leaving non-claude targets (e.g. a shell) untouched.
+// Resolve how launches should invoke an agent CLI, plus the host path (if any)
+// that must be exposed read-only in the sandbox for that invocation to work.
+//   command    - argv[0] to run
+//   installDir - extra ro-bind so the resolved binary is present, or null
+//
+// claude: "claude" (so the sandbox's PATH resolves it) unless overridden via
+//   CCSERVER_CLAUDE_BIN / "claudeBin" in the sandbox config.
+// opencode: the resolved absolute path. Its install (e.g. an nvm bin dir) is
+//   typically NOT on the sandbox PATH, so the absolute path + installDir bind
+//   is required for it to run inside the sandbox.
+export function resolveApp(app, configuredBin = loadSandboxConfig().claudeBin) {
+  if (app === 'opencode') {
+    const r = resolveAgentCommand('opencode', [join(HOME, '.opencode', 'bin')]);
+    if (r) {
+      let real = r.path;
+      try { real = realpathSync(r.path); } catch { /* keep as given */ }
+      return { command: real, installDir: appInstallDir(real) };
+    }
+    return { command: process.platform === 'win32' ? 'opencode.exe' : 'opencode', installDir: null };
+  }
+  const command = configuredBin || (process.platform === 'win32' ? 'claude.exe' : 'claude');
+  const r = resolveAgentCommand(command);
+  // Keep the bare name when PATH resolves it (the sandbox PATH can too); use
+  // an absolute path for installs PATH can't see (e.g. systemd).
+  if (r) return { command: r.command, installDir: appInstallDir(r.path) };
+  return { command, installDir: null };
+}
+
+// Backwards-compatible alias used by the claude-only /usage capture.
+export function resolveClaude(configuredBin = loadSandboxConfig().claudeBin) {
+  return resolveApp('claude', configuredBin);
+}
+
+// Swap a leading bare `claude`/`opencode` in a target command for the resolved
+// launcher, leaving non-agent targets (e.g. a shell) untouched. Absolute
+// commands (e.g. resolved opencode paths) pass through as-is.
 function withClaude(targetCommand, command) {
-  if (targetCommand[0] === 'claude' || targetCommand[0] === 'claude.exe') {
+  if (targetCommand[0] === 'claude' || targetCommand[0] === 'claude.exe'
+    || targetCommand[0] === 'opencode' || targetCommand[0] === 'opencode.exe') {
     return [command, ...targetCommand.slice(1)];
   }
   return targetCommand;
@@ -341,21 +388,26 @@ function buildBwrapArgs({ cwd, docker, gpg, extraBinds, extraEnv, authSock, stat
   // The project directory (read-write).
   args.push('--bind', cwd, cwd);
 
-  // Claude Code configuration + install.
-  const claudeBinds = [
+  // Agent CLI configuration + install dirs (claude + opencode), writable so
+  // sessions/auth state survive across sandbox launches and conversations can
+  // be resumed. ~/.local/bin is exposed so the user's own tools resolve.
+  const appBinds = [
     [join(HOME, '.claude'), 'rw'],
     [join(HOME, '.claude.json'), 'rw'],
     [join(HOME, '.local', 'share', 'claude'), 'rw'],
+    [join(HOME, '.config', 'opencode'), 'rw'],
+    [join(HOME, '.local', 'share', 'opencode'), 'rw'],
     [join(HOME, '.local', 'bin'), 'ro'],
   ];
-  for (const [src, mode] of claudeBinds) {
+  for (const [src, mode] of appBinds) {
     if (existsSync(src)) {
       args.push(mode === 'ro' ? '--ro-bind' : '--bind', src, src);
     }
   }
 
-  // The claude install itself, when it lives outside the exposed trees (e.g.
-  // /opt/claude-code reached via a /usr/bin/claude wrapper). See claudeInstallDir.
+  // The agent install itself, when it lives outside the exposed trees (e.g.
+  // /opt/claude-code reached via a /usr/bin/claude wrapper, or an opencode
+  // binary under nvm). See appInstallDir.
   if (claudeDir && existsSync(claudeDir)) {
     args.push('--ro-bind', claudeDir, claudeDir);
   }
@@ -417,8 +469,8 @@ function buildBwrapArgs({ cwd, docker, gpg, extraBinds, extraEnv, authSock, stat
 
     // The helper/wrapper scripts are Node scripts (shebang points at this
     // fixed path); bind the actual node binary here rather than assume
-    // /usr/bin/node exists, mirroring how resolveClaude follows the real
-    // claude binary instead of assuming a host layout.
+    // /usr/bin/node exists, mirroring how resolveApp follows the real
+    // agent binary instead of assuming a host layout.
     const nodeBin = realpathSync(process.execPath);
     args.push('--ro-bind', nodeBin, SANDBOX_NODE_PATH);
     args.push('--ro-bind', CRED_HELPER_SCRIPT, SANDBOX_CRED_HELPER_PATH);
@@ -553,12 +605,13 @@ export function buildMinimalSandboxSpawn({ cwd, targetCommand }) {
 
 // Returns { command, args } for pty.spawn, wrapping the given target command
 // (e.g. ['claude', '--resume', id] or ['/bin/bash']) in the sandbox.
+//   app         - selects which agent the install-dir resolution applies to.
 //   sandboxOpts - optional per-launch override for the opt-in flags
 //                 ({ gpg, sshAgent }, either key omittable). Lets a caller
 //                 (the client, via the launch UI) pick these per session/
 //                 directory instead of only through the shared config file;
 //                 an omitted key falls back to loadSandboxConfig()'s value.
-export function buildSandboxSpawn({ cwd, targetCommand, sandboxOpts }) {
+export function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts }) {
   const { docker: cfgDocker, gpg: cfgGpg, sshAgent: cfgSshAgent, gitBroker: gitBrokerEnabled, binds, env, claudeBin } = loadSandboxConfig();
   const docker = cfgDocker && dockerSandboxAvailable();
   const gpg = sandboxOpts?.gpg ?? cfgGpg;
@@ -597,7 +650,7 @@ export function buildSandboxSpawn({ cwd, targetCommand, sandboxOpts }) {
     );
   }
 
-  const { command, installDir } = resolveClaude(claudeBin);
+  const { command, installDir } = resolveApp(app, claudeBin);
   const bwrapArgs = buildBwrapArgs({ cwd, docker, gpg, extraBinds: binds, extraEnv: env, authSock, stateDir, claudeDir: installDir, gitBroker });
   const innerCmd = [BASH, '/ccserver-sandbox-entrypoint.sh', ...withClaude(targetCommand, command)];
 

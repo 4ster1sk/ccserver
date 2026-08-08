@@ -5,6 +5,7 @@ import { WebLinksAddon } from '@xterm/addon-web-links';
 import '@xterm/xterm/css/xterm.css';
 import { getThemeIds, getTheme } from '../themes.js';
 import { authWsUrl } from '../auth.js';
+import { createOsc52Handler } from '../osc52.js';
 
 const ALL_SPECIAL_KEYS = [
   { id: 'bs', label: 'BS', data: '\x7f' },
@@ -168,9 +169,53 @@ function loadKeyConfig(keyMap) {
 const MAX_RECONNECT_ATTEMPTS = 20;
 const PING_INTERVAL_MS = 30000;
 
+function appLabel(app) {
+  return app === 'opencode' ? 'opencode' : 'Claude Code';
+}
+
+// OSC 52 clipboard writes (sent by apps like opencode): update the browser
+// clipboard, falling back to a hidden-textarea copy when the async Clipboard
+// API is unavailable (non-secure context, denied permission, ...).
+function writeClipboardText(text) {
+  if (navigator.clipboard && window.isSecureContext) {
+    navigator.clipboard.writeText(text).catch(() => fallbackCopy(text));
+  } else {
+    fallbackCopy(text);
+  }
+}
+
+function fallbackCopy(text) {
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.setAttribute('readonly', '');
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    document.execCommand('copy');
+    document.body.removeChild(ta);
+  } catch { /* clipboard unavailable — nothing more we can do */ }
+}
+
+function readClipboardText() {
+  if (navigator.clipboard?.readText && window.isSecureContext) {
+    return navigator.clipboard.readText().catch(() => null);
+  }
+  return Promise.resolve(null);
+}
+
+// OSC 52 query response: the clipboard content base64-encoded for the app.
+function osc52Response(text) {
+  const bytes = new TextEncoder().encode(text);
+  let bin = '';
+  for (const b of bytes) bin += String.fromCharCode(b);
+  return `\x1b]52;c;${btoa(bin)}\x07`;
+}
+
 const themeIds = getThemeIds();
 
-export default function TerminalView({ cwd, onClose, claudeSessionId, shell, sandbox, sandboxOpts, notify, notifyEnabled, notifyPermission, onToggleNotify, visible, onSessionId, onExited, attachSessionId, xtermTheme, themeId, onThemeChange, tabId, onAttention, onFocusTab }) {
+export default function TerminalView({ cwd, onClose, claudeSessionId, shell, sandbox, sandboxOpts, app = 'claude', resume = false, notify, notifyEnabled, notifyPermission, onToggleNotify, visible, onSessionId, onExited, attachSessionId, xtermTheme, themeId, onThemeChange, tabId, onAttention, onFocusTab }) {
   const terminalRef = useRef(null);
   const xtermRef = useRef(null);
   const wsRef = useRef(null);
@@ -183,6 +228,8 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
   const shellRef = useRef(shell);
   const sandboxRef = useRef(sandbox);
   const sandboxOptsRef = useRef(sandboxOpts);
+  const appRef = useRef(app);
+  const resumeRef = useRef(resume);
   const [autoYes, setAutoYes] = useState(false);
   const [autoYesLog, setAutoYesLog] = useState([]);
   const [showAutoYesLog, setShowAutoYesLog] = useState(false);
@@ -259,6 +306,22 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
     term.loadAddon(webLinksAddon);
     term.open(terminalRef.current);
     fitAddon.fit();
+
+    // OSC 52 (clipboard) extraction: apps like opencode write the clipboard
+    // via OSC 52, which xterm.js ignores. Handle it here and strip the
+    // sequences from the stream.
+    const osc52 = createOsc52Handler({
+      onWrite: (text) => writeClipboardText(text),
+      onQuery: () => {
+        readClipboardText().then((text) => {
+          if (text == null) return;
+          const ws = wsRef.current;
+          if (ws && ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: 'input', data: osc52Response(text) }));
+          }
+        });
+      },
+    });
 
     xtermRef.current = term;
     fitAddonRef.current = fitAddon;
@@ -347,10 +410,13 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
             shell: !!shellRef.current,
             sandbox: !!sandboxRef.current,
             sandboxOpts: sandboxOptsRef.current || null,
+            app: appRef.current,
           };
           if (!shellRef.current && claudeResumeIdRef.current) {
             initMsg.claudeSessionId = claudeResumeIdRef.current;
             claudeResumeIdRef.current = null;
+          } else if (!shellRef.current && appRef.current === 'opencode' && resumeRef.current) {
+            initMsg.resume = true;
           }
           ws.send(JSON.stringify(initMsg));
         }
@@ -378,7 +444,7 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
             term.focus();
             break;
           case 'output':
-            term.write(msg.data);
+            term.write(osc52.process(msg.data));
             break;
           case 'auto_yes':
             setAutoYesLog((prev) => [...prev, msg.entry]);
@@ -398,7 +464,7 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
           case 'schedule_fired': {
             setSchedule(null);
             if (notifyRef.current) {
-              const n = notifyRef.current('Claude Code', {
+              const n = notifyRef.current(appLabel(appRef.current), {
                 body: `Scheduled prompt sent in ${cwd}`,
                 icon: '/icon-192.png',
                 tag: `schedule-fired-${cwd}`,
@@ -414,7 +480,7 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
             break;
           }
           case 'replay':
-            term.write(msg.data);
+            term.write(osc52.process(msg.data));
             break;
           case 'exit': {
             term.writeln('');
@@ -422,11 +488,14 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
             sessionStorage.removeItem(storageKey);
             sessionIdRef.current = null;
             if (onExitedRef.current) onExitedRef.current(true);
-            const claudeResumeKey = `ccserver-claude-resume:${cwd}`;
+            const app = appRef.current;
+            const resumeKey = `ccserver-resume:${app}:${cwd}`;
             if (msg.claudeSessionId) {
-              localStorage.setItem(claudeResumeKey, msg.claudeSessionId);
+              localStorage.setItem(resumeKey, msg.claudeSessionId);
             } else {
-              localStorage.removeItem(claudeResumeKey);
+              localStorage.removeItem(resumeKey);
+              // Legacy key from before sessions were app-scoped
+              if (app === 'claude') localStorage.removeItem(`ccserver-claude-resume:${cwd}`);
             }
             break;
           }
@@ -442,10 +511,16 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
                 rows: dims?.rows || 24,
                 shell: !!shellRef.current,
                 sandbox: !!sandboxRef.current,
+                sandboxOpts: sandboxOptsRef.current || null,
+                app: appRef.current,
               };
               if (!shellRef.current) {
+                const app = appRef.current;
                 const savedClaudeId = claudeResumeIdRef.current
-                  || localStorage.getItem(`ccserver-claude-resume:${cwd}`);
+                  || localStorage.getItem(`ccserver-resume:${app}:${cwd}`)
+                  || (app === 'claude'
+                    ? localStorage.getItem(`ccserver-claude-resume:${cwd}`)
+                    : null);
                 if (savedClaudeId) {
                   initMsg.claudeSessionId = savedClaudeId;
                   claudeResumeIdRef.current = null;
@@ -460,7 +535,7 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
               onAttentionRef.current();
             }
             if (notifyRef.current) {
-              const n = notifyRef.current('Claude Code', {
+              const n = notifyRef.current(appLabel(appRef.current), {
                 body: `Input needed in ${cwd}`,
                 icon: '/icon-192.png',
                 tag: `input-needed-${cwd}`,
@@ -792,7 +867,7 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
   return (
     <div className={`terminal-view${keyboardOpen ? ' keyboard-open' : ''}`}>
       <div className="terminal-header">
-        <span className="terminal-title">{sandbox ? '🔒 ' : ''}{shell ? 'Terminal' : 'Claude Code'} &mdash; {cwd}</span>
+        <span className="terminal-title">{sandbox ? '🔒 ' : ''}{shell ? 'Terminal' : appLabel(app)} &mdash; {cwd}</span>
         <div className="header-actions">
           <div className="theme-picker" ref={themeMenuRef}>
             <button
