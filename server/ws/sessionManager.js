@@ -43,7 +43,7 @@ function extractResumeId(session) {
 // gitignored-real-file / committed-.example.json pattern -- so the default
 // lives in the (untracked) config, not in committed source.
 function defaultApp() {
-  return loadSandboxConfig().defaultApp === 'opencode' ? 'opencode' : 'claude';
+  return loadSandboxConfig().defaultApp;
 }
 
 export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox, sandboxOpts, app, resumeLast }) {

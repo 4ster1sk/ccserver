@@ -120,7 +120,11 @@ export function loadSandboxConfig() {
   // How to launch claude. Overridable because the install location is
   // environment-specific (see resolveClaude). Env var wins over the config file.
   const claudeBin = process.env.CCSERVER_CLAUDE_BIN || (typeof raw.claudeBin === 'string' ? raw.claudeBin : null);
-  return { docker, gpg, sshAgent, gitBroker, binds, env, claudeBin, configPath };
+  // Which agent a new session launches when the client doesn't request one.
+  // See appLaunch.js's APPS; anything else (including unset) falls back to
+  // claude -- see sessionManager.js's defaultApp().
+  const defaultApp = raw.defaultApp === 'opencode' ? 'opencode' : 'claude';
+  return { docker, gpg, sshAgent, gitBroker, binds, env, claudeBin, defaultApp, configPath };
 }
 
 // Locate an executable named `cmd` on the given PATH (or return it as-is if

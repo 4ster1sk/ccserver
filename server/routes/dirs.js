@@ -1,10 +1,11 @@
 import { readdir, mkdir, stat } from 'node:fs/promises';
 import { join, resolve, basename } from 'node:path';
 import { homedir } from 'node:os';
+import { loadSandboxConfig } from '../ws/sandbox.js';
 
 export async function dirsRoute(fastify, opts) {
   fastify.get('/dirs/home', async () => {
-    return { home: homedir() };
+    return { home: homedir(), defaultApp: loadSandboxConfig().defaultApp };
   });
 
   fastify.get('/dirs', async (request, reply) => {
