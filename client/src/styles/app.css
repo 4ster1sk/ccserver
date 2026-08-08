@@ -676,6 +676,9 @@ body {
 .terminal-container {
   flex: 1;
   overflow: hidden;
+  /* Touch drags scroll the terminal (via synthetic wheel events), not the
+     page: the browser must not pan while the finger is on the terminal. */
+  touch-action: none;
 }
 
 /* Keyboard open - hide chrome to maximize terminal space */

@@ -352,7 +352,11 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
     };
     containerEl.addEventListener('click', handleContainerClick);
 
-    // Mobile touch scroll - override xterm's broken iOS touch handling
+    // Mobile touch scroll - override xterm's broken iOS touch handling.
+    // Vertical drags are translated into synthetic wheel events: when the app
+    // has mouse tracking (opencode's TUI) xterm.js forwards them as wheel-
+    // mouse sequences, which scroll the TUI's internal conversation history;
+    // without tracking (shells, claude) it scrolls its own buffer instead.
     let touchStartY = 0;
     let touchScrolling = false;
     const handleTouchStart = (e) => {
@@ -363,11 +367,17 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
     };
     const handleTouchMove = (e) => {
       if (e.touches.length !== 1) return;
-      const dy = touchStartY - e.touches[0].clientY;
-      const lines = Math.trunc(dy / 20);
-      if (lines !== 0) {
-        term.scrollLines(lines);
-        touchStartY = e.touches[0].clientY;
+      const touch = e.touches[0];
+      const dy = touchStartY - touch.clientY;
+      if (Math.abs(dy) >= 20) {
+        term.element.dispatchEvent(new WheelEvent('wheel', {
+          deltaY: dy,
+          clientX: touch.clientX,
+          clientY: touch.clientY,
+          bubbles: true,
+          cancelable: true,
+        }));
+        touchStartY = touch.clientY;
         touchScrolling = true;
       }
     };
