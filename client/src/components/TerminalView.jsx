@@ -73,6 +73,85 @@ function parseEscapeSequence(str) {
     .replace(/\\\\/g, '\\');
 }
 
+// Inverse of parseEscapeSequence: raw bytes -> the \xNN/\e/\r notation, for
+// showing users what a picked key actually sends without requiring them to
+// read/write that notation themselves.
+function formatEscapeSequence(str) {
+  let out = '';
+  for (const ch of str) {
+    const code = ch.codePointAt(0);
+    if (ch === '\x1b') out += '\\e';
+    else if (ch === '\r') out += '\\r';
+    else if (ch === '\n') out += '\\n';
+    else if (ch === '\t') out += '\\t';
+    else if (ch === '\\') out += '\\\\';
+    else if (code < 0x20 || code === 0x7f) out += `\\x${code.toString(16).padStart(2, '0')}`;
+    else out += ch;
+  }
+  return out;
+}
+
+// Structured picker for building a custom key's byte sequence without typing
+// escape notation by hand. Ctrl/Alt on cursor/function keys use the standard
+// xterm CSI-modifier encoding (\x1b[1;<mod><final>, mod = 1 + alt*2 + ctrl*4);
+// Ctrl on a letter computes the control byte, Alt prefixes ESC ("meta sends
+// escape") -- both match what real terminals send.
+const PICKER_LETTER_DEFS = Array.from({ length: 26 }, (_, i) => {
+  const ch = String.fromCharCode(97 + i);
+  return { id: `letter:${ch}`, label: ch.toUpperCase(), kind: 'letter', char: ch, ctrlAlt: true };
+});
+
+const PICKER_NAMED_DEFS = [
+  { id: 'named:enter', label: 'Enter', kind: 'plain', data: '\r', ctrlAlt: false },
+  { id: 'named:tab', label: 'Tab', kind: 'plain', data: '\t', ctrlAlt: false },
+  { id: 'named:esc', label: 'Esc', kind: 'plain', data: '\x1b', ctrlAlt: false },
+  { id: 'named:bs', label: 'Backspace', kind: 'plain', data: '\x7f', ctrlAlt: false },
+  { id: 'named:space', label: 'Space', kind: 'plain', data: ' ', ctrlAlt: false },
+  { id: 'named:up', label: '↑ Up', kind: 'csi-final', final: 'A', ctrlAlt: true },
+  { id: 'named:down', label: '↓ Down', kind: 'csi-final', final: 'B', ctrlAlt: true },
+  { id: 'named:right', label: '→ Right', kind: 'csi-final', final: 'C', ctrlAlt: true },
+  { id: 'named:left', label: '← Left', kind: 'csi-final', final: 'D', ctrlAlt: true },
+  { id: 'named:home', label: 'Home', kind: 'csi-final', final: 'H', ctrlAlt: true },
+  { id: 'named:end', label: 'End', kind: 'csi-final', final: 'F', ctrlAlt: true },
+  { id: 'named:ins', label: 'Insert', kind: 'csi-tilde', num: 2, ctrlAlt: true },
+  { id: 'named:del', label: 'Delete', kind: 'csi-tilde', num: 3, ctrlAlt: true },
+  { id: 'named:pgup', label: 'PageUp', kind: 'csi-tilde', num: 5, ctrlAlt: true },
+  { id: 'named:pgdn', label: 'PageDown', kind: 'csi-tilde', num: 6, ctrlAlt: true },
+  { id: 'named:f1', label: 'F1', kind: 'ss3', final: 'P', ctrlAlt: true },
+  { id: 'named:f2', label: 'F2', kind: 'ss3', final: 'Q', ctrlAlt: true },
+  { id: 'named:f3', label: 'F3', kind: 'ss3', final: 'R', ctrlAlt: true },
+  { id: 'named:f4', label: 'F4', kind: 'ss3', final: 'S', ctrlAlt: true },
+  { id: 'named:f5', label: 'F5', kind: 'csi-tilde', num: 15, ctrlAlt: true },
+  { id: 'named:f6', label: 'F6', kind: 'csi-tilde', num: 17, ctrlAlt: true },
+  { id: 'named:f7', label: 'F7', kind: 'csi-tilde', num: 18, ctrlAlt: true },
+  { id: 'named:f8', label: 'F8', kind: 'csi-tilde', num: 19, ctrlAlt: true },
+  { id: 'named:f9', label: 'F9', kind: 'csi-tilde', num: 20, ctrlAlt: true },
+  { id: 'named:f10', label: 'F10', kind: 'csi-tilde', num: 21, ctrlAlt: true },
+  { id: 'named:f11', label: 'F11', kind: 'csi-tilde', num: 23, ctrlAlt: true },
+  { id: 'named:f12', label: 'F12', kind: 'csi-tilde', num: 24, ctrlAlt: true },
+];
+
+const PICKER_KEY_MAP = Object.fromEntries([...PICKER_LETTER_DEFS, ...PICKER_NAMED_DEFS].map((d) => [d.id, d]));
+
+function buildPickerSequence(def, ctrl, alt) {
+  if (!def) return '';
+  const mod = 1 + (alt ? 2 : 0) + (ctrl ? 4 : 0);
+  if (def.kind === 'csi-final') return mod > 1 ? `\x1b[1;${mod}${def.final}` : `\x1b[${def.final}`;
+  if (def.kind === 'csi-tilde') return mod > 1 ? `\x1b[${def.num};${mod}~` : `\x1b[${def.num}~`;
+  if (def.kind === 'ss3') return mod > 1 ? `\x1b[1;${mod}${def.final}` : `\x1bO${def.final}`;
+  if (def.kind === 'letter') {
+    const base = ctrl ? String.fromCharCode(def.char.toUpperCase().charCodeAt(0) - 64) : def.char;
+    return alt ? `\x1b${base}` : base;
+  }
+  return alt ? `\x1b${def.data}` : def.data; // 'plain'
+}
+
+function buildPickerLabel(def, ctrl, alt) {
+  if (!def) return '';
+  const prefix = `${ctrl ? 'C-' : ''}${alt ? 'M-' : ''}`;
+  return def.kind === 'letter' ? `${prefix}${def.char}` : `${prefix}${def.label}`;
+}
+
 function loadKeyConfig(keyMap) {
   try {
     const saved = localStorage.getItem(STORAGE_KEY);
@@ -91,7 +170,7 @@ const PING_INTERVAL_MS = 30000;
 
 const themeIds = getThemeIds();
 
-export default function TerminalView({ cwd, onClose, claudeSessionId, shell, sandbox, notify, notifyEnabled, notifyPermission, onToggleNotify, visible, onSessionId, onExited, attachSessionId, xtermTheme, themeId, onThemeChange, tabId, onAttention, onFocusTab }) {
+export default function TerminalView({ cwd, onClose, claudeSessionId, shell, sandbox, sandboxOpts, notify, notifyEnabled, notifyPermission, onToggleNotify, visible, onSessionId, onExited, attachSessionId, xtermTheme, themeId, onThemeChange, tabId, onAttention, onFocusTab }) {
   const terminalRef = useRef(null);
   const xtermRef = useRef(null);
   const wsRef = useRef(null);
@@ -103,6 +182,7 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
   const claudeResumeIdRef = useRef(claudeSessionId);
   const shellRef = useRef(shell);
   const sandboxRef = useRef(sandbox);
+  const sandboxOptsRef = useRef(sandboxOpts);
   const [autoYes, setAutoYes] = useState(false);
   const [autoYesLog, setAutoYesLog] = useState([]);
   const [showAutoYesLog, setShowAutoYesLog] = useState(false);
@@ -266,6 +346,7 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
             rows: dims?.rows || 24,
             shell: !!shellRef.current,
             sandbox: !!sandboxRef.current,
+            sandboxOpts: sandboxOptsRef.current || null,
           };
           if (!shellRef.current && claudeResumeIdRef.current) {
             initMsg.claudeSessionId = claudeResumeIdRef.current;
@@ -515,6 +596,12 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
   const [customKeys, setCustomKeys] = useState(loadCustomKeys);
   const [newKeyLabel, setNewKeyLabel] = useState('');
   const [newKeyData, setNewKeyData] = useState('');
+  const [customKeyTab, setCustomKeyTab] = useState('key'); // 'key' | 'text' | 'advanced'
+  const [pickerKeyId, setPickerKeyId] = useState('');
+  const [pickerCtrl, setPickerCtrl] = useState(false);
+  const [pickerAlt, setPickerAlt] = useState(false);
+  const [pickerText, setPickerText] = useState('');
+  const [pickerAppendEnter, setPickerAppendEnter] = useState(false);
 
   const keyMap = buildKeyMap(customKeys);
   const [keyConfig, setKeyConfig] = useState(() => loadKeyConfig(keyMap));
@@ -555,12 +642,9 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
     saveKeyConfig([...DEFAULT_KEY_IDS]);
   }, [saveKeyConfig]);
 
-  const addCustomKey = useCallback(() => {
-    const label = newKeyLabel.trim();
-    const rawData = newKeyData.trim();
-    if (!label || !rawData) return;
+  const commitCustomKey = useCallback((label, data) => {
+    if (!label || !data) return;
     const id = `custom:${label.toLowerCase().replace(/\s+/g, '-')}-${Date.now()}`;
-    const data = parseEscapeSequence(rawData);
     const newKey = { id, label, data };
     const nextCustom = [...customKeys, newKey];
     setCustomKeys(nextCustom);
@@ -570,9 +654,47 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
       localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
       return next;
     });
+  }, [customKeys]);
+
+  // Draft state for the "カスタムキーを追加" form, derived fresh each render
+  // from whichever of the three input modes (key picker / literal text /
+  // raw notation) is currently selected.
+  const pickerKeyDef = PICKER_KEY_MAP[pickerKeyId];
+  const pickerCtrlAltCapable = !!pickerKeyDef?.ctrlAlt;
+  const effectivePickerCtrl = pickerCtrl && pickerCtrlAltCapable;
+  const effectivePickerAlt = pickerAlt && pickerCtrlAltCapable;
+  const customKeyDraft = (() => {
+    if (customKeyTab === 'key') {
+      const data = pickerKeyDef ? buildPickerSequence(pickerKeyDef, effectivePickerCtrl, effectivePickerAlt) : '';
+      const autoLabel = pickerKeyDef ? buildPickerLabel(pickerKeyDef, effectivePickerCtrl, effectivePickerAlt) : '';
+      return { data, autoLabel, valid: !!pickerKeyDef };
+    }
+    if (customKeyTab === 'text') {
+      const data = pickerText + (pickerAppendEnter ? '\r' : '');
+      const autoLabel = pickerText.trim() || (pickerAppendEnter ? 'Enter' : '');
+      return { data, autoLabel, valid: !!(pickerText.trim() || pickerAppendEnter) };
+    }
+    const raw = newKeyData.trim();
+    const data = raw ? parseEscapeSequence(raw) : '';
+    return { data, autoLabel: data ? formatEscapeSequence(data) : '', valid: !!raw };
+  })();
+
+  const resetCustomKeyForm = useCallback(() => {
     setNewKeyLabel('');
     setNewKeyData('');
-  }, [newKeyLabel, newKeyData, customKeys]);
+    setPickerKeyId('');
+    setPickerCtrl(false);
+    setPickerAlt(false);
+    setPickerText('');
+    setPickerAppendEnter(false);
+  }, []);
+
+  const addCustomKey = useCallback(() => {
+    if (!customKeyDraft.valid) return;
+    const label = newKeyLabel.trim() || customKeyDraft.autoLabel;
+    commitCustomKey(label, customKeyDraft.data);
+    resetCustomKeyForm();
+  }, [customKeyDraft, newKeyLabel, commitCustomKey, resetCustomKeyForm]);
 
   const deleteCustomKey = useCallback((id) => {
     const nextCustom = customKeys.filter((k) => k.id !== id);
@@ -900,25 +1022,121 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
           )}
           <div className="key-config-custom">
             <div className="key-config-subheader">カスタムキーを追加</div>
+            <div className="key-config-tabs">
+              <button
+                type="button"
+                className={'key-config-tab' + (customKeyTab === 'key' ? ' active' : '')}
+                onClick={() => setCustomKeyTab('key')}
+              >
+                キー
+              </button>
+              <button
+                type="button"
+                className={'key-config-tab' + (customKeyTab === 'text' ? ' active' : '')}
+                onClick={() => setCustomKeyTab('text')}
+              >
+                テキスト
+              </button>
+              <button
+                type="button"
+                className={'key-config-tab' + (customKeyTab === 'advanced' ? ' active' : '')}
+                onClick={() => setCustomKeyTab('advanced')}
+              >
+                詳細
+              </button>
+            </div>
+
+            {customKeyTab === 'key' && (
+              <div className="key-config-picker-row">
+                <select
+                  className="key-config-select"
+                  value={pickerKeyId}
+                  onChange={(e) => setPickerKeyId(e.target.value)}
+                >
+                  <option value="" disabled>キーを選択...</option>
+                  <optgroup label="文字">
+                    {PICKER_LETTER_DEFS.map((d) => (
+                      <option key={d.id} value={d.id}>{d.label}</option>
+                    ))}
+                  </optgroup>
+                  <optgroup label="特殊キー">
+                    {PICKER_NAMED_DEFS.map((d) => (
+                      <option key={d.id} value={d.id}>{d.label}</option>
+                    ))}
+                  </optgroup>
+                </select>
+                <label className={'key-config-modifier' + (pickerCtrlAltCapable ? '' : ' disabled')}>
+                  <input
+                    type="checkbox"
+                    checked={effectivePickerCtrl}
+                    disabled={!pickerCtrlAltCapable}
+                    onChange={(e) => setPickerCtrl(e.target.checked)}
+                  />
+                  Ctrl
+                </label>
+                <label className={'key-config-modifier' + (pickerCtrlAltCapable ? '' : ' disabled')}>
+                  <input
+                    type="checkbox"
+                    checked={effectivePickerAlt}
+                    disabled={!pickerCtrlAltCapable}
+                    onChange={(e) => setPickerAlt(e.target.checked)}
+                  />
+                  Alt
+                </label>
+              </div>
+            )}
+
+            {customKeyTab === 'text' && (
+              <div className="key-config-picker-row">
+                <input
+                  type="text"
+                  className="key-config-input key-config-input-data"
+                  placeholder="送信するテキスト (例: hello)"
+                  value={pickerText}
+                  onChange={(e) => setPickerText(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === 'Enter' && customKeyDraft.valid) addCustomKey(); }}
+                />
+                <label className="key-config-modifier">
+                  <input
+                    type="checkbox"
+                    checked={pickerAppendEnter}
+                    onChange={(e) => setPickerAppendEnter(e.target.checked)}
+                  />
+                  末尾にEnter
+                </label>
+              </div>
+            )}
+
+            {customKeyTab === 'advanced' && (
+              <div className="key-config-picker-row">
+                <input
+                  type="text"
+                  className="key-config-input key-config-input-data"
+                  placeholder="データ (例: \x03, \e[A, hello\r)"
+                  value={newKeyData}
+                  onChange={(e) => setNewKeyData(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === 'Enter' && customKeyDraft.valid) addCustomKey(); }}
+                />
+              </div>
+            )}
+
             <div className="key-config-custom-form">
               <input
                 type="text"
                 className="key-config-input"
-                placeholder="ラベル"
+                placeholder="ラベル (空欄で自動)"
                 value={newKeyLabel}
                 onChange={(e) => setNewKeyLabel(e.target.value)}
                 maxLength={20}
               />
-              <input
-                type="text"
-                className="key-config-input key-config-input-data"
-                placeholder="データ (例: \x03, \e[A, hello\r)"
-                value={newKeyData}
-                onChange={(e) => setNewKeyData(e.target.value)}
-                onKeyDown={(e) => { if (e.key === 'Enter') addCustomKey(); }}
-              />
-              <button className="btn btn-primary btn-sm" onClick={addCustomKey} disabled={!newKeyLabel.trim() || !newKeyData.trim()}>追加</button>
+              <button className="btn btn-primary btn-sm" onClick={addCustomKey} disabled={!customKeyDraft.valid}>追加</button>
             </div>
+            {customKeyDraft.valid && (
+              <div className="key-config-preview">
+                ラベル: <code>{newKeyLabel.trim() || customKeyDraft.autoLabel}</code>
+                {' '}・ データ: <code>{formatEscapeSequence(customKeyDraft.data)}</code>
+              </div>
+            )}
           </div>
         </div>
       )}

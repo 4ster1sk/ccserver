@@ -55,6 +55,7 @@ export async function terminalWs(fastify, opts) {
             claudeSessionId: msg.claudeSessionId || null,
             shell: !!msg.shell,
             sandbox: !!msg.sandbox,
+            sandboxOpts: msg.sandboxOpts || null,
           });
 
           if (result.error) {

@@ -41,7 +41,7 @@ function extractClaudeSessionId(outputBuffer) {
   return null;
 }
 
-export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox }) {
+export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox, sandboxOpts }) {
   const id = randomUUID();
 
   const { SSH_AUTH_SOCK, SSH_AGENT_PID, ...cleanEnv } = process.env;
@@ -65,7 +65,7 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox
   let sandboxGitBrokerDir = null;
   if (sandbox && process.platform !== 'win32' && sandboxAvailable()) {
     try {
-      const spawn = buildSandboxSpawn({ cwd, targetCommand: [command, ...args] });
+      const spawn = buildSandboxSpawn({ cwd, targetCommand: [command, ...args], sandboxOpts });
       command = spawn.command;
       args = spawn.args;
       sandboxStateDir = spawn.stateDir || null;
@@ -110,6 +110,7 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox
     cwd,
     shell: !!shell,
     sandbox: useSandbox,
+    sandboxOpts: useSandbox ? (sandboxOpts || null) : null, // per-launch gpg/sshAgent override, for schedule/resume replay
     sandboxStateDir, // rootlesskit state dir to remove on teardown (docker only)
     sandboxGitBrokerProc, // host-side git-broker child process, killed on teardown
     sandboxGitBrokerDir, // its runtime dir (socket + allow-list), removed on teardown
@@ -323,6 +324,7 @@ function persistSchedules() {
         text: s.text,
         cwd: s.cwd,
         sandbox: !!s.sandbox,
+        sandboxOpts: s.sandboxOpts || null,
         shell: !!s.shell,
         claudeSessionId: s.claudeSessionId || null,
       });
@@ -451,6 +453,7 @@ function fireSchedule(scheduleId) {
     claudeSessionId: entry.claudeSessionId,
     shell: entry.shell,
     sandbox: entry.sandbox,
+    sandboxOpts: entry.sandboxOpts,
   });
   if (!res?.session) return;
   const session = res.session;
@@ -487,6 +490,7 @@ export function setScheduledPrompt(id, at, text) {
     text,
     cwd: session.cwd,
     sandbox: !!session.sandbox,
+    sandboxOpts: session.sandboxOpts || null,
     shell: !!session.shell,
     claudeSessionId: resumeIdForSession(session),
     sessionId: id,
@@ -537,6 +541,7 @@ export function restoreSchedules() {
       text: e.text,
       cwd: e.cwd,
       sandbox: !!e.sandbox,
+      sandboxOpts: e.sandboxOpts || null,
       shell: !!e.shell,
       claudeSessionId: e.claudeSessionId || null,
       sessionId: null,
@@ -564,6 +569,7 @@ export function listSessions() {
       connected: session.socket !== null,
       shell: session.shell,
       sandbox: session.sandbox,
+      sandboxOpts: session.sandboxOpts || null,
     });
   }
   return result;
@@ -702,6 +708,7 @@ export function gracefulShutdown() {
             cwd: session.cwd,
             claudeSessionId: claudeId,
             sandbox: !!session.sandbox,
+            sandboxOpts: session.sandboxOpts || null,
           });
         }
       }

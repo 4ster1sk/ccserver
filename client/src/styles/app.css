@@ -392,6 +392,31 @@ body {
   color: var(--accent);
 }
 
+.open-menu-suboptions {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 4px 10px 4px 28px;
+  border-top: 1px solid var(--border);
+  margin-top: 4px;
+}
+
+.open-menu-suboption {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 0;
+  font-size: 12px;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.open-menu-suboption input[type="checkbox"] {
+  width: 14px;
+  height: 14px;
+  margin: 0;
+}
+
 .open-menu-note {
   padding: 6px 10px 4px;
   font-size: 11px;
@@ -661,9 +686,10 @@ body {
   display: none;
 }
 
-.terminal-view.keyboard-open .key-config-panel {
-  display: none;
-}
+/* Note: key-config-panel is intentionally NOT hidden here. Its own inputs
+   are what triggers the on-screen keyboard in the first place -- hiding the
+   panel on keyboard-open would unfocus/remove the input the user just
+   tapped, which on iOS reads as "the cursor never appears". */
 
 /* Mobile Input Bar */
 .terminal-input-bar {
@@ -939,10 +965,97 @@ body {
   align-items: center;
 }
 
+.key-config-tabs {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.key-config-tab {
+  height: 26px;
+  padding: 0 10px;
+  background: var(--bg-surface);
+  color: var(--text-secondary);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-size: 12px;
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  cursor: pointer;
+}
+
+.key-config-tab.active {
+  background: var(--accent);
+  color: var(--bg-primary);
+  border-color: var(--accent);
+  font-weight: 600;
+}
+
+.key-config-picker-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+
+.key-config-select {
+  height: 30px;
+  padding: 0 6px;
+  font-size: 14px;
+  background: var(--bg-surface);
+  color: var(--text-primary);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  outline: none;
+  flex: 1;
+  min-width: 100px;
+}
+
+.key-config-select:focus {
+  border-color: var(--accent);
+}
+
+.key-config-modifier {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 13px;
+  color: var(--text-primary);
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.key-config-modifier input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+}
+
+.key-config-modifier.disabled {
+  color: var(--text-muted);
+  cursor: default;
+}
+
+.key-config-preview {
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.key-config-preview code {
+  color: var(--text-primary);
+  background: var(--bg-surface);
+  padding: 1px 4px;
+  border-radius: 3px;
+}
+
 .key-config-input {
   height: 28px;
   padding: 0 8px;
-  font-size: 12px;
+  /* 16px, not smaller: iOS Safari auto-zooms the page on focus for inputs
+     below 16px, which fights the visualViewport-based keyboard handling
+     above. */
+  font-size: 16px;
   font-family: 'JetBrains Mono', 'Fira Code', monospace;
   background: var(--bg-surface);
   color: var(--text-primary);

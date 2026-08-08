@@ -553,9 +553,16 @@ export function buildMinimalSandboxSpawn({ cwd, targetCommand }) {
 
 // Returns { command, args } for pty.spawn, wrapping the given target command
 // (e.g. ['claude', '--resume', id] or ['/bin/bash']) in the sandbox.
-export function buildSandboxSpawn({ cwd, targetCommand }) {
-  const { docker: cfgDocker, gpg, sshAgent, gitBroker: gitBrokerEnabled, binds, env, claudeBin } = loadSandboxConfig();
+//   sandboxOpts - optional per-launch override for the opt-in flags
+//                 ({ gpg, sshAgent }, either key omittable). Lets a caller
+//                 (the client, via the launch UI) pick these per session/
+//                 directory instead of only through the shared config file;
+//                 an omitted key falls back to loadSandboxConfig()'s value.
+export function buildSandboxSpawn({ cwd, targetCommand, sandboxOpts }) {
+  const { docker: cfgDocker, gpg: cfgGpg, sshAgent: cfgSshAgent, gitBroker: gitBrokerEnabled, binds, env, claudeBin } = loadSandboxConfig();
   const docker = cfgDocker && dockerSandboxAvailable();
+  const gpg = sandboxOpts?.gpg ?? cfgGpg;
+  const sshAgent = sandboxOpts?.sshAgent ?? cfgSshAgent;
 
   // ssh-agent forwarding is opt-in (see loadSandboxConfig). When on, an
   // explicit env.SSH_AUTH_SOCK in the config wins; otherwise auto-discover.

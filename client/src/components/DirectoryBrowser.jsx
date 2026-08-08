@@ -3,6 +3,27 @@ import { authFetch, getToken } from '../auth.js';
 
 const LAST_DIR_KEY = 'ccserver-last-dir';
 const SANDBOX_KEY = 'ccserver-sandbox-default';
+const SANDBOX_OPTS_PREFIX = 'ccserver-sandbox-opts:';
+
+// Per-directory opt-in sandbox flags (gpg / sshAgent), remembered separately
+// per cwd rather than as one server-wide default -- see server/sandbox.config.json's
+// `gpg`/`sshAgent` for the fallback these override at launch.
+function loadSandboxOpts(path) {
+  try {
+    const raw = localStorage.getItem(SANDBOX_OPTS_PREFIX + path);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      return { gpg: !!parsed.gpg, sshAgent: !!parsed.sshAgent };
+    }
+  } catch { /* ignore */ }
+  return { gpg: false, sshAgent: false };
+}
+
+function saveSandboxOpts(path, opts) {
+  try {
+    localStorage.setItem(SANDBOX_OPTS_PREFIX + path, JSON.stringify(opts));
+  } catch { /* ignore */ }
+}
 
 function formatSize(bytes) {
   if (bytes === 0) return '0 B';
@@ -33,10 +54,22 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onSessionClick, 
   const [sandboxDefault, setSandboxDefault] = useState(() => localStorage.getItem(SANDBOX_KEY) === '1');
   const [openMenuOpen, setOpenMenuOpen] = useState(false);
   const openMenuRef = useRef(null);
+  const [sandboxOpts, setSandboxOpts] = useState(() => loadSandboxOpts(currentPath));
 
   const chooseSandbox = useCallback((val) => {
     setSandboxDefault(val);
     localStorage.setItem(SANDBOX_KEY, val ? '1' : '0');
+  }, []);
+
+  // gpg/sshAgent are remembered per directory, not globally -- reload whenever
+  // the browser navigates to a different one.
+  useEffect(() => {
+    setSandboxOpts(loadSandboxOpts(currentPath));
+  }, [currentPath]);
+
+  const updateSandboxOpts = useCallback((path, next) => {
+    setSandboxOpts(next);
+    saveSandboxOpts(path, next);
   }, []);
 
   const fetchDirs = useCallback(async (path) => {
@@ -145,7 +178,8 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onSessionClick, 
     // Preserve the session's original sandbox setting; fall back to the current
     // default only for legacy saved entries that predate the persisted flag.
     const sandbox = saved.sandbox ?? sandboxDefault;
-    onOpen(saved.cwd, { sandbox });
+    const opts = saved.sandboxOpts ?? loadSandboxOpts(saved.cwd);
+    onOpen(saved.cwd, { sandbox, sandboxOpts: opts });
   }, [onOpen, sandboxDefault]);
 
   const handleDeleteSession = useCallback(async (session) => {
@@ -325,7 +359,7 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onSessionClick, 
         <div className="open-split" ref={openMenuRef}>
           <button
             className="btn btn-primary open-btn open-split-main"
-            onClick={() => onOpen(currentPath, { sandbox: sandboxDefault })}
+            onClick={() => onOpen(currentPath, { sandbox: sandboxDefault, sandboxOpts })}
             title={sandboxDefault ? 'サンドボックスで起動' : '通常起動'}
           >
             {sandboxDefault ? '🔒 Claude Code' : 'Claude Code'}
@@ -349,13 +383,32 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onSessionClick, 
               </div>
               <div
                 className="open-menu-item"
-                onClick={() => { chooseSandbox(true); setOpenMenuOpen(false); onOpen(currentPath, { sandbox: true }); }}
+                onClick={() => { chooseSandbox(true); setOpenMenuOpen(false); onOpen(currentPath, { sandbox: true, sandboxOpts }); }}
               >
                 <span className="open-menu-check">{sandboxDefault ? '✓' : ''}</span>
                 🔒 サンドボックスで起動
               </div>
+              <div className="open-menu-suboptions">
+                <label className="open-menu-suboption" onClick={(e) => e.stopPropagation()}>
+                  <input
+                    type="checkbox"
+                    checked={sandboxOpts.gpg}
+                    onChange={(e) => updateSandboxOpts(currentPath, { ...sandboxOpts, gpg: e.target.checked })}
+                  />
+                  GPG署名を使う
+                </label>
+                <label className="open-menu-suboption" onClick={(e) => e.stopPropagation()}>
+                  <input
+                    type="checkbox"
+                    checked={sandboxOpts.sshAgent}
+                    onChange={(e) => updateSandboxOpts(currentPath, { ...sandboxOpts, sshAgent: e.target.checked })}
+                  />
+                  ssh-agentを転送する
+                </label>
+              </div>
               <div className="open-menu-note">
-                サンドボックス: 隣接プロジェクトを隔離し、内部に rootless docker を用意
+                サンドボックス: 隣接プロジェクトを隔離し、内部に rootless docker を用意。
+                GPG/ssh-agentは既定オフ、このディレクトリ ({currentPath}) に記憶されます。
               </div>
             </div>
           )}
@@ -458,7 +511,7 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onSessionClick, 
               key={dir.path}
               className="dir-item"
               onClick={() => navigateTo(dir.path)}
-              onDoubleClick={() => onOpen(dir.path, { sandbox: sandboxDefault })}
+              onDoubleClick={() => onOpen(dir.path, { sandbox: sandboxDefault, sandboxOpts: loadSandboxOpts(dir.path) })}
               role="button"
               tabIndex={0}
               onKeyDown={(e) => {

@@ -32,28 +32,28 @@ export default function App() {
     saveThemeId(themeId);
   }, [themeId]);
 
-  const openTerminalTab = useCallback((dirPath, { claudeSessionId = null, shell = false, sessionId = null, attachSessionId = null, sandbox = false } = {}) => {
+  const openTerminalTab = useCallback((dirPath, { claudeSessionId = null, shell = false, sessionId = null, attachSessionId = null, sandbox = false, sandboxOpts = null } = {}) => {
     const id = `terminal-${++tabIdCounter}`;
     const dirName = dirPath.split(/[/\\]/).filter(Boolean).pop() || dirPath;
     const label = shell ? `$ ${dirName}` : dirName;
     setTabs((prev) => [
       ...prev,
-      { id, type: 'terminal', label, cwd: dirPath, claudeSessionId, shell, sessionId, attachSessionId, sandbox, exited: false },
+      { id, type: 'terminal', label, cwd: dirPath, claudeSessionId, shell, sessionId, attachSessionId, sandbox, sandboxOpts, exited: false },
     ]);
     setActiveTabId(id);
     setLastDir(dirPath);
   }, []);
 
-  const handleOpen = useCallback((dirPath, { sandbox = false, skipResumePrompt = false } = {}) => {
+  const handleOpen = useCallback((dirPath, { sandbox = false, sandboxOpts = null, skipResumePrompt = false } = {}) => {
     if (!skipResumePrompt) {
       const savedSessionId = localStorage.getItem(`ccserver-claude-resume:${dirPath}`);
       if (savedSessionId) {
         pendingOpenRef.current = dirPath;
-        setResumePrompt({ cwd: dirPath, sessionId: savedSessionId, sandbox });
+        setResumePrompt({ cwd: dirPath, sessionId: savedSessionId, sandbox, sandboxOpts });
         return;
       }
     }
-    openTerminalTab(dirPath, { sandbox });
+    openTerminalTab(dirPath, { sandbox, sandboxOpts });
   }, [openTerminalTab]);
 
   const handleOpenShell = useCallback((dirPath) => {
@@ -72,7 +72,7 @@ export default function App() {
 
   const handleResume = useCallback(() => {
     if (resumePrompt) {
-      openTerminalTab(resumePrompt.cwd, { claudeSessionId: resumePrompt.sessionId, sandbox: resumePrompt.sandbox });
+      openTerminalTab(resumePrompt.cwd, { claudeSessionId: resumePrompt.sessionId, sandbox: resumePrompt.sandbox, sandboxOpts: resumePrompt.sandboxOpts });
       setResumePrompt(null);
       pendingOpenRef.current = null;
     }
@@ -81,7 +81,7 @@ export default function App() {
   const handleNewSession = useCallback(() => {
     if (resumePrompt) {
       localStorage.removeItem(`ccserver-claude-resume:${resumePrompt.cwd}`);
-      openTerminalTab(resumePrompt.cwd, { sandbox: resumePrompt.sandbox });
+      openTerminalTab(resumePrompt.cwd, { sandbox: resumePrompt.sandbox, sandboxOpts: resumePrompt.sandboxOpts });
       setResumePrompt(null);
       pendingOpenRef.current = null;
     }
@@ -199,6 +199,7 @@ export default function App() {
                   claudeSessionId={tab.claudeSessionId}
                   shell={tab.shell}
                   sandbox={tab.sandbox}
+                  sandboxOpts={tab.sandboxOpts}
                   notify={notify}
                   notifyEnabled={notifyEnabled}
                   notifyPermission={notifyPermission}
