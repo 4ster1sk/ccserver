@@ -832,6 +832,30 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
     }
   }, []);
 
+  // opencode's message-scroll keybindings (see src/config/keybind.ts in the
+  // opencode repo): pageup/pagedown scroll half a page, ctrl+g / ctrl+alt+g
+  // jump to the first/last message.
+  const OPENCODE_SCROLL_KEYS = {
+    up: '\x1b[5~', // pageup
+    down: '\x1b[6~', // pagedown
+    top: '\x07', // ctrl+g
+    btm: '\x1b\x07', // ctrl+alt+g
+  };
+
+  const handleScrollButton = useCallback((action) => {
+    const term = xtermRef.current;
+    if (!term) return;
+    if (appRef.current === 'opencode') {
+      sendInput(OPENCODE_SCROLL_KEYS[action]);
+    } else if (action === 'top') {
+      term.scrollToTop();
+    } else if (action === 'btm') {
+      term.scrollToBottom();
+    } else {
+      term.scrollLines(action === 'up' ? -10 : 10);
+    }
+  }, [sendInput]);
+
   const handleInputSend = useCallback(() => {
     if (composingRef.current) return;
     if (!inputText) return;
@@ -1064,12 +1088,25 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
       <div className="terminal-container" ref={terminalRef} />
       {!keyboardOpen && (
         <div className="terminal-scroll-controls">
-          <button className="scroll-btn" onClick={() => xtermRef.current?.scrollLines(-10)} title="Scroll up">
+          {/* opencode's TUI owns the conversation (mouse tracking + internal
+              scroll), so its scrollback is frozen and xterm.js's scrollLines
+              do nothing — drive the TUI with its message-scroll keybindings
+              instead (PageUp/PageDown = half page, ctrl+g / ctrl+alt+g =
+              first/last message). Other apps keep the buffer scroll. */}
+          <button
+            className="scroll-btn"
+            onClick={() => handleScrollButton('up')}
+            title="Scroll up"
+          >
             <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M4 10l4-4 4 4"/></svg>
           </button>
-          <button className="scroll-btn" onClick={() => xtermRef.current?.scrollToTop()} title="Top">Top</button>
-          <button className="scroll-btn" onClick={() => xtermRef.current?.scrollToBottom()} title="Bottom">Btm</button>
-          <button className="scroll-btn" onClick={() => xtermRef.current?.scrollLines(10)} title="Scroll down">
+          <button className="scroll-btn" onClick={() => handleScrollButton('top')} title="Top">Top</button>
+          <button className="scroll-btn" onClick={() => handleScrollButton('btm')} title="Bottom">Btm</button>
+          <button
+            className="scroll-btn"
+            onClick={() => handleScrollButton('down')}
+            title="Scroll down"
+          >
             <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M4 6l4 4 4-4"/></svg>
           </button>
         </div>
