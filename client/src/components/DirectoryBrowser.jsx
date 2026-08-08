@@ -53,7 +53,6 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onSessionClick, 
   const dragCountRef = useRef(0);
   const [sandboxDefault, setSandboxDefault] = useState(() => localStorage.getItem(SANDBOX_KEY) === '1');
   const [openMenuOpen, setOpenMenuOpen] = useState(false);
-  const openMenuRef = useRef(null);
   const [sandboxOpts, setSandboxOpts] = useState(() => loadSandboxOpts(currentPath));
 
   const chooseSandbox = useCallback((val) => {
@@ -156,17 +155,6 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onSessionClick, 
   useEffect(() => {
     fetchSessions();
   }, [fetchSessions]);
-
-  useEffect(() => {
-    if (!openMenuOpen) return;
-    const handleClick = (e) => {
-      if (openMenuRef.current && !openMenuRef.current.contains(e.target)) {
-        setOpenMenuOpen(false);
-      }
-    };
-    document.addEventListener('mousedown', handleClick);
-    return () => document.removeEventListener('mousedown', handleClick);
-  }, [openMenuOpen]);
 
   const handleSessionClick = useCallback((session) => {
     onSessionClick(session);
@@ -356,7 +344,7 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onSessionClick, 
         <button className="btn btn-secondary open-btn" onClick={() => onOpenShell(currentPath)}>
           Terminal
         </button>
-        <div className="open-split" ref={openMenuRef}>
+        <div className="open-split">
           <button
             className="btn btn-primary open-btn open-split-main"
             onClick={() => onOpen(currentPath, { sandbox: sandboxDefault, sandboxOpts })}
@@ -366,54 +354,67 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onSessionClick, 
           </button>
           <button
             className="btn btn-primary open-btn open-split-caret"
-            onClick={() => setOpenMenuOpen((v) => !v)}
+            onClick={() => setOpenMenuOpen(true)}
             title="起動方法を選択"
             aria-label="起動方法を選択"
           >
             &#9662;
           </button>
-          {openMenuOpen && (
-            <div className="open-menu">
-              <div
-                className="open-menu-item"
-                onClick={() => { chooseSandbox(false); setOpenMenuOpen(false); onOpen(currentPath, { sandbox: false }); }}
-              >
-                <span className="open-menu-check">{!sandboxDefault ? '✓' : ''}</span>
-                通常起動
-              </div>
-              <div
-                className="open-menu-item"
-                onClick={() => { chooseSandbox(true); setOpenMenuOpen(false); onOpen(currentPath, { sandbox: true, sandboxOpts }); }}
-              >
-                <span className="open-menu-check">{sandboxDefault ? '✓' : ''}</span>
-                🔒 サンドボックスで起動
-              </div>
-              <div className="open-menu-suboptions">
-                <label className="open-menu-suboption" onClick={(e) => e.stopPropagation()}>
-                  <input
-                    type="checkbox"
-                    checked={sandboxOpts.gpg}
-                    onChange={(e) => updateSandboxOpts(currentPath, { ...sandboxOpts, gpg: e.target.checked })}
-                  />
-                  GPG署名を使う
-                </label>
-                <label className="open-menu-suboption" onClick={(e) => e.stopPropagation()}>
-                  <input
-                    type="checkbox"
-                    checked={sandboxOpts.sshAgent}
-                    onChange={(e) => updateSandboxOpts(currentPath, { ...sandboxOpts, sshAgent: e.target.checked })}
-                  />
-                  ssh-agentを転送する
-                </label>
-              </div>
-              <div className="open-menu-note">
-                サンドボックス: 隣接プロジェクトを隔離し、内部に rootless docker を用意。
-                GPG/ssh-agentは既定オフ、このディレクトリ ({currentPath}) に記憶されます。
-              </div>
-            </div>
-          )}
         </div>
       </div>
+
+      {openMenuOpen && (
+        // Modal instead of an anchored dropdown: a dropdown positioned off
+        // .open-split (position: absolute; right: 0) has no way to know
+        // when it no longer fits a narrow viewport, and reliably ran off
+        // the right edge on iPhone. A centered, viewport-relative modal
+        // (same pattern as the close/resume dialogs below) sidesteps that
+        // entirely.
+        <div className="resume-overlay" onClick={() => setOpenMenuOpen(false)}>
+          <div className="resume-dialog" onClick={(e) => e.stopPropagation()}>
+            <h3>起動方法を選択</h3>
+            <div
+              className="open-menu-item"
+              onClick={() => { chooseSandbox(false); setOpenMenuOpen(false); onOpen(currentPath, { sandbox: false }); }}
+            >
+              <span className="open-menu-check">{!sandboxDefault ? '✓' : ''}</span>
+              通常起動
+            </div>
+            <div
+              className="open-menu-item"
+              onClick={() => { chooseSandbox(true); setOpenMenuOpen(false); onOpen(currentPath, { sandbox: true, sandboxOpts }); }}
+            >
+              <span className="open-menu-check">{sandboxDefault ? '✓' : ''}</span>
+              🔒 サンドボックスで起動
+            </div>
+            <div className="open-menu-suboptions">
+              <label className="open-menu-suboption">
+                <input
+                  type="checkbox"
+                  checked={sandboxOpts.gpg}
+                  onChange={(e) => updateSandboxOpts(currentPath, { ...sandboxOpts, gpg: e.target.checked })}
+                />
+                GPG署名を使う
+              </label>
+              <label className="open-menu-suboption">
+                <input
+                  type="checkbox"
+                  checked={sandboxOpts.sshAgent}
+                  onChange={(e) => updateSandboxOpts(currentPath, { ...sandboxOpts, sshAgent: e.target.checked })}
+                />
+                ssh-agentを転送する
+              </label>
+            </div>
+            <p className="open-menu-note">
+              サンドボックス: 隣接プロジェクトを隔離し、内部に rootless docker を用意。
+              GPG/ssh-agentは既定オフ、このディレクトリ ({currentPath}) に記憶されます。
+            </p>
+            <div className="resume-actions">
+              <button className="btn btn-secondary" onClick={() => setOpenMenuOpen(false)}>閉じる</button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {uploadProgress && (
         <div className="upload-progress">{uploadProgress}</div>

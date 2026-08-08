@@ -357,19 +357,6 @@ body {
   border-left: 1px solid rgba(0, 0, 0, 0.25);
 }
 
-.open-menu {
-  position: absolute;
-  top: calc(100% + 4px);
-  right: 0;
-  z-index: 20;
-  min-width: 240px;
-  background: var(--bg-surface, var(--bg-secondary));
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
-  padding: 4px;
-}
-
 .open-menu-item {
   display: flex;
   align-items: center;
@@ -379,11 +366,10 @@ body {
   border-radius: 4px;
   cursor: pointer;
   color: var(--text-secondary);
-  white-space: nowrap;
 }
 
 .open-menu-item:hover {
-  background: var(--bg-secondary);
+  background: var(--bg-surface);
 }
 
 .open-menu-check {
@@ -1611,6 +1597,27 @@ body {
     width: 100%;
     text-align: center;
     padding: 10px;
+  }
+
+  /* .open-split-main/.open-split-caret also carry .open-btn (for the shared
+     margin/padding above), so the blanket width:100% there stretches BOTH
+     halves of the split button to full width inside the inline-flex
+     .open-split wrapper -- the wrapper then has to fit two full-width
+     children side by side and blows out past the viewport, taking the
+     .open-menu dropdown anchored to it off-screen too. Give the wrapper the
+     full width instead and let its two children share it proportionally. */
+  .open-split {
+    width: 100%;
+  }
+
+  .open-split-main {
+    flex: 1;
+    width: auto;
+  }
+
+  .open-split-caret {
+    width: auto;
+    flex-shrink: 0;
   }
 
   .dir-item {
