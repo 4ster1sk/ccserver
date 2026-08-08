@@ -251,9 +251,10 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
   const [themeMenuOpen, setThemeMenuOpen] = useState(false);
   const themeMenuRef = useRef(null);
   const [keyboardOpen, setKeyboardOpen] = useState(false);
-  // { x, y } (viewport coords) while a touch-selection has text selected and
-  // the floating copy button should show; null otherwise.
-  const [copyBtn, setCopyBtn] = useState(null);
+  // Whether a touch-selection has text selected and the floating copy
+  // button should show; positioned off the (reactively-updated) end
+  // handle rather than its own tracked coordinates -- see `handles`.
+  const [copyBtn, setCopyBtn] = useState(false);
   // { start: {x,y}, end: {x,y} } (viewport coords) for the two draggable
   // selection-adjustment handles; null when there's no active selection.
   const [handles, setHandles] = useState(null);
@@ -502,7 +503,7 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
       }
 
       selecting = false;
-      setCopyBtn(null);
+      setCopyBtn(false);
       longPressTimer = setTimeout(() => {
         selecting = true;
         dispatchMouse('mousedown', clientX, clientY, 1);
@@ -538,11 +539,7 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
         const { clientX, clientY } = e.changedTouches[0] || {};
         dispatchMouse('mouseup', clientX, clientY, 0);
         updateHandles();
-        if (term.hasSelection() && clientX != null) {
-          setCopyBtn({ x: clientX, y: clientY });
-        } else {
-          setCopyBtn(null);
-        }
+        setCopyBtn(term.hasSelection() && clientX != null);
         e.preventDefault();
         return;
       }
@@ -559,7 +556,7 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
     };
     const selectionChangeDisposable = term.onSelectionChange(() => {
       updateHandles();
-      if (!term.hasSelection()) setCopyBtn(null);
+      if (!term.hasSelection()) setCopyBtn(false);
     });
     if (isMobile) {
       containerEl.addEventListener('touchstart', handleTouchStart, { passive: true });
@@ -808,6 +805,9 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
       }
       fitAddon.fit();
       pinToBottom();
+      // Rows re-rendered at (possibly) new screen positions -- any visible
+      // selection handles were computed against the old layout.
+      updateHandles();
       const dims = fitAddon.proposeDimensions();
       const ws = wsRef.current;
       if (dims && ws && ws.readyState === WebSocket.OPEN) {
@@ -828,6 +828,21 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
 
     window.addEventListener('resize', handleResize);
 
+    // iOS shows/hides the on-screen keyboard (and scrolls the page to keep
+    // the focused input clear of it) without firing a plain window resize
+    // or necessarily changing the container's own size -- visualViewport
+    // is the reliable signal for both, so handles need their own listener
+    // here rather than relying on handleResize's ResizeObserver.
+    const vv = window.visualViewport;
+    const handleViewportShift = () => updateHandles();
+    if (vv) {
+      vv.addEventListener('resize', handleViewportShift);
+      vv.addEventListener('scroll', handleViewportShift);
+    }
+    // Scrolling the buffer (not just resizing) also moves every row's
+    // screen position without changing the selection itself.
+    const scrollDisposable = term.onScroll(() => updateHandles());
+
     return () => {
       intentionalCloseRef.current = true;
       clearTimeout(reconnectTimerRef.current);
@@ -835,6 +850,11 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
       document.removeEventListener('visibilitychange', handleVisibilityChange);
       window.removeEventListener('resize', handleResize);
       resizeObserver.disconnect();
+      if (vv) {
+        vv.removeEventListener('resize', handleViewportShift);
+        vv.removeEventListener('scroll', handleViewportShift);
+      }
+      scrollDisposable.dispose();
       containerEl.removeEventListener('click', handleContainerClick);
       clearTimeout(longPressTimer);
       selectionChangeDisposable.dispose();
@@ -1254,17 +1274,20 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
           <div className="selection-handle" style={{ left: handles.end.x, top: handles.end.y }} />
         </>
       )}
-      {copyBtn && (
+      {copyBtn && handles && (
         <button
           className="selection-copy-btn"
-          style={{ left: Math.min(copyBtn.x, window.innerWidth - 90), top: Math.max(copyBtn.y - 48, 8) }}
+          // Anchored to the (reactively-updated) end handle rather than the
+          // touch point that was live when the button first appeared, so a
+          // keyboard show/hide or scroll afterward can't leave it stranded.
+          style={{ left: Math.min(handles.end.x, window.innerWidth - 90), top: Math.max(handles.end.y - 40, 8) }}
           onClick={() => {
             const term = xtermRef.current;
             if (term) {
               writeClipboardText(dewrapSelection(term.getSelection(), term.cols));
               term.clearSelection();
             }
-            setCopyBtn(null);
+            setCopyBtn(false);
           }}
         >
           📋 コピー
