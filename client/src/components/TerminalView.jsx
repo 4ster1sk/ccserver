@@ -582,6 +582,12 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
                 }
               }
               ws.send(JSON.stringify(initMsg));
+            } else {
+              // Any other error (e.g. SPAWN_FAILED — the target app isn't
+              // installed, or resolveApp/sandbox setup failed) previously had
+              // no handler here: the tab just sat open and blank forever,
+              // with nothing telling the user what went wrong.
+              term.writeln(`\r\n[Error: ${msg.message || 'unknown error'}${msg.code ? ` (${msg.code})` : ''}]`);
             }
             break;
           }
