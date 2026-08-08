@@ -160,33 +160,79 @@ rootless docker には subuid マッピング付き userns が要るため、外
 
 ```
 ccserver/
-├── package.json              # npm workspaces ルート
+├── package.json                    # npm workspaces ルート + playwright
+├── playwright.config.js
+├── docs/
+│   └── ccserver.service
+├── tests/
+│   └── close-confirm.spec.js       # Playwright E2E
 ├── server/
 │   ├── package.json
-│   ├── index.js              # Fastify エントリポイント
+│   ├── index.js                    # Fastify エントリポイント (トークン認証・静的配信含む)
+│   ├── usage.js                    # `claude --ax-screen-reader` を叩いて /usage をパース・キャッシュ
+│   ├── sandbox.config.example.json
 │   ├── routes/
-│   │   └── dirs.js           # GET /api/dirs ディレクトリ一覧
+│   │   ├── dirs.js                 # GET/POST /api/dirs, GET /api/dirs/home
+│   │   ├── sessions.js             # GET/DELETE /api/sessions...
+│   │   ├── files.js                # GET/POST /api/files (アップロード/ダウンロード)
+│   │   ├── system.js               # GET /api/system-stats (CPU/メモリ/温度/GPU/IPMI)
+│   │   └── usage.js                # GET /api/usage
 │   └── ws/
-│       └── terminal.js       # WebSocket + node-pty ブリッジ
+│       ├── terminal.js             # WebSocket + node-pty ブリッジ (/ws/terminal)
+│       ├── sessionManager.js       # セッション・予約プロンプトの状態管理/永続化
+│       ├── sandbox.js              # bwrap + rootless docker サンドボックス構築
+│       ├── sandbox-entrypoint.sh
+│       ├── sandbox-gh-wrapper.cjs         # サンドボックス内 gh をブローカー中継に差し替え
+│       ├── sandbox-ssh-wrapper.cjs        # サンドボックス内 ssh を許可リストでゲート
+│       ├── sandbox-git-credential-helper.cjs
+│       ├── sandbox-gitconfig / sandbox-known-hosts / sandbox-ssh-config
+│       ├── git-broker.js           # サンドボックス外で動く、リポジトリスコープの認証情報ブローカー
+│       └── ghAllowlist.js / gitAllowlist.js  (+ 各 *.test.js, sandbox-gh-wrapper.test.js)
 └── client/
     ├── package.json
     ├── index.html
     ├── vite.config.js
     └── src/
-        ├── main.jsx
-        ├── App.jsx
+        ├── main.jsx / App.jsx
+        ├── auth.js                 # トークン認証 (CCSERVER_TOKEN)
+        ├── themes.js
+        ├── hooks/
+        │   └── useNotifications.js
         ├── components/
         │   ├── DirectoryBrowser.jsx
-        │   └── TerminalView.jsx
+        │   ├── TerminalView.jsx    # 遅延ロード (初期バンドル削減)
+        │   ├── UsageButton.jsx
+        │   └── SystemMonitor.jsx
         └── styles/
             └── app.css
 ```
 
 ## API
 
-### `GET /api/dirs?path=<path>&showHidden=1`
+### 認証 (任意)
 
-指定パスのサブディレクトリ一覧を返す。
+`CCSERVER_TOKEN` 環境変数を設定すると、`/api` と `/ws` 配下の全リクエストに Jupyter 風のトークン認証がかかります (未設定なら無効)。`?token=<TOKEN>` クエリか `Authorization: Bearer <TOKEN>` ヘッダのどちらかで通ります。クライアントは 401 を受けると `prompt()` でトークンを聞き、`localStorage` (`ccserver-token`) に保存して以降のリクエストへ自動付与します (`client/src/auth.js`)。
+
+```bash
+CCSERVER_TOKEN=some-secret NODE_ENV=production node server/index.js
+```
+
+### REST
+
+| メソッド | パス | 説明 |
+|---|---|---|
+| GET | `/api/dirs?path=<path>&showHidden=1` | 指定パスのサブディレクトリ/ファイル一覧 |
+| GET | `/api/dirs/home` | サーバーのホームディレクトリを返す |
+| POST | `/api/dirs` | `{ parent, name }` でフォルダ作成 |
+| GET | `/api/sessions` | 実行中セッション + 保存済み (未起動) セッションの一覧 |
+| DELETE | `/api/sessions/:id` | セッションを終了する (予約プロンプトも解除) |
+| DELETE | `/api/sessions/saved/:index` | 保存済みセッション一覧からエントリを削除 |
+| GET | `/api/files?path=<path>` | ファイルをダウンロード |
+| POST | `/api/files` | multipart アップロード (`destination` フィールド + ファイルパート) |
+| GET | `/api/system-stats?ipmi=1` | CPU/メモリ/温度/GPU (`nvidia-smi`)/IPMI (要 `ENABLE_IPMI=1`)・load average |
+| GET | `/api/usage?force=1` | Claude Code `/usage` のキャッシュ済みスナップショット (`force=1` で即時再取得) |
+
+`GET /api/dirs` のレスポンス例:
 
 ```json
 {
@@ -194,22 +240,35 @@ ccserver/
   "parent": "/home",
   "dirs": [
     { "name": "projects", "path": "/home/user/projects" }
+  ],
+  "files": [
+    { "name": "notes.txt", "path": "/home/user/notes.txt", "size": 123, "mtime": 1730000000000 }
   ]
 }
 ```
 
 ### `WebSocket /ws/terminal`
 
-JSON メッセージでターミナル I/O を中継。
+JSON メッセージでターミナル I/O とセッション管理 (アタッチ・予約プロンプト・自動承認) を中継。
 
 | 方向 | type | フィールド | 説明 |
 |------|------|-----------|------|
-| → | `init` | `cwd`, `cols`, `rows` | Claude Code をスポーン |
+| → | `init` | `cwd`, `cols`, `rows`, `claudeSessionId?`, `shell?`, `sandbox?` | 新規セッションを起動 (既定は Claude Code、`shell: true` で素のシェル) |
+| → | `attach` | `sessionId`, `cols?`, `rows?` | 既存セッションに再接続 (出力バッファを `replay` で再送) |
 | → | `input` | `data` | キーボード入力 |
 | → | `resize` | `cols`, `rows` | ターミナルリサイズ |
-| ← | `ready` | `cwd`, `cols`, `rows` | スポーン完了 |
+| → | `ping` | – | 疎通確認 (`pong` が返る) |
+| → | `set_auto_yes` / `get_auto_yes` | `enabled?` | 確認プロンプトの自動承認 ON/OFF・状態取得 |
+| → | `schedule_prompt` | `time` (`"HH:MM"`) か `at` (epoch ms), `text` | 予約プロンプトを設定 |
+| → | `cancel_schedule` / `get_schedule` | – | 予約の解除・現在状態の取得 |
+| ← | `session` | `sessionId`, `cwd`, `cols`, `rows`, `isReconnect` | スポーン/再接続完了 |
 | ← | `output` | `data` | ターミナル出力 |
-| ← | `exit` | `exitCode`, `signal` | プロセス終了 |
+| ← | `replay` | `data` | `attach` 時、切断中に貯まった出力バッファを再送 (複数回届く) |
+| ← | `exit` | `exitCode`, `signal`, `claudeSessionId` | プロセス終了 |
+| ← | `auto_yes_state` | `enabled`, `log` | 自動承認の状態変化・ログ |
+| ← | `schedule_state` | `scheduled`, `serverTz`, `serverNow`, `error?` | 予約プロンプトの現在状態 (サーバー時刻/TZ 付き) |
+| ← | `error` | `message`, `code` | エラー通知 |
+| ← | `pong` | – | `ping` への応答 |
 
 ## systemd でバックグラウンド実行
 
