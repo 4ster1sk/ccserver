@@ -6,6 +6,7 @@ import '@xterm/xterm/css/xterm.css';
 import { getThemeIds, getTheme } from '../themes.js';
 import { authWsUrl } from '../auth.js';
 import { createOsc52Handler } from '../osc52.js';
+import { dewrapSelection } from '../dewrap.js';
 
 const ALL_SPECIAL_KEYS = [
   { id: 'bs', label: 'BS', data: '\x7f' },
@@ -253,6 +254,13 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
   // { x, y } (viewport coords) while a touch-selection has text selected and
   // the floating copy button should show; null otherwise.
   const [copyBtn, setCopyBtn] = useState(null);
+  // { start: {x,y}, end: {x,y} } (viewport coords) for the two draggable
+  // selection-adjustment handles; null when there's no active selection.
+  const [handles, setHandles] = useState(null);
+  // Mirrors `handles` synchronously for use inside touch event listeners,
+  // which close over state from whenever the effect last ran and would
+  // otherwise see a stale value across renders.
+  const handlesRef = useRef(null);
   const onSessionIdRef = useRef(onSessionId);
   useEffect(() => { onSessionIdRef.current = onSessionId; }, [onSessionId]);
   const onExitedRef = useRef(onExited);
@@ -417,6 +425,7 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
     // for a canvas selection either.
     const LONG_PRESS_MS = 450;
     const MOVE_CANCEL_PX = 10;
+    const HANDLE_HIT_RADIUS = 28;
     let touchStartX = 0;
     let touchStartY = 0;
     let touchScrolling = false;
@@ -431,15 +440,69 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
         clientX: x, clientY: y, button: 0, buttons, detail: 1, bubbles: true, cancelable: true,
       }));
     };
+    // Converts a buffer cell position (x/y, as returned by
+    // term.getSelectionPosition() -- 0-based in practice despite the
+    // "(1-based)" wording in xterm's own type declarations, confirmed by
+    // round-tripping term.select(0, row, n)) into viewport pixel coords --
+    // rows are real DOM nodes under .xterm-rows, one per visible line, so
+    // their rect gives us cell size. Returns two Y variants: `y` hangs
+    // below the row (for drawing a handle that doesn't cover the character
+    // it marks) and `anchorY` sits at the row's own vertical center (for
+    // precisely re-establishing a selection anchor -- landing exactly on a
+    // row boundary is ambiguous for xterm's own hit-testing).
+    const cellPixel = (bufY, bufX) => {
+      const viewportRow = bufY - term.buffer.active.viewportY;
+      if (viewportRow < 0 || viewportRow >= term.rows) return null;
+      const rowEl = containerEl.querySelectorAll('.xterm-rows > div')[viewportRow];
+      if (!rowEl) return null;
+      const rect = rowEl.getBoundingClientRect();
+      const cellWidth = rect.width / term.cols;
+      return { x: rect.x + bufX * cellWidth, y: rect.y + rect.height, anchorY: rect.y + rect.height / 2 };
+    };
+    const updateHandles = () => {
+      if (!term.hasSelection()) {
+        handlesRef.current = null;
+        setHandles(null);
+        return;
+      }
+      const pos = term.getSelectionPosition();
+      const start = pos ? cellPixel(pos.start.y, pos.start.x) : null;
+      const end = pos ? cellPixel(pos.end.y, pos.end.x) : null;
+      const next = start && end ? { start, end } : null;
+      handlesRef.current = next;
+      setHandles(next);
+    };
+    const nearHandle = (x, y) => {
+      const h = handlesRef.current;
+      if (!h) return null;
+      if (Math.hypot(x - h.start.x, y - h.start.y) <= HANDLE_HIT_RADIUS) return 'start';
+      if (Math.hypot(x - h.end.x, y - h.end.y) <= HANDLE_HIT_RADIUS) return 'end';
+      return null;
+    };
     const handleTouchStart = (e) => {
       if (e.touches.length !== 1) return;
       const { clientX, clientY } = e.touches[0];
       touchStartX = clientX;
       touchStartY = clientY;
       touchScrolling = false;
+      clearTimeout(longPressTimer);
+
+      // Grabbing an existing handle re-anchors the selection at the OTHER
+      // end (using its precise row-center Y, not the handle's own
+      // below-row drawing position) and immediately starts following the
+      // touch, so dragging either handle adjusts that side independently
+      // without disturbing the rest of the selection.
+      const grabbed = nearHandle(clientX, clientY);
+      if (grabbed) {
+        selecting = true;
+        const fixed = grabbed === 'start' ? handlesRef.current.end : handlesRef.current.start;
+        dispatchMouse('mousedown', fixed.x, fixed.anchorY, 1);
+        dispatchMouse('mousemove', clientX, clientY, 1);
+        return;
+      }
+
       selecting = false;
       setCopyBtn(null);
-      clearTimeout(longPressTimer);
       longPressTimer = setTimeout(() => {
         selecting = true;
         dispatchMouse('mousedown', clientX, clientY, 1);
@@ -474,17 +537,28 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
         selecting = false;
         const { clientX, clientY } = e.changedTouches[0] || {};
         dispatchMouse('mouseup', clientX, clientY, 0);
+        updateHandles();
         if (term.hasSelection() && clientX != null) {
           setCopyBtn({ x: clientX, y: clientY });
+        } else {
+          setCopyBtn(null);
         }
         e.preventDefault();
         return;
       }
       if (touchScrolling) {
         e.preventDefault();
+        return;
+      }
+      // A plain tap that wasn't a long-press or a handle drag: if a
+      // selection is still showing from an earlier long-press, treat the
+      // tap as "dismiss" rather than leaving stale handles on screen.
+      if (term.hasSelection()) {
+        term.clearSelection();
       }
     };
     const selectionChangeDisposable = term.onSelectionChange(() => {
+      updateHandles();
       if (!term.hasSelection()) setCopyBtn(null);
     });
     if (isMobile) {
@@ -1174,6 +1248,12 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
           empty scrollbar (.tui-scroll) and pinToBottom keeps the viewport at
           the bottom. */}
       <div className={`terminal-container${app === 'opencode' ? ' tui-scroll' : ''}`} ref={terminalRef} />
+      {handles && (
+        <>
+          <div className="selection-handle" style={{ left: handles.start.x, top: handles.start.y }} />
+          <div className="selection-handle" style={{ left: handles.end.x, top: handles.end.y }} />
+        </>
+      )}
       {copyBtn && (
         <button
           className="selection-copy-btn"
@@ -1181,7 +1261,7 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
           onClick={() => {
             const term = xtermRef.current;
             if (term) {
-              writeClipboardText(term.getSelection());
+              writeClipboardText(dewrapSelection(term.getSelection(), term.cols));
               term.clearSelection();
             }
             setCopyBtn(null);
