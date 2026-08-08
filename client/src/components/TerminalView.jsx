@@ -250,6 +250,9 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
   const [themeMenuOpen, setThemeMenuOpen] = useState(false);
   const themeMenuRef = useRef(null);
   const [keyboardOpen, setKeyboardOpen] = useState(false);
+  // { x, y } (viewport coords) while a touch-selection has text selected and
+  // the floating copy button should show; null otherwise.
+  const [copyBtn, setCopyBtn] = useState(null);
   const onSessionIdRef = useRef(onSessionId);
   useEffect(() => { onSessionIdRef.current = onSessionId; }, [onSessionId]);
   const onExitedRef = useRef(onExited);
@@ -399,17 +402,59 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
     // has mouse tracking (opencode's TUI) xterm.js forwards them as wheel-
     // mouse sequences, which scroll the TUI's internal conversation history;
     // without tracking (shells, claude) it scrolls its own buffer instead.
+    //
+    // Long-press-then-drag instead selects text: xterm.js already has full
+    // mouse-driven selection (SelectionService, bound to real mouse events)
+    // -- iOS just never gets a chance to trigger it, because (a) canvas-
+    // rendered glyphs aren't selectable DOM text for the OS's native
+    // long-press gesture, and (b) touch-action: none on the container (see
+    // app.css) suppresses that gesture anyway so our own scroll handling
+    // above can own touch-drag unambiguously. So a detected long-press
+    // dispatches synthetic mousedown/mousemove/mouseup at the touch
+    // coordinates instead of wheel events, letting xterm's own selection
+    // logic do the rest exactly as it would for a real mouse. A floating
+    // "コピー" button appears afterward since iOS has no native copy menu
+    // for a canvas selection either.
+    const LONG_PRESS_MS = 450;
+    const MOVE_CANCEL_PX = 10;
+    let touchStartX = 0;
     let touchStartY = 0;
     let touchScrolling = false;
+    let selecting = false;
+    let longPressTimer = null;
+    const dispatchMouse = (type, x, y, buttons) => {
+      // detail must be 1 (a real single click) -- xterm's SelectionService
+      // branches on event.detail to pick single/double/triple-click
+      // handling (handleMouseDown), and a MouseEvent's detail defaults to 0
+      // when unset, which matches none of those branches and silently no-ops.
+      term.element.dispatchEvent(new MouseEvent(type, {
+        clientX: x, clientY: y, button: 0, buttons, detail: 1, bubbles: true, cancelable: true,
+      }));
+    };
     const handleTouchStart = (e) => {
-      if (e.touches.length === 1) {
-        touchStartY = e.touches[0].clientY;
-        touchScrolling = false;
-      }
+      if (e.touches.length !== 1) return;
+      const { clientX, clientY } = e.touches[0];
+      touchStartX = clientX;
+      touchStartY = clientY;
+      touchScrolling = false;
+      selecting = false;
+      setCopyBtn(null);
+      clearTimeout(longPressTimer);
+      longPressTimer = setTimeout(() => {
+        selecting = true;
+        dispatchMouse('mousedown', clientX, clientY, 1);
+      }, LONG_PRESS_MS);
     };
     const handleTouchMove = (e) => {
       if (e.touches.length !== 1) return;
       const touch = e.touches[0];
+      if (selecting) {
+        dispatchMouse('mousemove', touch.clientX, touch.clientY, 1);
+        return;
+      }
+      if (Math.hypot(touch.clientX - touchStartX, touch.clientY - touchStartY) > MOVE_CANCEL_PX) {
+        clearTimeout(longPressTimer);
+      }
       const dy = touchStartY - touch.clientY;
       if (Math.abs(dy) >= 20) {
         term.element.dispatchEvent(new WheelEvent('wheel', {
@@ -424,10 +469,24 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
       }
     };
     const handleTouchEnd = (e) => {
+      clearTimeout(longPressTimer);
+      if (selecting) {
+        selecting = false;
+        const { clientX, clientY } = e.changedTouches[0] || {};
+        dispatchMouse('mouseup', clientX, clientY, 0);
+        if (term.hasSelection() && clientX != null) {
+          setCopyBtn({ x: clientX, y: clientY });
+        }
+        e.preventDefault();
+        return;
+      }
       if (touchScrolling) {
         e.preventDefault();
       }
     };
+    const selectionChangeDisposable = term.onSelectionChange(() => {
+      if (!term.hasSelection()) setCopyBtn(null);
+    });
     if (isMobile) {
       containerEl.addEventListener('touchstart', handleTouchStart, { passive: true });
       containerEl.addEventListener('touchmove', handleTouchMove, { passive: true });
@@ -703,6 +762,8 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
       window.removeEventListener('resize', handleResize);
       resizeObserver.disconnect();
       containerEl.removeEventListener('click', handleContainerClick);
+      clearTimeout(longPressTimer);
+      selectionChangeDisposable.dispose();
       if (isMobile) {
         containerEl.removeEventListener('touchstart', handleTouchStart);
         containerEl.removeEventListener('touchmove', handleTouchMove);
@@ -1113,6 +1174,22 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
           empty scrollbar (.tui-scroll) and pinToBottom keeps the viewport at
           the bottom. */}
       <div className={`terminal-container${app === 'opencode' ? ' tui-scroll' : ''}`} ref={terminalRef} />
+      {copyBtn && (
+        <button
+          className="selection-copy-btn"
+          style={{ left: Math.min(copyBtn.x, window.innerWidth - 90), top: Math.max(copyBtn.y - 48, 8) }}
+          onClick={() => {
+            const term = xtermRef.current;
+            if (term) {
+              writeClipboardText(term.getSelection());
+              term.clearSelection();
+            }
+            setCopyBtn(null);
+          }}
+        >
+          📋 コピー
+        </button>
+      )}
       {!keyboardOpen && (
         <div className="terminal-scroll-controls">
           {/* opencode's TUI owns the conversation (mouse tracking + internal
