@@ -314,6 +314,10 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
       theme: xtermThemeRef.current,
       scrollSensitivity: isMobile ? 3 : 1,
       fastScrollSensitivity: isMobile ? 10 : 5,
+      // FitAddon reserves 14px for the scrollbar unless scrollback is 0.
+      // opencode's TUI owns its history (no xterm scrollback needed), so drop
+      // it to let the terminal use the full width.
+      scrollback: appRef.current === 'opencode' ? 0 : 1000,
     });
 
     const fitAddon = new FitAddon();
