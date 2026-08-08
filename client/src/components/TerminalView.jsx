@@ -218,6 +218,7 @@ const themeIds = getThemeIds();
 
 export default function TerminalView({ cwd, onClose, claudeSessionId, shell, sandbox, sandboxOpts, app = 'claude', resume = false, notify, notifyEnabled, notifyPermission, onToggleNotify, visible, onSessionId, onExited, attachSessionId, xtermTheme, themeId, onThemeChange, tabId, onAttention, onFocusTab }) {
   const terminalRef = useRef(null);
+  const terminalViewRef = useRef(null);
   const xtermRef = useRef(null);
   const wsRef = useRef(null);
   const fitAddonRef = useRef(null);
@@ -444,21 +445,39 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
     // Converts a buffer cell position (x/y, as returned by
     // term.getSelectionPosition() -- 0-based in practice despite the
     // "(1-based)" wording in xterm's own type declarations, confirmed by
-    // round-tripping term.select(0, row, n)) into viewport pixel coords --
-    // rows are real DOM nodes under .xterm-rows, one per visible line, so
-    // their rect gives us cell size. Returns two Y variants: `y` hangs
-    // below the row (for drawing a handle that doesn't cover the character
-    // it marks) and `anchorY` sits at the row's own vertical center (for
-    // precisely re-establishing a selection anchor -- landing exactly on a
-    // row boundary is ambiguous for xterm's own hit-testing).
+    // round-tripping term.select(0, row, n)) into pixel coords -- rows are
+    // real DOM nodes under .xterm-rows, one per visible line, so their rect
+    // gives us cell size.
+    //
+    // Returns both viewport-relative coords (x/y/anchorY -- for touch
+    // hit-testing and synthetic mouse dispatch, which the DOM always
+    // reports in viewport space) and terminal-view-relative coords
+    // (relX/relY -- for CSS position:absolute rendering). The relative
+    // pair is what actually survives an iOS keyboard open/close: a fixed,
+    // viewport-space handle needs every scroll/resize event caught and
+    // recomputed, but an absolutely-positioned one anchored to a normal-flow
+    // ancestor moves together with the row it marks for free, since both
+    // are offset from the same shifting reference point identically.
+    //
+    // y/anchorY: `y` hangs below the row (for drawing a handle that
+    // doesn't cover the character it marks); `anchorY` sits at the row's
+    // own vertical center (for precisely re-establishing a selection
+    // anchor -- landing exactly on a row boundary is ambiguous for
+    // xterm's own hit-testing).
     const cellPixel = (bufY, bufX) => {
       const viewportRow = bufY - term.buffer.active.viewportY;
       if (viewportRow < 0 || viewportRow >= term.rows) return null;
       const rowEl = containerEl.querySelectorAll('.xterm-rows > div')[viewportRow];
       if (!rowEl) return null;
       const rect = rowEl.getBoundingClientRect();
+      const anchorRect = terminalViewRef.current.getBoundingClientRect();
       const cellWidth = rect.width / term.cols;
-      return { x: rect.x + bufX * cellWidth, y: rect.y + rect.height, anchorY: rect.y + rect.height / 2 };
+      const x = rect.x + bufX * cellWidth;
+      const y = rect.y + rect.height;
+      return {
+        x, y, anchorY: rect.y + rect.height / 2,
+        relX: x - anchorRect.x, relY: y - anchorRect.y,
+      };
     };
     const updateHandles = () => {
       if (!term.hasSelection()) {
@@ -828,19 +847,12 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
 
     window.addEventListener('resize', handleResize);
 
-    // iOS shows/hides the on-screen keyboard (and scrolls the page to keep
-    // the focused input clear of it) without firing a plain window resize
-    // or necessarily changing the container's own size -- visualViewport
-    // is the reliable signal for both, so handles need their own listener
-    // here rather than relying on handleResize's ResizeObserver.
-    const vv = window.visualViewport;
-    const handleViewportShift = () => updateHandles();
-    if (vv) {
-      vv.addEventListener('resize', handleViewportShift);
-      vv.addEventListener('scroll', handleViewportShift);
-    }
-    // Scrolling the buffer (not just resizing) also moves every row's
-    // screen position without changing the selection itself.
+    // Scrolling the buffer moves every row's position within the
+    // container without changing the selection itself -- handles need
+    // recomputing. (A page-level shift from the iOS keyboard opening does
+    // NOT need a separate visualViewport listener: handles are positioned
+    // relative to .terminal-view via cellPixel's relX/relY, so they move
+    // together with the rows they mark for free.)
     const scrollDisposable = term.onScroll(() => updateHandles());
 
     return () => {
@@ -850,10 +862,6 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
       document.removeEventListener('visibilitychange', handleVisibilityChange);
       window.removeEventListener('resize', handleResize);
       resizeObserver.disconnect();
-      if (vv) {
-        vv.removeEventListener('resize', handleViewportShift);
-        vv.removeEventListener('scroll', handleViewportShift);
-      }
       scrollDisposable.dispose();
       containerEl.removeEventListener('click', handleContainerClick);
       clearTimeout(longPressTimer);
@@ -1111,7 +1119,7 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
   }, [showScheduler]);
 
   return (
-    <div className={`terminal-view${keyboardOpen ? ' keyboard-open' : ''}`}>
+    <div className={`terminal-view${keyboardOpen ? ' keyboard-open' : ''}`} ref={terminalViewRef}>
       <div className="terminal-header">
         <span className="terminal-title">{sandbox ? '🔒 ' : ''}{shell ? 'Terminal' : appLabel(app)} &mdash; {cwd}</span>
         <div className="header-actions">
@@ -1270,8 +1278,8 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
       <div className={`terminal-container${app === 'opencode' ? ' tui-scroll' : ''}`} ref={terminalRef} />
       {handles && (
         <>
-          <div className="selection-handle" style={{ left: handles.start.x, top: handles.start.y }} />
-          <div className="selection-handle" style={{ left: handles.end.x, top: handles.end.y }} />
+          <div className="selection-handle" style={{ left: handles.start.relX, top: handles.start.relY }} />
+          <div className="selection-handle" style={{ left: handles.end.relX, top: handles.end.relY }} />
         </>
       )}
       {copyBtn && handles && (
@@ -1280,7 +1288,10 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
           // Anchored to the (reactively-updated) end handle rather than the
           // touch point that was live when the button first appeared, so a
           // keyboard show/hide or scroll afterward can't leave it stranded.
-          style={{ left: Math.min(handles.end.x, window.innerWidth - 90), top: Math.max(handles.end.y - 40, 8) }}
+          style={{
+            left: Math.min(handles.end.relX, (terminalViewRef.current?.clientWidth ?? window.innerWidth) - 90),
+            top: Math.max(handles.end.relY - 40, 8),
+          }}
           onClick={() => {
             const term = xtermRef.current;
             if (term) {

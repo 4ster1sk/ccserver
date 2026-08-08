@@ -643,6 +643,10 @@ body {
   height: 100%;
   display: flex;
   flex-direction: column;
+  /* Positioning context for .selection-handle/.selection-copy-btn, which
+     are absolutely positioned relative to it instead of the viewport --
+     see the cellPixel comment in TerminalView.jsx for why. */
+  position: relative;
 }
 
 .terminal-header {
@@ -693,7 +697,7 @@ body {
    (see the long-press handling in TerminalView.jsx). Positioned inline via
    style={{ left, top }} at the touch point. */
 .selection-copy-btn {
-  position: fixed;
+  position: absolute;
   z-index: 50;
   display: flex;
   align-items: center;
@@ -711,7 +715,7 @@ body {
   -webkit-tap-highlight-color: transparent;
 }
 .selection-handle {
-  position: fixed;
+  position: absolute;
   z-index: 49;
   width: 14px;
   height: 14px;
