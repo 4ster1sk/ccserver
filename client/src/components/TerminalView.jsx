@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useCallback } from 'react';
+import { useEffect, useRef, useState, useCallback, useMemo } from 'react';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { WebLinksAddon } from '@xterm/addon-web-links';
@@ -217,6 +217,7 @@ function osc52Response(text) {
 const themeIds = getThemeIds();
 
 export default function TerminalView({ cwd, onClose, claudeSessionId, shell, sandbox, sandboxOpts, app = 'claude', resume = false, notify, notifyEnabled, notifyPermission, onToggleNotify, visible, onSessionId, onExited, attachSessionId, xtermTheme, themeId, onThemeChange, tabId, onAttention, onFocusTab }) {
+  const isMobile = useMemo(() => 'ontouchstart' in window, []);
   const terminalRef = useRef(null);
   const terminalViewRef = useRef(null);
   const xtermRef = useRef(null);
@@ -252,6 +253,24 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
   const [themeMenuOpen, setThemeMenuOpen] = useState(false);
   const themeMenuRef = useRef(null);
   const [keyboardOpen, setKeyboardOpen] = useState(false);
+  // Explicit mobile "select text" mode: a long-press gesture alone gives no
+  // feedback in a PWA (no OS haptics), so entering selection is a deliberate
+  // toggle instead -- its on/off state IS the confirmation. While active,
+  // any single-finger drag starts a selection immediately (no long-press
+  // wait) and the terminal is blurred/kept unfocused so the on-screen
+  // keyboard doesn't pop up and shift the layout underneath it.
+  const [selectionMode, setSelectionMode] = useState(false);
+  const selectionModeRef = useRef(false);
+  useEffect(() => {
+    selectionModeRef.current = selectionMode;
+    const term = xtermRef.current;
+    if (!term) return;
+    if (selectionMode) {
+      term.blur();
+    } else {
+      term.focus();
+    }
+  }, [selectionMode]);
   // Whether a touch-selection has text selected and the floating copy
   // button should show; positioned off the (reactively-updated) end
   // handle rather than its own tracked coordinates -- see `handles`.
@@ -302,8 +321,6 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
   }, []);
 
   useEffect(() => {
-    const isMobile = 'ontouchstart' in window;
-
     // Narrow screens: keep the terminal wide enough for the TUI's bottom
     // chrome (opencode's prompt meta row — agent · model · provider — wraps
     // to 2-3 lines below ~65 columns, eating most of the screen), shrinking
@@ -400,10 +417,11 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
       }
     });
 
-    // Click on terminal container to restore focus
+    // Click on terminal container to restore focus, unless selection mode
+    // is deliberately keeping the keyboard closed.
     const containerEl = terminalRef.current;
     const handleContainerClick = () => {
-      term.focus();
+      if (!selectionModeRef.current) term.focus();
     };
     containerEl.addEventListener('click', handleContainerClick);
 
@@ -413,26 +431,25 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
     // mouse sequences, which scroll the TUI's internal conversation history;
     // without tracking (shells, claude) it scrolls its own buffer instead.
     //
-    // Long-press-then-drag instead selects text: xterm.js already has full
-    // mouse-driven selection (SelectionService, bound to real mouse events)
-    // -- iOS just never gets a chance to trigger it, because (a) canvas-
-    // rendered glyphs aren't selectable DOM text for the OS's native
-    // long-press gesture, and (b) touch-action: none on the container (see
-    // app.css) suppresses that gesture anyway so our own scroll handling
-    // above can own touch-drag unambiguously. So a detected long-press
-    // dispatches synthetic mousedown/mousemove/mouseup at the touch
-    // coordinates instead of wheel events, letting xterm's own selection
-    // logic do the rest exactly as it would for a real mouse. A floating
-    // "コピー" button appears afterward since iOS has no native copy menu
-    // for a canvas selection either.
-    const LONG_PRESS_MS = 450;
-    const MOVE_CANCEL_PX = 10;
+    // Text selection is a separate, explicit mode (see `selectionMode`)
+    // rather than a long-press gesture -- a PWA gets no OS haptic feedback,
+    // so there was no way to tell a long-press had actually landed. While
+    // the mode is on, any single-finger drag starts a selection immediately:
+    // xterm.js already has full mouse-driven selection (SelectionService,
+    // bound to real mouse events) -- iOS just never gets a chance to
+    // trigger it, because canvas-rendered glyphs aren't selectable DOM text
+    // for the OS's native gestures, and touch-action: none on the container
+    // (see app.css) suppresses them anyway so our own handling can own
+    // touch-drag unambiguously. So a drag dispatches synthetic
+    // mousedown/mousemove/mouseup at the touch coordinates instead of wheel
+    // events, letting xterm's own selection logic do the rest exactly as it
+    // would for a real mouse. A floating "コピー" button appears afterward
+    // since iOS has no native copy menu for a canvas selection either.
     const HANDLE_HIT_RADIUS = 28;
     let touchStartX = 0;
     let touchStartY = 0;
     let touchScrolling = false;
     let selecting = false;
-    let longPressTimer = null;
     const dispatchMouse = (type, x, y, buttons) => {
       // detail must be 1 (a real single click) -- xterm's SelectionService
       // branches on event.detail to pick single/double/triple-click
@@ -505,7 +522,6 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
       touchStartX = clientX;
       touchStartY = clientY;
       touchScrolling = false;
-      clearTimeout(longPressTimer);
 
       // Grabbing an existing handle re-anchors the selection at the OTHER
       // end (using its precise row-center Y, not the handle's own
@@ -521,12 +537,14 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
         return;
       }
 
-      selecting = false;
-      setCopyBtn(false);
-      longPressTimer = setTimeout(() => {
+      if (selectionModeRef.current) {
         selecting = true;
+        setCopyBtn(false);
         dispatchMouse('mousedown', clientX, clientY, 1);
-      }, LONG_PRESS_MS);
+        return;
+      }
+
+      selecting = false;
     };
     const handleTouchMove = (e) => {
       if (e.touches.length !== 1) return;
@@ -534,9 +552,6 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
       if (selecting) {
         dispatchMouse('mousemove', touch.clientX, touch.clientY, 1);
         return;
-      }
-      if (Math.hypot(touch.clientX - touchStartX, touch.clientY - touchStartY) > MOVE_CANCEL_PX) {
-        clearTimeout(longPressTimer);
       }
       const dy = touchStartY - touch.clientY;
       if (Math.abs(dy) >= 20) {
@@ -552,7 +567,6 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
       }
     };
     const handleTouchEnd = (e) => {
-      clearTimeout(longPressTimer);
       if (selecting) {
         selecting = false;
         const { clientX, clientY } = e.changedTouches[0] || {};
@@ -566,9 +580,9 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
         e.preventDefault();
         return;
       }
-      // A plain tap that wasn't a long-press or a handle drag: if a
-      // selection is still showing from an earlier long-press, treat the
-      // tap as "dismiss" rather than leaving stale handles on screen.
+      // A plain tap that wasn't a drag: if a selection is still showing
+      // from an earlier one, treat the tap as "dismiss" rather than
+      // leaving stale handles on screen.
       if (term.hasSelection()) {
         term.clearSelection();
       }
@@ -642,7 +656,7 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
             if (msg.isReconnect) {
               term.clear();
             }
-            term.focus();
+            if (!selectionModeRef.current) term.focus();
             break;
           case 'output':
             term.write(osc52.process(msg.data));
@@ -864,7 +878,6 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
       resizeObserver.disconnect();
       scrollDisposable.dispose();
       containerEl.removeEventListener('click', handleContainerClick);
-      clearTimeout(longPressTimer);
       selectionChangeDisposable.dispose();
       if (isMobile) {
         containerEl.removeEventListener('touchstart', handleTouchStart);
@@ -884,7 +897,7 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
       // Small delay to let layout settle after display:none → flex
       const timer = setTimeout(() => {
         fitAddonRef.current.fit();
-        xtermRef.current.focus();
+        if (!selectionModeRef.current) xtermRef.current.focus();
         const dims = fitAddonRef.current.proposeDimensions();
         const ws = wsRef.current;
         if (dims && ws && ws.readyState === WebSocket.OPEN) {
@@ -1119,7 +1132,7 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
   }, [showScheduler]);
 
   return (
-    <div className={`terminal-view${keyboardOpen ? ' keyboard-open' : ''}`} ref={terminalViewRef}>
+    <div className={`terminal-view${keyboardOpen ? ' keyboard-open' : ''}${selectionMode ? ' selection-mode' : ''}`} ref={terminalViewRef}>
       <div className="terminal-header">
         <span className="terminal-title">{sandbox ? '🔒 ' : ''}{shell ? 'Terminal' : appLabel(app)} &mdash; {cwd}</span>
         <div className="header-actions">
@@ -1342,6 +1355,15 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
             {key.label}
           </button>
         ))}
+        {isMobile && (
+          <button
+            className={'special-key-btn selection-mode-btn' + (selectionMode ? ' active' : '')}
+            onClick={() => setSelectionMode((v) => !v)}
+            title={selectionMode ? 'テキスト選択モードを終了' : 'テキスト選択モード'}
+          >
+            選択
+          </button>
+        )}
         <button
           className={'special-key-btn key-config-btn' + (showKeyConfig ? ' active' : '')}
           onClick={() => setShowKeyConfig((v) => !v)}

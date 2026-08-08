@@ -1,9 +1,13 @@
 import { test, expect, devices } from '@playwright/test';
 
-// iPhone text selection: a long-press starts a selection (dispatched as a
-// synthetic mouse drag so xterm's own SelectionService does the real work),
-// and two draggable handles let either end be adjusted afterward without
-// disturbing the rest of the selection.
+// iPhone text selection: an explicit "selection mode" toggle (there's no OS
+// haptic feedback in a PWA to confirm a long-press landed, so entry is a
+// deliberate, visibly-stateful button instead) makes any single-finger drag
+// start a selection immediately, dispatched as a synthetic mouse drag so
+// xterm's own SelectionService does the real work. Two draggable handles
+// let either end be adjusted afterward without disturbing the rest of the
+// selection, and the mode keeps the terminal blurred so the on-screen
+// keyboard doesn't pop up and shift the layout mid-selection.
 test.use({
   ...devices['iPhone 13'],
   defaultBrowserType: 'chromium',
@@ -62,7 +66,7 @@ async function selectionHandlePositions(page) {
   }));
 }
 
-test('long-press selects text and both ends can be dragged independently', async ({ page, context }) => {
+test('selection mode: keeps the keyboard closed and lets both ends be dragged independently', async ({ page, context }) => {
   await page.goto('/');
   await page.locator('.open-btn', { hasText: 'Terminal' }).click();
   await expect(page.locator('.terminal-container')).toBeVisible();
@@ -94,11 +98,29 @@ test('long-press selects text and both ends can be dragged independently', async
     return page.evaluate(() => navigator.clipboard.readText());
   };
 
-  // Long-press on "four" and drag to "six" -- initial selection "four five six".
   const fourStart = await charPos(page, OUTPUT, WORD_START.four);
   const sixEnd = await charPos(page, OUTPUT, WORD_END.six);
+
+  // Outside selection mode, a drag over the terminal scrolls -- it must
+  // not start a selection.
   await touchStart(fourStart.x, fourStart.y);
-  await page.waitForTimeout(600); // exceed the 450ms long-press threshold
+  await touchMove(sixEnd.x, sixEnd.y);
+  await touchEnd();
+  await expect(page.locator('.selection-handle')).toHaveCount(0);
+
+  // Enabling selection mode blurs the terminal (closing the keyboard if it
+  // was open) and must keep it that way -- the whole point is not to have
+  // the keyboard pop back up and shift the layout mid-selection.
+  await page.locator('.terminal-container').click();
+  await expect.poll(() => page.evaluate(() => document.activeElement?.className)).toContain('xterm-helper-textarea');
+  await page.locator('.selection-mode-btn').click();
+  await expect(page.locator('.terminal-view.selection-mode')).toHaveCount(1);
+  await expect.poll(() => page.evaluate(() => document.activeElement?.className)).not.toContain('xterm-helper-textarea');
+
+  // In selection mode a drag starts selecting immediately -- no long-press
+  // wait, since the mode toggle itself is the confirmation that selection
+  // is active.
+  await touchStart(fourStart.x, fourStart.y);
   await touchMove(sixEnd.x, sixEnd.y);
   await touchEnd();
 
@@ -107,11 +129,12 @@ test('long-press selects text and both ends can be dragged independently', async
   expect(await copyToClipboard()).toBe('four five six');
   // Copying clears the selection; a fresh one is needed for the next step.
   await expect(page.locator('.selection-handle')).toHaveCount(0);
+  // Tapping the copy button must not have reopened the keyboard either.
+  await expect.poll(() => page.evaluate(() => document.activeElement?.className)).not.toContain('xterm-helper-textarea');
 
   // Re-make the same selection, then drag the START handle back to "one" --
   // this must extend the selection backward while leaving the end alone.
   await touchStart(fourStart.x, fourStart.y);
-  await page.waitForTimeout(600);
   await touchMove(sixEnd.x, sixEnd.y);
   await touchEnd();
   await expect(page.locator('.selection-handle')).toHaveCount(2);
@@ -129,7 +152,6 @@ test('long-press selects text and both ends can be dragged independently', async
   // Re-make the "four five six" selection again, then drag the END handle
   // forward to "nine" -- this must extend forward while leaving the start.
   await touchStart(fourStart.x, fourStart.y);
-  await page.waitForTimeout(600);
   await touchMove(sixEnd.x, sixEnd.y);
   await touchEnd();
   await expect(page.locator('.selection-handle')).toHaveCount(2);
@@ -142,4 +164,9 @@ test('long-press selects text and both ends can be dragged independently', async
   await touchEnd();
 
   expect(await copyToClipboard()).toBe('four five six seven eight nine');
+
+  // Disabling selection mode restores normal typing focus.
+  await page.locator('.selection-mode-btn').click();
+  await expect(page.locator('.terminal-view.selection-mode')).toHaveCount(0);
+  await expect.poll(() => page.evaluate(() => document.activeElement?.className)).toContain('xterm-helper-textarea');
 });

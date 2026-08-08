@@ -685,6 +685,15 @@ body {
   touch-action: none;
 }
 
+/* Persistent visual confirmation for selection mode -- a PWA has no OS
+   haptics to confirm a gesture landed, so the mode's on/off state itself
+   has to be the feedback, visible independent of where in the terminal
+   the user is currently touching. */
+.terminal-view.selection-mode .terminal-container {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
 /* opencode draws in the alternate screen: xterm.js keeps no scrollback for
    it, so the native scrollbar would be an empty, misleading track. Hide it
    and pin the viewport to the bottom instead (see pinToBottom in
