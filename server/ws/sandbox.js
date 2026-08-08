@@ -74,7 +74,7 @@ const DIND_ROOT = join(HOME, '.local', 'share', 'ccserver-sandbox', 'dind');
 // resolving against the host PATH makes claudeInstallDir follow a wrapper the
 // sandbox will never actually invoke -- silently missing the real install dir
 // and leaving the sandboxed launch to fail with exit 127.
-const SANDBOX_PATH = `${join(HOME, '.local', 'bin')}:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin`;
+export const SANDBOX_PATH = `${join(HOME, '.local', 'bin')}:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin`;
 
 function expandHome(p) {
   if (p === '~') return HOME;
