@@ -66,6 +66,16 @@ function newStateDir() {
 // across sessions of the same project.
 const DIND_ROOT = join(HOME, '.local', 'share', 'ccserver-sandbox', 'dind');
 
+// PATH set inside the sandbox at runtime (see buildBwrapArgs' --setenv PATH
+// below). Resolving the bare "claude" command for install-dir detection must
+// search this PATH, not the host ccserver process's own PATH: a personal PATH
+// shim ahead of it there (e.g. a ~/.dotfiles/bin/claude wrapper that nests its
+// own bwrap sandbox around /usr/bin/claude) is never on the sandboxed PATH, so
+// resolving against the host PATH makes claudeInstallDir follow a wrapper the
+// sandbox will never actually invoke -- silently missing the real install dir
+// and leaving the sandboxed launch to fail with exit 127.
+const SANDBOX_PATH = `${join(HOME, '.local', 'bin')}:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin`;
+
 function expandHome(p) {
   if (p === '~') return HOME;
   if (p.startsWith('~/')) return join(HOME, p.slice(2));
@@ -105,12 +115,15 @@ export function loadSandboxConfig() {
   return { docker, gpg, gitBroker, binds, env, claudeBin, configPath };
 }
 
-// Locate an executable named `cmd` on PATH (or return it as-is if it already
-// looks like a path). Mirrors `command -v` without spawning a shell.
-function which(cmd) {
+// Locate an executable named `cmd` on the given PATH (or return it as-is if
+// it already looks like a path). Mirrors `command -v` without spawning a
+// shell. Defaults to the sandbox's own runtime PATH (see SANDBOX_PATH) since
+// that -- not the host ccserver process's PATH -- is what actually resolves
+// the command once launched.
+function which(cmd, pathEnv = SANDBOX_PATH) {
   if (!cmd) return null;
   if (cmd.includes('/')) return cmd;
-  for (const dir of (process.env.PATH || '').split(':')) {
+  for (const dir of (pathEnv || '').split(':')) {
     if (!dir) continue;
     const p = join(dir, cmd);
     try {
@@ -476,7 +489,7 @@ function buildBwrapArgs({ cwd, docker, gpg, extraBinds, extraEnv, authSock, stat
   args.push(
     '--setenv', 'HOME', HOME,
     '--setenv', 'XDG_RUNTIME_DIR', XDG_RUNTIME_DIR,
-    '--setenv', 'PATH', `${join(HOME, '.local', 'bin')}:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin`,
+    '--setenv', 'PATH', SANDBOX_PATH,
     '--setenv', 'CCSANDBOX_DOCKER', docker ? '1' : '0',
   );
   if (docker) {
