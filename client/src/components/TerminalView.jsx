@@ -259,6 +259,17 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
   // any single-finger drag starts a selection immediately (no long-press
   // wait) and the terminal is blurred/kept unfocused so the on-screen
   // keyboard doesn't pop up and shift the layout underneath it.
+  //
+  // Blurring alone isn't enough: xterm.js focuses its input textarea on
+  // every mousedown (including the synthetic ones we dispatch for
+  // touch-selection), which would pop the IME right back up. So we set
+  // disableStdin -- xterm turns the textarea readonly in response, and
+  // iOS/Android never open an IME for a readonly input -- but only for the
+  // instant of the synthetic mousedown dispatch (see `dispatchMouse`),
+  // not for the whole selection session. disableStdin is "stop stdin
+  // entirely", not "make the textarea readonly": leaving it on would also
+  // silently kill paste (its handlers funnel into triggerDataEvent, which
+  // early-returns while disableStdin is set).
   const [selectionMode, setSelectionMode] = useState(false);
   const selectionModeRef = useRef(false);
   useEffect(() => {
@@ -455,9 +466,19 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
       // branches on event.detail to pick single/double/triple-click
       // handling (handleMouseDown), and a MouseEvent's detail defaults to 0
       // when unset, which matches none of those branches and silently no-ops.
+      //
+      // A mousedown makes xterm focus its input textarea, which pops the
+      // IME back up unless the textarea is readonly at that instant. Set
+      // disableStdin just around the dispatch (dispatchEvent runs listeners
+      // synchronously) so the readonly window covers exactly the focus
+      // moment -- and nothing else, keeping paste and other stdin paths
+      // working during the rest of selection mode.
+      const isMousedown = type === 'mousedown';
+      if (isMousedown) term.options.disableStdin = true;
       term.element.dispatchEvent(new MouseEvent(type, {
         clientX: x, clientY: y, button: 0, buttons, detail: 1, bubbles: true, cancelable: true,
       }));
+      if (isMousedown) term.options.disableStdin = false;
     };
     // Converts a buffer cell position (x/y, as returned by
     // term.getSelectionPosition() -- 0-based in practice despite the
@@ -1340,6 +1361,15 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
           >
             <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M4 6l4 4 4-4"/></svg>
           </button>
+          {isMobile && (
+            <button
+              className={'scroll-btn selection-mode-btn' + (selectionMode ? ' active' : '')}
+              onClick={() => setSelectionMode((v) => !v)}
+              title={selectionMode ? 'テキスト選択モードを終了' : 'テキスト選択モード'}
+            >
+              選択
+            </button>
+          )}
         </div>
       )}
       <div className="terminal-special-keys">
@@ -1355,15 +1385,6 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
             {key.label}
           </button>
         ))}
-        {isMobile && (
-          <button
-            className={'special-key-btn selection-mode-btn' + (selectionMode ? ' active' : '')}
-            onClick={() => setSelectionMode((v) => !v)}
-            title={selectionMode ? 'テキスト選択モードを終了' : 'テキスト選択モード'}
-          >
-            選択
-          </button>
-        )}
         <button
           className={'special-key-btn key-config-btn' + (showKeyConfig ? ' active' : '')}
           onClick={() => setShowKeyConfig((v) => !v)}
