@@ -5,6 +5,7 @@ import { writeFileSync, readFileSync, unlinkSync, rmSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { buildSandboxSpawn, resolveApp, sandboxAvailable, loadSandboxConfig } from './sandbox.js';
+import { buildMcpConfigArgsAndEnv } from './mcpConfig.js';
 import {
   isValidApp,
   appResumeArgs,
@@ -13,7 +14,7 @@ import {
 } from './appLaunch.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const SAVED_SESSIONS_PATH = join(__dirname, '..', '..', '.saved-sessions.json');
+const SAVED_SESSIONS_PATH = process.env.CCSERVER_SAVED_SESSIONS_PATH || join(__dirname, '..', '..', '.saved-sessions.json');
 const SCHEDULES_PATH = join(__dirname, '..', '..', '.scheduled-prompts.json');
 
 const SESSION_TIMEOUT_MS = 2 * 60 * 60 * 1000; // 2 hours for active sessions
@@ -22,6 +23,49 @@ const OUTPUT_BUFFER_MAX_BYTES = 512 * 1024;
 const IDLE_TIMEOUT_MS = 3000;
 
 const sessions = new Map();
+
+// Observers of session exits (pty terminated, for any reason: normal exit,
+// user teardown, group destroy) and of session creations. Used by
+// groupManager to stop MCP brokers of dying sessions and to re-bind roles
+// when a member session is (re)created outside the explicit launch paths
+// (e.g. a scheduled prompt auto-resuming a group member). Runtime-only -- no
+// module init cycles.
+const sessionExitListeners = new Set();
+const sessionCreateListeners = new Set();
+
+export function setSessionExitListener(fn) {
+  sessionExitListeners.add(fn);
+}
+
+export function setSessionCreateListener(fn) {
+  sessionCreateListeners.add(fn);
+}
+
+// Resolvers of the MCP socket a group member session should be launched with.
+// groupManager registers one: it (re)creates the member's handoff channel (or
+// the orchestrator's control broker) and returns its sockPath. Used by the
+// scheduled-prompt auto-resume path, where a group member's session is
+// recreated outside the explicit launch flows.
+const mcpSocketResolvers = new Set();
+
+export function setMcpSocketResolver(fn) {
+  mcpSocketResolvers.add(fn);
+}
+
+// Resolve the MCP socket path for a group member being recreated. Resolves to
+// null when no resolver can produce one (group gone, broker failed, or not a
+// group member) -- the caller then launches without MCP injection.
+export async function resolveMcpSocketForSession(groupId, groupRole) {
+  for (const fn of mcpSocketResolvers) {
+    try {
+      const sockPath = await fn(groupId, groupRole);
+      if (sockPath) return sockPath;
+    } catch {
+      // try the next resolver
+    }
+  }
+  return null;
+}
 
 function resolveCommand(cmd) {
   if (process.platform !== 'win32') return cmd;
@@ -45,7 +89,7 @@ function defaultApp() {
   return loadSandboxConfig().defaultApp;
 }
 
-export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox, sandboxOpts, app, resumeLast }) {
+export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox, sandboxOpts, app, resumeLast, groupId = null, groupRole = null, mcpSocketPath = null }) {
   const id = randomUUID();
 
   // claude (and likely opencode) aborts immediately (SIGABRT, exit 134, no
@@ -78,6 +122,20 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox
   }
   command = resolveCommand(command);
 
+  // Combo sessions (groupId set) get their role's MCP broker injected via CLI
+  // arg / env -- no file is ever written (see mcpConfig.js). The sandbox
+  // binds the socket at a fixed path and the agent runs the bridge wrapper
+  // there, so the MCP client appears inside the sandbox without the host or
+  // the repo being touched.
+  let mcpArgs = [];
+  let mcpEnv = {};
+  if (mcpSocketPath && sessionApp) {
+    const injected = buildMcpConfigArgsAndEnv(sessionApp);
+    mcpArgs = injected.args;
+    mcpEnv = injected.env;
+    args.push(...mcpArgs);
+  }
+
   // Optionally wrap the target in a filesystem sandbox (Linux only) so it can
   // only see the project directory plus configured paths, with an isolated
   // rootless docker inside. See sandbox.js.
@@ -87,7 +145,7 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox
   let sandboxGitBrokerDir = null;
   if (sandbox && process.platform !== 'win32' && sandboxAvailable()) {
     try {
-      const spawn = buildSandboxSpawn({ cwd, targetCommand: [command, ...args], app: sessionApp, sandboxOpts });
+      const spawn = buildSandboxSpawn({ cwd, targetCommand: [command, ...args], app: sessionApp, sandboxOpts, mcpSocketPath });
       command = spawn.command;
       args = spawn.args;
       sandboxStateDir = spawn.stateDir || null;
@@ -125,6 +183,7 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox
       // the whole conversation in an internal scrollable area that the wheel
       // scrolls natively, and its own drag-selection + copy-on-select writes
       // to the browser clipboard via OSC 52 (handled client-side).
+      ...mcpEnv,
     },
   });
   } catch (err) {
@@ -136,6 +195,8 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox
     cwd,
     shell: !!shell,
     app: sessionApp,
+    groupId,
+    groupRole,
     sandbox: useSandbox,
     sandboxOpts: useSandbox ? (sandboxOpts || null) : null, // per-launch gpg/sshAgent override, for schedule/resume replay
     sandboxStateDir, // rootlesskit state dir to remove on teardown (docker only)
@@ -287,6 +348,14 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox
     // resume id and detach it so it auto-resumes the conversation at fire time.
     refreshScheduleOnExit(session);
 
+    for (const fn of sessionExitListeners) {
+      try {
+        fn(session);
+      } catch {
+        // a listener must never break the pty exit path
+      }
+    }
+
     if (session.socket && session.socket.readyState === 1) {
       session.socket.send(JSON.stringify({
         type: 'exit',
@@ -302,11 +371,52 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox
   });
 
   sessions.set(id, session);
+
+  for (const fn of sessionCreateListeners) {
+    try {
+      fn(session);
+    } catch {
+      // a listener must never break session creation
+    }
+  }
+
   return { sessionId: id, session };
 }
 
 export function getSession(id) {
   return sessions.get(id);
+}
+
+// Write text into a live session's pty, optionally submitting with Enter.
+// Shared by the WS 'input' path (terminal.js) and the MCP send_input tool
+// (mcpTools.js). Idle timer reset mirrors the WS input handler.
+export function writeToSession(id, text, { submit = false } = {}) {
+  const session = sessions.get(id);
+  if (!session?.ptyProcess || session.exited) return false;
+  try {
+    session.ptyProcess.write(text);
+    session.idleNotified = false;
+    if (session.idleTimer) {
+      clearTimeout(session.idleTimer);
+      session.idleTimer = null;
+    }
+    if (submit) {
+      // Delay the Enter so the TUI registers the text first (same pattern as
+      // injectIntoLiveSession).
+      setTimeout(() => {
+        if (!session.exited && session.ptyProcess) {
+          try {
+            session.ptyProcess.write('\r');
+          } catch {
+            // pty may have died between writes
+          }
+        }
+      }, 200);
+    }
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 const MAX_SCHEDULE_AHEAD_MS = 48 * 60 * 60 * 1000; // 48h
@@ -361,6 +471,8 @@ function persistSchedules() {
         shell: !!s.shell,
         app: s.app || 'claude',
         claudeSessionId: s.claudeSessionId || null,
+        groupId: s.groupId || null,
+        groupRole: s.groupRole || null,
       });
     }
     if (arr.length > 0) {
@@ -451,7 +563,22 @@ function notifyFired(session, info, delivered) {
   }
 }
 
-function fireSchedule(scheduleId) {
+// Schedule-entry matching for the "same project" live-session substitution
+// (fireSchedule branch 2). Group members match strictly -- only the SAME
+// group AND SAME role -- because combo workers legitimately share cwd+app
+// with each other, so a cwd+app match alone could inject into the wrong
+// worker. Non-group entries (groupId null on both sides) keep the original
+// cwd+shell+app semantics. Exported for direct unit testing.
+export function matchesScheduleTarget(session, entry) {
+  return !!session && !session.exited && !!session.ptyProcess
+    && session.cwd === entry.cwd
+    && session.shell === entry.shell
+    && session.app === entry.app
+    && (session.groupId ?? null) === (entry.groupId ?? null)
+    && (session.groupRole ?? null) === (entry.groupRole ?? null);
+}
+
+async function fireSchedule(scheduleId) {
   const entry = schedules.get(scheduleId);
   if (!entry) return;
   if (entry.timer) clearTimeout(entry.timer);
@@ -463,10 +590,10 @@ function fireSchedule(scheduleId) {
   if (target && (target.exited || !target.ptyProcess)) target = null;
 
   // 2) Otherwise any live session for the same project (user reopened it).
+  // See matchesScheduleTarget: group members match strictly by group+role.
   if (!target) {
     for (const s of sessions.values()) {
-      if (!s.exited && s.ptyProcess && s.cwd === entry.cwd
-        && s.shell === entry.shell && s.app === entry.app) {
+      if (matchesScheduleTarget(s, entry)) {
         target = s;
         break;
       }
@@ -483,6 +610,20 @@ function fireSchedule(scheduleId) {
   // 3) No live session — auto-resume the conversation, then inject once ready.
   // opencode has no session id in its TUI output, so resume the last session
   // of the project instead of a specific one.
+  // A group member gets its role's MCP socket re-created (handoff channel or
+  // control broker) so the resumed session can actually reach the group --
+  // otherwise the orchestrator's wait_for_handoff would wait on a worker that
+  // can never hand off. If that socket can't be produced (group already torn
+  // down, broker failed), the prompt is dropped rather than orphaned: a
+  // member session without MCP can never hand off again, and in the
+  // group-gone case nobody is waiting anyway.
+  const mcpSocketPath = entry.groupId && entry.groupRole
+    ? await resolveMcpSocketForSession(entry.groupId, entry.groupRole)
+    : null;
+  if (entry.groupId && !mcpSocketPath) {
+    console.warn(`[scheduler] dropping prompt for group member ${entry.groupRole} of ${entry.groupId}: MCP socket unavailable`);
+    return;
+  }
   const res = createSession({
     cwd: entry.cwd,
     cols: 80,
@@ -493,6 +634,11 @@ function fireSchedule(scheduleId) {
     sandboxOpts: entry.sandboxOpts,
     app: entry.app,
     resumeLast: entry.app === 'opencode',
+    // A group member keeps its membership across the resume: groupManager's
+    // session-create listener re-binds the role to the new sessionId.
+    groupId: entry.groupId,
+    groupRole: entry.groupRole,
+    mcpSocketPath,
   });
   if (!res?.session) return;
   const session = res.session;
@@ -534,6 +680,8 @@ export function setScheduledPrompt(id, at, text) {
     app: session.app || 'claude',
     claudeSessionId: resumeIdForSession(session),
     sessionId: id,
+    groupId: session.groupId || null,
+    groupRole: session.groupRole || null,
     timer: setTimeout(() => fireSchedule(scheduleId), delay),
   };
   schedules.set(scheduleId, entry);
@@ -586,6 +734,10 @@ export function restoreSchedules() {
       // Legacy persisted schedules predate the app field and were claude.
       app: isValidApp(e.app) ? e.app : 'claude',
       claudeSessionId: e.claudeSessionId || null,
+      // Group membership survives a restart: an auto-resume re-binds the
+      // role (see fireSchedule), so a member isn't orphaned by a reboot.
+      groupId: e.groupId || null,
+      groupRole: e.groupRole || null,
       sessionId: null,
       timer: null,
     };
@@ -613,6 +765,8 @@ export function listSessions() {
       sandbox: session.sandbox,
       sandboxOpts: session.sandboxOpts || null,
       app: session.app,
+      groupId: session.groupId || null,
+      groupRole: session.groupRole || null,
     });
   }
   return result;
@@ -726,6 +880,24 @@ export function destroyAllSessions() {
   }
 }
 
+// Public (serializable) view of a session for the graceful-shutdown
+// .saved-sessions.json write. Group membership is preserved so a restarted
+// server doesn't surface group members as plain standalone sessions.
+// `claudeId` is the best-known resume id (already-resolved by the caller,
+// falling back to a buffer extraction) -- keeps the on-exit id as the
+// primary source.
+export function savedSessionPublic(session, claudeId) {
+  return {
+    cwd: session.cwd,
+    claudeSessionId: claudeId || null,
+    sandbox: !!session.sandbox,
+    sandboxOpts: session.sandboxOpts || null,
+    app: session.app || 'claude',
+    groupId: session.groupId || null,
+    groupRole: session.groupRole || null,
+  };
+}
+
 export function gracefulShutdown() {
   return new Promise((resolve) => {
     const pendingSessions = [];
@@ -748,13 +920,7 @@ export function gracefulShutdown() {
         // claude sessions are saved when their resume id is known; opencode
         // sessions are always saved (resume happens via `opencode -c`).
         if (claudeId || session.app === 'opencode') {
-          savedSessions.push({
-            cwd: session.cwd,
-            claudeSessionId: claudeId || null,
-            sandbox: !!session.sandbox,
-            sandboxOpts: session.sandboxOpts || null,
-            app: session.app || 'claude',
-          });
+          savedSessions.push(savedSessionPublic(session, claudeId));
         }
       }
 
@@ -815,6 +981,18 @@ export function loadSavedSessions() {
   } catch {
     savedSessionsCache = [];
     return [];
+  }
+}
+
+// Read .saved-sessions.json WITHOUT unlinking it or touching the cache --
+// used by groupManager.restoreGroups() to match each restored group member's
+// resume info (app/cwd/claudeSessionId/sandbox) while the file is still
+// intact for the client's own saved-session listing.
+export function peekSavedSessions() {
+  try {
+    return JSON.parse(readFileSync(SAVED_SESSIONS_PATH, 'utf-8'));
+  } catch {
+    return null;
   }
 }
 

@@ -2,7 +2,10 @@ import { useState, useCallback, useRef, useEffect, lazy, Suspense } from 'react'
 import DirectoryBrowser from './components/DirectoryBrowser.jsx';
 import SystemMonitor from './components/SystemMonitor.jsx';
 import UsageButton from './components/UsageButton.jsx';
+import TabIcon from './components/TabIcon.jsx';
+import GroupTabView from './components/GroupTabView.jsx';
 import { useNotifications } from './hooks/useNotifications.js';
+import { authFetch } from './auth.js';
 import { getTheme, loadThemeId, saveThemeId, applyThemeCss } from './themes.js';
 
 const TerminalView = lazy(() => import('./components/TerminalView.jsx'));
@@ -21,6 +24,10 @@ export default function App() {
   const [attentionTabs, setAttentionTabs] = useState(new Set());
   const [closeConfirm, setCloseConfirm] = useState(null);
   const [dontAskAgain, setDontAskAgain] = useState(false);
+  const [groupActiveApp, setGroupActiveApp] = useState(null);
+  // Bumped whenever a group is created / destroyed / re-opened, so the
+  // directory browser's groups list refetches (it is otherwise fetch-on-mount).
+  const [groupsVersion, setGroupsVersion] = useState(0);
   const [skipCloseConfirm, setSkipCloseConfirm] = useState(
     () => localStorage.getItem('ccserver-skip-close-confirm') === '1'
   );
@@ -61,6 +68,93 @@ export default function App() {
   const handleOpenShell = useCallback((dirPath) => {
     openTerminalTab(dirPath, { shell: true });
   }, [openTerminalTab]);
+
+  // Combo launch: ask the server to spawn 2 workers + 1 orchestrator as one
+  // group, then add a single group tab for all three (each member attaches
+  // over the regular WS attach flow once its TerminalView mounts).
+  const handleOpenCombo = useCallback(async (cwd, cfg) => {
+    // A group tab is a single-slot UI per project directory: re-opening a
+    // combo for a directory that already has an open group tab must just
+    // activate that tab -- spawning a second group for the same project is
+    // never intended, and attaching a second tab to the same sessions would
+    // 'detach' the first one (the server replaces the old socket), leaving
+    // the first tab stuck on "Session taken over". Guard on cwd: the server
+    // assigns a fresh groupId per POST, so a groupId-based lookup could never
+    // match an existing tab.
+    const existing = tabs.find((t) => t.type === 'group' && t.cwd === cwd);
+    if (existing) {
+      setActiveTabId(existing.id);
+      setLastDir(cwd);
+      setGroupsVersion((v) => v + 1);
+      return;
+    }
+    try {
+      const res = await authFetch('/api/groups', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ cwd, ...cfg }),
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.error || `HTTP ${res.status}`);
+      }
+      const data = await res.json();
+      const id = `group-${++tabIdCounter}`;
+      const dirName = cwd.split(/[/\\]/).filter(Boolean).pop() || cwd;
+      setTabs((prev) => [...prev, {
+        id,
+        type: 'group',
+        label: dirName,
+        cwd,
+        groupId: data.groupId,
+        members: data.members || [],
+      }]);
+      setActiveTabId(id);
+      setLastDir(cwd);
+      setGroupsVersion((v) => v + 1);
+    } catch (err) {
+      // Surface launch failures in the directory browser (which owns the
+      // combo modal); a failed group launch should not silently no-op.
+      window.alert(`コンボ起動に失敗しました: ${err.message}`);
+    }
+  }, [tabs]);
+
+  // Re-open a group (from the browser's groups list): fetch its current
+  // membership, then add a group tab. Live members re-attach over the normal
+  // WS flow; members whose pty died (server restart) show as exited and
+  // re-launch via GroupTabView's re-init path.
+  const handleOpenGroup = useCallback(async (groupId) => {
+    try {
+      const res = await authFetch(`/api/groups/${groupId}`);
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.error || `HTTP ${res.status}`);
+      }
+      const data = await res.json();
+      // Same single-slot rule as handleOpenCombo: activating an existing tab
+      // instead of attaching a second one to the same sessions.
+      const existing = tabs.find((t) => t.type === 'group' && t.groupId === data.groupId);
+      if (existing) {
+        setActiveTabId(existing.id);
+        setGroupsVersion((v) => v + 1);
+        return;
+      }
+      const id = `group-${++tabIdCounter}`;
+      const dirName = (data.cwd || '').split(/[/\\]/).filter(Boolean).pop() || data.groupId;
+      setTabs((prev) => [...prev, {
+        id,
+        type: 'group',
+        label: dirName,
+        cwd: data.cwd,
+        groupId: data.groupId,
+        members: data.members || [],
+      }]);
+      setActiveTabId(id);
+      setGroupsVersion((v) => v + 1);
+    } catch (err) {
+      window.alert(`グループを開けませんでした: ${err.message}`);
+    }
+  }, [tabs]);
 
   const handleSessionClick = useCallback((session) => {
     // Check if a tab is already open for this session
@@ -115,28 +209,62 @@ export default function App() {
     });
   }, [activeTabId]);
 
-  const handleCloseTab = useCallback((tabId) => {
+  // Server-side teardown for a group tab: DELETE /api/groups/:id destroys the
+  // 3 member sessions + MCP brokers. Must run even when the close-confirm is
+  // skipped ("次回以降確認しない"), otherwise the sessions and their Unix
+  // sockets leak for as long as the server runs.
+  const destroyGroupTab = useCallback(async (tab) => {
+    try {
+      await authFetch(`/api/groups/${tab.groupId}`, { method: 'DELETE' });
+      setGroupsVersion((v) => v + 1);
+    } catch {
+      // group teardown already happened server-side or is unreachable;
+      // closing the tab is still the right move
+    }
+  }, []);
+
+  const handleCloseTab = useCallback(async (tabId) => {
     // タブを閉じてもセッション自体はサーバー側で動き続けるが、
     // 再アタッチの手間があるため、稼働中のタブは閉じる前に確認する。
     // プロセスが終了済みのタブや「次回以降確認しない」設定時は確認なしで閉じる。
+    // グループタブは3セッションを破棄するため、「次回以降確認しない」が
+    // 設定されていない限り必ず確認する。
     const tab = tabs.find((t) => t.id === tabId);
+    if (tab?.type === 'group') {
+      if (skipCloseConfirm) {
+        // サーバ側のグループ破棄は完了させてからタブを閉じる: 先にタブだけ
+        // 閉じて DELETE が後追いで走ると、その間に Groups リストから再
+        // オープンしたときにサーバ側 teardown と競合する (attach→404→
+        // 再init→MCPソケット消失で復旧不能なエラー画面)。
+        await destroyGroupTab(tab);
+        doCloseTab(tabId);
+      } else {
+        setDontAskAgain(false);
+        setCloseConfirm({ tabId, kind: 'group' });
+      }
+      return;
+    }
     if (tab && tab.type === 'terminal' && !tab.exited && !skipCloseConfirm) {
       setDontAskAgain(false);
-      setCloseConfirm({ tabId });
+      setCloseConfirm({ tabId, kind: 'terminal' });
       return;
     }
     doCloseTab(tabId);
-  }, [tabs, skipCloseConfirm, doCloseTab]);
+  }, [tabs, skipCloseConfirm, doCloseTab, destroyGroupTab]);
 
-  const confirmCloseTab = useCallback(() => {
+  const confirmCloseTab = useCallback(async () => {
     if (!closeConfirm) return;
     if (dontAskAgain) {
       localStorage.setItem('ccserver-skip-close-confirm', '1');
       setSkipCloseConfirm(true);
     }
+    const tab = tabs.find((t) => t.id === closeConfirm.tabId);
+    if (tab?.type === 'group') {
+      await destroyGroupTab(tab);
+    }
     doCloseTab(closeConfirm.tabId);
     setCloseConfirm(null);
-  }, [closeConfirm, dontAskAgain, doCloseTab]);
+  }, [closeConfirm, dontAskAgain, tabs, doCloseTab, destroyGroupTab]);
 
   const handleTabClick = useCallback((tabId) => {
     setActiveTabId(tabId);
@@ -161,7 +289,10 @@ export default function App() {
   }, []);
 
   const activeTab = tabs.find((t) => t.id === activeTabId);
-  const usageHidden = activeTab?.type === 'terminal' && activeTab.app === 'opencode';
+  // Usage (Claude spend) is only meaningful for claude sessions; hide it for
+  // opencode terminals and for a group tab whose active sub-tab is opencode.
+  const usageHidden = (activeTab?.type === 'terminal' && activeTab.app === 'opencode')
+    || (activeTab?.type === 'group' && groupActiveApp === 'opencode');
 
   return (
     <div className="app">
@@ -174,11 +305,7 @@ export default function App() {
             onClick={() => handleTabClick(tab.id)}
           >
             <span className="tab-label">
-              {tab.type === 'browser' && <svg className="tab-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><path d="M2 3.5A1.5 1.5 0 013.5 2h3l1.5 2h4.5A1.5 1.5 0 0114 5.5v7a1.5 1.5 0 01-1.5 1.5h-9A1.5 1.5 0 012 12.5z"/></svg>}
-              {tab.type === 'monitor' && <svg className="tab-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><rect x="2" y="2" width="12" height="10" rx="1.5"/><path d="M5 14h6M8 12v2M4.5 8.5V9M6.5 6.5V9M8.5 5V9M10.5 7V9"/></svg>}
-              {tab.type === 'terminal' && tab.shell && <svg className="tab-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><path d="M3.5 5l4 3-4 3"/><path d="M8.5 12h4"/></svg>}
-              {tab.type === 'terminal' && tab.app === 'opencode' && <svg className="tab-icon" viewBox="0 0 16 16" fill="currentColor"><path fillRule="evenodd" d="M4 3h8v10H4V3zm7 1H5v8h6V4z"/><path opacity="0.45" d="M6 7h4v4H6V7z"/></svg>}
-              {tab.type === 'terminal' && tab.app === 'claude' && !tab.shell && <svg className="tab-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"><path d="M8 2v12M3.2 5l9.6 6M12.8 5l-9.6 6"/></svg>}
+              <TabIcon type={tab.type} app={tab.app} shell={tab.shell} />
               {tab.label}
             </span>
             {tab.type !== 'browser' && tab.type !== 'monitor' && (
@@ -201,7 +328,7 @@ export default function App() {
       </div>
       <div className="tab-content">
         <div style={{ display: activeTabId === 'browser' ? 'flex' : 'none', height: '100%', flexDirection: 'column' }}>
-          <DirectoryBrowser onOpen={handleOpen} onOpenShell={handleOpenShell} onSessionClick={handleSessionClick} initialPath={lastDir} />
+          <DirectoryBrowser onOpen={handleOpen} onOpenShell={handleOpenShell} onOpenCombo={handleOpenCombo} onOpenGroup={handleOpenGroup} onSessionClick={handleSessionClick} initialPath={lastDir} groupsVersion={groupsVersion} />
         </div>
         <div style={{ display: activeTabId === 'monitor' ? 'flex' : 'none', height: '100%', flexDirection: 'column' }}>
           <SystemMonitor visible={activeTabId === 'monitor'} />
@@ -245,6 +372,35 @@ export default function App() {
               </Suspense>
             </div>
           ))}
+        {tabs
+          .filter((t) => t.type === 'group')
+          .map((tab) => (
+            <div
+              key={tab.id}
+              style={{ display: activeTabId === tab.id ? 'flex' : 'none', height: '100%', flexDirection: 'column' }}
+            >
+              <GroupTabView
+                groupId={tab.groupId}
+                initialMembers={tab.members}
+                visible={activeTabId === tab.id}
+                xtermTheme={getTheme(themeId).xterm}
+                themeId={themeId}
+                onThemeChange={setThemeId}
+                notify={notify}
+                notifyEnabled={notifyEnabled}
+                notifyPermission={notifyPermission}
+                onToggleNotify={toggleNotify}
+                onActiveAppChange={setGroupActiveApp}
+                tabId={tab.id}
+                onAttention={() => {
+                  if (activeTabId !== tab.id) {
+                    setAttentionTabs((prev) => new Set(prev).add(tab.id));
+                  }
+                }}
+                onFocusTab={() => handleTabClick(tab.id)}
+              />
+            </div>
+          ))}
       </div>
       {resumePrompt && (
         <div className="resume-overlay" onClick={handleNewSession}>
@@ -265,8 +421,10 @@ export default function App() {
       {closeConfirm && (
         <div className="resume-overlay" onClick={() => setCloseConfirm(null)}>
           <div className="resume-dialog" onClick={(e) => e.stopPropagation()}>
-            <h3>タブを閉じますか?</h3>
-            <p>セッションは背後で動き続け、セッション一覧から再接続できます。</p>
+            <h3>{closeConfirm.kind === 'group' ? 'グループを閉じますか?' : 'タブを閉じますか?'}</h3>
+            <p>{closeConfirm.kind === 'group'
+              ? 'グループの3つのセッション（ワーカー2つとオーケストレーター）を終了します。'
+              : 'セッションは背後で動き続け、セッション一覧から再接続できます。'}</p>
             <label className="close-confirm-checkbox">
               <input
                 type="checkbox"

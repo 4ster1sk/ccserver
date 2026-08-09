@@ -9,8 +9,10 @@ import { sessionsRoute } from './routes/sessions.js';
 import { filesRoute } from './routes/files.js';
 import { systemRoute } from './routes/system.js';
 import { usageRoute } from './routes/usage.js';
+import { groupsRoute, cleanupOrphanedOrchestrators } from './routes/groups.js';
 import { terminalWs } from './ws/terminal.js';
 import { gracefulShutdown, restoreSchedules } from './ws/sessionManager.js';
+import { restoreGroups } from './ws/groupManager.js';
 import { warmUsage } from './usage.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -39,6 +41,7 @@ await fastify.register(sessionsRoute, { prefix: '/api' });
 await fastify.register(filesRoute, { prefix: '/api' });
 await fastify.register(systemRoute, { prefix: '/api' });
 await fastify.register(usageRoute, { prefix: '/api' });
+await fastify.register(groupsRoute, { prefix: '/api' });
 await fastify.register(terminalWs);
 
 if (process.env.NODE_ENV === 'production') {
@@ -67,6 +70,19 @@ await fastify.listen({ port: PORT, host: '0.0.0.0' });
 // Re-arm scheduled prompts persisted before the last shutdown/restart. Missed
 // ones (server was down at their time) fire shortly after startup; live ones
 // wait for their time. Sessions are auto-resumed lazily at fire time.
+// Combo groups are restored first (their member sessions died with the old
+// process) so those auto-resumes can re-create MCP channels, and the UI can
+// offer to re-open the groups.
+try {
+  const groupInfo = restoreGroups();
+  if (groupInfo?.restored) {
+    fastify.log.info(`Restored ${groupInfo.restored} combo group(s)`);
+  }
+  cleanupOrphanedOrchestrators(groupInfo?.ids);
+} catch (err) {
+  fastify.log.error({ err }, 'Failed to restore combo groups');
+}
+
 try {
   const info = restoreSchedules();
   if (info?.restored) {
