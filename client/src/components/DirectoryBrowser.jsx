@@ -478,7 +478,7 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
                   onClick={() => chooseSandbox(false)}
                   title={forceSandbox ? 'サーバー設定でサンドボックス外の起動は禁止されています' : ''}
                 >
-                  <span className="open-menu-check">{forceSandbox ? '✓' : (!sandboxDefault ? '✓' : '')}</span>
+                  <span className="open-menu-check">{!sandboxDefault ? '✓' : ''}</span>
                   通常起動
                 </div>
                 <div
