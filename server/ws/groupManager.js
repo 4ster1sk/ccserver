@@ -11,7 +11,7 @@ import { EventEmitter } from 'node:events';
 import { mkdirSync, writeFileSync, readFileSync, unlinkSync, rmSync } from 'node:fs';
 import { dirname, join, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { getSession, destroySession, createSession, writeToSession, setSessionExitListener, setSessionCreateListener, setMcpSocketResolver, peekSavedSessions } from './sessionManager.js';
+import { getSession, destroySession, createSession, writeToSession, waitUntilSettled, setSessionExitListener, setSessionCreateListener, setMcpSocketResolver, peekSavedSessions } from './sessionManager.js';
 import { startControlBroker, startHandoffChannel, stopBroker } from './mcpBroker.js';
 import { isValidApp } from './appLaunch.js';
 
@@ -643,6 +643,7 @@ const defaultSessionApi = {
   destroySession,
   createSession,
   writeToSession,
+  waitUntilSettled,
 };
 let sessionApi = defaultSessionApi;
 
