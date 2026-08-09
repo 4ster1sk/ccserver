@@ -1,23 +1,10 @@
 import { test, expect, devices } from '@playwright/test';
-import { execFileSync } from 'node:child_process';
+import { hasOpencode } from './helpers.js';
 
 // Mobile touch scrolling: a vertical drag on the terminal must reach the app
 // (opencode's TUI) as SGR wheel-mouse sequences so its internal conversation
 // history scrolls — xterm.js's own buffer has no scrollback under a TUI.
 test.use({ ...devices['iPhone 13'], defaultBrowserType: 'chromium' });
-
-// opencode isn't installed on every machine this suite runs on (e.g. this
-// repo's plain ubuntu-latest CI runner has neither claude nor opencode) --
-// the webServer this test drives runs on the same machine, so a local check
-// is a valid proxy for whether the server can actually spawn it.
-function hasOpencode() {
-  try {
-    execFileSync('which', ['opencode'], { stdio: 'ignore' });
-    return true;
-  } catch {
-    return false;
-  }
-}
 
 test('touch drag sends SGR wheel events to the opencode TUI', async ({ page, context }) => {
   test.skip(!hasOpencode(), 'opencode CLI not installed on this machine');

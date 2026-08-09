@@ -1,24 +1,11 @@
 import { test, expect } from '@playwright/test';
-import { execFileSync } from 'node:child_process';
+import { hasOpencode } from './helpers.js';
 
 // The scroll buttons (up/down/Top/Btm) scroll xterm.js's own buffer, which is
 // frozen under opencode's TUI (alt screen + mouse tracking). For opencode
 // sessions they must instead drive the TUI's internal conversation scroll via
 // its message-scroll keybindings: pageup/pagedown (half page), ctrl+g
 // (first message), ctrl+alt+g (last message).
-
-// opencode isn't installed on every machine this suite runs on (e.g. this
-// repo's plain ubuntu-latest CI runner has neither claude nor opencode) --
-// the webServer this test drives runs on the same machine, so a local check
-// is a valid proxy for whether the server can actually spawn it.
-function hasOpencode() {
-  try {
-    execFileSync('which', ['opencode'], { stdio: 'ignore' });
-    return true;
-  } catch {
-    return false;
-  }
-}
 
 test('scroll buttons send opencode\'s message-scroll keys', async ({ page }) => {
   test.skip(!hasOpencode(), 'opencode CLI not installed on this machine');

@@ -456,12 +456,16 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
     // prompt editor's own viewport, never the conversation. Fixed band height
     // for now; tune PROMPT_BAND_ROWS if opencode's prompt layout grows.
     const PROMPT_BAND_ROWS = 10;
+    // Cached container geometry for band hit-testing: the rect only changes
+    // on resize, and wheel/touchmove events fire far too often to re-read it
+    // per event (each getBoundingClientRect forces a synchronous layout).
+    let bandRect = containerEl.getBoundingClientRect();
+    const bandCellHeight = () => bandRect.height / term.rows;
     const isOverPromptBand = (clientY) => {
       if (appRef.current !== 'opencode') return false;
-      const rect = containerEl.getBoundingClientRect();
-      const cellHeight = rect.height / term.rows;
+      const cellHeight = bandCellHeight();
       if (cellHeight <= 0) return false;
-      const row = Math.floor((clientY - rect.top) / cellHeight);
+      const row = Math.floor((clientY - bandRect.top) / cellHeight);
       return row >= term.rows - PROMPT_BAND_ROWS;
     };
     // Wheel events over the prompt band are never forwarded to the TUI at
@@ -479,11 +483,19 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
       e.preventDefault();
       e.stopImmediatePropagation();
       if (e.deltaY === 0) return;
-      if ((bandWheelAccumY > 0) !== (e.deltaY > 0)) bandWheelAccumY = 0;
-      bandWheelAccumY += e.deltaY;
-      if (Math.abs(bandWheelAccumY) < 120) return;
-      bandWheelAccumY = 0;
-      sendInput(e.deltaY > 0 ? OPENCODE_SCROLL_KEYS.lineDown : OPENCODE_SCROLL_KEYS.lineUp);
+      // Normalize the delta to pixels: line- or page-based deltas (deltaMode
+      // 1/2) would otherwise never reach the pixel-sized threshold.
+      let deltaY = e.deltaY;
+      if (e.deltaMode === 1) deltaY *= bandCellHeight();
+      else if (e.deltaMode === 2) deltaY *= bandRect.height;
+      if ((bandWheelAccumY > 0) !== (deltaY > 0)) bandWheelAccumY = 0;
+      bandWheelAccumY += deltaY;
+      // Keep the remainder so one large delta (fast flick) scrolls several
+      // lines, mirroring the touch path's while loop below.
+      while (Math.abs(bandWheelAccumY) >= 120) {
+        sendInput(bandWheelAccumY > 0 ? OPENCODE_SCROLL_KEYS.lineDown : OPENCODE_SCROLL_KEYS.lineUp);
+        bandWheelAccumY -= Math.sign(bandWheelAccumY) * 120;
+      }
     };
     term.element.addEventListener('wheel', handleWheel, { capture: true, passive: false });
     let touchStartX = 0;
@@ -563,6 +575,8 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
       touchStartX = clientX;
       touchStartY = clientY;
       touchScrolling = false;
+      // A previous drag's sub-cell remainder must not leak into this one.
+      bandTouchAccum = 0;
 
       // Grabbing an existing handle re-anchors the selection at the OTHER
       // end (using its precise row-center Y, not the handle's own
@@ -601,7 +615,7 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
           // scroll the prompt editor): drive the conversation line-by-line
           // with the TUI's line-scroll keybindings instead, one line per
           // cell height of drag -- the same rate SGR wheels scroll the log.
-          const cellHeight = containerEl.getBoundingClientRect().height / term.rows || 16;
+          const cellHeight = bandCellHeight() || 16;
           bandTouchAccum += dy;
           if ((bandTouchAccum > 0) !== (dy > 0)) bandTouchAccum = 0;
           while (Math.abs(bandTouchAccum) >= cellHeight) {
@@ -893,6 +907,9 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
       }
       fitAddon.fit();
       pinToBottom();
+      // The container geometry changed -- the cached band hit-test rect
+      // (isOverPromptBand) must follow or wheels mis-map to rows.
+      bandRect = containerEl.getBoundingClientRect();
       // Rows re-rendered at (possibly) new screen positions -- any visible
       // selection handles were computed against the old layout.
       updateHandles();

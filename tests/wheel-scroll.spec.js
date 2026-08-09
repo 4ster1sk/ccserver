@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test';
-import { execFileSync } from 'node:child_process';
+import { hasOpencode } from './helpers.js';
 
 // Desktop wheel scrolling over opencode's TUI: the TUI hit-tests SGR wheel
 // events by position, so a wheel over the prompt band (the bottom rows, where
@@ -9,19 +9,6 @@ import { execFileSync } from 'node:child_process';
 // conversation's scrollbox with the TUI's one-line scroll keybindings
 // instead (ctrl+alt+y / ctrl+alt+e; see src/config/keybind.ts in the opencode
 // repo). A desktop notch (~120px of delta) scrolls exactly one line.
-
-// opencode isn't installed on every machine this suite runs on (e.g. this
-// repo's plain ubuntu-latest CI runner has neither claude nor opencode) --
-// the webServer this test drives runs on the same machine, so a local check
-// is a valid proxy for whether the server can actually spawn it.
-function hasOpencode() {
-  try {
-    execFileSync('which', ['opencode'], { stdio: 'ignore' });
-    return true;
-  } catch {
-    return false;
-  }
-}
 
 test('desktop wheel over the prompt band scrolls the log via line-scroll keys', async ({ page }) => {
   test.skip(!hasOpencode(), 'opencode CLI not installed on this machine');
@@ -64,14 +51,16 @@ test('desktop wheel over the prompt band scrolls the log via line-scroll keys', 
   const dims = await page.evaluate(() => {
     const inner = [...document.querySelectorAll('.xterm')]
       .find((t) => t.getBoundingClientRect().height > 0);
+    if (!inner) throw new Error('no visible .xterm element');
     const r = inner.getBoundingClientRect();
     const rowEls = inner.querySelectorAll('.xterm-rows > div');
     const cellH = rowEls[0] ? rowEls[0].getBoundingClientRect().height : 16;
     return { x: r.x, y: r.y, w: r.width, cellH, rows: rowEls.length };
   });
-  expect(dims.rows).toBeGreaterThan(10);
+  // Row 7 (1-based) must sit above the 10-row prompt band: rows - 10 > 7.
+  expect(dims.rows).toBeGreaterThan(17);
   const cx = dims.x + dims.w / 2;
-  const yLog = dims.y + 6 * dims.cellH; // deep in the log area
+  const yLog = dims.y + 6.5 * dims.cellH; // center of row 7 (1-based), off the row boundary
   const yBand = dims.y + (dims.rows - 3) * dims.cellH; // inside the prompt band
 
   // Control: a wheel over the log area passes through unclamped -- its SGR
@@ -97,6 +86,10 @@ test('desktop wheel over the prompt band scrolls the log via line-scroll keys', 
     () => inputFrames.some((d) => d === '\x1b\x19'),
     { timeout: 5_000 }
   ).toBe(true);
+  // Let any straggler SGR frame arrive over the WebSocket before asserting
+  // none ever escaped (a one-shot check right after the poll could miss a
+  // late frame).
+  await page.waitForTimeout(1000);
   expect(inputFrames.some((d) => /\x1b\[<6[45]/.test(d))).toBe(false);
 
   // And the same in the other direction.
@@ -106,5 +99,6 @@ test('desktop wheel over the prompt band scrolls the log via line-scroll keys', 
     () => inputFrames.some((d) => d === '\x1b\x05'),
     { timeout: 5_000 }
   ).toBe(true);
+  await page.waitForTimeout(1000);
   expect(inputFrames.some((d) => /\x1b\[<6[45]/.test(d))).toBe(false);
 });
