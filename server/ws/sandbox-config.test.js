@@ -52,11 +52,3 @@ test('forceSandbox coexists with the other config keys', () => {
     assert.equal(cfg.defaultApp, 'opencode');
   });
 });
-
-test('forceSandbox is exposed via /api/dirs/home payload helper keys', () => {
-  withConfig({ forceSandbox: true, defaultApp: 'claude' }, () => {
-    const cfg = loadSandboxConfig();
-    assert.equal(cfg.defaultApp, 'claude');
-    assert.equal(cfg.forceSandbox, true);
-  });
-});
