@@ -470,6 +470,31 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
       if (row < term.rows - PROMPT_BAND_ROWS) return clientY;
       return rect.top + CLAMP_WHEEL_ROW * cellHeight;
     };
+    // Real (desktop) wheel events over the prompt band are never forwarded to
+    // the TUI at all: opencode's TUI hit-tests SGR wheel events by position,
+    // so any wheel event whose row lands on the prompt band scrolls the prompt
+    // editor, not the conversation -- and a re-dispatched event at a fake
+    // position could just as easily land on the sidebar or a dialog. Swallow
+    // the event and drive the conversation's scrollbox with the TUI's own
+    // message-scroll keybindings instead (the same PageUp/PageDown sequences
+    // the scroll buttons send). Wheel deltas accumulate because one keypress
+    // scrolls half a page: ~360px (3 typical notches) per press keeps the
+    // band-wheeling rate comparable to SGR wheels over the log.
+    let wheelAccumY = 0;
+    const handleWheel = (e) => {
+      if (appRef.current !== 'opencode') return;
+      const clampedY = clampedWheelClientY(e.clientY);
+      if (clampedY === e.clientY) return;
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      if (e.deltaY === 0) return;
+      if ((wheelAccumY > 0) !== (e.deltaY > 0)) wheelAccumY = 0;
+      wheelAccumY += e.deltaY;
+      if (Math.abs(wheelAccumY) < 360) return;
+      wheelAccumY = 0;
+      sendInput(e.deltaY > 0 ? OPENCODE_SCROLL_KEYS.down : OPENCODE_SCROLL_KEYS.up);
+    };
+    term.element.addEventListener('wheel', handleWheel, { capture: true, passive: false });
     let touchStartX = 0;
     let touchStartY = 0;
     let touchScrolling = false;
@@ -904,6 +929,7 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
       resizeObserver.disconnect();
       scrollDisposable.dispose();
       containerEl.removeEventListener('click', handleContainerClick);
+      term.element.removeEventListener('wheel', handleWheel, { capture: true });
       selectionChangeDisposable.dispose();
       if (isMobile) {
         containerEl.removeEventListener('touchstart', handleTouchStart);
