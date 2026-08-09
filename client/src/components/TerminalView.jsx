@@ -446,6 +446,27 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
     // would for a real mouse. A floating "コピー" button appears afterward
     // since iOS has no native copy menu for a canvas selection either.
     const HANDLE_HIT_RADIUS = 28;
+    // opencode's TUI hit-tests wheel events by position (the SGR row/col), so
+    // a wheel whose row lands on the prompt input at the bottom of the screen
+    // scrolls the prompt editor's own buffer (revealing earlier draft lines),
+    // never the conversation. Touch drags there are clamped to a top row of
+    // the terminal -- the conversation scrollbox fills everything above the
+    // prompt -- so they keep scrolling the conversation. Fixed band height
+    // for now; tune PROMPT_BAND_ROWS if opencode's prompt layout grows.
+    const PROMPT_BAND_ROWS = 10;
+    const CLAMP_WHEEL_ROW = 2;
+    // Cached container geometry for the clamp: the rect only changes on
+    // resize, and touchmove fires far too often to re-read it per event (each
+    // getBoundingClientRect forces a synchronous layout).
+    let bandRect = containerEl.getBoundingClientRect();
+    const clampedWheelClientY = (clientY) => {
+      if (appRef.current !== 'opencode') return clientY;
+      const cellHeight = bandRect.height / term.rows;
+      if (cellHeight <= 0) return clientY;
+      const row = Math.floor((clientY - bandRect.top) / cellHeight);
+      if (row < term.rows - PROMPT_BAND_ROWS) return clientY;
+      return bandRect.top + CLAMP_WHEEL_ROW * cellHeight;
+    };
     let touchStartX = 0;
     let touchStartY = 0;
     let touchScrolling = false;
@@ -558,7 +579,10 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
         term.element.dispatchEvent(new WheelEvent('wheel', {
           deltaY: dy,
           clientX: touch.clientX,
-          clientY: touch.clientY,
+          // Clamp Y out of the prompt band (see clampedWheelClientY) so the
+          // wheel always lands on the conversation scrollbox, never the
+          // prompt input.
+          clientY: clampedWheelClientY(touch.clientY),
           bubbles: true,
           cancelable: true,
         }));
@@ -838,6 +862,9 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
       }
       fitAddon.fit();
       pinToBottom();
+      // The container geometry changed -- the cached band clamp rect must
+      // follow or clamped touch wheels mis-map to rows.
+      bandRect = containerEl.getBoundingClientRect();
       // Rows re-rendered at (possibly) new screen positions -- any visible
       // selection handles were computed against the old layout.
       updateHandles();
