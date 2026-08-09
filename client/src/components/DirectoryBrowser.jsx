@@ -54,6 +54,10 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
   const fileInputRef = useRef(null);
   const dragCountRef = useRef(0);
   const [sandboxDefault, setSandboxDefault] = useState(() => localStorage.getItem(SANDBOX_KEY) === '1');
+  // Server-enforced sandbox (sandbox.config.json's "forceSandbox"): when on,
+  // the sandbox toggle is overridden -- every launch is sandboxed and the
+  // "通常起動" choice is disabled. Set from /api/dirs/home.
+  const [forceSandbox, setForceSandbox] = useState(false);
   // 'claude' until the server's configured default (sandbox.config.json's
   // "defaultApp") arrives via /api/dirs/home, or the user picks explicitly.
   const [appDefault, setAppDefault] = useState(() => {
@@ -78,9 +82,10 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
   }, []);
 
   const chooseSandbox = useCallback((val) => {
+    if (forceSandbox) return; // server forbids unsandboxed launches
     setSandboxDefault(val);
     localStorage.setItem(SANDBOX_KEY, val ? '1' : '0');
-  }, []);
+  }, [forceSandbox]);
 
   const chooseApp = useCallback((val) => {
     setAppDefault(val);
@@ -131,6 +136,11 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
       // if the user hasn't explicitly picked one on this browser yet.
       if (!localStorage.getItem(APP_KEY) && (data.defaultApp === 'opencode' || data.defaultApp === 'claude')) {
         setAppDefault(data.defaultApp);
+      }
+      // Server-enforced sandbox: force the toggle on and lock it.
+      if (data.forceSandbox) {
+        setForceSandbox(true);
+        setSandboxDefault(true);
       }
     }).catch(() => {});
   }, []);
@@ -464,15 +474,17 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
                 </div>
                 <div className="open-menu-sep" />
                 <div
-                  className="open-menu-item"
+                  className={`open-menu-item${forceSandbox ? ' open-menu-item-disabled' : ''}`}
                   onClick={() => chooseSandbox(false)}
+                  title={forceSandbox ? 'サーバー設定でサンドボックス外の起動は禁止されています' : ''}
                 >
-                  <span className="open-menu-check">{!sandboxDefault ? '✓' : ''}</span>
+                  <span className="open-menu-check">{forceSandbox ? '✓' : (!sandboxDefault ? '✓' : '')}</span>
                   通常起動
                 </div>
                 <div
                   className="open-menu-item"
                   onClick={() => chooseSandbox(true)}
+                  title={forceSandbox ? 'サーバー設定で強制' : ''}
                 >
                   <span className="open-menu-check">{sandboxDefault ? '✓' : ''}</span>
                   🔒 サンドボックスで起動
@@ -496,8 +508,9 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
                   </label>
                 </div>
                 <p className="open-menu-note">
-                  サンドボックス: 隣接プロジェクトを隔離し、内部に rootless docker を用意。
-                  GPG/ssh-agentは既定オフ、このディレクトリ ({currentPath}) に記憶されます。
+                  {forceSandbox
+                    ? 'サンドボックスがサーバー設定 (forceSandbox) で強制されています。通常起動はできません。'
+                    : `サンドボックス: 隣接プロジェクトを隔離し、内部に rootless docker を用意。GPG/ssh-agentは既定オフ、このディレクトリ (${currentPath}) に記憶されます。`}
                 </p>
               </>
             ) : (

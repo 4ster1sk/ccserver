@@ -5,7 +5,8 @@ import { loadSandboxConfig } from '../ws/sandbox.js';
 
 export async function dirsRoute(fastify, opts) {
   fastify.get('/dirs/home', async () => {
-    return { home: homedir(), defaultApp: loadSandboxConfig().defaultApp };
+    const { defaultApp, forceSandbox } = loadSandboxConfig();
+    return { home: homedir(), defaultApp, forceSandbox };
   });
 
   fastify.get('/dirs', async (request, reply) => {

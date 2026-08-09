@@ -123,6 +123,11 @@ export function loadSandboxConfig() {
   // ~/.config/gh exposure, which is blocked unconditionally regardless of
   // this flag (see the extraBinds filter below).
   const gitBroker = raw.gitBroker !== false;
+  // Forbid launching the agent (or a shell) outside the sandbox: every session
+  // is forced sandboxed, and a launch is refused -- instead of falling back to
+  // a direct (unsandboxed) spawn -- when bwrap is unavailable (or on Windows).
+  // Also blocks /usage's direct-launch fallback; see usage.js. Default off.
+  const forceSandbox = raw.forceSandbox === true;
   const binds = Array.isArray(raw.binds) ? raw.binds : [];
   const env = (raw.env && typeof raw.env === 'object') ? raw.env : {};
   // How to launch claude. Overridable because the install location is
@@ -132,7 +137,7 @@ export function loadSandboxConfig() {
   // See appLaunch.js's APPS; anything else (including unset) falls back to
   // claude -- see sessionManager.js's defaultApp().
   const defaultApp = raw.defaultApp === 'opencode' ? 'opencode' : 'claude';
-  return { docker, gpg, sshAgent, gitBroker, binds, env, claudeBin, defaultApp, configPath };
+  return { docker, gpg, sshAgent, gitBroker, forceSandbox, binds, env, claudeBin, defaultApp, configPath };
 }
 
 // Locate an executable named `cmd` on the given PATH (or return it as-is if
