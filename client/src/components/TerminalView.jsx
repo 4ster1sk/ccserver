@@ -433,8 +433,8 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
     //
     // opencode routes those wheel events by position: over the prompt band
     // (the bottom rows of the TUI) they scroll the prompt editor, not the
-    // log. Drags there are clamped to a top row via clampedWheelClientY so
-    // they still scroll the conversation.
+    // log. Drags there are turned into line-scroll keybindings instead (see
+    // handleTouchMove) so they still scroll the conversation.
     //
     // Text selection is a separate, explicit mode (see `selectionMode`)
     // rather than a long-press gesture -- a PWA gets no OS haptic feedback,
@@ -453,50 +453,42 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
     const HANDLE_HIT_RADIUS = 28;
     // opencode's TUI hit-tests wheel events by position (the SGR row/col), so
     // a wheel over the prompt band at the bottom of the screen scrolls the
-    // prompt editor's own viewport, never the conversation. Clamp the
-    // synthetic wheel's Y to a top row of the terminal -- the conversation
-    // scrollbox fills everything above the prompt (see routes/session in the
-    // opencode source) -- so touch drags on the prompt band scroll the log
-    // instead. Fixed band height for now; tune PROMPT_BAND_ROWS if opencode's
-    // prompt layout grows.
+    // prompt editor's own viewport, never the conversation. Fixed band height
+    // for now; tune PROMPT_BAND_ROWS if opencode's prompt layout grows.
     const PROMPT_BAND_ROWS = 10;
-    const CLAMP_WHEEL_ROW = 2;
-    const clampedWheelClientY = (clientY) => {
-      if (appRef.current !== 'opencode') return clientY;
+    const isOverPromptBand = (clientY) => {
+      if (appRef.current !== 'opencode') return false;
       const rect = containerEl.getBoundingClientRect();
       const cellHeight = rect.height / term.rows;
-      if (cellHeight <= 0) return clientY;
+      if (cellHeight <= 0) return false;
       const row = Math.floor((clientY - rect.top) / cellHeight);
-      if (row < term.rows - PROMPT_BAND_ROWS) return clientY;
-      return rect.top + CLAMP_WHEEL_ROW * cellHeight;
+      return row >= term.rows - PROMPT_BAND_ROWS;
     };
-    // Real (desktop) wheel events over the prompt band are never forwarded to
-    // the TUI at all: opencode's TUI hit-tests SGR wheel events by position,
-    // so any wheel event whose row lands on the prompt band scrolls the prompt
+    // Wheel events over the prompt band are never forwarded to the TUI at
+    // all: opencode's TUI hit-tests SGR wheel events by position, so any
+    // wheel event whose row lands on the prompt band scrolls the prompt
     // editor, not the conversation -- and a re-dispatched event at a fake
     // position could just as easily land on the sidebar or a dialog. Swallow
-    // the event and drive the conversation's scrollbox with the TUI's own
-    // message-scroll keybindings instead (the same PageUp/PageDown sequences
-    // the scroll buttons send). Wheel deltas accumulate because one keypress
-    // scrolls half a page: ~360px (3 typical notches) per press keeps the
-    // band-wheeling rate comparable to SGR wheels over the log.
-    let wheelAccumY = 0;
+    // the event and drive the conversation's scrollbox with the TUI's
+    // line-scroll keybindings instead (ctrl+alt+y / ctrl+alt+e scroll
+    // exactly one line; see src/config/keybind.ts in the opencode repo).
+    // Deltas accumulate so a desktop notch (~120px) scrolls one line.
+    let bandWheelAccumY = 0;
     const handleWheel = (e) => {
-      if (appRef.current !== 'opencode') return;
-      const clampedY = clampedWheelClientY(e.clientY);
-      if (clampedY === e.clientY) return;
+      if (appRef.current !== 'opencode' || !isOverPromptBand(e.clientY)) return;
       e.preventDefault();
       e.stopImmediatePropagation();
       if (e.deltaY === 0) return;
-      if ((wheelAccumY > 0) !== (e.deltaY > 0)) wheelAccumY = 0;
-      wheelAccumY += e.deltaY;
-      if (Math.abs(wheelAccumY) < 360) return;
-      wheelAccumY = 0;
-      sendInput(e.deltaY > 0 ? OPENCODE_SCROLL_KEYS.down : OPENCODE_SCROLL_KEYS.up);
+      if ((bandWheelAccumY > 0) !== (e.deltaY > 0)) bandWheelAccumY = 0;
+      bandWheelAccumY += e.deltaY;
+      if (Math.abs(bandWheelAccumY) < 120) return;
+      bandWheelAccumY = 0;
+      sendInput(e.deltaY > 0 ? OPENCODE_SCROLL_KEYS.lineDown : OPENCODE_SCROLL_KEYS.lineUp);
     };
     term.element.addEventListener('wheel', handleWheel, { capture: true, passive: false });
     let touchStartX = 0;
     let touchStartY = 0;
+    let bandTouchAccum = 0;
     let touchScrolling = false;
     let selecting = false;
     const dispatchMouse = (type, x, y, buttons) => {
@@ -604,15 +596,27 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
       }
       const dy = touchStartY - touch.clientY;
       if (Math.abs(dy) >= 20) {
-        term.element.dispatchEvent(new WheelEvent('wheel', {
-          deltaY: dy,
-          clientX: touch.clientX,
-          // Clamp Y out of the prompt band (see clampedWheelClientY) so the
-          // wheel always lands on the conversation scrollbox.
-          clientY: clampedWheelClientY(touch.clientY),
-          bubbles: true,
-          cancelable: true,
-        }));
+        if (isOverPromptBand(touch.clientY)) {
+          // Over the prompt band no wheel event may reach the TUI (it would
+          // scroll the prompt editor): drive the conversation line-by-line
+          // with the TUI's line-scroll keybindings instead, one line per
+          // cell height of drag -- the same rate SGR wheels scroll the log.
+          const cellHeight = containerEl.getBoundingClientRect().height / term.rows || 16;
+          bandTouchAccum += dy;
+          if ((bandTouchAccum > 0) !== (dy > 0)) bandTouchAccum = 0;
+          while (Math.abs(bandTouchAccum) >= cellHeight) {
+            sendInput(bandTouchAccum > 0 ? OPENCODE_SCROLL_KEYS.lineDown : OPENCODE_SCROLL_KEYS.lineUp);
+            bandTouchAccum -= Math.sign(bandTouchAccum) * cellHeight;
+          }
+        } else {
+          term.element.dispatchEvent(new WheelEvent('wheel', {
+            deltaY: dy,
+            clientX: touch.clientX,
+            clientY: touch.clientY,
+            bubbles: true,
+            cancelable: true,
+          }));
+        }
         touchStartY = touch.clientY;
         touchScrolling = true;
       }
@@ -1085,11 +1089,14 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
   }, []);
 
   // opencode's message-scroll keybindings (see src/config/keybind.ts in the
-  // opencode repo): pageup/pagedown scroll half a page, ctrl+g / ctrl+alt+g
-  // jump to the first/last message.
+  // opencode repo): pageup/pagedown scroll half a page, ctrl+alt+y / ctrl+alt+e
+  // scroll exactly one line, ctrl+g / ctrl+alt+g jump to the first/last
+  // message.
   const OPENCODE_SCROLL_KEYS = {
     up: '\x1b[5~', // pageup
     down: '\x1b[6~', // pagedown
+    lineUp: '\x1b\x19', // ctrl+alt+y
+    lineDown: '\x1b\x05', // ctrl+alt+e
     top: '\x07', // ctrl+g
     btm: '\x1b\x07', // ctrl+alt+g
   };

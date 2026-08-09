@@ -77,7 +77,7 @@ test('touch drag sends SGR wheel events to the opencode TUI', async ({ page, con
   ).toBe(true);
 });
 
-test('touch drag over the prompt band is clamped to the log rows', async ({ page, context }) => {
+test('touch drag over the prompt band scrolls the log via line-scroll keys', async ({ page, context }) => {
   test.skip(!hasOpencode(), 'opencode CLI not installed on this machine');
 
   await page.addInitScript(() => {
@@ -114,27 +114,30 @@ test('touch drag over the prompt band is clamped to the log rows', async ({ page
   ).toBe(true);
 
   // opencode hit-tests wheel events by position, so a wheel over the prompt
-  // band would scroll the prompt editor, not the log. TerminalView clamps
-  // the synthetic wheel's Y to a top row, and the SGR row is what proves it:
-  // reports from a band drag must carry row <= 3 instead of the touch's own
-  // (bottom) row. Move in small steps so several wheel events are emitted
-  // while the finger is still inside the band.
+  // band would scroll the prompt editor, not the log. TerminalView must not
+  // emit any wheel event there: instead the drag drives the conversation with
+  // the TUI's one-line scroll keybinding. A finger drag UP is "scroll down"
+  // (the same direction SGR wheel-down events had), so the keybinding is
+  // ctrl+alt+e. Keep the whole drag inside the band (10 bottom rows) so no
+  // wheel event escapes it.
   const client = await context.newCDPSession(page);
   const box = await page.locator('.terminal-container').boundingBox();
   const x = box.x + box.width / 2;
-  const yStart = box.y + box.height * 0.92;
+  const yStart = box.y + box.height * 0.95;
   await client.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x, y: yStart }] });
-  for (let i = 1; i <= 5; i++) {
+  for (let i = 1; i <= 4; i++) {
     await client.send('Input.dispatchTouchEvent', {
       type: 'touchMove',
-      touchPoints: [{ x, y: yStart - i * 24 }],
+      touchPoints: [{ x, y: yStart - i * 20 }],
     });
   }
   await client.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
 
-  // Clamped wheel report: \x1b[<64;col;rowM / \x1b[<65;col;rowM, row <= 3.
-  await expect.poll(() =>
-    inputFrames.some((d) => /\x1b\[<6[45];\d+;[123]M/.test(d)),
+  // Line-scroll keybinding only -- and not a single SGR wheel event, which
+  // would have reached the prompt editor.
+  await expect.poll(
+    () => inputFrames.some((d) => d === '\x1b\x05'),
     { timeout: 5_000 }
   ).toBe(true);
+  expect(inputFrames.some((d) => /\x1b\[<6[45]/.test(d))).toBe(false);
 });

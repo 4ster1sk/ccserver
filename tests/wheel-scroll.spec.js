@@ -6,8 +6,9 @@ import { execFileSync } from 'node:child_process';
 // the prompt editor lives) would scroll the prompt editor's own viewport --
 // never the conversation log. TerminalView swallows band wheels entirely (no
 // SGR wheel event ever reaches the TUI / the prompt input) and drives the
-// conversation's scrollbox with the TUI's message-scroll keybindings instead
-// (the same PageUp/PageDown the scroll buttons send).
+// conversation's scrollbox with the TUI's one-line scroll keybindings
+// instead (ctrl+alt+y / ctrl+alt+e; see src/config/keybind.ts in the opencode
+// repo). A desktop notch (~120px of delta) scrolls exactly one line.
 
 // opencode isn't installed on every machine this suite runs on (e.g. this
 // repo's plain ubuntu-latest CI runner has neither claude nor opencode) --
@@ -22,7 +23,7 @@ function hasOpencode() {
   }
 }
 
-test('desktop wheel over the prompt band is clamped to the log rows', async ({ page, context }) => {
+test('desktop wheel over the prompt band scrolls the log via line-scroll keys', async ({ page }) => {
   test.skip(!hasOpencode(), 'opencode CLI not installed on this machine');
 
   await page.addInitScript(() => {
@@ -85,18 +86,25 @@ test('desktop wheel over the prompt band is clamped to the log rows', async ({ p
 
   // The band wheel must never reach the TUI as an SGR wheel event (that would
   // land on the prompt editor): no <64/<65 frames may appear. Instead the
-  // conversation scrolls via the TUI's PageUp keybinding, accumulated over
-  // ~360px of wheel delta -- 3 notches here (3 * -120) emit exactly one
-  // PageUp.
+  // conversation scrolls one line per notch via the TUI's line-scroll
+  // keybinding (ctrl+alt+y / ctrl+alt+e).
   inputFrames.length = 0;
   await page.mouse.move(cx, yBand);
   for (let i = 0; i < 3; i++) {
     await page.mouse.wheel(0, -120);
   }
   await expect.poll(
-    () => inputFrames.some((d) => d === '\x1b[5~'),
+    () => inputFrames.some((d) => d === '\x1b\x19'),
     { timeout: 5_000 }
   ).toBe(true);
-  const sgrBand = inputFrames.filter((d) => /\x1b\[<6[45]/.test(d));
-  expect(sgrBand).toEqual([]);
+  expect(inputFrames.some((d) => /\x1b\[<6[45]/.test(d))).toBe(false);
+
+  // And the same in the other direction.
+  inputFrames.length = 0;
+  await page.mouse.wheel(0, 120);
+  await expect.poll(
+    () => inputFrames.some((d) => d === '\x1b\x05'),
+    { timeout: 5_000 }
+  ).toBe(true);
+  expect(inputFrames.some((d) => /\x1b\[<6[45]/.test(d))).toBe(false);
 });
