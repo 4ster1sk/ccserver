@@ -4,6 +4,7 @@ import SystemMonitor from './components/SystemMonitor.jsx';
 import UsageButton from './components/UsageButton.jsx';
 import { useNotifications } from './hooks/useNotifications.js';
 import { getTheme, loadThemeId, saveThemeId, applyThemeCss } from './themes.js';
+import { dbg } from './debug.js';
 
 const TerminalView = lazy(() => import('./components/TerminalView.jsx'));
 
@@ -36,6 +37,7 @@ export default function App() {
     const id = `terminal-${++tabIdCounter}`;
     const dirName = dirPath.split(/[/\\]/).filter(Boolean).pop() || dirPath;
     const label = shell ? `$ ${dirName}` : dirName;
+    dbg('open tab', { id, cwd: dirPath, app, shell, sandbox, sessionId, attachSessionId, resume, claudeSessionId });
     setTabs((prev) => [
       ...prev,
       { id, type: 'terminal', label, cwd: dirPath, claudeSessionId, shell, sessionId, attachSessionId, sandbox, sandboxOpts, app, resume, exited: false },
@@ -66,9 +68,11 @@ export default function App() {
     // Check if a tab is already open for this session
     const existingTab = tabs.find((t) => t.sessionId === session.id);
     if (existingTab) {
+      dbg('session click -> existing tab', { sessionId: session.id, tabId: existingTab.id });
       setActiveTabId(existingTab.id);
       return;
     }
+    dbg('session click -> attach new tab', { sessionId: session.id, cwd: session.cwd, app: session.app });
     openTerminalTab(session.cwd, { shell: !!session.shell, sessionId: session.id, attachSessionId: session.id, app: session.app === 'opencode' ? 'opencode' : 'claude' });
   }, [tabs, openTerminalTab]);
 

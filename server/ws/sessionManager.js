@@ -4,6 +4,7 @@ import { execFileSync } from 'node:child_process';
 import { writeFileSync, readFileSync, unlinkSync, rmSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { dbg } from '../debug.js';
 import { buildSandboxSpawn, resolveApp, sandboxAvailable, loadSandboxConfig } from './sandbox.js';
 import {
   isValidApp,
@@ -276,6 +277,7 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox
     session.exited = true;
     session.exitCode = exitCode;
     session.exitSignal = signal;
+    dbg('session exited', { sessionId: id, exitCode, signal });
     if (!session.shell) {
       session.claudeSessionId = extractResumeSessionId(
         session.app,
@@ -628,6 +630,7 @@ export function attachSocket(id, socket) {
   }
 
   if (session.socket && session.socket !== socket) {
+    dbg('attach replaces existing socket', { sessionId: id });
     try {
       session.socket.send(
         JSON.stringify({ type: 'detached', reason: 'replaced' })
@@ -648,6 +651,7 @@ export function detachSocket(id, socketToDetach) {
 
   if (socketToDetach && session.socket !== socketToDetach) return;
 
+  dbg('detach socket', { sessionId: id });
   session.socket = null;
 
   const timeout = session.exited
@@ -659,6 +663,8 @@ export function detachSocket(id, socketToDetach) {
 export function destroySession(id, { keepSchedule = true } = {}) {
   const session = sessions.get(id);
   if (!session) return;
+
+  dbg('destroy session', { sessionId: id });
 
   if (session.timeoutTimer) {
     clearTimeout(session.timeoutTimer);

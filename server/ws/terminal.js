@@ -1,4 +1,5 @@
 import { homedir } from 'node:os';
+import { dbg } from '../debug.js';
 import {
   createSession,
   getSession,
@@ -44,6 +45,7 @@ export async function terminalWs(fastify, opts) {
 
       switch (msg.type) {
         case 'init': {
+          dbg('client init', { cwd: msg.cwd, app: msg.app, shell: !!msg.shell, sandbox: !!msg.sandbox, claudeSessionId: msg.claudeSessionId || null, resume: !!msg.resume });
           if (currentSessionId) {
             detachSocket(currentSessionId, socket);
           }
@@ -72,6 +74,7 @@ export async function terminalWs(fastify, opts) {
           const { sessionId, session } = result;
           currentSessionId = sessionId;
           attachSocket(sessionId, socket);
+          dbg('session created', { sessionId, cwd: session.cwd, cols: session.cols, rows: session.rows });
 
           socket.send(
             JSON.stringify({
@@ -101,6 +104,7 @@ export async function terminalWs(fastify, opts) {
 
           const session = getSession(msg.sessionId);
           if (!session) {
+            dbg('attach failed: session not found', { sessionId: msg.sessionId });
             socket.send(
               JSON.stringify({
                 type: 'error',
@@ -117,6 +121,7 @@ export async function terminalWs(fastify, opts) {
 
           currentSessionId = msg.sessionId;
           attachSocket(msg.sessionId, socket);
+          dbg('client attach', { sessionId: msg.sessionId, cwd: session.cwd, cols: msg.cols, rows: msg.rows });
 
           socket.send(
             JSON.stringify({
@@ -266,6 +271,7 @@ export async function terminalWs(fastify, opts) {
 
     socket.on('close', () => {
       if (currentSessionId) {
+        dbg('socket closed, detaching', { sessionId: currentSessionId });
         detachSocket(currentSessionId, socket);
         currentSessionId = null;
       }
@@ -274,6 +280,7 @@ export async function terminalWs(fastify, opts) {
     socket.on('error', (err) => {
       fastify.log.error('WebSocket error:', err);
       if (currentSessionId) {
+        dbg('socket error, detaching', { sessionId: currentSessionId, error: err.message });
         detachSocket(currentSessionId, socket);
         currentSessionId = null;
       }

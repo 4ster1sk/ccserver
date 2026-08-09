@@ -7,6 +7,7 @@ import { getThemeIds, getTheme } from '../themes.js';
 import { authWsUrl } from '../auth.js';
 import { createOsc52Handler } from '../osc52.js';
 import { dewrapSelection } from '../dewrap.js';
+import { dbg } from '../debug.js';
 
 const ALL_SPECIAL_KEYS = [
   { id: 'bs', label: 'BS', data: '\x7f' },
@@ -402,6 +403,12 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
     if (attachSessionId) {
       sessionIdRef.current = attachSessionId;
     }
+    dbg('terminal mount', {
+      cwd, app: appRef.current, shell: shellRef.current, sandbox: sandboxRef.current,
+      resume: resumeRef.current, claudeSessionId: claudeResumeIdRef.current,
+      attachSessionId: attachSessionId || null, sessionId: sessionIdRef.current,
+      saved: sessionStorage.getItem(storageKey),
+    });
 
     const inputDisposable = term.onData((data) => {
       const ws = wsRef.current;
@@ -626,12 +633,14 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
       const wsUrl = `${protocol}//${window.location.host}/ws/terminal`;
       const ws = new WebSocket(authWsUrl(wsUrl));
       wsRef.current = ws;
+      dbg('ws connecting', { url: wsUrl, attach: sessionIdRef.current });
 
       ws.onopen = () => {
         reconnectAttemptsRef.current = 0;
         const dims = fitAddon.proposeDimensions();
 
         if (sessionIdRef.current) {
+          dbg('ws open -> attach', { sessionId: sessionIdRef.current, cols: dims?.cols, rows: dims?.rows });
           ws.send(
             JSON.stringify({
               type: 'attach',
@@ -657,6 +666,7 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
           } else if (!shellRef.current && appRef.current === 'opencode' && resumeRef.current) {
             initMsg.resume = true;
           }
+          dbg('ws open -> init', initMsg);
           ws.send(JSON.stringify(initMsg));
         }
       };
@@ -674,6 +684,7 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
             sessionIdRef.current = msg.sessionId;
             sessionStorage.setItem(storageKey, msg.sessionId);
             if (onSessionIdRef.current) onSessionIdRef.current(msg.sessionId);
+            dbg('msg session', { sessionId: msg.sessionId, isReconnect: msg.isReconnect });
             // 再接続などで同一タブに新しいセッションが始まるケースがあるため、
             // セッション確立のたびにexitedフラグを戻す。
             if (onExitedRef.current) onExitedRef.current(false);
@@ -730,6 +741,7 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
             sessionStorage.removeItem(storageKey);
             sessionIdRef.current = null;
             if (onExitedRef.current) onExitedRef.current(true);
+            dbg('msg exit', { exitCode: msg.exitCode, claudeSessionId: msg.claudeSessionId });
             const app = appRef.current;
             const resumeKey = `ccserver-resume:${app}:${cwd}`;
             if (msg.claudeSessionId) {
@@ -742,6 +754,7 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
             break;
           }
           case 'error': {
+            dbg('msg error', { code: msg.code, message: msg.message });
             if (msg.code === 'SESSION_NOT_FOUND') {
               sessionIdRef.current = null;
               sessionStorage.removeItem(storageKey);
@@ -799,13 +812,15 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
             break;
           }
           case 'detached':
+            dbg('msg detached (session taken over by another client)', msg);
             term.writeln('\r\n[Session taken over by another client]');
             intentionalCloseRef.current = true;
             break;
         }
       };
 
-      ws.onclose = () => {
+      ws.onclose = (e) => {
+        dbg('ws closed', { code: e.code, reason: e.reason, wasClean: e.wasClean, intentional: intentionalCloseRef.current });
         if (intentionalCloseRef.current) return;
 
         if (reconnectAttemptsRef.current < MAX_RECONNECT_ATTEMPTS) {
@@ -814,6 +829,7 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
             10000
           );
           reconnectAttemptsRef.current++;
+          dbg('scheduling reconnect', { attempt: reconnectAttemptsRef.current, delayMs: delay, sessionId: sessionIdRef.current });
           term.writeln(
             `\r\n[Connection lost. Reconnecting in ${delay / 1000}s... (${reconnectAttemptsRef.current}/${MAX_RECONNECT_ATTEMPTS})]`
           );
@@ -836,6 +852,11 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
     const handleVisibilityChange = () => {
       if (document.visibilityState === 'visible') {
         const ws = wsRef.current;
+        dbg('visibilitychange -> visible', {
+          wsState: ws ? ['CONNECTING', 'OPEN', 'CLOSING', 'CLOSED'][ws.readyState] : 'none',
+          intentional: intentionalCloseRef.current,
+          sessionId: sessionIdRef.current,
+        });
         if (!ws || ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING) {
           if (intentionalCloseRef.current) return;
           reconnectAttemptsRef.current = 0;
@@ -897,6 +918,7 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
     const scrollDisposable = term.onScroll(() => updateHandles());
 
     return () => {
+      dbg('terminal unmount', { sessionId: sessionIdRef.current, cwd });
       intentionalCloseRef.current = true;
       clearTimeout(reconnectTimerRef.current);
       clearInterval(pingInterval);
