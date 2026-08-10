@@ -293,6 +293,31 @@ describe('classifyGhInvocation: gh api (Actions read-only)', () => {
     assert.equal(r.reason, 'repo-unresolved');
   });
 
+  test('SECURITY: placeholders in the wrong owner/repo slot are refused', () => {
+    for (const endpoint of [
+      'repos/{repo}/testowner/actions/runs',
+      'repos/testowner/{owner}/actions/runs',
+      'repos/{repo}/{owner}/actions/runs',
+      'repos/{host}/testowner/actions/runs',
+      'repos/%7Bowner%7D/unrelated/actions/runs',
+    ]) {
+      const r = classifyGhInvocation(['api', endpoint], cwdOrigin);
+      assert.equal(r.allowed, false, endpoint);
+      assert.equal(r.reason, 'repo-unresolved', endpoint);
+    }
+  });
+
+  test('SECURITY: dot-segment traversal in an Actions endpoint is refused', () => {
+    for (const endpoint of [
+      'repos/testowner/testrepo/actions/runs/../../someoneelse/issues',
+      'repos/testowner/testrepo/actions/runs/%2e%2e/someoneelse/issues',
+    ]) {
+      const r = classifyGhInvocation(['api', endpoint], cwdOrigin);
+      assert.equal(r.allowed, false, endpoint);
+      assert.equal(r.reason, 'subcommand-not-allowed', endpoint);
+    }
+  });
+
   test('SECURITY: endpoint repo and a conflicting --repo are both surfaced as required references', () => {
     // Same pitfall-2 pattern as pr merge <url> --repo x: gh would call the
     // endpoint's repo regardless of --repo, so the broker must be forced to

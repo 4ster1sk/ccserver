@@ -181,16 +181,32 @@ function classifyGhApi(argv, resolveCwdOrigin) {
   }
 
   const [, owner, repo] = API_ACTIONS_PATH_RE.exec(endpoint);
+
+  // A dot segment can change the effective URL path before the request is
+  // handled, escaping the checked repo or the actions-only scope.
+  if (endpoint.split('/').some((segment) => {
+    try {
+      const decoded = decodeURIComponent(segment);
+      return decoded === '.' || decoded === '..';
+    } catch {
+      return false;
+    }
+  })) {
+    return { allowed: false, repos: [], reason: 'subcommand-not-allowed' };
+  }
+
   const ownerIsPlaceholder = owner === '{owner}';
   const repoIsPlaceholder = repo === '{repo}';
 
   // A mix of placeholder and literal (repos/{owner}/foo/... or repos/foo/
-  // {repo}/...) is refused: gh fills the placeholder from --repo/cwd, so the
-  // endpoint's actual target (e.g. repos/owner-of-cwd/foo) is a repo we never
-  // resolve or check -- the cwd/--repo check below would cover a different
-  // repo and let a non-allow-listed one through. Only all-placeholder or
-  // all-literal shapes are supported.
-  if (ownerIsPlaceholder !== repoIsPlaceholder) {
+  // {repo}/...), and templates in the wrong slot (e.g. {repo} as owner), are
+  // refused: gh fills templates from --repo/cwd, so the endpoint's actual
+  // target is a repo we never resolve or check. Only the exact
+  // {owner}/{repo} pair or all-literal shapes are supported.
+  const hasTemplate = (value) => /[{}]|%7[bBdD]/i.test(value);
+  if ((hasTemplate(owner) && !ownerIsPlaceholder) ||
+      (hasTemplate(repo) && !repoIsPlaceholder) ||
+      ownerIsPlaceholder !== repoIsPlaceholder) {
     return { allowed: false, repos: [], reason: 'repo-unresolved' };
   }
 
