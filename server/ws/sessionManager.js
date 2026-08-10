@@ -218,7 +218,13 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox
     settled: false, // reached the first idle gap (TUI init burst over) -- the send_input settle gate
     settleWaiters: [], // resolvers waiting on `settled` (see waitUntilSettled)
     lastOutputAt: null, // epoch ms of the most recent output chunk; null until the first one (activity timestamp, Issue #16)
-    autoYes: false,
+    // Workers (groupRole in 'workerX' form) always run inside the sandbox, so
+    // start them with Auto-Y enabled. The orchestrator (groupRole ===
+    // 'orchestrator') and standalone sessions (groupRole === null) keep the
+    // historical off default. groupRole is already validated server-side
+    // (WORKER_ROLE_RE in groupManager), so "anything but the fixed
+    // 'orchestrator' string is a worker" is a safe check here.
+    autoYes: !!groupRole && groupRole !== 'orchestrator',
     autoYesLog: [],
     autoYesPending: null,
     autoYesBuf: '',
@@ -1010,32 +1016,10 @@ export function gracefulShutdown() {
   });
 }
 
-let savedSessionsCache = null;
-
-export function removeSavedSession(index) {
-  const list = loadSavedSessions();
-  if (index < 0 || index >= list.length) return false;
-  list.splice(index, 1);
-  return true;
-}
-
-export function loadSavedSessions() {
-  if (savedSessionsCache !== null) return savedSessionsCache;
-  try {
-    const data = readFileSync(SAVED_SESSIONS_PATH, 'utf-8');
-    unlinkSync(SAVED_SESSIONS_PATH);
-    savedSessionsCache = JSON.parse(data);
-    return savedSessionsCache;
-  } catch {
-    savedSessionsCache = [];
-    return [];
-  }
-}
-
 // Read .saved-sessions.json WITHOUT unlinking it or touching the cache --
 // used by groupManager.restoreGroups() to match each restored group member's
 // resume info (app/cwd/claudeSessionId/sandbox) while the file is still
-// intact for the client's own saved-session listing.
+// intact.
 export function peekSavedSessions() {
   try {
     return JSON.parse(readFileSync(SAVED_SESSIONS_PATH, 'utf-8'));
