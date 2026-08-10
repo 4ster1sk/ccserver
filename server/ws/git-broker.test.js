@@ -121,6 +121,30 @@ test('gh-exec: gh api is refused before ever touching the real gh binary', async
   assert.equal(r.reason, 'subcommand-not-allowed');
 });
 
+test('gh-exec: an allowed literal Actions GET executes through the fake gh', async () => {
+  const r = await request(broker.sockPath, { op: 'gh-exec', argv: ['api', 'repos/testowner/testrepo/actions/runs'] });
+  assert.equal(r.ok, true);
+  assert.equal(Buffer.from(r.stdout, 'base64').toString(), 'GH_ARGS:api repos/testowner/testrepo/actions/runs\n');
+});
+
+test('gh-exec: a placeholder gh api Actions endpoint is refused at the broker (would target a repo the allow-list never saw)', async () => {
+  const r = await request(broker.sockPath, { op: 'gh-exec', argv: ['api', 'repos/{owner}/{repo}/actions/runs'] });
+  assert.equal(r.ok, false);
+  assert.equal(r.reason, 'repo-unresolved');
+});
+
+test('gh-exec: a dot-segment-smuggled gh api endpoint is refused (encoded-slash .. traversal)', async () => {
+  const r = await request(broker.sockPath, { op: 'gh-exec', argv: ['api', 'repos/testowner/testrepo/actions/runs/..%2f..%2fissues'] });
+  assert.equal(r.ok, false);
+  assert.equal(r.reason, 'subcommand-not-allowed');
+});
+
+test('gh-exec: a --hostname gh api invocation is refused', async () => {
+  const r = await request(broker.sockPath, { op: 'gh-exec', argv: ['api', 'repos/testowner/testrepo/actions/runs', '--hostname', 'ghe.example.com'] });
+  assert.equal(r.ok, false);
+  assert.equal(r.reason, 'ambiguous-flags');
+});
+
 test('gh-exec: explicit --repo pointing outside the allow-list is denied', async () => {
   const r = await request(broker.sockPath, { op: 'gh-exec', argv: ['pr', 'view', '1', '--repo', 'someoneelse/unrelated'] });
   assert.equal(r.ok, false);

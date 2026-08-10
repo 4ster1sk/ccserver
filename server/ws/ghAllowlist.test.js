@@ -82,6 +82,12 @@ describe('classifyGhInvocation: --repo/-R resolution', () => {
     assert.equal(r.allowed, false);
     assert.equal(r.reason, 'repo-unresolved');
   });
+
+  test('SECURITY: repeated --repo flags surface every value (pflag keeps only the last --repo, so checking just the first would check the wrong repo)', () => {
+    const r = classifyGhInvocation(['pr', 'list', '--repo', 'testowner/testrepo', '--repo', 'someoneelse/unrelated'], cwdOrigin);
+    assert.equal(r.allowed, true);
+    assert.deepEqual([...r.repos].sort(), ['github.com/someoneelse/unrelated', REPO].sort());
+  });
 });
 
 describe('classifyGhInvocation: bundled short-flag safety (security)', () => {
@@ -216,9 +222,29 @@ describe('classifyGhInvocation: gh api (Actions read-only)', () => {
     assert.deepEqual(r, { allowed: true, repos: [REPO], reason: null });
   });
 
-  test('Actions GET with {owner}/{repo} placeholders resolves from --repo', () => {
+  test('SECURITY: {owner}/{repo} placeholders are refused entirely, even with --repo', () => {
+    // gh fills placeholders from its own base-repo resolution (--repo /
+    // GH_REPO / cwd origin) and sends the request to the host's default API
+    // host, so a placeholder endpoint can target a github.com repo we never
+    // checked (e.g. a cwd whose origin is a GHES remote). Only literal
+    // owner/repo endpoints are supported.
     const r = classifyGhInvocation(['api', 'repos/{owner}/{repo}/actions/workflows', '--repo', 'testowner/testrepo'], cwdOrigin);
-    assert.deepEqual(r, { allowed: true, repos: [REPO], reason: null });
+    assert.equal(r.allowed, false);
+    assert.equal(r.reason, 'repo-unresolved');
+  });
+
+  test('SECURITY: placeholder endpoint is refused even when cwd origin would make it look consistent', () => {
+    // cwd fallback can't be used to legitimize a placeholder: gh would fill it
+    // from its own resolution, not the one the broker does.
+    const r = classifyGhInvocation(['api', 'repos/{owner}/{repo}/actions/runs'], cwdOrigin);
+    assert.equal(r.allowed, false);
+    assert.equal(r.reason, 'repo-unresolved');
+  });
+
+  test('SECURITY: placeholder endpoint with a HOST/OWNER/REPO --repo is refused (would GET github.com/o/r while ghes.example.com/o/r is checked)', () => {
+    const r = classifyGhInvocation(['api', 'repos/{owner}/{repo}/actions/runs', '--repo', 'ghes.example.com/testowner/testrepo'], cwdOrigin);
+    assert.equal(r.allowed, false);
+    assert.equal(r.reason, 'repo-unresolved');
   });
 
   test('leading slash on the endpoint is accepted', () => {
@@ -307,15 +333,55 @@ describe('classifyGhInvocation: gh api (Actions read-only)', () => {
     }
   });
 
-  test('SECURITY: dot-segment traversal in an Actions endpoint is refused', () => {
+  test('SECURITY: dot-segment traversal in an Actions endpoint is refused (raw, percent-encoded, and encoded-slash-smuggled)', () => {
     for (const endpoint of [
       'repos/testowner/testrepo/actions/runs/../../someoneelse/issues',
       'repos/testowner/testrepo/actions/runs/%2e%2e/someoneelse/issues',
+      'repos/testowner/testrepo/actions/runs/%2E%2E/someoneelse/issues',
+      'repos/testowner/testrepo/actions/runs/%2e./someoneelse/issues',
+      'repos/testowner/testrepo/actions/runs/./runs',
+      'repos/testowner/testrepo/actions/runs/%2e%2e%2fsomeoneelse/issues',
+      'repos/testowner/testrepo/actions/runs/..%2f..%2fissues',
+      'repos/%2e%2e/testrepo/actions/runs',
+      'repos/testowner/..%2f..%2fsomeoneelse/actions/runs',
     ]) {
       const r = classifyGhInvocation(['api', endpoint], cwdOrigin);
       assert.equal(r.allowed, false, endpoint);
       assert.equal(r.reason, 'subcommand-not-allowed', endpoint);
     }
+  });
+
+  test('SECURITY: double-encoded %252e%252e stays allowed but is harmless (the server decodes once and sees a literal %2e%2e segment -> 404, and the checked repo string can never match an allow-list entry)', () => {
+    const r = classifyGhInvocation(['api', 'repos/testowner/testrepo/actions/runs/%252e%252e/someoneelse/issues'], cwdOrigin);
+    assert.deepEqual(r, { allowed: true, repos: [REPO], reason: null });
+  });
+
+  test('a query string on a literal Actions endpoint is fine (the dot-segment check ignores the query)', () => {
+    const r = classifyGhInvocation(['api', 'repos/testowner/testrepo/actions/runs?per_page=1&head=feature%2Ffix'], cwdOrigin);
+    assert.deepEqual(r, { allowed: true, repos: [REPO], reason: null });
+  });
+
+  test('SECURITY: --hostname is refused (would redirect the request off api.github.com, voiding the repo/path check)', () => {
+    for (const argv of [
+      ['api', 'repos/testowner/testrepo/actions/runs', '--hostname', 'ghe.example.com'],
+      ['api', 'repos/testowner/testrepo/actions/runs', '--hostname=github.com'],
+    ]) {
+      const r = classifyGhInvocation(argv, cwdOrigin);
+      assert.equal(r.allowed, false, argv.join(' '));
+      assert.equal(r.reason, 'ambiguous-flags', argv.join(' '));
+    }
+  });
+
+  test('SECURITY: literal endpoint plus a HOST/OWNER/REPO --repo surfaces both repos (broker denies if either is not allow-listed)', () => {
+    const r = classifyGhInvocation(['api', 'repos/testowner/testrepo/actions/runs', '--repo', 'ghes.example.com/testowner/testrepo'], cwdOrigin);
+    assert.equal(r.allowed, true);
+    assert.deepEqual([...r.repos].sort(), ['github.com/testowner/testrepo', 'ghes.example.com/testowner/testrepo'].sort());
+  });
+
+  test('SECURITY: repeated --repo flags on gh api surface every value', () => {
+    const r = classifyGhInvocation(['api', 'repos/testowner/testrepo/actions/runs', '--repo', 'testowner/testrepo', '--repo', 'someoneelse/unrelated'], cwdOrigin);
+    assert.equal(r.allowed, true);
+    assert.deepEqual([...r.repos].sort(), ['github.com/someoneelse/unrelated', REPO].sort());
   });
 
   test('SECURITY: endpoint repo and a conflicting --repo are both surfaced as required references', () => {
@@ -361,6 +427,12 @@ describe('classifyGhInvocation: workflow run/enable/disable require explicit rep
     const r = classifyGhInvocation(['workflow', 'run', 'deploy.yml', '--repo', 'someoneelse/unrelated'], cwdOrigin);
     assert.equal(r.allowed, true);
     assert.deepEqual(r.repos, ['github.com/someoneelse/unrelated']);
+  });
+
+  test('SECURITY: repeated --repo flags surface EVERY value (pflag keeps only the last; checking only the first would bypass the explicit-repo gate)', () => {
+    const r = classifyGhInvocation(['workflow', 'run', 'deploy.yml', '--repo', 'testowner/testrepo', '--repo', 'someoneelse/unrelated'], cwdOrigin);
+    assert.equal(r.allowed, true);
+    assert.deepEqual([...r.repos].sort(), ['github.com/someoneelse/unrelated', REPO].sort());
   });
 
   test('regression: workflow view/list still fall back to cwd origin (no explicit-repo gate)', () => {
