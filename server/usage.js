@@ -7,13 +7,15 @@
 //
 // The capture runs in a *minimal* filesystem sandbox when bwrap is available
 // (only Claude's own config is exposed — no project, no docker), falling back to
-// launching claude directly otherwise. Viewing /usage makes no API call, so this
-// does not itself consume plan usage.
+// launching claude directly otherwise -- unless sandbox.config.json sets
+// "forceSandbox": true, in which case the capture fails rather than run
+// unsandboxed. Viewing /usage makes no API call, so this does not itself
+// consume plan usage.
 import * as pty from 'node-pty';
 import { homedir } from 'node:os';
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { buildMinimalSandboxSpawn, resolveClaude, sandboxAvailable } from './ws/sandbox.js';
+import { buildMinimalSandboxSpawn, resolveClaude, sandboxAvailable, loadSandboxConfig } from './ws/sandbox.js';
 
 const CACHE_TTL_MS = 60 * 1000;       // serve cache without re-capturing
 const CAPTURE_TIMEOUT_MS = 15 * 1000; // hard cap on a single capture
@@ -172,8 +174,16 @@ function capture() {
         spawnCwd = USAGE_CWD;
         sandboxed = true;
       } catch {
-        // fall back to launching claude directly
+        // bwrap launch failed; fall through to the forceSandbox / direct path.
       }
+    }
+
+    // forceSandbox (sandbox.config.json) forbids launching the agent outside
+    // the sandbox, so the direct-launch fallback below is not allowed -- fail
+    // the capture with a clear error instead of running claude unsandboxed.
+    if (!sandboxed && loadSandboxConfig().forceSandbox) {
+      resolve({ error: 'Cannot read usage: "forceSandbox": true but the sandbox is unavailable (bwrap missing / Windows)' });
+      return;
     }
 
     // Drop any forwarded ssh-agent env; irrelevant here and can confuse tools.

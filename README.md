@@ -190,6 +190,7 @@ cp server/sandbox.config.example.json server/sandbox.config.json
   "gpg": true,
   "sshAgent": false,
   "gitBroker": true,
+  "forceSandbox": false,
   "defaultApp": "claude",
   "binds": [],
   "env": {}
@@ -202,6 +203,7 @@ cp server/sandbox.config.example.json server/sandbox.config.json
 | `gpg` | `false` | コミット署名用に gpg-agent を転送 (上記参照)。UI で上書き可。 |
 | `sshAgent` | `false` | ssh-agent を転送 (上記参照)。UI で上書き可。 |
 | `gitBroker` | `true` | git/gh の認証情報スコープ制限 (上記参照)。 |
+| `forceSandbox` | `false` | `true` でサンドボックス外の起動を全面禁止。エージェント・シェルを問わず全セッションがサンドボックス強制になり、UI のサンドボックス切替は無効化されます。bwrap が無い環境 (または Windows) では起動をエラーで拒否します (`/usage` 取得の直接起動フォールバックも同様に禁止)。ホストに bwrap (bubblewrap) のインストールが必須です。 |
 | `defaultApp` | `"claude"` | 新規セッションの既定エージェント (`"claude"` か `"opencode"`)。UI で一度明示的に選んだ後はブラウザの記憶が優先され、この値は初回表示時の見た目とサーバー側フォールバック (予約プロンプトの自動再開など、クライアントが `app` を指定しない経路) にのみ使われます。 |
 | `binds` | `[]` | 追加で見せるホストパス。各要素 `{ src, mode?, dest? }`。`mode` は `ro` (既定) か `rw`。存在しないパスはスキップ。`~` はホームに展開。`~/.ssh` と `~/.config/gh` は `gitBroker` の設定に関わらず常にブロックされます。 |
 | `env` | `{}` | サンドボックス内の追加環境変数 (適用順は最後 = 既定値を上書き)。例: `sshAgent: true` のときに `SSH_AUTH_SOCK` を明示指定して自動検出を上書き。 |

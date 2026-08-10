@@ -138,12 +138,16 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox
 
   // Optionally wrap the target in a filesystem sandbox (Linux only) so it can
   // only see the project directory plus configured paths, with an isolated
-  // rootless docker inside. See sandbox.js.
+  // rootless docker inside. See sandbox.js. forceSandbox (sandbox.config.json)
+  // overrides the client's per-launch choice: every session -- agents and
+  // shells alike -- must run sandboxed, and a launch is refused when the
+  // sandbox can't be built instead of falling back to a direct spawn.
+  const forceSandbox = loadSandboxConfig().forceSandbox;
   let useSandbox = false;
   let sandboxStateDir = null;
   let sandboxGitBrokerProc = null;
   let sandboxGitBrokerDir = null;
-  if (sandbox && process.platform !== 'win32' && sandboxAvailable()) {
+  if ((forceSandbox || sandbox) && process.platform !== 'win32' && sandboxAvailable()) {
     try {
       const spawn = buildSandboxSpawn({ cwd, targetCommand: [command, ...args], app: sessionApp, sandboxOpts, mcpSocketPath });
       command = spawn.command;
@@ -155,6 +159,15 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox
     } catch (err) {
       return { sessionId: id, session: null, error: `Failed to build sandbox: ${err.message}` };
     }
+  } else if (forceSandbox) {
+    const reason = process.platform === 'win32'
+      ? 'the sandbox is Linux-only'
+      : 'bwrap is not available on this host';
+    return {
+      sessionId: id,
+      session: null,
+      error: `Cannot launch: sandbox.config.json sets "forceSandbox": true, but ${reason}. Install bwrap (bubblewrap) or disable forceSandbox.`,
+    };
   }
 
   let ptyProcess;
