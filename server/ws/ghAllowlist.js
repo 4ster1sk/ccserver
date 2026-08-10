@@ -9,8 +9,11 @@
 // resolving which repo(s) they target and checking every one of them
 // against the same allow-list already computed for git (gitAllowlist.js).
 // Anything not explicitly named in ALLOWED is refused -- most importantly:
-//   - `gh api` (arbitrary GitHub API endpoint, not repo-scoped at all --
-//     could read/write far beyond any single repo)
+//   - `gh api` (any GitHub API endpoint, not repo-scoped at all -- could
+//     read/write far beyond any single repo). The one exception: a GET
+//     against repos/{owner}/{repo}/actions/... is repo-scoped and read-only,
+//     so it's allowed (see classifyGhApi below); every other `gh api` call
+//     is still refused.
 //   - `gh auth` / `gh secret` / `gh variable` / `gh ssh-key` / `gh gpg-key`
 //     (credential/secret management, not a repo operation)
 //   - `gh repo clone` / `fork` / `create` / `delete` / `rename` (the target
@@ -59,10 +62,27 @@ const ALLOWED = {
   issue: new Set(['create', 'view', 'list', 'edit', 'comment', 'close', 'reopen', 'status']),
   release: new Set(['create', 'view', 'list', 'edit', 'delete', 'upload', 'download', 'delete-asset']),
   workflow: new Set(['run', 'view', 'list', 'enable', 'disable']),
+  run: new Set(['list', 'view', 'watch']),
   repo: new Set(['view']),
 };
 
 const URL_RE = /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//;
+
+// The only `gh api` endpoint shape allowed: a GET on repos/{owner}/{repo}/
+// actions/... . The leading "/" is optional; owner/repo are either the
+// "{owner}"/"{repo}" placeholders gh fills from --repo/cwd, or literal
+// owner/repo strings. Anything under actions/ is required (a bare
+// "repos/o/r/actions" call has no real-world use, so it's not accepted).
+// graphql, /user, /orgs/..., non-actions repos/... endpoints, and absolute
+// URLs (https://api.github.com/...) all fail this regex and stay refused.
+const API_ACTIONS_PATH_RE = /^\/?repos\/([^/]+)\/([^/]+)\/actions\/.+$/;
+
+// workflow run/enable/disable trigger/write operations (kick off CI, toggle
+// a workflow's on/off state), so unlike every other subcommand they must NOT
+// silently fall back to the cwd origin -- an explicit --repo/-R or a URL
+// positional in argv is required. Read-only subcommands (pr/issue/release/
+// repo view, run/workflow view+list, gh api Actions) keep the cwd fallback.
+const REQUIRE_EXPLICIT_REPO = new Set(['workflow:run', 'workflow:enable', 'workflow:disable']);
 
 // See pitfall (1) above. Only a bare "-R" or the attached "-Rvalue" form are
 // unambiguous; any other multi-letter short-dash token (length > 2, not
@@ -118,6 +138,74 @@ function normalizeOwnerRepoOrUrl(raw) {
   return null;
 }
 
+// `gh api`'s data flags (-f/--raw-field, -F/--field, --input) silently turn
+// the default HTTP method into POST when no method is given, and the bundled
+// short-flag hazard (-fX bundling -f with -X) can't be safely distinguished
+// here -- so for `api` specifically, short flags are refused entirely (only
+// long-form flags are accepted) and the data flags are always refused (v1:
+// no GET-query-parameter via -f/--field yet -- could be relaxed later by
+// allowing them when --method=GET is explicit). If --method is present its
+// value (either form) must be GET (case-insensitive); omitting --method is
+// fine since the data flags are already banned, so gh's default (GET) can't
+// silently become POST. Returns true when the invocation must be refused.
+function apiRejectsFlags(argv) {
+  return argv.some((a, i) => {
+    if (a === '-' || !a.startsWith('-')) return false;
+    if (!a.startsWith('--')) return true; // any short-flag token is refused
+    if (a === '--raw-field' || a.startsWith('--raw-field=') ||
+        a === '--field' || a.startsWith('--field=') ||
+        a === '--input' || a.startsWith('--input=')) return true;
+    if (a === '--method') {
+      const v = argv[i + 1];
+      return !v || v.toUpperCase() !== 'GET';
+    }
+    if (a.startsWith('--method=')) return a.slice('--method='.length).toUpperCase() !== 'GET';
+    return false;
+  });
+}
+
+// The dedicated `gh api` path: only GETs on repos/{owner}/{repo}/actions/...
+// (see API_ACTIONS_PATH_RE) are allowed. The endpoint's own owner/repo, when
+// literal, is collected as its own required repo reference (pitfall 2: an
+// endpoint naming one repo plus a --repo flag naming another must have both
+// checked by the caller). When {owner}/{repo} placeholders are used, gh
+// fills them from the repo flag / cwd, so the explicit flag (or the cwd
+// fallback below) is the repo the endpoint actually targets.
+function classifyGhApi(argv, resolveCwdOrigin) {
+  const endpoint = argv[1];
+  if (!endpoint || !API_ACTIONS_PATH_RE.test(endpoint)) {
+    return { allowed: false, repos: [], reason: 'subcommand-not-allowed' };
+  }
+  if (apiRejectsFlags(argv)) {
+    return { allowed: false, repos: [], reason: 'ambiguous-flags' };
+  }
+
+  const [, owner, repo] = API_ACTIONS_PATH_RE.exec(endpoint);
+  const ownerIsPlaceholder = owner === '{owner}';
+  const repoIsPlaceholder = repo === '{repo}';
+
+  const repoFlagValue = parseRepoFlag(argv);
+  const explicit = repoFlagValue ? normalizeOwnerRepoOrUrl(repoFlagValue) : null;
+  if (repoFlagValue && !explicit) return { allowed: false, repos: [], reason: 'repo-unresolved' };
+
+  const repos = new Set();
+  if (explicit) repos.add(explicit);
+
+  if (!ownerIsPlaceholder && !repoIsPlaceholder) {
+    const literal = normalizeGitUrl(`https://github.com/${owner}/${repo}`);
+    if (!literal) return { allowed: false, repos: [], reason: 'repo-unresolved' };
+    repos.add(literal);
+  }
+
+  if (repos.size === 0) {
+    const fallback = normalizeGitUrl(resolveCwdOrigin() || '');
+    if (!fallback) return { allowed: false, repos: [], reason: 'repo-unresolved' };
+    repos.add(fallback);
+  }
+
+  return { allowed: true, repos: [...repos], reason: null };
+}
+
 // Classify a gh invocation. `resolveCwdOrigin` is a callback returning the
 // session cwd's raw origin remote URL (or null) -- called lazily, only when
 // no repo reference is found anywhere in argv, since it shells out to git.
@@ -132,10 +220,18 @@ function normalizeOwnerRepoOrUrl(raw) {
 //     allow-listed (usually one entry; can be more if e.g. both --repo and a
 //     URL positional are present).
 //   - reason: set when allowed is false ('subcommand-not-allowed',
-//     'ambiguous-flags', or 'repo-unresolved').
+//     'ambiguous-flags', 'repo-unresolved', or 'repo-must-be-explicit').
 export function classifyGhInvocation(argv, resolveCwdOrigin) {
   const top = argv[0];
   const sub = argv[1];
+
+  // `gh api` has no subcommand in the safelist sense -- its first positional
+  // is the endpoint. Route it to its own dedicated (Actions-read-only-only)
+  // classifier before the generic subcommand check below.
+  if (top === 'api') {
+    return classifyGhApi(argv, resolveCwdOrigin);
+  }
+
   if (!top || !ALLOWED[top] || !sub || !ALLOWED[top].has(sub)) {
     return { allowed: false, repos: [], reason: 'subcommand-not-allowed' };
   }
@@ -168,6 +264,9 @@ export function classifyGhInvocation(argv, resolveCwdOrigin) {
   for (const r of bareRepoRefs) repos.add(r);
 
   if (repos.size === 0) {
+    if (REQUIRE_EXPLICIT_REPO.has(`${top}:${sub}`)) {
+      return { allowed: false, repos: [], reason: 'repo-must-be-explicit' };
+    }
     const fallback = normalizeGitUrl(resolveCwdOrigin() || '');
     if (!fallback) return { allowed: false, repos: [], reason: 'repo-unresolved' };
     repos.add(fallback);

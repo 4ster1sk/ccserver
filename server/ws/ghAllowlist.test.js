@@ -186,3 +186,145 @@ describe('classifyGhInvocation: no repo context at all', () => {
     assert.equal(r.reason, 'repo-unresolved');
   });
 });
+
+describe('classifyGhInvocation: gh run (read-only)', () => {
+  test('run list falls back to cwd origin', () => {
+    const r = classifyGhInvocation(['run', 'list'], cwdOrigin);
+    assert.deepEqual(r, { allowed: true, repos: [REPO], reason: null });
+  });
+
+  test('run view <run-id> falls back to cwd origin', () => {
+    const r = classifyGhInvocation(['run', 'view', '123456789'], cwdOrigin);
+    assert.deepEqual(r, { allowed: true, repos: [REPO], reason: null });
+  });
+
+  test('run watch <run-id> falls back to cwd origin', () => {
+    const r = classifyGhInvocation(['run', 'watch', '123456789'], cwdOrigin);
+    assert.deepEqual(r, { allowed: true, repos: [REPO], reason: null });
+  });
+
+  test('run rerun (trigger/write) is refused', () => {
+    const r = classifyGhInvocation(['run', 'rerun', '123456789'], cwdOrigin);
+    assert.equal(r.allowed, false);
+    assert.equal(r.reason, 'subcommand-not-allowed');
+  });
+});
+
+describe('classifyGhInvocation: gh api (Actions read-only)', () => {
+  test('Actions GET endpoint resolves repo from cwd origin', () => {
+    const r = classifyGhInvocation(['api', 'repos/testowner/testrepo/actions/runs'], cwdOrigin);
+    assert.deepEqual(r, { allowed: true, repos: [REPO], reason: null });
+  });
+
+  test('Actions GET with {owner}/{repo} placeholders resolves from --repo', () => {
+    const r = classifyGhInvocation(['api', 'repos/{owner}/{repo}/actions/workflows', '--repo', 'testowner/testrepo'], cwdOrigin);
+    assert.deepEqual(r, { allowed: true, repos: [REPO], reason: null });
+  });
+
+  test('leading slash on the endpoint is accepted', () => {
+    const r = classifyGhInvocation(['api', '/repos/testowner/testrepo/actions/runs/123/jobs'], cwdOrigin);
+    assert.deepEqual(r, { allowed: true, repos: [REPO], reason: null });
+  });
+
+  test('explicit --method=GET is still allowed', () => {
+    const r = classifyGhInvocation(['api', 'repos/testowner/testrepo/actions/runs', '--method=GET'], cwdOrigin);
+    assert.deepEqual(r, { allowed: true, repos: [REPO], reason: null });
+  });
+
+  test('space-separated --method GET is allowed', () => {
+    const r = classifyGhInvocation(['api', 'repos/testowner/testrepo/actions/runs', '--method', 'GET'], cwdOrigin);
+    assert.deepEqual(r, { allowed: true, repos: [REPO], reason: null });
+  });
+
+  test('short-flag data flag -f is refused', () => {
+    const r = classifyGhInvocation(['api', 'repos/testowner/testrepo/actions/runs', '-f', 'branch=main'], cwdOrigin);
+    assert.equal(r.allowed, false);
+    assert.equal(r.reason, 'ambiguous-flags');
+  });
+
+  test('--raw-field is refused (could silently flip the default method to POST)', () => {
+    const r = classifyGhInvocation(['api', 'repos/testowner/testrepo/actions/runs', '--raw-field', 'branch=main'], cwdOrigin);
+    assert.equal(r.allowed, false);
+    assert.equal(r.reason, 'ambiguous-flags');
+  });
+
+  test('--method POST is refused (read-only only)', () => {
+    const r = classifyGhInvocation(['api', 'repos/testowner/testrepo/actions/runs', '--method', 'POST'], cwdOrigin);
+    assert.equal(r.allowed, false);
+    assert.equal(r.reason, 'ambiguous-flags');
+  });
+
+  test('bundled short flag -iX is refused (short flags are fully banned for api)', () => {
+    const r = classifyGhInvocation(['api', 'repos/testowner/testrepo/actions/runs', '-iX', 'POST'], cwdOrigin);
+    assert.equal(r.allowed, false);
+    assert.equal(r.reason, 'ambiguous-flags');
+  });
+
+  test('graphql endpoint is refused', () => {
+    const r = classifyGhInvocation(['api', 'graphql', '-f', 'query=...'], cwdOrigin);
+    assert.equal(r.allowed, false);
+    assert.equal(r.reason, 'subcommand-not-allowed');
+  });
+
+  test('non-actions endpoint (/user) is refused', () => {
+    const r = classifyGhInvocation(['api', '/user'], cwdOrigin);
+    assert.equal(r.allowed, false);
+    assert.equal(r.reason, 'subcommand-not-allowed');
+  });
+
+  test('non-actions repo endpoint is refused', () => {
+    const r = classifyGhInvocation(['api', 'repos/testowner/testrepo/issues'], cwdOrigin);
+    assert.equal(r.allowed, false);
+    assert.equal(r.reason, 'subcommand-not-allowed');
+  });
+
+  test('SECURITY: endpoint repo and a conflicting --repo are both surfaced as required references', () => {
+    // Same pitfall-2 pattern as pr merge <url> --repo x: gh would call the
+    // endpoint's repo regardless of --repo, so the broker must be forced to
+    // check BOTH (it denies if either is not allow-listed).
+    const r = classifyGhInvocation(['api', 'repos/testowner/testrepo/actions/runs', '--repo', 'someoneelse/unrelated'], cwdOrigin);
+    assert.equal(r.allowed, true);
+    assert.deepEqual([...r.repos].sort(), ['github.com/someoneelse/unrelated', REPO].sort());
+  });
+});
+
+describe('classifyGhInvocation: workflow run/enable/disable require explicit repo', () => {
+  test('workflow run without --repo/-R is refused (cwd fallback disabled)', () => {
+    const r = classifyGhInvocation(['workflow', 'run', 'deploy.yml'], cwdOrigin);
+    assert.equal(r.allowed, false);
+    assert.equal(r.reason, 'repo-must-be-explicit');
+  });
+
+  test('workflow enable without --repo/-R is refused', () => {
+    const r = classifyGhInvocation(['workflow', 'enable', '123'], cwdOrigin);
+    assert.equal(r.allowed, false);
+    assert.equal(r.reason, 'repo-must-be-explicit');
+  });
+
+  test('workflow disable without --repo/-R is refused', () => {
+    const r = classifyGhInvocation(['workflow', 'disable', '123'], cwdOrigin);
+    assert.equal(r.allowed, false);
+    assert.equal(r.reason, 'repo-must-be-explicit');
+  });
+
+  test('workflow run with --repo OWNER/REPO is allowed', () => {
+    const r = classifyGhInvocation(['workflow', 'run', 'deploy.yml', '--repo', 'testowner/testrepo'], cwdOrigin);
+    assert.deepEqual(r, { allowed: true, repos: [REPO], reason: null });
+  });
+
+  test('workflow run with attached -R form is allowed', () => {
+    const r = classifyGhInvocation(['workflow', 'run', 'deploy.yml', '-Rtestowner/testrepo'], cwdOrigin);
+    assert.deepEqual(r, { allowed: true, repos: [REPO], reason: null });
+  });
+
+  test('SECURITY: workflow run --repo pointing at an unrelated repo surfaces that repo (broker denies it)', () => {
+    const r = classifyGhInvocation(['workflow', 'run', 'deploy.yml', '--repo', 'someoneelse/unrelated'], cwdOrigin);
+    assert.equal(r.allowed, true);
+    assert.deepEqual(r.repos, ['github.com/someoneelse/unrelated']);
+  });
+
+  test('regression: workflow view/list still fall back to cwd origin (no explicit-repo gate)', () => {
+    assert.deepEqual(classifyGhInvocation(['workflow', 'view', '1'], cwdOrigin), { allowed: true, repos: [REPO], reason: null });
+    assert.deepEqual(classifyGhInvocation(['workflow', 'list'], cwdOrigin), { allowed: true, repos: [REPO], reason: null });
+  });
+});

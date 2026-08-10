@@ -27,7 +27,7 @@
 //   executed, and only for repos already in the git allow-list.
 //     -> {"op":"gh-exec","argv":["pr","view","123"],"stdin":"<base64>"}
 //     <- {"ok":true,"exitCode":0,"stdout":"<base64>","stderr":"<base64>"}
-//     <- {"ok":false,"reason":"subcommand-not-allowed"|"ambiguous-flags"|"repo-unresolved"|"not-allowlisted"|"bad-request"|"exec-failed"|"timeout"}
+//     <- {"ok":false,"reason":"subcommand-not-allowed"|"ambiguous-flags"|"repo-unresolved"|"repo-must-be-explicit"|"not-allowlisted"|"bad-request"|"exec-failed"|"timeout"}
 //
 // SSH allow/deny does NOT go through this socket — the allow-list isn't
 // secret, so it's ro-bound into the sandbox as a plain file and checked
