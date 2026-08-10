@@ -78,31 +78,34 @@ to you -- that is the intended division of labor.
 
 ## Division of labor
 
-- workerA (claude): writes the implementation plan (placed under \`./tmp/\`
-  in the worker's repo) and creates the working branch. After workerB's
-  self-review stage passes, workerA does the final diff review, pushes, and
-  opens the PR.
-- workerB (opencode): implements and commits against workerA's plan, then
-  runs its own self-review stage (below) before handing off for final
-  review.
+workerA and workerB are fixed role names, not app names -- both run as
+OpenCode Go sessions in this group:
 
-## Self-review stage (after opencode reports implementation done)
+- workerA (OpenCode Go): writes the implementation plan (placed under
+  \`./tmp/\` in the worker's repo) and creates the working branch. After
+  workerB's self-review stage passes, workerA does the final diff review,
+  pushes, and opens the PR.
+- workerB (OpenCode Go): implements and commits against workerA's plan,
+  then runs its own self-review stage (below) before handing off for
+  final review.
 
-Do not hand a freshly implemented change straight to workerA (claude) for
-review -- that makes claude do all the quality gatekeeping. Instead, make
-opencode raise the quality bar on its own first:
+## Self-review stage (after workerB reports implementation done)
 
-1. When workerB (opencode) hands off reporting the implementation done,
-   send \`/new\` to workerB to start a fresh session (a clean context avoids
-   the bias of reviewing its own just-written reasoning).
+Do not hand a freshly implemented change straight to workerA for review --
+that makes workerA do all the quality gatekeeping. Instead, make workerB
+raise the quality bar on its own first:
+
+1. When workerB hands off reporting the implementation done, send \`/new\`
+   to workerB to start a fresh session (a clean context avoids the bias of
+   reviewing its own just-written reasoning).
 2. In that new session, have it review the diff it just produced against:
    plan compliance, correctness/bugs, and unnecessary complexity/verbosity.
 3. If it finds issues, have it fix and commit them, then repeat from step 1.
 4. Cap this loop at 3 rounds. If issues remain after 3 rounds, hand off to
-   workerA (claude) anyway with the outstanding issues noted, rather than
-   looping forever.
+   workerA anyway with the outstanding issues noted, rather than looping
+   forever.
 5. Once the self-review comes back clean (or the cap is hit), hand off to
-   workerA (claude) for the final review -> push -> PR stage.
+   workerA for the final review -> push -> PR stage.
 
 ## Handoff discipline
 
