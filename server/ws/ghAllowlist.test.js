@@ -278,6 +278,21 @@ describe('classifyGhInvocation: gh api (Actions read-only)', () => {
     assert.equal(r.reason, 'subcommand-not-allowed');
   });
 
+  test('SECURITY: mixed placeholder/literal endpoint is refused (gh fills the placeholder from --repo/cwd, targeting a repo we never check)', () => {
+    // repos/{owner}/unrelated/... with cwd testowner/testrepo would make gh
+    // GET repos/testowner/unrelated/actions/runs while the cwd fallback only
+    // checked testowner/testrepo -- a non-allow-listed repo would slip through.
+    const r = classifyGhInvocation(['api', 'repos/{owner}/unrelated/actions/runs'], cwdOrigin);
+    assert.equal(r.allowed, false);
+    assert.equal(r.reason, 'repo-unresolved');
+  });
+
+  test('SECURITY: mixed placeholder/literal with --repo is refused the same way', () => {
+    const r = classifyGhInvocation(['api', 'repos/testowner/{repo}/actions/runs', '--repo', 'testowner/testrepo'], cwdOrigin);
+    assert.equal(r.allowed, false);
+    assert.equal(r.reason, 'repo-unresolved');
+  });
+
   test('SECURITY: endpoint repo and a conflicting --repo are both surfaced as required references', () => {
     // Same pitfall-2 pattern as pr merge <url> --repo x: gh would call the
     // endpoint's repo regardless of --repo, so the broker must be forced to

@@ -184,6 +184,16 @@ function classifyGhApi(argv, resolveCwdOrigin) {
   const ownerIsPlaceholder = owner === '{owner}';
   const repoIsPlaceholder = repo === '{repo}';
 
+  // A mix of placeholder and literal (repos/{owner}/foo/... or repos/foo/
+  // {repo}/...) is refused: gh fills the placeholder from --repo/cwd, so the
+  // endpoint's actual target (e.g. repos/owner-of-cwd/foo) is a repo we never
+  // resolve or check -- the cwd/--repo check below would cover a different
+  // repo and let a non-allow-listed one through. Only all-placeholder or
+  // all-literal shapes are supported.
+  if (ownerIsPlaceholder !== repoIsPlaceholder) {
+    return { allowed: false, repos: [], reason: 'repo-unresolved' };
+  }
+
   const repoFlagValue = parseRepoFlag(argv);
   const explicit = repoFlagValue ? normalizeOwnerRepoOrUrl(repoFlagValue) : null;
   if (repoFlagValue && !explicit) return { allowed: false, repos: [], reason: 'repo-unresolved' };
