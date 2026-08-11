@@ -443,6 +443,65 @@ test('matchesScheduleTarget is group+role scoped (no cross-group injection)', ()
   );
 });
 
+// Fix 7 (Issue #30): a model-annotated schedule must only inject into a live
+// session launched with the SAME model -- never into an unmodeled or
+// differently-modeled one. Both sides are already normalizeModel()-ed by the
+// time the matcher runs, so ?? null gives a safe strict comparison.
+test('matchesScheduleTarget is model-scoped (no cross-model injection)', () => {
+  const live = (over = {}) => ({
+    cwd: '/srv/proj', shell: false, app: 'opencode',
+    model: null, groupId: null, groupRole: null, exited: false, ptyProcess: {},
+    ...over,
+  });
+  const entry = {
+    cwd: '/srv/proj', shell: false, app: 'opencode', model: 'anthropic/claude-sonnet-4',
+    groupId: null, groupRole: null,
+  };
+
+  // Unmodeled / differently-modeled sessions must not take the schedule
+  // (Issue #30: the user reopened the project with google/gemini-2.0-flash).
+  assert.equal(sessionManager.matchesScheduleTarget(live(), entry), false);
+  assert.equal(sessionManager.matchesScheduleTarget(live({ model: 'google/gemini-2.0-flash' }), entry), false);
+  // The same-model session matches.
+  assert.equal(
+    sessionManager.matchesScheduleTarget(live({ model: 'anthropic/claude-sonnet-4' }), entry),
+    true,
+  );
+
+  // Unmodeled entries (legacy schedules) keep matching unmodeled sessions only.
+  const plain = { ...entry, model: null };
+  assert.equal(sessionManager.matchesScheduleTarget(live(), plain), true);
+  assert.equal(sessionManager.matchesScheduleTarget(live({ model: 'anthropic/claude-sonnet-4' }), plain), false);
+
+  // The model match must not break the group+role scope: same model but a
+  // different group/role still refuses, and same group+role+model matches.
+  const groupEntry = { ...entry, groupId: 'g1', groupRole: 'workerA' };
+  assert.equal(
+    sessionManager.matchesScheduleTarget(
+      live({ model: 'anthropic/claude-sonnet-4', groupId: 'g1', groupRole: 'workerB' }),
+      groupEntry,
+    ),
+    false,
+    'same model but a different role must not match',
+  );
+  assert.equal(
+    sessionManager.matchesScheduleTarget(
+      live({ model: 'anthropic/claude-sonnet-4', groupId: 'g2', groupRole: 'workerA' }),
+      groupEntry,
+    ),
+    false,
+    'same model but a different group must not match',
+  );
+  assert.equal(
+    sessionManager.matchesScheduleTarget(
+      live({ model: 'anthropic/claude-sonnet-4', groupId: 'g1', groupRole: 'workerA' }),
+      groupEntry,
+    ),
+    true,
+    'same model and same group+role matches',
+  );
+});
+
 // Fix 3: auto-resume of a dead group member recreates its handoff channel,
 // binds it to the new session, and re-registers the role.
 test('fireSchedule auto-resume of a group member recreates its MCP channel and rebinds the role', async () => {

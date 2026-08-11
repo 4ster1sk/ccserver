@@ -68,28 +68,6 @@ export async function resolveMcpSocketForSession(groupId, groupRole) {
   return null;
 }
 
-// Resolver of the read-only worker-cwd binds an orchestrator session should be
-// launched with (see groupManager.resolveWorkerRoBinds). Mirrors the
-// setMcpSocketResolver pattern -- a single slot avoids the import cycle with
-// groupManager. Runtime-only; no module init cycles.
-let workerBindsResolverFn = null;
-
-export function setWorkerBindsResolver(fn) {
-  workerBindsResolverFn = fn;
-}
-
-// Resolve the { src, dest } ro-binds for a group member being (re)created.
-// Returns [] when no resolver is registered or none can produce binds -- the
-// caller then launches without any worker-dir mounts.
-export async function resolveWorkerBindsForSession(groupId, groupRole) {
-  if (!workerBindsResolverFn) return [];
-  try {
-    return (await workerBindsResolverFn(groupId, groupRole)) || [];
-  } catch {
-    return [];
-  }
-}
-
 function resolveCommand(cmd) {
   if (process.platform !== 'win32') return cmd;
   try {
@@ -120,7 +98,7 @@ function normalizeModel(model) {
   return typeof model === 'string' && model.length > 0 ? model : null;
 }
 
-export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox, sandboxOpts, app, model, resumeLast, groupId = null, groupRole = null, mcpSocketPath = null, roBinds = [] }) {
+export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox, sandboxOpts, app, model, resumeLast, groupId = null, groupRole = null, mcpSocketPath = null }) {
   const id = randomUUID();
 
   // claude (and likely opencode) aborts immediately (SIGABRT, exit 134, no
@@ -187,7 +165,7 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox
   let sandboxGitBrokerDir = null;
   if ((forceSandbox || sandbox) && process.platform !== 'win32' && sandboxAvailable()) {
     try {
-      const spawn = buildSandboxSpawn({ cwd, targetCommand: [command, ...args], app: sessionApp, sandboxOpts, mcpSocketPath, roBinds });
+      const spawn = buildSandboxSpawn({ cwd, targetCommand: [command, ...args], app: sessionApp, sandboxOpts, mcpSocketPath });
       command = spawn.command;
       args = spawn.args;
       sandboxStateDir = spawn.stateDir || null;
@@ -676,13 +654,15 @@ function notifyFired(session, info, delivered) {
 // (fireSchedule branch 2). Group members match strictly -- only the SAME
 // group AND SAME role -- because combo workers legitimately share cwd+app
 // with each other, so a cwd+app match alone could inject into the wrong
-// worker. Non-group entries (groupId null on both sides) keep the original
-// cwd+shell+app semantics. Exported for direct unit testing.
+// worker. A model-annotated schedule must likewise only inject into a
+// session launched with the SAME model; unmodeled entries (both null) keep
+// the original cwd+shell+app semantics. Exported for direct unit testing.
 export function matchesScheduleTarget(session, entry) {
   return !!session && !session.exited && !!session.ptyProcess
     && session.cwd === entry.cwd
     && session.shell === entry.shell
     && session.app === entry.app
+    && (session.model ?? null) === (entry.model ?? null)
     && (session.groupId ?? null) === (entry.groupId ?? null)
     && (session.groupRole ?? null) === (entry.groupRole ?? null);
 }
@@ -733,12 +713,6 @@ async function fireSchedule(scheduleId) {
     console.warn(`[scheduler] dropping prompt for group member ${entry.groupRole} of ${entry.groupId}: MCP socket unavailable`);
     return;
   }
-  // An orchestrator auto-resume also re-derives its read-only worker binds at
-  // launch time (like the restart endpoint), so a restarted orchestrator
-  // still sees the workers' project dirs under /workers/<role>.
-  const roBinds = entry.groupId && entry.groupRole === 'orchestrator'
-    ? await resolveWorkerBindsForSession(entry.groupId, entry.groupRole)
-    : [];
   const res = createSession({
     cwd: entry.cwd,
     cols: 80,
@@ -755,7 +729,6 @@ async function fireSchedule(scheduleId) {
     groupId: entry.groupId,
     groupRole: entry.groupRole,
     mcpSocketPath,
-    roBinds,
   });
   if (!res?.session) return;
   const session = res.session;

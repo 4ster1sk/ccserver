@@ -6,10 +6,9 @@
 //
 // The orchestrator runs in its own isolated directory (orchestratorDir) with
 // only CLAUDE.md/AGENTS.md, in a mandatory sandbox. Its reach into the workers
-// is the control MCP server socket (see mcpBroker.js / mcpTools.js) plus each
-// worker's project directory mounted READ-ONLY at /workers/<role> -- basic
-// facts (README, file listing, git log) are directly readable there, but
-// nothing is writable. See DEFAULT_ORCHESTRATOR_TEMPLATE below.
+// is the control MCP server socket (see mcpBroker.js / mcpTools.js) -- basic
+// project facts are obtained through the repo_info tool, never by direct
+// filesystem access. See DEFAULT_ORCHESTRATOR_TEMPLATE below.
 //
 // orchestratorDir is deterministic per project (hashed from the resolved cwd),
 // so the orchestrator's CLAUDE.md/AGENTS.md edits survive group launches and
@@ -64,6 +63,9 @@ Each worker is a full terminal session you can inspect and control:
 - send_input -- type text into a member's terminal (submit defaults to true).
 - open_tab / close_tab -- add or terminate worker sessions.
 - get_tab_status -- quick status of a member.
+- repo_info -- the repository's basic facts (top-level layout, README,
+  package.json summary, git state). Shallow by design: it never returns
+  source-file contents, takes no path arguments, and is capped in size.
 
 Recommended turn pattern (keeps your context small):
 
@@ -74,18 +76,15 @@ Recommended turn pattern (keeps your context small):
 4. Decide the next action from the summary alone; only read_output when
    something looks stuck.
 
-Your own sandbox has each worker's project directory mounted **read-only**
-at /workers/workerA and /workers/workerB -- basic facts (README, file
-listing, git log, etc.) are directly readable there, so you don't need to
-ask a worker just to see what's already in its checkout. This does not
-change how you actually work with them, though: the mount is read-only (you
-cannot edit anything there), and everything that requires a worker to think
-or act -- running commands, writing code, deciding what to do next -- still
-goes exclusively through the tools below. You are only in the loop when a
-worker hands off to you -- that is the intended division of labor. Note: a
-worker opened via open_tab after your own session started will not appear
-under /workers/<role> until you are restarted (the mount is fixed at your
-own sandbox's startup).
+You have no direct access to the project files: your sandbox contains only
+your own orchestrator directory, and worker checkouts are NOT mounted into
+it. Repository facts you can see are limited to what repo_info returns
+(top-level layout, README, package.json summary, git state) -- nothing
+deeper. Everything that requires seeing a file's contents, running a
+command, writing code, or deciding what to do next goes exclusively through
+the tools below: hand the work to a worker via send_input. You are only in
+the loop when a worker hands off to you -- that is the intended division of
+labor.
 
 ## Division of labor
 
@@ -175,7 +174,7 @@ function memberSpecFromBody(spec) {
 // to the project (cwd); concurrent groups for the same project are refused at
 // creation time, so at most one live group ever owns it at a time --
 // `resumeLast` maps 1:1 onto "the previous conversation").
-export function orchestratorRestartSessionOpts({ group, app, model = null, sandboxOpts = null, mcpSocketPath, roBinds = [] }) {
+export function orchestratorRestartSessionOpts({ group, app, model = null, sandboxOpts = null, mcpSocketPath }) {
   return {
     cwd: group.orchestratorDir,
     cols: 80,
@@ -188,7 +187,6 @@ export function orchestratorRestartSessionOpts({ group, app, model = null, sandb
     groupId: group.id,
     groupRole: 'orchestrator',
     mcpSocketPath,
-    roBinds,
   };
 }
 
@@ -307,14 +305,6 @@ export async function groupsRoute(fastify, opts) {
       if (res.error) return fail(`worker ${role} failed to launch: ${res.message || res.error}`);
     }
 
-    // Both workers are registered by now (addMember calls registerMember
-    // internally), so the orchestrator's ro-mounts can be derived from the
-    // live registry: each worker's cwd is mounted read-only at /workers/<role>.
-    // resolveWorkerRoBinds re-validates each role against WORKER_ROLE_RE
-    // before it becomes a mount destination (defense in depth -- roles can
-    // also enter the registry through client-controlled re-init paths).
-    const roBinds = groupManager.resolveWorkerRoBinds(groupId, 'orchestrator');
-
     const orchRes = createSession({
       cwd: orchestratorDir,
       cols: 80,
@@ -330,7 +320,6 @@ export async function groupsRoute(fastify, opts) {
       groupId,
       groupRole: 'orchestrator',
       mcpSocketPath: controlBroker ? controlBroker.sockPath : null,
-      roBinds,
     });
     if (orchRes.error || !orchRes.session) {
       return fail(`orchestrator failed to launch: ${orchRes.error || 'unknown error'}`);
@@ -411,12 +400,7 @@ export async function groupsRoute(fastify, opts) {
       return reply.code(500).send({ error: 'failed to re-create the control broker' });
     }
 
-    // Re-validate roles via resolveWorkerRoBinds (WORKER_ROLE_RE) -- the same
-    // filter the scheduler path uses, so a crafted role can never become a
-    // /workers/<role> mount destination.
-    const roBinds = groupManager.resolveWorkerRoBinds(group.id, 'orchestrator');
-
-    const res = createSession(orchestratorRestartSessionOpts({ group, app, model, sandboxOpts, mcpSocketPath, roBinds }));
+    const res = createSession(orchestratorRestartSessionOpts({ group, app, model, sandboxOpts, mcpSocketPath }));
     if (res.error || !res.session) {
       return reply.code(500).send({ error: `orchestrator restart failed: ${res.error || 'unknown error'}` });
     }

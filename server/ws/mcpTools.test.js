@@ -9,7 +9,8 @@
 
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -18,6 +19,8 @@ let runtimeDir;
 let groupManager;
 let tools;
 let groupsToDestroy = [];
+// Real on-disk repo fixtures for repo_info (see the repoInfo tests below).
+let tmpRepos = [];
 
 // The real brokers listen under XDG_RUNTIME_DIR (read at mcpBroker module
 // evaluation), so point it at a fresh dir before importing.
@@ -32,8 +35,16 @@ before(async () => {
 
 after(() => {
   for (const id of groupsToDestroy) groupManager.destroyGroup(id);
+  for (const dir of tmpRepos) { try { rmSync(dir, { recursive: true, force: true }); } catch { /* ignore */ } }
   try { rmSync(runtimeDir, { recursive: true, force: true }); } catch { /* ignore */ }
 });
+
+// Real on-disk repo fixtures for repo_info (see the repoInfo tests below).
+function makeTmpRepo(tag) {
+  const dir = mkdtempSync(join(tmpdir(), `ccserver-repo-${tag}-`));
+  tmpRepos.push(dir);
+  return dir;
+}
 
 async function makeGroupAsync() {
   const id = randomUUID();
@@ -632,4 +643,92 @@ test('stripAnsi: removes common escape sequences', () => {
   assert.equal(tools.stripAnsi('\x1b[31mred\x1b[0m text'), 'red text');
   assert.equal(tools.stripAnsi('\x1b]0;title\x07hi'), 'hi');
   assert.equal(tools.stripAnsi('plain'), 'plain');
+});
+
+// --- repo_info (Issue: orchestrator repo-facts tool) -----------------------
+
+test('repoInfo returns shallow repo facts (root/readme/packageJson/git)', async () => {
+  const dir = makeTmpRepo('full');
+  mkdirSync(join(dir, 'src'));
+  mkdirSync(join(dir, 'docs'));
+  writeFileSync(join(dir, 'README.md'), '# My Project\n\nRead me.');
+  writeFileSync(join(dir, 'package.json'), JSON.stringify({
+    name: 'my-project',
+    version: '1.2.3',
+    description: 'A test project',
+    scripts: { build: 'tsc', test: 'vitest' },
+    dependencies: { zod: '^3.0.0' },
+    devDependencies: { typescript: '^5.0.0' },
+  }));
+  execFileSync('git', ['init', '-q', dir]);
+  execFileSync('git', ['-C', dir, 'add', '.']);
+  execFileSync('git', ['-C', dir, '-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '-m', 'initial commit']);
+
+  const gid = randomUUID();
+  await groupManager.createGroup({ groupId: gid, cwd: dir, orchestratorDir: join(dir, '..', 'orch') });
+  groupsToDestroy.push(gid);
+
+  const out = await tools.repoInfo(controlDeps(gid));
+  assert.equal(out.error, undefined);
+  assert.equal(out.cwd, dir);
+  assert.ok(out.root.dirs.includes('src'), 'src dir listed');
+  assert.ok(out.root.dirs.includes('docs'), 'docs dir listed');
+  assert.ok(out.root.files.includes('package.json'), 'package.json listed');
+  assert.ok(out.root.files.includes('README.md'), 'README.md listed');
+  assert.equal(out.root.truncated, false);
+  assert.equal(out.readme.file, 'README.md');
+  assert.ok(out.readme.text.includes('My Project'));
+  assert.equal(out.readme.truncated, false);
+  assert.equal(out.packageJson.name, 'my-project');
+  assert.equal(out.packageJson.version, '1.2.3');
+  assert.equal(out.packageJson.description, 'A test project');
+  assert.deepEqual(out.packageJson.scripts, ['build', 'test']);
+  assert.deepEqual(out.packageJson.dependencies, ['zod']);
+  assert.deepEqual(out.packageJson.devDependencies, ['typescript']);
+  assert.ok(out.git.branch.length > 0, 'current branch reported');
+  assert.ok(out.git.head.length > 0, 'short HEAD reported');
+  assert.equal(out.git.log.length, 1);
+  assert.ok(out.git.log[0].endsWith('initial commit'), `log line is '<hash> initial commit' (got ${out.git.log[0]})`);
+  assert.equal(out.git.changes, 0, 'clean tree');
+});
+
+test('repoInfo: missing README/package.json/git fall back to null per section', async () => {
+  const dir = makeTmpRepo('bare');
+  const gid = randomUUID();
+  await groupManager.createGroup({ groupId: gid, cwd: dir, orchestratorDir: join(dir, '..', 'orch') });
+  groupsToDestroy.push(gid);
+
+  const out = await tools.repoInfo(controlDeps(gid));
+  assert.equal(out.readme, null, 'no README variant -> null');
+  assert.equal(out.packageJson, null, 'no package.json -> null');
+  assert.equal(out.git, null, 'not a git repository -> null');
+  assert.deepEqual(out.root.dirs, []);
+  assert.deepEqual(out.root.files, []);
+});
+
+test('repoInfo: unknown group yields group-not-found', async () => {
+  const out = await tools.repoInfo(controlDeps('no-such-group'));
+  assert.equal(out.error, 'group-not-found');
+});
+
+test('repoInfo: caps bite (root 100 entries, README 8KB, package keys 50)', async () => {
+  const dir = makeTmpRepo('caps');
+  for (let i = 0; i < 120; i++) writeFileSync(join(dir, `file-${String(i).padStart(3, '0')}.txt`), 'x');
+  writeFileSync(join(dir, 'README.md'), 'x'.repeat(9000));
+  writeFileSync(join(dir, 'package.json'), JSON.stringify({
+    name: 'caps',
+    scripts: Object.fromEntries(Array.from({ length: 60 }, (_, i) => [`s${i}`, 'echo'])),
+    dependencies: Object.fromEntries(Array.from({ length: 60 }, (_, i) => [`dep${i}`, '^1.0.0'])),
+  }));
+  const gid = randomUUID();
+  await groupManager.createGroup({ groupId: gid, cwd: dir, orchestratorDir: join(dir, '..', 'orch') });
+  groupsToDestroy.push(gid);
+
+  const out = await tools.repoInfo(controlDeps(gid));
+  assert.equal(out.root.files.length, 100, 'root listing capped at 100');
+  assert.equal(out.root.truncated, true);
+  assert.equal(out.readme.text.length, 8 * 1024, 'README capped at 8KB');
+  assert.equal(out.readme.truncated, true);
+  assert.equal(out.packageJson.scripts.length, 50, 'scripts keys capped at 50');
+  assert.equal(out.packageJson.dependencies.length, 50, 'dependencies keys capped at 50');
 });
