@@ -386,6 +386,12 @@ body {
   height: 100%;
   display: flex;
   flex-direction: column;
+  /* margin: 0 auto だけだと flex コンテナ内で横方向に伸びず fit-content 幅に
+     なり、狭い viewport ではコンテンツ（ツールバー等）が max-content 幅の
+     まま右側へはみ出す（#root の overflow:hidden でクリップされ「右が切れる」）。
+     width: 100% で viewport に一致させ、max-width + margin auto で広い画面では
+     従来どおり中央寄せにする。 */
+  width: 100%;
   max-width: 800px;
   margin: 0 auto;
   padding: 24px;
