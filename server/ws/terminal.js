@@ -1,4 +1,6 @@
 import { homedir } from 'node:os';
+import { basename } from 'node:path';
+import { getGroup } from './groupManager.js';
 import {
   createSession,
   getSession,
@@ -84,6 +86,11 @@ export async function terminalWs(fastify, opts) {
           }
           // An orchestrator re-launched through the browser's re-init path
           // still reaches the group via the re-created control broker above.
+          // Its init cwd is the hashed orchestrator dir, so attribute the
+          // session to the group's real project path (workers' cwd IS the
+          // project dir, so the same override is harmless for them).
+          const group = groupId ? getGroup(groupId) : null;
+          const projectName = group?.cwd ? basename(group.cwd) : undefined;
 
           const result = createSession({
             cwd: msg.cwd || homedir(),
@@ -98,6 +105,7 @@ export async function terminalWs(fastify, opts) {
             resumeLast: !!msg.resume,
             groupId,
             groupRole,
+            projectName,
             mcpSocketPath,
           });
           if (result.error) {

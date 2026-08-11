@@ -599,3 +599,66 @@ test('idle timer no longer sends input_needed, but still advances the settle gat
     try { rmSync(cfgDir, { recursive: true, force: true }); } catch { /* ignore */ }
   }
 });
+
+// notifyIdentity attribution (see notify.js / mcpConfig.js): the per-session
+// identity rides to the bridge as the CCSERVER_NOTIFY_IDENTITY env. An
+// explicit projectName overrides basename(cwd) -- a combo orchestrator's cwd
+// is a hashed orchestrator dir (routes/groups.js) and must not leak into the
+// notify footer; without one the cwd basename is used (existing behavior). A
+// fake claude binary echoes the env var so the injected identity is
+// observable from the session's output buffer.
+test('createSession notify identity: explicit projectName wins, cwd basename is the fallback', async () => {
+  const binDir = mkdtempSync(join(tmpdir(), 'ccserver-fake-agent-'));
+  const fakeBin = join(binDir, 'fake-claude');
+  writeFileSync(fakeBin, '#!/bin/bash\nprintf "%s\\n" "$CCSERVER_NOTIFY_IDENTITY"\n', { mode: 0o755 });
+  const cfgDir = mkdtempSync(join(tmpdir(), 'ccserver-fake-cfg-'));
+  const cfgPath = join(cfgDir, 'sandbox.config.json');
+  writeFileSync(cfgPath, JSON.stringify({
+    docker: false,
+    gitBroker: false,
+    notify: { discordWebhook: 'https://discord.example/hook' },
+  }));
+  const prevBin = process.env.CCSERVER_CLAUDE_BIN;
+  const prevCfg = process.env.CCSERVER_SANDBOX_CONFIG;
+  process.env.CCSERVER_CLAUDE_BIN = fakeBin;
+  process.env.CCSERVER_SANDBOX_CONFIG = cfgPath;
+  const notify = await import('./notify.js');
+  await notify.ensureNotifyBroker();
+  const ids = [];
+  const identityOf = (s) => {
+    const line = s.outputBuffer.join('').split('\n').map((l) => l.trim()).find((l) => l.startsWith('{'));
+    return line ? JSON.parse(line) : null;
+  };
+  try {
+    const named = sessionManager.createSession({
+      cwd: '/tmp', cols: 80, rows: 24, shell: false, sandbox: false, app: 'claude',
+      projectName: 'real-proj',
+    });
+    assert.ok(named.session, 'agent session should spawn');
+    ids.push(named.sessionId);
+    await sleep(500);
+    const namedIdentity = identityOf(named.session);
+    assert.ok(namedIdentity, 'notify identity must be injected (CCSERVER_NOTIFY_IDENTITY env)');
+    assert.equal(namedIdentity.projectName, 'real-proj', 'the explicit projectName wins over the cwd basename');
+    assert.equal(namedIdentity.cwd, '/tmp');
+
+    const fallback = sessionManager.createSession({
+      cwd: '/tmp', cols: 80, rows: 24, shell: false, sandbox: false, app: 'claude',
+    });
+    assert.ok(fallback.session, 'agent session should spawn');
+    ids.push(fallback.sessionId);
+    await sleep(500);
+    const fallbackIdentity = identityOf(fallback.session);
+    assert.ok(fallbackIdentity, 'notify identity must be injected');
+    assert.equal(fallbackIdentity.projectName, 'tmp', 'without an explicit projectName the cwd basename is used');
+  } finally {
+    for (const id of ids) sessionManager.destroySession(id, { keepSchedule: false });
+    notify.stopNotifyBroker();
+    if (prevBin === undefined) delete process.env.CCSERVER_CLAUDE_BIN;
+    else process.env.CCSERVER_CLAUDE_BIN = prevBin;
+    if (prevCfg === undefined) delete process.env.CCSERVER_SANDBOX_CONFIG;
+    else process.env.CCSERVER_SANDBOX_CONFIG = prevCfg;
+    try { rmSync(binDir, { recursive: true, force: true }); } catch { /* ignore */ }
+    try { rmSync(cfgDir, { recursive: true, force: true }); } catch { /* ignore */ }
+  }
+});
