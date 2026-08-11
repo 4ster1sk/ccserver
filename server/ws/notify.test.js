@@ -70,6 +70,12 @@ test('shouldInjectNotify: standalone agents and combo orchestrators only', () =>
   assert.equal(shouldInjectNotify({ ...base, notifyEnabled: false }), false, 'feature disabled -> never');
 });
 
+test('shouldInjectNotify: copilot is never injected (no CLI-arg/env MCP injection)', () => {
+  const base = { shell: false, app: 'copilot', groupId: null, groupRole: null, notifyEnabled: true };
+  assert.equal(shouldInjectNotify(base), false, 'standalone copilot never gets the notify server');
+  assert.equal(shouldInjectNotify({ ...base, groupId: 'g1', groupRole: 'orchestrator' }), false, 'copilot as combo orchestrator also never');
+});
+
 test('subscribe/unsubscribe/list persist to the state file and restore', async () => {
   await withNotifyConfig(
     { notify: { subscriptions: [{ url: 'https://seed.example/webhook', name: 'seed' }] } },

@@ -16,6 +16,10 @@
 //               sessions in the same cwd cannot collide).
 //   opencode -> OPENCODE_CONFIG_CONTENT env var (deep-merged with project
 //               config, no file written).
+//   copilot  -> nothing. copilot has no CLI-arg/env MCP injection (its config
+//               is file-based only), so `buildMcpConfigArgsAndEnv` never
+//               assembles an injection for it -- passing `--mcp-config` would
+//               make the binary error out with "unknown option".
 //
 // The optional `{ notify }` descriptor adds the ccserver-notify MCP server:
 //   { mode, sockPath, identity? }
@@ -57,6 +61,15 @@ function notifyInvocation(notify) {
 export function buildMcpConfigArgsAndEnv(app, { groupMcp = true, notify } = {}) {
   const notifySockEnv = notify ? { CCSANDBOX_NOTIFY_MCP_SOCK: notify.sockPath } : {};
   const notifyIdentityEnv = notify?.identity ? { CCSERVER_NOTIFY_IDENTITY: JSON.stringify(notify.identity) } : {};
+
+  if (app === 'copilot') {
+    // No CLI-arg/env MCP injection exists for copilot: assembling one would
+    // reach the binary as `--mcp-config` and die with "unknown option". The
+    // function is the single assembly point, so refusing here guarantees no
+    // copilot launch path ever injects (group launches already refuse copilot
+    // at open_tab / addMember).
+    return { args: [], env: {} };
+  }
 
   if (app === 'opencode') {
     const mcp = {};
