@@ -87,8 +87,13 @@ export function bunTmpdirOverride() {
 }
 
 // The env fragment for pty env assembly: { BUN_TMPDIR: dir } when an override
-// is needed, {} otherwise -- so callers just spread it.
+// is needed, {} otherwise -- so callers just spread it. An explicit BUN_TMPDIR
+// from the environment is left alone: Bun uses it over TMPDIR, so the noexec
+// TMPDIR problem does not apply there, and overriding it could turn a working
+// user configuration into a dead launch (e.g. when HOME is not writable and
+// the fallback mkdir fails).
 export function bunTmpdirEnv() {
+  if (process.env.BUN_TMPDIR) return {};
   const dir = bunTmpdirOverride();
   return dir ? { BUN_TMPDIR: dir } : {};
 }

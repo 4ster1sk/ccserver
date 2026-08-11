@@ -125,3 +125,22 @@ test('bunTmpdirOverride matches the real mount state of the TMPDIR', () => {
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('bunTmpdirEnv leaves an explicit BUN_TMPDIR alone', () => {
+  const beforeTmp = process.env.TMPDIR;
+  const beforeBun = process.env.BUN_TMPDIR;
+  const dir = mkdtempSync(join(tmpdir(), 'ccserver-bun-tmpdir-test-'));
+  process.env.TMPDIR = dir;
+  process.env.BUN_TMPDIR = join(dir, 'user-choice');
+  try {
+    // Bun prefers BUN_TMPDIR over TMPDIR, so a user-set value makes the
+    // noexec check moot -- whatever the mount state, it must be preserved.
+    assert.deepEqual(bunTmpdirEnv(), {});
+  } finally {
+    if (beforeTmp === undefined) delete process.env.TMPDIR;
+    else process.env.TMPDIR = beforeTmp;
+    if (beforeBun === undefined) delete process.env.BUN_TMPDIR;
+    else process.env.BUN_TMPDIR = beforeBun;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
