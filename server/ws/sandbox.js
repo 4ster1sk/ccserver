@@ -442,7 +442,6 @@ function buildBwrapArgs({ cwd, docker, gpg, extraBinds, extraEnv, authSock, stat
   // shared with the git-broker branch below, so it's pulled out there.
   if (mcpSocketPath) {
     args.push('--bind-try', mcpSocketPath, SANDBOX_MCP_SOCK_PATH);
-    args.push('--ro-bind', MCP_BRIDGE_SCRIPT, SANDBOX_MCP_BRIDGE_PATH);
     args.push('--setenv', 'CCSANDBOX_MCP_SOCK', SANDBOX_MCP_SOCK_PATH);
   }
 
@@ -452,8 +451,14 @@ function buildBwrapArgs({ cwd, docker, gpg, extraBinds, extraEnv, authSock, stat
   // (no mcpSocketPath) get notify on its own.
   if (notifySocketPath) {
     args.push('--bind-try', notifySocketPath, SANDBOX_NOTIFY_SOCK_PATH);
-    args.push('--ro-bind', MCP_BRIDGE_SCRIPT, SANDBOX_MCP_BRIDGE_PATH);
     args.push('--setenv', 'CCSANDBOX_NOTIFY_MCP_SOCK', SANDBOX_NOTIFY_SOCK_PATH);
+  }
+
+  // The bridge wrapper is shared by the group socket and the notify socket
+  // (bound once -- a combo orchestrator may have both) and its node shebang
+  // lives at SANDBOX_NODE_PATH (ro-bound with the git-broker branch below).
+  if (mcpSocketPath || notifySocketPath) {
+    args.push('--ro-bind', MCP_BRIDGE_SCRIPT, SANDBOX_MCP_BRIDGE_PATH);
   }
 
   // Agent CLI configuration + install dirs (claude + opencode + copilot),

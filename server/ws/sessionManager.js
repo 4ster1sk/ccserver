@@ -6,7 +6,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { buildSandboxSpawn, resolveApp, sandboxAvailable, loadSandboxConfig } from './sandbox.js';
 import { buildMcpConfigArgsAndEnv } from './mcpConfig.js';
-import { shouldInjectNotify, notifyEnabled, getNotifySockPath } from './notify.js';
+import { shouldInjectNotify, notifyEnabled, getNotifySockPath, notifyBrokerRunning } from './notify.js';
 import {
   isValidApp,
   appResumeArgs,
@@ -126,10 +126,13 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox
 
   // ccserver-notify injection (see notify.js): standalone agent sessions and
   // combo orchestrators get the process-global notify MCP server when the
-  // feature is enabled (Discord webhook configured or subscriptions exist).
+  // feature is enabled (Discord webhook configured or subscriptions exist)
+  // AND the broker is actually listening (it is started once at boot). The
+  // broker-running check prevents injecting a dead socket path when the boot
+  // startup failed, or when a config edit enables notify without a restart.
   // Shells and combo workers never do. The socket path is the process-global
   // one, created once at boot (ensureNotifyBroker).
-  const useNotify = shouldInjectNotify({
+  const useNotify = notifyBrokerRunning() && shouldInjectNotify({
     shell: !!shell,
     app: sessionApp,
     groupId,
@@ -171,12 +174,16 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox
   // buildSandboxSpawn runs, so the mode is derived from sandboxRequested.
   let mcpEnv = {};
   if (sessionApp && (mcpSocketPath || useNotify)) {
-    const injected = buildMcpConfigArgsAndEnv(sessionApp, useNotify ? {
-      notify: {
+    const injected = buildMcpConfigArgsAndEnv(sessionApp, {
+      // ccserver (the group broker) only when the session has a group socket:
+      // standalone notify sessions must not get a broken ccserver entry (its
+      // bridge would point at a socket that is never bound for them).
+      groupMcp: !!mcpSocketPath,
+      notify: useNotify ? {
         mode: sandboxRequested ? 'sandbox' : 'host',
         sockPath: notifySocketPath,
-      },
-    } : undefined);
+      } : undefined,
+    });
     mcpEnv = injected.env;
     args.push(...injected.args);
   }

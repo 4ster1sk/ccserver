@@ -226,6 +226,16 @@ export async function ensureNotifyBroker() {
   return notifyBroker.sockPath;
 }
 
+// Whether the global broker is actually listening right now. Injecting the
+// notify MCP into a session whose socket was never started (broker startup
+// failure, or a config edit that enables notify without a restart) would give
+// the agent a bridge to a socket nobody is listening on -- the wrapper would
+// exhaust its retries and the MCP server would just fail. createSession gates
+// its injection on this in addition to shouldInjectNotify.
+export function notifyBrokerRunning() {
+  return !!notifyBroker;
+}
+
 // Teardown for graceful shutdown. Synchronous (the stopBroker reference is
 // cached on the first ensureNotifyBroker call). Best effort; a stale socket
 // file is removed by the next boot's listenMcp anyway.

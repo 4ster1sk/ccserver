@@ -67,11 +67,10 @@ process.on('SIGTERM', cleanup);
 process.on('SIGINT', cleanup);
 
 const PORT = process.env.PORT || 3001;
-await fastify.listen({ port: PORT, host: '0.0.0.0' });
 
 // ccserver-notify: restore the subscription registry, then host the
 // process-global MCP socket if the feature is enabled (Discord webhook or
-// subscriptions). Done before any client can launch a session: bwrap's
+// subscriptions). Started before the server accepts connections: bwrap's
 // --bind-try snapshots the socket file at mount time, so it must exist
 // before a notify-enabled session is created.
 try {
@@ -83,6 +82,8 @@ try {
 } catch (err) {
   fastify.log.error({ err }, 'Failed to start ccserver-notify broker');
 }
+
+await fastify.listen({ port: PORT, host: '0.0.0.0' });
 
 // Re-arm scheduled prompts persisted before the last shutdown/restart. Missed
 // ones (server was down at their time) fire shortly after startup; live ones

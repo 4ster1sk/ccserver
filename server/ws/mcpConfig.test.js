@@ -81,3 +81,27 @@ test('no notify descriptor -> unchanged (ccserver only)', () => {
   const cfg = JSON.parse(args[1]);
   assert.deepEqual(Object.keys(cfg.mcpServers), ['ccserver']);
 });
+
+// Standalone notify session (no group socket, mcpSocketPath null): only
+// ccserver-notify is registered -- a ccserver entry would point its bridge at
+// /ccserver-sandbox-mcp.sock which is never bound for a standalone session
+// (the wrapper would exit "not configured", or the host path would not exist).
+test('notify(host) without a group socket registers ccserver-notify only (no ccserver)', () => {
+  const { args } = buildMcpConfigArgsAndEnv('claude', {
+    groupMcp: false,
+    notify: { mode: 'host', sockPath: '/run/user/1000/ccserver-notify.sock' },
+  });
+  const cfg = JSON.parse(args[1]);
+  assert.deepEqual(Object.keys(cfg.mcpServers), ['ccserver-notify'], 'standalone gets no ccserver entry');
+  assert.equal(cfg.mcpServers['ccserver-notify'].command, process.execPath);
+});
+
+test('opencode notify without a group socket registers ccserver-notify only', () => {
+  const { env } = buildMcpConfigArgsAndEnv('opencode', {
+    groupMcp: false,
+    notify: { mode: 'sandbox', sockPath: '/run/user/1000/ccserver-notify.sock' },
+  });
+  const cfg = JSON.parse(env.OPENCODE_CONFIG_CONTENT);
+  assert.deepEqual(Object.keys(cfg.mcp), ['ccserver-notify']);
+  assert.deepEqual(cfg.mcp['ccserver-notify'].command, ['/ccserver-sandbox-mcp-bridge', 'notify']);
+});

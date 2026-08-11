@@ -1,9 +1,15 @@
-// Builds the MCP server registration that combo-launched sessions (workers and
-// orchestrator) get injected with -- never written to a file on the host or in
-// the repo. Both CLIs get the same fixed config: "run the bridge script at the
-// fixed in-sandbox path". Whether that bridge reaches the control broker or a
-// handoff channel is decided solely by which host socket got bound to
-// /ccserver-sandbox-mcp.sock in the sandbox (see sandbox.js / mcpBroker.js).
+// Builds the MCP server registration injected into a session -- never written
+// to a file on the host or in the repo. Which servers are registered:
+//   ccserver        - the group's control/handoff broker (combo sessions only,
+//                     i.e. when `groupMcp` is true and mcpSocketPath was set).
+//                     The CLI runs the bridge script at the fixed in-sandbox
+//                     path; which broker it reaches is decided solely by which
+//                     host socket got bound to /ccserver-sandbox-mcp.sock in
+//                     the sandbox (see sandbox.js / mcpBroker.js). Absent for
+//                     standalone sessions -- they have no group socket, so
+//                     registering it would hand the agent a broken server.
+//   ccserver-notify - the process-global notification server (see notify.js),
+//                     registered when the `{ notify }` descriptor is passed.
 //
 //   claude   -> CLI arg `--mcp-config '<inline JSON>'` (process-scoped, does
 //               not touch ~/.claude.json's shared projects key, so parallel
@@ -11,8 +17,7 @@
 //   opencode -> OPENCODE_CONFIG_CONTENT env var (deep-merged with project
 //               config, no file written).
 //
-// The optional `{ notify }` descriptor adds the ccserver-notify MCP server
-// (see notify.js / mcpConfig usage in sessionManager.js):
+// The optional `{ notify }` descriptor adds the ccserver-notify MCP server:
 //   { mode, sockPath }
 //     mode     - 'sandbox' (run the in-sandbox bridge, args ['notify']) or
 //                'host' (run <node> <bridge script> notify on the host --
@@ -42,13 +47,12 @@ function notifyInvocation(notify) {
   return { command: MCP_BRIDGE_COMMAND, args: ['notify'] };
 }
 
-export function buildMcpConfigArgsAndEnv(app, { notify } = {}) {
+export function buildMcpConfigArgsAndEnv(app, { groupMcp = true, notify } = {}) {
   const notifySockEnv = notify ? { CCSANDBOX_NOTIFY_MCP_SOCK: notify.sockPath } : {};
 
   if (app === 'opencode') {
-    const mcp = {
-      ccserver: { type: 'local', command: [MCP_BRIDGE_COMMAND] },
-    };
+    const mcp = {};
+    if (groupMcp) mcp.ccserver = { type: 'local', command: [MCP_BRIDGE_COMMAND] };
     if (notify) {
       const inv = notifyInvocation(notify);
       mcp['ccserver-notify'] = { type: 'local', command: [inv.command, ...inv.args] };
@@ -65,9 +69,8 @@ export function buildMcpConfigArgsAndEnv(app, { notify } = {}) {
     };
   }
 
-  const mcpServers = {
-    ccserver: { type: 'stdio', command: MCP_BRIDGE_COMMAND, args: [] },
-  };
+  const mcpServers = {};
+  if (groupMcp) mcpServers.ccserver = { type: 'stdio', command: MCP_BRIDGE_COMMAND, args: [] };
   if (notify) {
     const inv = notifyInvocation(notify);
     mcpServers['ccserver-notify'] = { type: 'stdio', command: inv.command, args: inv.args };
