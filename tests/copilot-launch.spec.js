@@ -61,6 +61,13 @@ test('launch modal offers GitHub Copilot and spawns a session', async ({ page })
 test('combo launch refuses copilot members', async ({ page }) => {
   test.skip(!sandboxAvailable, 'bwrap not available — sandbox cannot run');
   await page.goto('/');
+  // The combo UI only offers claude/opencode per role -- copilot never
+  // appears as a member app (single-mode items are hidden in combo mode).
+  await page.locator('.open-split-caret').click();
+  await page.locator('.resume-dialog .launch-mode-btn', { hasText: 'コンボ起動' }).click();
+  await expect(page.locator('.open-menu-app-btn', { hasText: 'GitHub Copilot' })).toHaveCount(0);
+  await expect(page.locator('.open-menu-app-btn', { hasText: 'Claude Code' })).toHaveCount(3);
+  // The API refuses it too.
   const res = await page.evaluate(async () => {
     const r = await fetch('/api/groups', {
       method: 'POST',
