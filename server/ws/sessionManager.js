@@ -676,9 +676,7 @@ function notifyFired(session, info, delivered) {
 // with each other, so a cwd+app match alone could inject into the wrong
 // worker. A model-annotated schedule must likewise only inject into a
 // session launched with the SAME model; unmodeled entries (both null) keep
-// the original cwd+shell+app semantics. Non-group entries (groupId null on
-// both sides) keep the original cwd+shell+app semantics. Exported for direct
-// unit testing.
+// the original cwd+shell+app semantics. Exported for direct unit testing.
 export function matchesScheduleTarget(session, entry) {
   return !!session && !session.exited && !!session.ptyProcess
     && session.cwd === entry.cwd
