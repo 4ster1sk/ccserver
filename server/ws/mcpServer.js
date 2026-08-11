@@ -100,7 +100,7 @@ export function buildControlMcpServer(deps) {
 
   server.tool(
     'open_tab',
-    'Open a new worker session inside this group (with its own handoff channel) and return its sessionId. role must be a worker role (workerA, workerB, ...) -- never orchestrator. cwd is restricted to the group project directory. app (claude or opencode), model (a provider/model string, or null for the app default) and sandboxOpts (gpg/ssh-agent forwarding) are optional: omitted values fall back to the role\'s persisted preferences, then to the group/app defaults. The result returns the effective app/model/sandboxOpts.',
+    'Open a new worker session inside this group (with its own handoff channel) and return its sessionId. role must be a worker role (workerA, workerB, ...) -- never orchestrator. cwd is restricted to the group project directory. app (claude or opencode) is optional: omitted values fall back to the role\'s persisted preferences, then to the group defaults. copilot is NOT supported in groups (it has no CLI-arg/env MCP injection, so it could never reach this group\'s broker tools) and is refused.',
     {
       role: z.string().regex(/^worker[A-Za-z0-9_-]+$/),
       app: z.enum(['claude', 'opencode']).optional(),
