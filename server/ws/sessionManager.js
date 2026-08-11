@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { buildSandboxSpawn, resolveApp, sandboxAvailable, loadSandboxConfig } from './sandbox.js';
 import { buildMcpConfigArgsAndEnv } from './mcpConfig.js';
 import { shouldInjectNotify, notifyEnabled, getNotifySockPath, notifyBrokerRunning } from './notify.js';
+import { bunTmpdirEnv } from './bunTmpdir.js';
 import {
   isValidApp,
   appResumeArgs,
@@ -263,6 +264,15 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox
       // scrolls natively, and its own drag-selection + copy-on-select writes
       // to the browser clipboard via OSC 52 (handled client-side).
       ...mcpEnv,
+      // /tmp being mounted noexec makes Bun fail to unpack + dlopen its
+      // embedded libopentui.so, so opencode's TUI dies at startup (opencode
+      // #26136/#27580). Direct host launches switch BUN_TMPDIR to
+      // ~/.cache/opencode/tmp when the host TMPDIR is noexec. Sandboxed
+      // launches don't: the sandbox's /tmp is a fresh tmpfs that is always
+      // executable, and the host-side cache dir is not bound into bwrap (with
+      // a fresh HOME it would not even exist), so setting it there would
+      // break what it is meant to fix.
+      ...(shell || sessionApp !== 'opencode' || useSandbox ? {} : bunTmpdirEnv()),
     },
   });
   } catch (err) {
