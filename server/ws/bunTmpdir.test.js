@@ -1,12 +1,13 @@
 // Unit tests for the noexec-TMPDIR -> BUN_TMPDIR switch (see bunTmpdir.js).
 // The pure helpers are tested with synthetic /proc/self/mounts lines; the
-// env-reading wrappers only get cases that are deterministic everywhere (an
-// exec TMPDIR must yield no override; a relative or nonexistent TMPDIR must
-// report not-noexec without touching /proc).
+// env-reading wrappers only get cases that are deterministic everywhere (a
+// relative or nonexistent TMPDIR must report not-noexec without touching
+// /proc, and the override must match the real mount state of the test
+// TMPDIR).
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { parseMountOptions, mountHasNoexec, isTmpNoexec, bunTmpdirOverride, bunTmpdirEnv } from './bunTmpdir.js';
@@ -97,13 +98,24 @@ test('isTmpNoexec is false for a nonexistent TMPDIR', () => {
   }
 });
 
-test('bunTmpdirOverride returns null (and bunTmpdirEnv nothing) when TMPDIR is exec', () => {
+test('bunTmpdirOverride matches the real mount state of the TMPDIR', () => {
   const before = process.env.TMPDIR;
   const dir = mkdtempSync(join(tmpdir(), 'ccserver-bun-tmpdir-test-'));
   process.env.TMPDIR = dir;
   try {
-    assert.equal(bunTmpdirOverride(), null);
-    assert.deepEqual(bunTmpdirEnv(), {});
+    // The mkdtemp dir sits on whatever mount the host TMPDIR does, so the
+    // expected outcome is computed from the live mount table instead of
+    // assuming exec (which would fail exactly on the noexec hosts this
+    // feature targets).
+    let lines = [];
+    try {
+      lines = readFileSync('/proc/self/mounts', 'utf-8').split('\n');
+    } catch {
+      // Non-linux or unreadable: no mount info, so no override is expected.
+    }
+    const expected = mountHasNoexec(dir, lines) ? dir : null;
+    assert.equal(bunTmpdirOverride(), expected);
+    assert.deepEqual(bunTmpdirEnv(), expected ? { BUN_TMPDIR: dir } : {});
   } finally {
     if (before === undefined) delete process.env.TMPDIR;
     else process.env.TMPDIR = before;

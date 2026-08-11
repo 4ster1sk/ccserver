@@ -8,7 +8,7 @@
 // Pure helpers (parseMountOptions / mountHasNoexec) are exported for unit
 // testing; the wrappers read the live environment.
 
-import { readFileSync, mkdirSync, existsSync } from 'node:fs';
+import { readFileSync, mkdirSync, existsSync, realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, isAbsolute } from 'node:path';
 
@@ -57,13 +57,14 @@ export function isTmpNoexec() {
   if (process.platform !== 'linux') return false;
   const tmpdir = process.env.TMPDIR || '/tmp';
   if (!isAbsolute(tmpdir) || !existsSync(tmpdir)) return false;
-  let lines;
+  let real, lines;
   try {
+    real = realpathSync(tmpdir);
     lines = readFileSync('/proc/self/mounts', 'utf-8').split('\n');
   } catch {
     return false;
   }
-  return mountHasNoexec(tmpdir, lines);
+  return mountHasNoexec(real, lines);
 }
 
 // The replacement Bun temp dir, matching upstream launcher PR #26134.
