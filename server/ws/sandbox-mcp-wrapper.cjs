@@ -10,6 +10,13 @@
 //   plain    -> CCSANDBOX_MCP_SOCK  (the group's control / handoff socket)
 //   'notify' -> CCSANDBOX_NOTIFY_MCP_SOCK (the process-global notify socket)
 // The wrapper itself is role-agnostic.
+//
+// In notify mode the wrapper additionally writes a single JSON line
+// `{"ccserver": <identity>}\n` as the FIRST frame on connect -- before any
+// MCP bytes -- so the server can attribute this connection's notifications
+// (see mcpBroker.js). The identity comes from the CCSERVER_NOTIFY_IDENTITY
+// env set by mcpConfig.js; absent or unparseable it sends an empty object
+// (host-only attribution).
 'use strict';
 const net = require('net');
 const isNotify = process.argv[2] === 'notify';
@@ -17,6 +24,16 @@ const sockPath = process.env[isNotify ? 'CCSANDBOX_NOTIFY_MCP_SOCK' : 'CCSANDBOX
 if (!sockPath) {
   process.stderr.write('sandbox: MCP bridge not configured\n');
   process.exit(1);
+}
+
+function parseIdentity(envValue) {
+  if (!envValue) return {};
+  try {
+    const parsed = JSON.parse(envValue);
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch {
+    return {};
+  }
 }
 
 function connect(attempt = 0) {
@@ -30,6 +47,9 @@ function connect(attempt = 0) {
   const sock = net.createConnection(sockPath);
   sock.on('connect', () => {
     established = true;
+    if (isNotify) {
+      sock.write(`${JSON.stringify({ ccserver: parseIdentity(process.env.CCSERVER_NOTIFY_IDENTITY) })}\n`);
+    }
     process.stdin.pipe(sock);
     sock.pipe(process.stdout);
   });
