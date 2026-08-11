@@ -9,6 +9,7 @@ import { buildMcpConfigArgsAndEnv } from './mcpConfig.js';
 import {
   isValidApp,
   appResumeArgs,
+  appModelArgs,
   extractResumeSessionId,
   detectPermissionPrompt,
 } from './appLaunch.js';
@@ -111,7 +112,15 @@ function defaultApp() {
   return loadSandboxConfig().defaultApp;
 }
 
-export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox, sandboxOpts, app, resumeLast, groupId = null, groupRole = null, mcpSocketPath = null, roBinds = [] }) {
+// Model normalization for storage/serialization: `model` is an optional
+// non-empty string, or explicit null meaning "use the app default model". Any
+// other value (empty string, wrong type) is coerced to null so an invalid
+// value can never leak into persistence or the CLI arg builder.
+function normalizeModel(model) {
+  return typeof model === 'string' && model.length > 0 ? model : null;
+}
+
+export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox, sandboxOpts, app, model, resumeLast, groupId = null, groupRole = null, mcpSocketPath = null, roBinds = [] }) {
   const id = randomUUID();
 
   // claude (and likely opencode) aborts immediately (SIGABRT, exit 134, no
@@ -131,6 +140,10 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox
 
   // Which agent CLI this session runs. Shell sessions have no app.
   const sessionApp = shell ? null : (isValidApp(app) ? app : defaultApp());
+  // Which model this session launches with. Explicit null / absent means "use
+  // the app's persisted-or-default model" (no --model flag is emitted); only a
+  // non-empty string becomes a CLI model selection. Shells never carry one.
+  const sessionModel = shell ? null : normalizeModel(model);
 
   const { SSH_AUTH_SOCK, SSH_AGENT_PID, ...cleanEnv } = process.env;
 
@@ -141,6 +154,9 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox
   } else {
     command = resolveApp(sessionApp).command;
     args = appResumeArgs(sessionApp, claudeSessionId, { resumeLast });
+    // Model selection must accompany fresh launches and resume alike; the
+    // helper only emits the flag for apps whose CLI is verified to accept it.
+    args.push(...appModelArgs(sessionApp, sessionModel));
   }
   command = resolveCommand(command);
 
@@ -230,6 +246,7 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox
     cwd,
     shell: !!shell,
     app: sessionApp,
+    model: sessionModel,
     groupId,
     groupRole,
     sandbox: useSandbox,
@@ -559,6 +576,7 @@ function persistSchedules() {
         sandboxOpts: s.sandboxOpts || null,
         shell: !!s.shell,
         app: s.app || 'claude',
+        model: normalizeModel(s.model) || null,
         claudeSessionId: s.claudeSessionId || null,
         groupId: s.groupId || null,
         groupRole: s.groupRole || null,
@@ -728,6 +746,7 @@ async function fireSchedule(scheduleId) {
     sandbox: entry.sandbox,
     sandboxOpts: entry.sandboxOpts,
     app: entry.app,
+    model: entry.model,
     resumeLast: entry.app === 'opencode',
     // A group member keeps its membership across the resume: groupManager's
     // session-create listener re-binds the role to the new sessionId.
@@ -774,6 +793,7 @@ export function setScheduledPrompt(id, at, text) {
     sandboxOpts: session.sandboxOpts || null,
     shell: !!session.shell,
     app: session.app || 'claude',
+    model: normalizeModel(session.model) || null,
     claudeSessionId: resumeIdForSession(session),
     sessionId: id,
     groupId: session.groupId || null,
@@ -829,6 +849,8 @@ export function restoreSchedules() {
       shell: !!e.shell,
       // Legacy persisted schedules predate the app field and were claude.
       app: isValidApp(e.app) ? e.app : 'claude',
+      // Legacy schedules predate the model field; null means the app default.
+      model: normalizeModel(e.model) || null,
       claudeSessionId: e.claudeSessionId || null,
       // Group membership survives a restart: an auto-resume re-binds the
       // role (see fireSchedule), so a member isn't orphaned by a reboot.
@@ -861,6 +883,7 @@ export function listSessions() {
       sandbox: session.sandbox,
       sandboxOpts: session.sandboxOpts || null,
       app: session.app,
+      model: session.model || null,
       groupId: session.groupId || null,
       groupRole: session.groupRole || null,
     });
@@ -989,6 +1012,7 @@ export function savedSessionPublic(session, claudeId) {
     sandbox: !!session.sandbox,
     sandboxOpts: session.sandboxOpts || null,
     app: session.app || 'claude',
+    model: normalizeModel(session.model) || null,
     groupId: session.groupId || null,
     groupRole: session.groupRole || null,
   };

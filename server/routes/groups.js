@@ -151,11 +151,22 @@ function validCwd(cwd) {
   }
 }
 
-function appFromBody(spec, fallback) {
-  if (spec && typeof spec === 'object' && typeof spec.app === 'string') {
-    return isValidApp(spec.app) ? spec.app : null;
+function memberSpecFromBody(spec) {
+  const source = spec && typeof spec === 'object' ? spec : {};
+  const result = {};
+  if (Object.prototype.hasOwnProperty.call(source, 'app')) {
+    result.app = typeof source.app === 'string' && isValidApp(source.app) ? source.app : null;
   }
-  return fallback;
+  if (Object.prototype.hasOwnProperty.call(source, 'model')) {
+    if (source.model !== null && typeof source.model !== 'string') result.model = undefined;
+    else result.model = source.model;
+  }
+  if (Object.prototype.hasOwnProperty.call(source, 'sandboxOpts')) {
+    result.sandboxOpts = source.sandboxOpts && typeof source.sandboxOpts === 'object'
+      ? { gpg: !!source.sandboxOpts.gpg, sshAgent: !!source.sandboxOpts.sshAgent }
+      : null;
+  }
+  return result;
 }
 
 // Session options for the orchestrator-restart route. Extracted (and pure)
@@ -164,14 +175,15 @@ function appFromBody(spec, fallback) {
 // to the project (cwd); concurrent groups for the same project are refused at
 // creation time, so at most one live group ever owns it at a time --
 // `resumeLast` maps 1:1 onto "the previous conversation").
-export function orchestratorRestartSessionOpts({ group, app, mcpSocketPath, roBinds = [] }) {
+export function orchestratorRestartSessionOpts({ group, app, model = null, sandboxOpts = null, mcpSocketPath, roBinds = [] }) {
   return {
     cwd: group.orchestratorDir,
     cols: 80,
     rows: 24,
     sandbox: true,
-    sandboxOpts: null,
+    sandboxOpts,
     app,
+    model,
     resumeLast: true,
     groupId: group.id,
     groupRole: 'orchestrator',
@@ -203,11 +215,17 @@ export async function groupsRoute(fastify, opts) {
       return reply.code(400).send({ error: 'combo launch requires the sandbox (bwrap not found on this host)' });
     }
 
-    const workerAApp = appFromBody(body.workerA, 'claude');
-    const workerBApp = appFromBody(body.workerB, 'claude');
-    const orchApp = appFromBody(body.orchestrator, 'claude');
-    if (!workerAApp || !workerBApp || !orchApp) {
+    const workerA = memberSpecFromBody(body.workerA);
+    const workerB = memberSpecFromBody(body.workerB);
+    const orchestrator = memberSpecFromBody(body.orchestrator);
+    const invalidApp = (spec) => Object.prototype.hasOwnProperty.call(spec || {}, 'app') && !spec.app;
+    if (invalidApp(workerA) || invalidApp(workerB) || invalidApp(orchestrator)) {
       return reply.code(400).send({ error: 'workerA/workerB/orchestrator app must be claude or opencode' });
+    }
+    if ((Object.prototype.hasOwnProperty.call(workerA, 'model') && workerA.model === undefined)
+      || (Object.prototype.hasOwnProperty.call(workerB, 'model') && workerB.model === undefined)
+      || (Object.prototype.hasOwnProperty.call(orchestrator, 'model') && orchestrator.model === undefined)) {
+      return reply.code(400).send({ error: 'member model must be a string or null' });
     }
     const sandboxOpts = (body.sandboxOpts && typeof body.sandboxOpts === 'object')
       ? { gpg: !!body.sandboxOpts.gpg, sshAgent: !!body.sandboxOpts.sshAgent }
@@ -248,7 +266,17 @@ export async function groupsRoute(fastify, opts) {
     // Broker start failures (socket path collision, permission errors, ...)
     // must surface as a launch error, not a silent "success".
     try {
-      await groupManager.createGroup({ groupId, cwd, orchestratorDir, sandboxOpts, orchestratorApp: orchApp, instructions });
+      await groupManager.createGroup({
+        groupId,
+        cwd,
+        orchestratorDir,
+        sandboxOpts,
+        orchestratorApp: orchestrator.app,
+        orchestratorModel: orchestrator.model,
+        orchestratorSandboxOpts: orchestrator.sandboxOpts ?? null,
+        memberPrefs: { workerA, workerB, orchestrator },
+        instructions,
+      });
     } catch (err) {
       if (!dirAlreadyExisted) { try { rmSync(orchestratorDir, { recursive: true, force: true }); } catch { /* best effort */ } }
       return reply.code(500).send({ error: `Failed to start control broker: ${err.message}` });
@@ -266,9 +294,9 @@ export async function groupsRoute(fastify, opts) {
     // creation, session spawn and registration can't drift between the
     // initial trio and later open_tab additions. Two workers in parallel.
     const workerResults = await Promise.all(
-      [['workerA', workerAApp], ['workerB', workerBApp]].map(async ([role, app]) => ({
+      [['workerA', workerA], ['workerB', workerB]].map(async ([role, spec]) => ({
         role,
-        res: await groupManager.addMember(groupId, role, { app, cwd, sandboxOpts }),
+        res: await groupManager.addMember(groupId, role, { ...spec, cwd }),
       })),
     );
     for (const { role, res } of workerResults) {
@@ -288,8 +316,9 @@ export async function groupsRoute(fastify, opts) {
       cols: 80,
       rows: 24,
       sandbox: true,
-      sandboxOpts: null,
-      app: orchApp,
+      sandboxOpts: orchestrator.sandboxOpts ?? null,
+      app: orchestrator.app,
+      model: orchestrator.model ?? null,
       groupId,
       groupRole: 'orchestrator',
       mcpSocketPath: controlBroker ? controlBroker.sockPath : null,
@@ -299,12 +328,17 @@ export async function groupsRoute(fastify, opts) {
       return fail(`orchestrator failed to launch: ${orchRes.error || 'unknown error'}`);
     }
     groupManager.registerMember(groupId, 'orchestrator', orchRes.sessionId);
+    groupManager.setMemberPrefs(groupId, 'orchestrator', {
+      app: orchRes.session.app,
+      model: orchRes.session.model,
+      sandboxOpts: orchestrator.sandboxOpts ?? null,
+    });
     // Assembly is complete: the group is now subject to the "no live members"
     // auto-destroy in onSessionExit. Before this point a member crash must
     // not tear the half-built group (and its control broker) down.
     groupManager.markGroupAssembled(groupId);
 
-    fastify.log.info(`[groups] ${groupId} launched at ${cwd} (workers ${workerAApp}/${workerBApp}, orchestrator ${orchApp})`);
+    fastify.log.info(`[groups] ${groupId} launched at ${cwd} (workers ${workerA.app || 'default'}/${workerB.app || 'default'}, orchestrator ${orchRes.session.app})`);
     return {
       groupId,
       cwd,
@@ -353,7 +387,10 @@ export async function groupsRoute(fastify, opts) {
     // Prefer the persisted launch app; fall back to the restored member's
     // saved app (legacy groups persisted before orchestratorApp existed).
     const orchMember = groupManager.listGroupMembers(request.params.id).find((m) => m.role === 'orchestrator');
-    const app = group.orchestratorApp || orchMember?.app || 'claude';
+    const pref = groupManager.getMemberPrefs(request.params.id, 'orchestrator') || {};
+    const app = pref.app || group.orchestratorApp || orchMember?.app || 'claude';
+    const model = pref.model ?? orchMember?.model ?? group.orchestratorModel ?? null;
+    const sandboxOpts = pref.sandboxOpts ?? orchMember?.sandboxOpts ?? null;
     if (!isValidApp(app)) {
       return reply.code(400).send({ error: 'orchestrator app unavailable for restart' });
     }
@@ -371,11 +408,12 @@ export async function groupsRoute(fastify, opts) {
     // /workers/<role> mount destination.
     const roBinds = groupManager.resolveWorkerRoBinds(group.id, 'orchestrator');
 
-    const res = createSession(orchestratorRestartSessionOpts({ group, app, mcpSocketPath, roBinds }));
+    const res = createSession(orchestratorRestartSessionOpts({ group, app, model, sandboxOpts, mcpSocketPath, roBinds }));
     if (res.error || !res.session) {
       return reply.code(500).send({ error: `orchestrator restart failed: ${res.error || 'unknown error'}` });
     }
     groupManager.registerMember(group.id, 'orchestrator', res.sessionId);
+    groupManager.setMemberPrefs(group.id, 'orchestrator', { app, model: res.session.model, sandboxOpts });
     fastify.log.info(`[groups] ${group.id} orchestrator restarted (${app})`);
     return {
       groupId: group.id,

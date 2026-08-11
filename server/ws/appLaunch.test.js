@@ -5,6 +5,8 @@ import {
   isValidApp,
   appDisplayName,
   appResumeArgs,
+  appModelArgs,
+  appSupportsModelFlag,
   extractResumeSessionId,
   detectPermissionPrompt,
 } from './appLaunch.js';
@@ -67,6 +69,62 @@ test('appResumeArgs: opencode resumes by id or -c', () => {
   assert.deepEqual(appResumeArgs('opencode', 'ses_abc'), ['--session', 'ses_abc']);
   assert.deepEqual(appResumeArgs('opencode', null, { resumeLast: true }), ['-c']);
   assert.deepEqual(appResumeArgs('opencode', 'ses_abc', { resumeLast: true }), ['--session', 'ses_abc']);
+});
+
+test('appSupportsModelFlag: opencode verified, claude opt-in only', () => {
+  assert.equal(appSupportsModelFlag('opencode'), true, 'opencode --help confirms -m/--model');
+  // claude's --model support cannot be verified on this host (the local
+  // wrapper resolves to a missing binary), so it must default to off and only
+  // turn on via the documented opt-in env var.
+  const before = process.env.CCSERVER_CLAUDE_MODEL;
+  delete process.env.CCSERVER_CLAUDE_MODEL;
+  try {
+    assert.equal(appSupportsModelFlag('claude'), false);
+  } finally {
+    if (before === undefined) delete process.env.CCSERVER_CLAUDE_MODEL;
+    else process.env.CCSERVER_CLAUDE_MODEL = before;
+  }
+  assert.equal(appSupportsModelFlag('claude'), false, 'unknown/bogus env must not enable it');
+  assert.equal(appSupportsModelFlag('bogus'), false);
+});
+
+test('appSupportsModelFlag: claude opt-in via CCSERVER_CLAUDE_MODEL=1', () => {
+  const before = process.env.CCSERVER_CLAUDE_MODEL;
+  process.env.CCSERVER_CLAUDE_MODEL = '1';
+  try {
+    assert.equal(appSupportsModelFlag('claude'), true);
+  } finally {
+    if (before === undefined) delete process.env.CCSERVER_CLAUDE_MODEL;
+    else process.env.CCSERVER_CLAUDE_MODEL = before;
+  }
+});
+
+test('appModelArgs: opencode emits --model only for a non-empty string model', () => {
+  assert.deepEqual(appModelArgs('opencode', 'anthropic/claude-sonnet-4'), ['--model', 'anthropic/claude-sonnet-4']);
+  assert.deepEqual(appModelArgs('opencode', 'gpt-5'), ['--model', 'gpt-5']);
+  assert.deepEqual(appModelArgs('opencode', ''), [], 'empty model must be omitted');
+  assert.deepEqual(appModelArgs('opencode', null), [], 'null model must be omitted');
+  assert.deepEqual(appModelArgs('opencode', undefined), [], 'absent model must be omitted');
+  assert.deepEqual(appModelArgs('opencode', 42), [], 'non-string model must be omitted');
+});
+
+test('appModelArgs: claude never emits --model unless the capability is enabled', () => {
+  const before = process.env.CCSERVER_CLAUDE_MODEL;
+  delete process.env.CCSERVER_CLAUDE_MODEL;
+  try {
+    assert.deepEqual(appModelArgs('claude', 'anthropic/claude-sonnet-4'), [],
+      'an unverified Claude CLI must never receive an unsupported flag');
+  } finally {
+    if (before === undefined) delete process.env.CCSERVER_CLAUDE_MODEL;
+    else process.env.CCSERVER_CLAUDE_MODEL = before;
+  }
+  process.env.CCSERVER_CLAUDE_MODEL = '1';
+  try {
+    assert.deepEqual(appModelArgs('claude', 'anthropic/claude-sonnet-4'), ['--model', 'anthropic/claude-sonnet-4']);
+  } finally {
+    if (before === undefined) delete process.env.CCSERVER_CLAUDE_MODEL;
+    else process.env.CCSERVER_CLAUDE_MODEL = before;
+  }
 });
 
 test('extractResumeSessionId: claude extracts the last resume id', () => {

@@ -94,13 +94,27 @@ export async function sendInput(deps, { sessionId, text, submit = true }) {
 
 // Open a new member session (worker role) inside the group, with its own
 // handoff channel. cwd is restricted to the group's allowedCwds (initialized
-// to the shared project directory -- see groupManager). sandboxOpts (gpg /
+// to the shared project directory -- see groupManager). app/model/sandboxOpts
+// are optional at the wire layer: omitted values fall back to the role's
+// persisted preference, then to the group/app defaults. sandboxOpts (gpg /
 // ssh-agent forwarding) defaults to the group's launch flags; an explicit
-// override is honored.
-export async function openTab(deps, { role, app, cwd, sandboxOpts = null }) {
-  const res = await deps.groupManager.addMember(deps.groupId, role, { app, cwd, sandboxOpts });
+// override is honored. The result carries the effective app/model/sandbox
+// settings so the caller can record what actually launched.
+export async function openTab(deps, { role, app, model, cwd, sandboxOpts }) {
+  const options = { cwd };
+  if (app !== undefined) options.app = app;
+  if (model !== undefined) options.model = model;
+  if (sandboxOpts !== undefined) options.sandboxOpts = sandboxOpts;
+  const res = await deps.groupManager.addMember(deps.groupId, role, options);
   if (res.error) return { error: res.error, message: res.message };
-  return { sessionId: res.sessionId, role, cwd, app: res.app };
+  return {
+    sessionId: res.sessionId,
+    role,
+    cwd,
+    app: res.app,
+    model: res.model,
+    sandboxOpts: res.sandboxOpts || null,
+  };
 }
 
 export function closeTab(deps, { sessionId }) {

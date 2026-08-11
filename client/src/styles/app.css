@@ -294,6 +294,16 @@ body {
   font-size: 10px;
 }
 
+.group-subtab-model {
+  font-size: 10px;
+  color: var(--text-muted);
+  max-width: 90px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
 .group-subtab-item.no-sandbox .group-subtab-label::before {
   content: '⚠️';
   font-size: 11px;
@@ -619,6 +629,29 @@ body {
   border: 1px solid var(--border);
   border-radius: 4px;
   resize: vertical;
+}
+
+.open-menu-model-row {
+  display: flex;
+  gap: 4px;
+  padding: 0 10px 4px;
+}
+
+.open-menu-model-input {
+  flex: 1;
+  padding: 5px 8px;
+  font-size: 12px;
+  font-family: inherit;
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
+
+.open-menu-role-sandbox {
+  padding: 0 10px 2px;
+  border-top: 1px dashed var(--border);
+  margin-top: 2px;
 }
 
 .open-dialog {

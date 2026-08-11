@@ -100,10 +100,11 @@ export function buildControlMcpServer(deps) {
 
   server.tool(
     'open_tab',
-    'Open a new worker session inside this group (with its own handoff channel) and return its sessionId. role must be a worker role (workerA, workerB, ...) -- never orchestrator. cwd is restricted to the group project directory. sandboxOpts (gpg/ssh-agent forwarding) defaults to the group launch flags.',
+    'Open a new worker session inside this group (with its own handoff channel) and return its sessionId. role must be a worker role (workerA, workerB, ...) -- never orchestrator. cwd is restricted to the group project directory. app (claude or opencode), model (a provider/model string, or null for the app default) and sandboxOpts (gpg/ssh-agent forwarding) are optional: omitted values fall back to the role\'s persisted preferences, then to the group/app defaults. The result returns the effective app/model/sandboxOpts.',
     {
       role: z.string().regex(/^worker[A-Za-z0-9_-]+$/),
-      app: z.enum(['claude', 'opencode']),
+      app: z.enum(['claude', 'opencode']).optional(),
+      model: z.string().nullable().optional(),
       cwd: z.string(),
       sandboxOpts: z.object({ gpg: z.boolean().optional(), sshAgent: z.boolean().optional() }).optional(),
     },
