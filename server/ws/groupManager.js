@@ -219,7 +219,16 @@ export function listGroupMembers(groupId) {
       restored: !session && !!saved,
     });
   }
-  return out;
+  // The orchestrator is always the first tab (UI default-active) and the first
+  // entry for the MCP list_group_sessions, regardless of registration order
+  // (the POST /groups launch registers the workers first and the orchestrator
+  // last -- see routes/groups.js). Stable sort -- V8 -- keeps the other roles
+  // in insertion order.
+  return out.slice().sort((a, b) => {
+    if (a.role === 'orchestrator') return -1;
+    if (b.role === 'orchestrator') return 1;
+    return 0;
+  });
 }
 
 // Compact public listing for GET /api/groups (client "groups" section).
