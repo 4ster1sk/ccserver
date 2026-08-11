@@ -17,7 +17,7 @@
 import { createServer } from 'node:net';
 import { rmSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { SocketTransport, buildControlMcpServer, buildHandoffMcpServer } from './mcpServer.js';
+import { SocketTransport, buildControlMcpServer, buildHandoffMcpServer, buildNotifyMcpServer } from './mcpServer.js';
 
 const UID = typeof process.getuid === 'function' ? process.getuid() : 0;
 const RUNTIME_BASE = process.env.XDG_RUNTIME_DIR || `/run/user/${UID}`;
@@ -55,14 +55,18 @@ function waitForSocketFile(sockPath, timeoutMs) {
 // listening, or rejects with the listen error (or a timeout waiting for the
 // socket file). Callers must propagate the rejection -- a silent failure
 // here would leave sessions sandboxed with a bind to a socket nobody is
-// listening on.
-async function listenMcp({ groupId, tag, buildServer }) {
-  const sockPath = sockPathFor(groupId, tag);
+// listening on. Pass an explicit `sockPath` to host a server at a path of
+// your choosing (the process-global ccserver-notify socket, see notify.js);
+// otherwise the path is derived from groupId + tag.
+async function listenMcp({ groupId, tag, buildServer, sockPath }) {
+  const target = sockPath || sockPathFor(groupId, tag);
   // A socket file left over from a crash (teardown never ran) would make
   // listen() fail with EADDRINUSE. The path is group-scoped and derived, so
-  // a stale file can never belong to a live listener -- safe to drop.
+  // a stale file can never belong to a live listener -- safe to drop. The
+  // notify socket is single-instance per server process, so its stale file
+  // is equally safe to drop.
   try {
-    rmSync(sockPath, { force: true });
+    rmSync(target, { force: true });
   } catch {
     // best effort
   }
@@ -96,7 +100,7 @@ async function listenMcp({ groupId, tag, buildServer }) {
       reject(new Error(`[mcp-broker] ${tag} listen failed: ${err.message}`));
     };
     server.once('error', onStartupError);
-    server.listen(sockPath, () => {
+    server.listen(target, () => {
       // Listening succeeded -- detach the startup-only rejecter so it can't
       // linger and fire on a later, unrelated error.
       server.off('error', onStartupError);
@@ -104,7 +108,7 @@ async function listenMcp({ groupId, tag, buildServer }) {
     });
   });
   try {
-    await waitForSocketFile(sockPath, SOCKET_FILE_WAIT_MS);
+    await waitForSocketFile(target, SOCKET_FILE_WAIT_MS);
   } catch (err) {
     for (const socket of connections) {
       try { socket.destroy(); } catch { /* already gone */ }
@@ -112,7 +116,7 @@ async function listenMcp({ groupId, tag, buildServer }) {
     try { server.close(); } catch { /* not listening */ }
     throw err;
   }
-  return { server, sockPath, dir: null, connections };
+  return { server, sockPath: target, dir: null, connections };
 }
 
 // deps: { groupId, groupManager, sessionManager }
@@ -130,6 +134,18 @@ export async function startHandoffChannel(deps) {
     groupId: deps.groupId,
     tag: `handoff-${deps.role}`,
     buildServer: () => buildHandoffMcpServer(deps),
+  });
+}
+
+// The process-global notification broker (ccserver-notify, see notify.js).
+// One per server process at the caller-provided sockPath (getNotifySockPath).
+// NOT group-scoped: the notify tools are process-wide, so the socket is bound
+// into every notify-enabled session's sandbox.
+export async function startNotifyBroker({ notifyApi, sockPath }) {
+  return listenMcp({
+    sockPath,
+    tag: 'notify',
+    buildServer: () => buildNotifyMcpServer({ notifyApi }),
   });
 }
 

@@ -158,3 +158,45 @@ export function buildHandoffMcpServer(deps) {
 
   return server;
 }
+
+// Process-global notification server (ccserver-notify, see notify.js). Unlike
+// the control/handoff servers it is not group-scoped: one socket hosts it for
+// the whole server, and its tools reach the shared subscription registry /
+// Discord webhook via the closed `notifyApi` facade. Identity is never taken
+// from the wire -- there is none here, the server is open to any caller who
+// reaches the socket (same-user sandboxes only).
+//
+// notifyApi: { sendNotification, subscribe, unsubscribe, listSubscriptions }
+export function buildNotifyMcpServer({ notifyApi }) {
+  const server = new McpServer({ name: 'ccserver-notify', version: '1.0.0' });
+
+  server.tool(
+    'notify',
+    'Deliver a notification to every configured channel (the Discord webhook set in sandbox.config.json, plus every webhook currently subscribed via subscribe). Use this when you need human attention that the terminal alone cannot provide. level is an optional severity (info/success/warning/error) reflected in the payload.',
+    { title: z.string(), body: z.string(), level: z.enum(['info', 'success', 'warning', 'error']).optional() },
+    async (args) => ({ content: [{ type: 'text', text: JSON.stringify(await notifyApi.sendNotification(args)) }] }),
+  );
+
+  server.tool(
+    'subscribe',
+    'Register a webhook URL (https only) to receive future notify deliveries. Subscriptions are persisted server-side and survive a restart. Returns the created subscription (with its id) for later unsubscribe.',
+    { url: z.string(), name: z.string().optional() },
+    async (args) => ({ content: [{ type: 'text', text: JSON.stringify(notifyApi.subscribe(args)) }] }),
+  );
+
+  server.tool(
+    'unsubscribe',
+    'Remove a webhook subscription by its id (see subscribe / list_subscriptions).',
+    { subscriptionId: z.string() },
+    async (args) => ({ content: [{ type: 'text', text: JSON.stringify(notifyApi.unsubscribe(args)) }] }),
+  );
+
+  server.tool(
+    'list_subscriptions',
+    'List all currently subscribed webhook URLs (id, url, name, createdAt).',
+    {},
+    async () => ({ content: [{ type: 'text', text: JSON.stringify({ subscriptions: notifyApi.listSubscriptions() }) }] }),
+  );
+
+  return server;
+}
