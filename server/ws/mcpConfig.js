@@ -18,7 +18,7 @@
 //               config, no file written).
 //
 // The optional `{ notify }` descriptor adds the ccserver-notify MCP server:
-//   { mode, sockPath }
+//   { mode, sockPath, identity? }
 //     mode     - 'sandbox' (run the in-sandbox bridge, args ['notify']) or
 //                'host' (run <node> <bridge script> notify on the host --
 //                used by non-sandboxed sessions, where the fixed in-sandbox
@@ -26,6 +26,13 @@
 //     sockPath - host path of the process-global notify socket, injected as
 //                CCSANDBOX_NOTIFY_MCP_SOCK so the wrapper can reach it (bwrap
 //                --setenv overrides it with the in-sandbox path when sandboxed).
+//     identity - optional per-connection attribution
+//                ({ sessionId, groupId, groupRole, cwd, projectName, app },
+//                see sessionManager / mcpBroker). Injected as the JSON
+//                CCSERVER_NOTIFY_IDENTITY env the bridge wrapper attaches to
+//                its first socket frame; absent -> no env key, the wrapper
+//                sends an empty frame and the notification carries host-only
+//                attribution.
 //
 // Returns { args, env } for sessionManager to splice into the pty spawn.
 
@@ -49,6 +56,7 @@ function notifyInvocation(notify) {
 
 export function buildMcpConfigArgsAndEnv(app, { groupMcp = true, notify } = {}) {
   const notifySockEnv = notify ? { CCSANDBOX_NOTIFY_MCP_SOCK: notify.sockPath } : {};
+  const notifyIdentityEnv = notify?.identity ? { CCSERVER_NOTIFY_IDENTITY: JSON.stringify(notify.identity) } : {};
 
   if (app === 'opencode') {
     const mcp = {};
@@ -65,6 +73,7 @@ export function buildMcpConfigArgsAndEnv(app, { groupMcp = true, notify } = {}) 
           mcp,
         }),
         ...notifySockEnv,
+        ...notifyIdentityEnv,
       },
     };
   }
@@ -80,6 +89,9 @@ export function buildMcpConfigArgsAndEnv(app, { groupMcp = true, notify } = {}) 
       '--mcp-config',
       JSON.stringify({ mcpServers }),
     ],
-    env: notifySockEnv,
+    env: {
+      ...notifySockEnv,
+      ...notifyIdentityEnv,
+    },
   };
 }
