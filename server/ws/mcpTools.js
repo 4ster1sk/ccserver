@@ -1,7 +1,7 @@
 // Pure MCP tool implementations for combo-launched groups. No MCP SDK
 // dependency and no imports of the app's mutable modules -- every function
 // receives its dependencies (`deps`) explicitly, so these can be unit-tested
-// directly with node --test (see mcpTools.test.js).
+// directly with node --test (see mcpTools.test.js). Node builtins only.
 //
 // SECURITY: no function here ever accepts `groupId`, `sessionId` or `role`
 // from the wire as an identity. The control server's deps carry the groupId
@@ -11,6 +11,11 @@
 // tool that takes one first checks groupManager.isSessionInGroup() -- the
 // single authorization chokepoint. Breaking this shape (e.g. accepting a
 // groupId argument) nullifies the whole isolation boundary.
+
+import { readdir, readFile, stat } from 'node:fs/promises';
+import { join } from 'node:path';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 
 const ANSI_RE = /\x1b(?:\[[0-9;?]*[a-zA-Z]|\][^\x07\x1b]*(?:\x07|\x1b\\)?|[()][A-Z0-9]|[>=<]|#[0-9])/g;
 
@@ -175,4 +180,126 @@ export function handoffToOrchestrator(deps, { summary, status = 'done', nextRole
     at: Date.now(),
   });
   return ok ? { ok: true } : { error: 'group-not-found' };
+}
+
+// --- repo_info -------------------------------------------------------------
+// Shallow repository facts for the orchestrator (control server only).
+// Security/cost posture, mirroring read_output:
+//   - cwd is the group's project directory (group.cwd) -- never taken from
+//     the wire, so there is no path argument to traverse with.
+//   - read-only: no writes; the only command execution is the fixed git
+//     invocations below (`git -C <cwd>` with a whitelisted argument list,
+//     never caller input).
+//   - every section is capped (root entries, package.json keys, README
+//     bytes) so a large repo cannot balloon the orchestrator's context;
+//     deeper inspection and all changes belong to the workers (send_input).
+const MAX_ROOT_ENTRIES = 100;
+const MAX_PACKAGE_KEYS = 50;
+const MAX_README_CHARS = 8 * 1024;
+
+// Top-level (depth 1) names only -- never file contents.
+async function rootListing(cwd) {
+  try {
+    const entries = await readdir(cwd, { withFileTypes: true });
+    const dirs = [];
+    const files = [];
+    for (const e of entries) {
+      if (e.isDirectory()) dirs.push(e.name);
+      else if (e.isFile()) files.push(e.name);
+    }
+    dirs.sort();
+    files.sort();
+    const truncated = dirs.length + files.length > MAX_ROOT_ENTRIES;
+    return {
+      dirs: dirs.slice(0, MAX_ROOT_ENTRIES),
+      files: files.slice(0, Math.max(MAX_ROOT_ENTRIES - dirs.length, 0)),
+      truncated,
+    };
+  } catch {
+    return null;
+  }
+}
+
+const README_VARIANTS = ['README.md', 'README', 'README.txt', 'README.rst', 'README.markdown'];
+
+// First found README variant, capped at MAX_README_CHARS (~100 lines).
+async function readmePreview(cwd) {
+  for (const name of README_VARIANTS) {
+    try {
+      if (!(await stat(join(cwd, name))).isFile()) continue;
+      const text = await readFile(join(cwd, name), 'utf-8');
+      const truncated = text.length > MAX_README_CHARS;
+      return {
+        file: name,
+        text: truncated ? text.slice(0, MAX_README_CHARS) : text,
+        truncated,
+      };
+    } catch {
+      // try the next variant
+    }
+  }
+  return null;
+}
+
+// Keys only -- never values -- so dependency/script names stay visible
+// without hauling versions or command strings into the orchestrator context.
+async function packageJsonSummary(cwd) {
+  try {
+    const pkg = JSON.parse(await readFile(join(cwd, 'package.json'), 'utf-8'));
+    const keyList = (obj) => (
+      obj && typeof obj === 'object' && !Array.isArray(obj)
+        ? Object.keys(obj).slice(0, MAX_PACKAGE_KEYS)
+        : []
+    );
+    return {
+      name: typeof pkg.name === 'string' ? pkg.name : null,
+      version: typeof pkg.version === 'string' ? pkg.version : null,
+      description: typeof pkg.description === 'string' ? pkg.description : null,
+      scripts: keyList(pkg.scripts),
+      dependencies: keyList(pkg.dependencies),
+      devDependencies: keyList(pkg.devDependencies),
+    };
+  } catch {
+    return null;
+  }
+}
+
+const gitExec = promisify(execFile);
+
+async function gitRun(cwd, args) {
+  try {
+    const { stdout } = await gitExec('git', ['-C', cwd, ...args], { encoding: 'utf-8', timeout: 10000 });
+    return stdout.trim();
+  } catch {
+    return null;
+  }
+}
+
+async function gitState(cwd) {
+  const branch = await gitRun(cwd, ['branch', '--show-current']);
+  const head = await gitRun(cwd, ['rev-parse', '--short', 'HEAD']);
+  if (head == null) return null; // not a repository (or no git at all)
+  const log = await gitRun(cwd, ['log', '--oneline', '-5']);
+  const status = await gitRun(cwd, ['status', '--porcelain']);
+  return {
+    branch: branch || null,
+    head,
+    log: log ? log.split('\n').filter(Boolean) : [],
+    changes: status ? status.split('\n').filter(Boolean).length : 0,
+  };
+}
+
+export async function repoInfo(deps) {
+  const group = deps.groupManager.getGroup(deps.groupId);
+  if (!group) {
+    return { error: 'group-not-found', message: 'group not found' };
+  }
+  const cwd = group.cwd;
+  return {
+    cwd,
+    root: await rootListing(cwd),
+    readme: await readmePreview(cwd),
+    packageJson: await packageJsonSummary(cwd),
+    git: await gitState(cwd),
+  };
 }
