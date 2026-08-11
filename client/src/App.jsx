@@ -38,6 +38,20 @@ export default function App() {
     saveThemeId(themeId);
   }, [themeId]);
 
+  // Browser tab title: "<hostname> ccserver" (hostname resolved server-side
+  // with the same precedence as the notify footer's _from: <host>). The
+  // static index.html fallback is "ccserver"; this upgrades it once the API
+  // answers. Silent on failure (e.g. token auth gate) -- the fallback stays.
+  // Idempotent, so React StrictMode's double mount is harmless.
+  useEffect(() => {
+    authFetch('/api/dirs/home')
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (data?.hostname) document.title = `${data.hostname} ccserver`;
+      })
+      .catch(() => {});
+  }, []);
+
   const openTerminalTab = useCallback((dirPath, { claudeSessionId = null, shell = false, sessionId = null, attachSessionId = null, sandbox = false, sandboxOpts = null, app = 'claude', model = null, resume = false } = {}) => {
     const id = `terminal-${++tabIdCounter}`;
     const dirName = dirPath.split(/[/\\]/).filter(Boolean).pop() || dirPath;

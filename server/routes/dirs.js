@@ -2,11 +2,15 @@ import { readdir, mkdir, stat } from 'node:fs/promises';
 import { join, resolve, basename } from 'node:path';
 import { homedir } from 'node:os';
 import { loadSandboxConfig } from '../ws/sandbox.js';
+import { resolvedHostname } from '../ws/notify.js';
 
 export async function dirsRoute(fastify, opts) {
   fastify.get('/dirs/home', async () => {
     const { defaultApp, forceSandbox } = loadSandboxConfig();
-    return { home: homedir(), defaultApp, forceSandbox };
+    // hostname for the browser tab title ("<host> ccserver"): the same
+    // resolution the notify footer uses, so the tab matches _from: <host>.
+    // Extra field, so existing clients are unaffected.
+    return { home: homedir(), defaultApp, forceSandbox, hostname: resolvedHostname() };
   });
 
   fastify.get('/dirs', async (request, reply) => {
