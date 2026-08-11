@@ -126,6 +126,18 @@ GitHub Copilot を選んだ場合:
   ```
 
   `subscriptions` は**初期購読のシード**です。購読ゼロ + Discord 未設定だと MCP 自体が注入されないため、購読だけから始めたい場合はここで seed します (MCP が無いと `subscribe` を呼べないため)。
+- **発信元属性 (自動付与)**: 各通知のペイロード末尾に、どのセッションから送られたかを示すフッターが自動で付与されます (`notify.hostname` 未設定なら OS の hostname、`CCSERVER_HOSTNAME` 環境変数が最優先):
+
+  ```
+  🚨 Build failed
+  details here
+
+  _from: myhost · myproject · group abc12345 · session 01234567
+  ```
+
+  - `<host>` は常に付与 (複数ホストで同じ webhook を共有する場合は `notify.hostname` で固定できます)。
+  - `<project>` はセッションの cwd の basename、`group <…>` はコンボのグループ ID 先頭 8 文字 (スタンドアロンでは付かない)、`session <…>` はセッション ID 先頭 8 文字です。
+  - フッターを出したくない場合は `notify.attribution: false` で丸ごと無効化できます (既定 `true`)。
 - **注入条件**: スタンドアロン (グループ外) のエージェントセッションと、コンボ起動の**オーケストレーターのみ**に注入されます。シェル・コンボのワーカーには注入されません。サンドボックス内外どちらでも動作します (サンドボックス内はソケットを bind、外はホストの node でブリッジを実行)。
 - **ツール**:
   | ツール | 引数 | 説明 |
