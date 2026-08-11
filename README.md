@@ -170,6 +170,11 @@ GitHub Copilot を選んだ場合:
 - シェルエラーが出てしまった場合、それを収拾しようとして空入力や Ctrl+C 相当の入力を送ってはいけません。継続入力待ちのシェルに対しては EOF のように作用し、**シェルプロセスごと終了させてしまうことがあります** (実際に一度そうなりました)。`get_tab_status` で `exited: true` を確認したら、そのタブは諦めて `close_tab` → `open_tab` で作り直してください。
 - 新規に開いたタブに何かを送る前には、`read_output` で実際にアプリの TUI が描画されていることを確認してから送ってください。
 
+#### control MCP ツールの信頼性保証 (handoff と read_output)
+
+- **ハンドオフは失われません**: `wait_for_handoff` はタイムアウト (`{timedOut:true}`) 時に**そのままもう一度呼ぶだけで安全**です。誰も待っていない間に届いたハンドオフはキューに残り、また**待機中に接続が切れても**イベントを消費しないため、再接続後の次の `wait_for_handoff` が必ず受け取ります。サーバー再起動後も未受信ハンドオフは残っています。
+- **`read_output` の `screen` / `screenAlt` / `screenIdleMs` を使う**: ワーカーのスピナー等の動的描画はカーソル移動と行消去でその場を書き換えるため、生のバイト列 (`raw` / `text`) からは「今見えている画面」を復元できません。サーバーはセッションごとに軽量な仮想画面 (ANSI 解釈) を維持しており、`screen` が現在の可視画面、`screenIdleMs` が**画面が最後に変化してからの経過** (スピナーが回っていれば小さい値、静止プロンプトなら大きい値) です。stuck/busy 判定は `text` や `idleForMs` (バイトベース) よりこれらを優先してください。`get_tab_status` の `screenIdleMs` も同様です。
+
 #### オーケストレーターから見えるのは repo_info の基本情報だけ
 
 オーケストレーターのサンドボックスにワーカーのディレクトリは**マウントされません** (プロジェクトファイルへの直接アクセスは不可)。代わりに、control MCP サーバーのツール `repo_info` がグループのプロジェクト (cwd) の**基本情報だけ**を返します: トップレベルの構成 (ディレクトリ/ファイル名のみ、100 エントリ上限)、README の先頭 ~8KB、`package.json` の要約 (name/version/description と scripts/dependencies/devDependencies の**キー一覧のみ**、値は返さない、各 50 キー上限)、git 状態 (現在ブランチ / short HEAD / 直近 5 コミットの件名 / 変更ファイル数)。
@@ -319,6 +324,7 @@ ccserver/
 │       ├── mcpServer.js            # control / handoff / notify 各 MCP サーバー (SocketTransport 含む)
 │       ├── mcpBroker.js            # Unix-socket MCP ブローカー (control/handoff はグループ毎、notify はプロセス毎 1 つ)
 │       ├── mcpTools.js             # control/handoff ツールの実装 (deps 注入)
+│       ├── screenModel.js          # read_output 用の軽量仮想画面 (ANSI 解釈 + 変化検知)
 │       ├── sandbox.js              # bwrap + rootless docker サンドボックス構築
 │       ├── sandbox-entrypoint.sh
 │       ├── sandbox-gh-wrapper.cjs         # サンドボックス内 gh をブローカー中継に差し替え

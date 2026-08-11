@@ -6,7 +6,7 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import net from 'node:net';
-import { mkdtempSync, rmSync, existsSync } from 'node:fs';
+import { mkdtempSync, rmSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -84,6 +84,13 @@ function mcpClient(sockPath) {
 async function callTool(client, name, args) {
   const result = await client.call('tools/call', { name, arguments: args });
   return JSON.parse(result.content[0].text);
+}
+
+// Raw variant: returns the full tools/call result so tests can inspect
+// isError / non-JSON error payloads (e.g. a handler exception surfacing as
+// { content: [...], isError: true }).
+async function callToolRaw(client, name, args) {
+  return client.call('tools/call', { name, arguments: args });
 }
 
 test('control socket: MCP initialize handshake works over the UDS', async () => {
@@ -513,4 +520,79 @@ test('notify broker: a non-ccserver first line is replayed, never treated as ide
   } finally {
     broker.stopBroker(notify);
   }
+});
+
+// --- handoff reliability: events survive a dead wait (Issue: handoff loss)
+// ---------------------------------------------------------------------------
+
+// The root-cause regression test: production brokers inject the groupManager
+// FACADE (not the full module), and repo_info calls deps.groupManager.getGroup.
+// A facade missing getGroup made repo_info fail with a TypeError on every
+// production call while the (full-module) unit tests stayed green. Over the
+// wire this surfaces as an isError tools/call result -- assert it does not.
+test('control socket: repo_info succeeds over the wire (facade carries getGroup)', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ccserver-repo-wire-'));
+  mkdirSync(join(dir, 'src'));
+  writeFileSync(join(dir, 'README.md'), '# Wire repo');
+  const gid = randomUUID();
+  await groupManager.createGroup({ groupId: gid, cwd: dir, orchestratorDir: join(dir, '..', 'wire-orch') });
+  try {
+    const ctrl = groupManager.getGroup(gid).controlBroker;
+    const c = mcpClient(ctrl.sockPath);
+    await c.connected;
+    const result = await callToolRaw(c, 'repo_info', {});
+    assert.equal(result.isError, undefined, 'repo_info must NOT surface as a tool error');
+    const out = JSON.parse(result.content[0].text);
+    assert.equal(out.error, undefined, out.content?.[0]?.text || 'no error field');
+    assert.equal(out.cwd, dir);
+    assert.ok(out.root.dirs.includes('src'), 'root listing returned');
+    assert.equal(out.readme.file, 'README.md');
+    assert.equal(out.readme.text, '# Wire repo');
+    c.close();
+  } finally {
+    groupManager.destroyGroup(gid);
+    try { rmSync(dir, { recursive: true, force: true }); } catch { /* ignore */ }
+  }
+});
+
+// The core no-loss scenario: an orchestrator waits, its connection dies, a
+// worker hands off afterwards -- the event must NOT be consumed by the dead
+// waiter (its response would be written to a destroyed socket and lost).
+// The next orchestrator connection receives it.
+test('a handoff is not lost when the waiting connection dies mid-wait', async () => {
+  const waitA = mcpClient(control.sockPath);
+  await waitA.connected;
+  const deadWait = callTool(waitA, 'wait_for_handoff', { timeoutMs: 5000 });
+  // Give the server a beat to register the waiter, then kill the connection.
+  await new Promise((r) => setTimeout(r, 100));
+  waitA.raw.destroy();
+  // Wait until the close has propagated server-side, so the dead waiter's
+  // liveness check is guaranteed to see the connection gone before the
+  // handoff arrives.
+  await new Promise((resolve) => waitA.raw.on('close', resolve));
+  await new Promise((r) => setTimeout(r, 50));
+
+  // The worker hands off only AFTER the orchestrator's connection died.
+  const worker = mcpClient(handoff.sockPath);
+  await worker.connected;
+  const handoffRes = await callTool(worker, 'handoff_to_orchestrator', {
+    summary: 'survives the dead wait',
+    status: 'done',
+  });
+  assert.deepEqual(handoffRes, { ok: true });
+  worker.close();
+
+  // A fresh orchestrator connection receives the event.
+  const waitB = mcpClient(control.sockPath);
+  await waitB.connected;
+  const ev = await callTool(waitB, 'wait_for_handoff', { timeoutMs: 3000 });
+  assert.equal(ev.error, undefined);
+  assert.equal(ev.summary, 'survives the dead wait');
+  assert.equal(ev.fromRole, 'workerA');
+  waitB.close();
+
+  // The dead waiter was superseded: no waiter may linger in the group.
+  assert.equal(groupManager.getGroup(groupId).pendingTakes.size, 0, 'no zombie waiter remains');
+  // (The dead client never receives a response -- deadWait stays pending
+  // client-side by design; the server-side waiter was settled.)
 });
