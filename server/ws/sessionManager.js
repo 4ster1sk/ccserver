@@ -308,6 +308,7 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox
     startedClaudeSessionId: claudeSessionId || null,
     scheduleId: null, // key into the module-level `schedules` map, if any
     pendingInjection: null, // { text, at } — scheduled prompt awaiting a freshly-resumed session
+    pendingInjectionTimer: null, // RESUME_INJECT_FALLBACK_MS safety net; cleared on teardown
   };
 
   ptyProcess.onData((rawData) => {
@@ -346,6 +347,10 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox
         if (session.pendingInjection) {
           const inj = session.pendingInjection;
           session.pendingInjection = null;
+          if (session.pendingInjectionTimer) {
+            clearTimeout(session.pendingInjectionTimer);
+            session.pendingInjectionTimer = null;
+          }
           const delivered = injectIntoLiveSession(session, inj.text);
           notifyFired(session, { at: inj.at, text: inj.text }, delivered);
         }
@@ -449,7 +454,7 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox
       }));
     }
 
-    if (!session.socket) {
+    if (!session.socket && sessions.has(session.id)) {
       startTimeout(session, SESSION_EXITED_TIMEOUT_MS);
     }
   });
@@ -765,10 +770,13 @@ async function fireSchedule(scheduleId) {
   session.pendingInjection = { text: entry.text, at: entry.at };
   // Safety net: deliver even if the session never emits an idle gap (e.g. a
   // plain shell). The idle path normally fires first for Claude sessions.
-  setTimeout(() => {
+  // Tracked on the session so a destroyed one doesn't keep a dead timer
+  // armed (it no-ops, but holds the event loop in tests and lingers in prod).
+  session.pendingInjectionTimer = setTimeout(() => {
     if (session.exited || !session.pendingInjection) return;
     const inj = session.pendingInjection;
     session.pendingInjection = null;
+    session.pendingInjectionTimer = null;
     const delivered = injectIntoLiveSession(session, inj.text);
     notifyFired(session, inj, delivered);
   }, RESUME_INJECT_FALLBACK_MS);
@@ -948,6 +956,11 @@ export function destroySession(id, { keepSchedule = true } = {}) {
     session.idleTimer = null;
   }
 
+  if (session.pendingInjectionTimer) {
+    clearTimeout(session.pendingInjectionTimer);
+    session.pendingInjectionTimer = null;
+  }
+
   // By default the scheduled prompt outlives the session (disconnect / idle
   // timeout / shutdown) and auto-resumes at fire time. Only an explicit
   // user-initiated teardown cancels it.
@@ -963,6 +976,16 @@ export function destroySession(id, { keepSchedule = true } = {}) {
     } catch {
       // already dead
     }
+  }
+
+  // Force-close the pty master read stream. kill() alone only signals the
+  // child; if a grandchild still holds the slave fd (or the child lingers),
+  // the master never sees EOF and the read stream keeps the event loop
+  // alive indefinitely (hanging test runners and lingering handles in prod).
+  try {
+    session.ptyProcess.destroy();
+  } catch {
+    // already torn down
   }
 
   // Remove the sandbox's unique rootlesskit state dir. The --unshare-pid tree is
