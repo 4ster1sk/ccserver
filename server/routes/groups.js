@@ -17,7 +17,7 @@
 
 import { randomUUID, createHash } from 'node:crypto';
 import { mkdirSync, writeFileSync, statSync, rmSync, existsSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { basename, join, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import * as groupManager from '../ws/groupManager.js';
 import { createSession, getSession } from '../ws/sessionManager.js';
@@ -58,11 +58,16 @@ the MCP server "ccserver" that is already configured in this session.
 Each worker is a full terminal session you can inspect and control:
 
 - list_group_sessions -- see the members of this group.
-- read_output -- read a member's recent terminal output (fallback for
-  inspecting a stuck member; avoid polling it).
+- read_output -- read a member's current screen / recent terminal output
+  (fallback for inspecting a stuck member; avoid polling it). Use its
+  \`screen\` and \`screenIdleMs\` fields for stuck/busy judgments -- a static
+  screen (large screenIdleMs) means the member is idle even if its byte
+  stream is noisy; a small screenIdleMs means it is actively redrawing
+  (spinner or progress).
 - send_input -- type text into a member's terminal (submit defaults to true).
 - open_tab / close_tab -- add or terminate worker sessions.
-- get_tab_status -- quick status of a member.
+- get_tab_status -- quick status of a member (including screenIdleMs, the
+  screen-change-based idle signal).
 - repo_info -- the repository's basic facts (top-level layout, README,
   package.json summary, git state). Shallow by design: it never returns
   source-file contents, takes no path arguments, and is capped in size.
@@ -130,6 +135,12 @@ orchestrator should catch this itself.
 - Every instruction sent via \`send_input\` MUST end with an explicit
   reminder to call \`handoff_to_orchestrator\` once done, blocked, or in
   need of input.
+- \`wait_for_handoff\` returning \`{timedOut:true}\` is NOT an error: it
+  simply means no handoff arrived within the timeout. Call it again. A
+  handoff is never lost to a timeout or a disconnect -- an event that
+  arrives while nobody is waiting stays queued, and even if your
+  connection dies mid-wait, the next \`wait_for_handoff\` (after the
+  reconnect) receives it.
 - After sending a step, don't just trust \`wait_for_handoff\` to eventually
   notify you -- it only returns once the worker actually calls the tool,
   and nothing forces that to happen. When you get any other opportunity to
@@ -191,7 +202,9 @@ function memberSpecFromBody(spec) {
 // group's most recent orchestrator conversation (orchestratorDir is exclusive
 // to the project (cwd); concurrent groups for the same project are refused at
 // creation time, so at most one live group ever owns it at a time --
-// `resumeLast` maps 1:1 onto "the previous conversation").
+// `resumeLast` maps 1:1 onto "the previous conversation"). projectName is the
+// real project's basename: the session's cwd is the hashed orchestratorDir,
+// which must not leak into the notify footer (see sessionManager).
 export function orchestratorRestartSessionOpts({ group, app, model = null, sandboxOpts = null, mcpSocketPath }) {
   return {
     cwd: group.orchestratorDir,
@@ -204,6 +217,7 @@ export function orchestratorRestartSessionOpts({ group, app, model = null, sandb
     resumeLast: true,
     groupId: group.id,
     groupRole: 'orchestrator',
+    projectName: group.cwd ? basename(group.cwd) : null,
     mcpSocketPath,
   };
 }
@@ -337,6 +351,9 @@ export async function groupsRoute(fastify, opts) {
       model: orchestrator.model ?? null,
       groupId,
       groupRole: 'orchestrator',
+      // The session's cwd is the hashed orchestratorDir; the notify footer
+      // must attribute the orchestrator to the real project instead.
+      projectName: basename(cwd),
       mcpSocketPath: controlBroker ? controlBroker.sockPath : null,
     });
     if (orchRes.error || !orchRes.session) {

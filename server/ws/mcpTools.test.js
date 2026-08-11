@@ -18,6 +18,7 @@ import { randomUUID } from 'node:crypto';
 let runtimeDir;
 let groupManager;
 let tools;
+let screenModel;
 let groupsToDestroy = [];
 // Real on-disk repo fixtures for repo_info (see the repoInfo tests below).
 let tmpRepos = [];
@@ -31,6 +32,7 @@ before(async () => {
   process.env.CCSERVER_GROUPS_PATH = join(runtimeDir, 'saved-groups.json');
   groupManager = await import('./groupManager.js');
   tools = await import('./mcpTools.js');
+  screenModel = await import('./screenModel.js');
 });
 
 after(() => {
@@ -53,11 +55,28 @@ async function makeGroupAsync() {
   return id;
 }
 
-// deps the way mcpServer would build them for the control socket
+// deps the way mcpServer would build them for the control socket. The
+// groupManager injected here is the REAL facade the production brokers
+// receive (getGroupManagerApi) -- NOT the full module -- so a missing
+// facade function (like the historical getGroup gap that broke repo_info in
+// production) fails these tests instead of slipping past them.
 function controlDeps(groupId) {
   return {
     groupId,
-    groupManager,
+    groupManager: groupManager.getGroupManagerApi(),
+    sessionManager: { getSession: () => null, writeToSession: () => false, waitUntilSettled: async () => ({ settled: true }) },
+  };
+}
+
+// The production deps shape for broker servers: groupManager arrives as the
+// narrow groupManagerApi facade (groupManager.js), which deliberately exposes
+// getGroupCwd but NOT the raw getGroup (the group object carries controlBroker
+// socket paths, handoff channels, etc. that LLM-facing tools must not reach).
+// repo_info must work against exactly this shape.
+function prodFacadeDeps(groupId) {
+  return {
+    groupId,
+    groupManager: { getGroupCwd: (id) => groupManager.getGroupCwd(id) },
     sessionManager: { getSession: () => null, writeToSession: () => false, waitUntilSettled: async () => ({ settled: true }) },
   };
 }
@@ -69,7 +88,7 @@ function handoffDeps(groupId, role, sessionId) {
     groupId,
     role,
     getSessionId: () => sessionId,
-    groupManager,
+    groupManager: groupManager.getGroupManagerApi(),
     sessionManager: { getSession: () => null, writeToSession: () => false, waitUntilSettled: async () => ({ settled: true }) },
   };
 }
@@ -225,7 +244,7 @@ test('sendInput moves the current turn to the targeted member', async () => {
   // A working writeToSession (the default controlDeps always returns false).
   const deps = {
     groupId: g,
-    groupManager,
+    groupManager: groupManager.getGroupManagerApi(),
     sessionManager: { getSession: () => ({}), writeToSession: () => true, waitUntilSettled: async () => ({ settled: true }) },
   };
 
@@ -246,7 +265,7 @@ test('sendInput: holds the write until the settle gate opens (fresh session)', a
   const gate = new Promise((r) => { releaseGate = r; });
   const deps = {
     groupId: g,
-    groupManager,
+    groupManager: groupManager.getGroupManagerApi(),
     sessionManager: {
       waitUntilSettled: async () => {
         await gate;
@@ -272,7 +291,7 @@ test('sendInput: still writes when the settle gate times out, reporting settled:
   let writeCalls = 0;
   const deps = {
     groupId: g,
-    groupManager,
+    groupManager: groupManager.getGroupManagerApi(),
     sessionManager: {
       waitUntilSettled: async () => ({ settled: false, timedOut: true }),
       writeToSession: () => { writeCalls++; return true; },
@@ -291,7 +310,7 @@ test('sendInput: an already-settled session writes without waiting (no latency r
   let gateWaited = false;
   const deps = {
     groupId: g,
-    groupManager,
+    groupManager: groupManager.getGroupManagerApi(),
     sessionManager: {
       waitUntilSettled: async () => { gateWaited = true; return { settled: true }; },
       writeToSession: () => true,
@@ -324,7 +343,7 @@ test('sendInput (real session): holds the write until the idle gap opens the set
     const writes = [];
     const deps = {
       groupId: g,
-      groupManager,
+      groupManager: groupManager.getGroupManagerApi(),
       sessionManager: {
         getSession: (id) => sm.getSession(id),
         writeToSession: (id, text, opts) => { writes.push(text); return sm.writeToSession(id, text, opts); },
@@ -356,7 +375,7 @@ test('getTabStatus: reports lastOutputAt and the derived idleForMs', async () =>
   const fakeSession = { cwd: '/srv/proj', app: 'claude', exited: false, socket: {}, lastOutputAt, autoYes: true };
   const deps = {
     groupId: g,
-    groupManager,
+    groupManager: groupManager.getGroupManagerApi(),
     sessionManager: { getSession: (id) => (id === 'sess-a1' ? fakeSession : null), writeToSession: () => false },
   };
   const r = tools.getTabStatus(deps, { sessionId: 'sess-a1' });
@@ -372,7 +391,7 @@ test('getTabStatus: no output yet (lastOutputAt null) yields idleForMs null', as
   const fakeSession = { cwd: '/srv/proj', app: 'claude', exited: false, lastOutputAt: null, autoYes: false };
   const deps = {
     groupId: g,
-    groupManager,
+    groupManager: groupManager.getGroupManagerApi(),
     sessionManager: { getSession: (id) => (id === 'sess-a1' ? fakeSession : null), writeToSession: () => false },
   };
   const r = tools.getTabStatus(deps, { sessionId: 'sess-a1' });
@@ -544,7 +563,7 @@ test('readOutput: authorized live member returns raw + stripped text (tail 0 cla
   };
   const deps = {
     groupId: g,
-    groupManager,
+    groupManager: groupManager.getGroupManagerApi(),
     sessionManager: { getSession: (id) => (id === 'sess-a1' ? fakeSession : null), writeToSession: () => false },
   };
   // tail: 0 must NOT silently fall back to the 4000 default -- it clamps to
@@ -572,7 +591,7 @@ test('readOutput: default tail stays small and output is hard-capped with trunca
   };
   const deps = {
     groupId: g,
-    groupManager,
+    groupManager: groupManager.getGroupManagerApi(),
     sessionManager: { getSession: (id) => (id === 'sess-a1' ? fakeSession : null), writeToSession: () => false },
   };
   const out = tools.readOutput(deps, { sessionId: 'sess-a1' });
@@ -592,6 +611,166 @@ test('readOutput: default tail stays small and output is hard-capped with trunca
   const small = tools.readOutput(deps, { sessionId: 'sess-a1', tail: 1 });
   assert.equal(small.truncated, false);
   assert.ok(small.raw.endsWith('x'.repeat(190)));
+});
+
+// --- screen view (Issue: read_output must show the CURRENT screen, not the
+// byte stream -- spinners redraw in place and cannot be read from raw bytes)
+// ---------------------------------------------------------------------------
+
+// A fake session carrying a real screen model, the way sessionManager would
+// have one.
+function makeScreenSession(screen, screenLastChangeAt = Date.now() - 100) {
+  return {
+    cwd: '/srv/project-x',
+    app: 'claude',
+    exited: false,
+    outputBuffer: ['\x1b[2K\r⠋ analyzing\r'],
+    screen,
+    screenLastChangeAt,
+  };
+}
+
+test('readOutput: screen shows the current view (spinner frames collapse to the latest line)', async () => {
+  const g = await makeGroupAsync();
+  groupManager.registerMember(g, 'workerA', 'sess-a1');
+  // A spinner redrawing one line in place: every frame is a CR + line erase
+  // + new frame char. Only the last frame must be on the screen.
+  const screen = screenModel.createScreenModel();
+  screen.feed('\r\x1b[2K⠋ analyzing…\r\x1b[2K⠙ analyzing…\r\x1b[2K⠹ analyzing…');
+  const deps = {
+    groupId: g,
+    groupManager: groupManager.getGroupManagerApi(),
+    sessionManager: { getSession: (id) => (id === 'sess-a1' ? makeScreenSession(screen, Date.now() - 5000) : null), writeToSession: () => false },
+  };
+  const out = tools.readOutput(deps, { sessionId: 'sess-a1' });
+  assert.equal(out.error, undefined);
+  assert.equal(out.screen, '⠹ analyzing…', 'the screen view holds only the latest frame');
+  assert.equal(out.screenAlt, false);
+  assert.ok(out.screenIdleMs >= 5000, `screenIdleMs derives from the screen change time (got ${out.screenIdleMs})`);
+});
+
+test('readOutput: screen honors the row cap with screenTruncated:true', async () => {
+  const g = await makeGroupAsync();
+  groupManager.registerMember(g, 'workerA', 'sess-a1');
+  const screen = screenModel.createScreenModel();
+  for (let i = 0; i < 100; i++) screen.feed(`line ${i}\r\n`);
+  const deps = {
+    groupId: g,
+    groupManager: groupManager.getGroupManagerApi(),
+    sessionManager: { getSession: (id) => (id === 'sess-a1' ? makeScreenSession(screen) : null), writeToSession: () => false },
+  };
+  const out = tools.readOutput(deps, { sessionId: 'sess-a1' });
+  assert.equal(out.screenTruncated, true);
+  assert.equal(out.screen.split('\n').length, 40, 'screen view capped at the newest 40 rows');
+  assert.ok(out.screen.endsWith('line 99\n'), 'the newest row survives the cap');
+});
+
+test('readOutput: session without a screen model yields null screen fields (no crash)', async () => {
+  const g = await makeGroupAsync();
+  groupManager.registerMember(g, 'workerA', 'sess-a1');
+  const deps = {
+    groupId: g,
+    groupManager: groupManager.getGroupManagerApi(),
+    sessionManager: {
+      getSession: (id) => (id === 'sess-a1'
+        ? { cwd: '/srv/project-x', app: 'claude', exited: false, outputBuffer: ['plain'] }
+        : null),
+      writeToSession: () => false,
+    },
+  };
+  const out = tools.readOutput(deps, { sessionId: 'sess-a1' });
+  assert.equal(out.error, undefined);
+  assert.equal(out.text, 'plain');
+  assert.equal(out.screen, null);
+  assert.equal(out.screenIdleMs, null);
+});
+
+test('getTabStatus: reports screenIdleMs from the screen model', async () => {
+  const g = await makeGroupAsync();
+  groupManager.registerMember(g, 'workerA', 'sess-a1');
+  const screenLastChangeAt = Date.now() - 9000;
+  const fakeSession = {
+    cwd: '/srv/proj',
+    app: 'claude',
+    exited: false,
+    socket: {},
+    lastOutputAt: Date.now() - 500,
+    autoYes: true,
+    screen: screenModel.createScreenModel(),
+    screenLastChangeAt,
+  };
+  const deps = {
+    groupId: g,
+    groupManager: groupManager.getGroupManagerApi(),
+    sessionManager: { getSession: (id) => (id === 'sess-a1' ? fakeSession : null), writeToSession: () => false },
+  };
+  const r = tools.getTabStatus(deps, { sessionId: 'sess-a1' });
+  assert.equal(r.error, undefined);
+  assert.ok(r.screenIdleMs >= 9000 && r.screenIdleMs <= 10000, `screenIdleMs must be the time since the screen changed (got ${r.screenIdleMs})`);
+  // idleForMs stays byte-based (backward compatible): here bytes kept
+  // flowing recently while the screen is old -- the two signals diverge on
+  // purpose (a spinner writes bytes without changing the screen).
+  assert.ok(r.idleForMs <= r.screenIdleMs, 'a static screen with flowing bytes: idleForMs < screenIdleMs');
+});
+
+test('readOutput: the 16KB text cap never splits an escape sequence (no control-byte leak)', async () => {
+  const g = await makeGroupAsync();
+  groupManager.registerMember(g, 'workerA', 'sess-a1');
+  // Layout the stream so the 16KB-from-the-end cut lands INSIDE an escape
+  // sequence: 9999 plain chars, then a SGR sequence starting at index 9999
+  // (the cut position is raw.length - 16384 = 10000, inside the sequence),
+  // then a visible word and filler. A naive `.slice(-16K)` would start the
+  // text mid-sequence ("[31mcolored...") and stripAnsi would leave the
+  // residue -- control bytes leak into `text`.
+  const raw = 'a'.repeat(9999) + '\x1b[31m' + 'colored' + 'b'.repeat(16373);
+  const fakeSession = {
+    cwd: '/srv/project-x',
+    app: 'claude',
+    exited: false,
+    outputBuffer: [raw],
+  };
+  const deps = {
+    groupId: g,
+    groupManager: groupManager.getGroupManagerApi(),
+    sessionManager: { getSession: (id) => (id === 'sess-a1' ? fakeSession : null), writeToSession: () => false },
+  };
+  const out = tools.readOutput(deps, { sessionId: 'sess-a1' });
+  assert.equal(out.truncated, true);
+  assert.ok(out.text.length <= 16 * 1024, `text must stay capped (got ${out.text.length})`);
+  assert.ok(!out.text.includes('\x1b'), 'no bare ESC may leak through the cap');
+  assert.ok(out.text.startsWith('colored'), 'the cut lands after the split sequence: clean text follows');
+});
+
+test('readOutput: a dangling escape at the end of the stream never leaks into text', async () => {
+  const g = await makeGroupAsync();
+  groupManager.registerMember(g, 'workerA', 'sess-a1');
+  // The buffer tail itself ends mid-sequence (a pty chunk boundary split the
+  // sequence): with the cap biting, the returned tail would end with a bare
+  // "\x1b[31" that stripAnsi cannot remove -- the text view must not contain
+  // it. Also cover the no-cap case (short stream, dangling escape at the end).
+  const raw = 'a'.repeat(16381) + '\x1b[31';
+  const fakeSession = {
+    cwd: '/srv/project-x',
+    app: 'claude',
+    exited: false,
+    outputBuffer: [raw],
+  };
+  const deps = {
+    groupId: g,
+    groupManager: groupManager.getGroupManagerApi(),
+    sessionManager: { getSession: (id) => (id === 'sess-a1' ? fakeSession : null), writeToSession: () => false },
+  };
+  const out = tools.readOutput(deps, { sessionId: 'sess-a1' });
+  assert.equal(out.truncated, true);
+  assert.ok(out.text.length <= 16 * 1024, `text must stay capped (got ${out.text.length})`);
+  assert.ok(!out.text.includes('\x1b'), 'the dangling escape must be trimmed, not leaked');
+  assert.ok(out.text.endsWith('a'.repeat(100)), 'the visible tail survives');
+
+  const short = tools.readOutput({
+    ...deps,
+    sessionManager: { getSession: (id) => (id === 'sess-a1' ? { ...fakeSession, outputBuffer: ['plain\x1b[3'] } : null), writeToSession: () => false },
+  }, { sessionId: 'sess-a1' });
+  assert.equal(short.text, 'plain', 'a dangling escape at the end of a short stream is trimmed too');
 });
 
 test('handoff queue is capped: overflow drops the oldest entries', async () => {
@@ -731,4 +910,33 @@ test('repoInfo: caps bite (root 100 entries, README 8KB, package keys 50)', asyn
   assert.equal(out.readme.truncated, true);
   assert.equal(out.packageJson.scripts.length, 50, 'scripts keys capped at 50');
   assert.equal(out.packageJson.dependencies.length, 50, 'dependencies keys capped at 50');
+});
+
+// Regression: production broker deps hand repo_info the narrow groupManager
+// facade (getGroupCwd only -- the full module's getGroup is never reachable),
+// which used to crash with "deps.groupManager.getGroup is not a function".
+test('repoInfo works against the production facade shape (no getGroup on groupManager)', async () => {
+  const dir = makeTmpRepo('facade');
+  writeFileSync(join(dir, 'README.md'), '# Facade Project');
+  const gid = randomUUID();
+  await groupManager.createGroup({ groupId: gid, cwd: dir, orchestratorDir: join(dir, '..', 'orch') });
+  groupsToDestroy.push(gid);
+
+  const deps = prodFacadeDeps(gid);
+  assert.equal(typeof deps.groupManager.getGroup, 'undefined', 'facade shape must not expose getGroup');
+  assert.equal(typeof deps.groupManager.getGroupCwd, 'function');
+
+  const out = await tools.repoInfo(deps);
+  assert.equal(out.error, undefined);
+  assert.equal(out.cwd, dir);
+  assert.equal(out.readme.file, 'README.md');
+  assert.ok(out.readme.text.includes('Facade Project'));
+  assert.ok(out.root.files.includes('README.md'));
+});
+
+test('repoInfo: group-not-found also works against the production facade shape', async () => {
+  const deps = prodFacadeDeps('no-such-group');
+  assert.equal(typeof deps.groupManager.getGroup, 'undefined', 'facade shape must not expose getGroup');
+  const out = await tools.repoInfo(deps);
+  assert.equal(out.error, 'group-not-found');
 });

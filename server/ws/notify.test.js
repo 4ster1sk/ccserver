@@ -17,6 +17,7 @@ import {
   listSubscriptions,
   restoreNotify,
   sendNotification,
+  resolvedHostname,
 } from './notify.js';
 
 // Point CCSERVER_SANDBOX_CONFIG + CCSERVER_NOTIFY_PATH at temp files and
@@ -68,6 +69,12 @@ test('shouldInjectNotify: standalone agents and combo orchestrators only', () =>
   assert.equal(shouldInjectNotify({ ...base, shell: true, app: null }), false, 'shell sessions never');
   assert.equal(shouldInjectNotify({ ...base, groupId: 'g1', groupRole: 'workerA' }), false, 'combo worker never');
   assert.equal(shouldInjectNotify({ ...base, notifyEnabled: false }), false, 'feature disabled -> never');
+});
+
+test('shouldInjectNotify: copilot is never injected (no CLI-arg/env MCP injection)', () => {
+  const base = { shell: false, app: 'copilot', groupId: null, groupRole: null, notifyEnabled: true };
+  assert.equal(shouldInjectNotify(base), false, 'standalone copilot never gets the notify server');
+  assert.equal(shouldInjectNotify({ ...base, groupId: 'g1', groupRole: 'orchestrator' }), false, 'copilot as combo orchestrator also never');
 });
 
 test('subscribe/unsubscribe/list persist to the state file and restore', async () => {
@@ -297,6 +304,29 @@ test('notify hostname precedence: env wins over config, config over os.hostname(
     await withNotifyConfig({ notify: { discordWebhook: 'https://discord.example/hook' } }, async () => {
       restoreNotify();
       await assertFooterHost(hostname());
+    });
+  } finally {
+    if (prevHost === undefined) delete process.env.CCSERVER_HOSTNAME;
+    else process.env.CCSERVER_HOSTNAME = prevHost;
+  }
+});
+
+// resolvedHostname() (exported for the browser tab title, dirs.js /dirs/home):
+// same precedence as the footer -- CCSERVER_HOSTNAME > notify.hostname >
+// os.hostname().
+test('resolvedHostname precedence: env > notify.hostname > os.hostname()', async () => {
+  const prevHost = process.env.CCSERVER_HOSTNAME;
+  try {
+    process.env.CCSERVER_HOSTNAME = 'env-host';
+    await withNotifyConfig({ notify: { hostname: 'cfg-host' } }, async () => {
+      assert.equal(resolvedHostname(), 'env-host');
+    });
+    delete process.env.CCSERVER_HOSTNAME;
+    await withNotifyConfig({ notify: { hostname: 'cfg-host' } }, async () => {
+      assert.equal(resolvedHostname(), 'cfg-host');
+    });
+    await withNotifyConfig({ notify: {} }, async () => {
+      assert.equal(resolvedHostname(), hostname());
     });
   } finally {
     if (prevHost === undefined) delete process.env.CCSERVER_HOSTNAME;

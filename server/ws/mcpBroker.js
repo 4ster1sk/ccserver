@@ -108,8 +108,16 @@ async function listenMcp({ groupId, tag, buildServer, sockPath }) {
       // after the frame read is buffered by the paused socket and replayed
       // to the transport's own handler once it starts.
       socket.pause();
-      const mcp = buildServer(identity);
       const transport = new SocketTransport(socket, seed);
+      // Per-connection liveness oracle for tools that must not act on behalf
+      // of a connection whose client is gone (e.g. wait_for_handoff must not
+      // dequeue an event for a dead socket -- the event would be lost). The
+      // transport is created before the server so the closure can observe its
+      // close state; buildServer receives it as the second argument (control/
+      // handoff servers thread it into their deps; the notify server ignores
+      // it).
+      const connectionIsAlive = () => !socket.destroyed && !transport._closed;
+      const mcp = buildServer(identity, connectionIsAlive);
       // mcp.connect() is async (transport.start() + the MCP initialize
       // handshake). A rejected promise here must NOT become an unhandled
       // rejection (Node's default --unhandled-rejections=throw would crash the
@@ -196,7 +204,10 @@ export async function startControlBroker(deps) {
   return listenMcp({
     groupId: deps.groupId,
     tag: 'control',
-    buildServer: () => buildControlMcpServer(deps),
+    // Per-connection deps: the liveness closure differs per accepted socket,
+    // so the server is built with a connection-specific deps object, not the
+    // shared one (a shared deps could never carry per-connection state).
+    buildServer: (identity, connectionIsAlive) => buildControlMcpServer({ ...deps, connectionIsAlive }),
   });
 }
 
@@ -205,7 +216,7 @@ export async function startHandoffChannel(deps) {
   return listenMcp({
     groupId: deps.groupId,
     tag: `handoff-${deps.role}`,
-    buildServer: () => buildHandoffMcpServer(deps),
+    buildServer: (identity, connectionIsAlive) => buildHandoffMcpServer({ ...deps, connectionIsAlive }),
   });
 }
 
