@@ -556,3 +556,46 @@ test('fireSchedule drops the prompt when the member group no longer exists', asy
   const leftover = sessionManager.listSessions().filter((s) => s.groupId === gid);
   assert.equal(leftover.length, 0, 'no MCP-less orphan session was spawned');
 });
+
+// The old idle heuristic sent `input_needed` to the client on an idle agent
+// session (removed -- see the notify-mcp plan / README). Regression guard: an
+// agent session going idle must NOT emit input_needed, while the settle gate
+// (a separate, still-used consumer of the same idle timer) keeps working.
+// A fake claude binary stands in for the real CLI (no agent install needed).
+test('idle timer no longer sends input_needed, but still advances the settle gate', async () => {
+  const binDir = mkdtempSync(join(tmpdir(), 'ccserver-fake-agent-'));
+  const fakeBin = join(binDir, 'fake-claude');
+  writeFileSync(fakeBin, '#!/bin/bash\nprintf "FAKE_AGENT_READY\\n"\nsleep 100\n', { mode: 0o755 });
+  const cfgDir = mkdtempSync(join(tmpdir(), 'ccserver-fake-cfg-'));
+  const cfgPath = join(cfgDir, 'sandbox.config.json');
+  writeFileSync(cfgPath, JSON.stringify({ docker: false, gitBroker: false }));
+  const prevBin = process.env.CCSERVER_CLAUDE_BIN;
+  const prevCfg = process.env.CCSERVER_SANDBOX_CONFIG;
+  process.env.CCSERVER_CLAUDE_BIN = fakeBin;
+  process.env.CCSERVER_SANDBOX_CONFIG = cfgPath;
+  let id = null;
+  try {
+    const res = sessionManager.createSession({
+      cwd: '/tmp', cols: 80, rows: 24, shell: false, sandbox: false, app: 'claude',
+    });
+    assert.ok(res.session, 'agent session should spawn');
+    id = res.sessionId;
+    const s = res.session;
+    const sent = [];
+    s.socket = { readyState: 1, send: (m) => sent.push(m) };
+    await sleep(3600); // > IDLE_TIMEOUT_MS (3000): the idle timer fires
+    assert.equal(s.settled, true, 'settle gate still advances on the first idle gap');
+    const types = sent.map((m) => {
+      try { return JSON.parse(m).type; } catch { return null; }
+    });
+    assert.ok(!types.includes('input_needed'), 'no input_needed is ever sent');
+  } finally {
+    if (id) sessionManager.destroySession(id, { keepSchedule: false });
+    if (prevBin === undefined) delete process.env.CCSERVER_CLAUDE_BIN;
+    else process.env.CCSERVER_CLAUDE_BIN = prevBin;
+    if (prevCfg === undefined) delete process.env.CCSERVER_SANDBOX_CONFIG;
+    else process.env.CCSERVER_SANDBOX_CONFIG = prevCfg;
+    try { rmSync(binDir, { recursive: true, force: true }); } catch { /* ignore */ }
+    try { rmSync(cfgDir, { recursive: true, force: true }); } catch { /* ignore */ }
+  }
+});
