@@ -48,14 +48,21 @@ const LEVEL_EMOJI = { info: 'ℹ️', success: '✅', warning: '⚠️', error: 
 let subscriptions = [];
 let notifyBroker = null; // { server, sockPath, dir, connections } | null
 
+// Hostname for attribution and the browser tab title: CCSERVER_HOSTNAME wins
+// over the config's notify.hostname, which in turn wins over the OS hostname
+// (same priority pattern as CCSERVER_DISCORD_WEBHOOK, see sandbox.js). Exported
+// so non-notify consumers (dirs.js /dirs/home -> client tab title) resolve the
+// same name the notify footer shows (_from: <host>).
+export function resolvedHostname() {
+  const notify = loadSandboxConfig().notify || {};
+  return process.env.CCSERVER_HOSTNAME || notify.hostname || hostname();
+}
+
 function loadNotifyConfig() {
   const notify = loadSandboxConfig().notify || { discordWebhook: null, subscriptions: [], hostname: null, attribution: true };
   return {
     ...notify,
-    // Hostname for attribution: CCSERVER_HOSTNAME wins over the config's
-    // notify.hostname, which in turn wins over the OS hostname (same
-    // priority pattern as CCSERVER_DISCORD_WEBHOOK, see sandbox.js).
-    hostname: process.env.CCSERVER_HOSTNAME || notify.hostname || hostname(),
+    hostname: resolvedHostname(),
     attribution: notify.attribution !== false,
   };
 }
