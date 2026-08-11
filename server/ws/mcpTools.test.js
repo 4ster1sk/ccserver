@@ -19,6 +19,8 @@ let runtimeDir;
 let groupManager;
 let tools;
 let groupsToDestroy = [];
+// Real on-disk repo fixtures for repo_info (see the repoInfo tests below).
+let tmpRepos = [];
 
 // The real brokers listen under XDG_RUNTIME_DIR (read at mcpBroker module
 // evaluation), so point it at a fresh dir before importing.
@@ -38,7 +40,6 @@ after(() => {
 });
 
 // Real on-disk repo fixtures for repo_info (see the repoInfo tests below).
-let tmpRepos = [];
 function makeTmpRepo(tag) {
   const dir = mkdtempSync(join(tmpdir(), `ccserver-repo-${tag}-`));
   tmpRepos.push(dir);
