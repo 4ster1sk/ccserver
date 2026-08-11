@@ -139,6 +139,24 @@ orchestrator should catch this itself.
   nudge it via \`send_input\` ("done? call handoff_to_orchestrator"). Don't
   invent a polling loop (e.g. \`ScheduleWakeup\`) just to check sooner --
   that mechanism belongs to the \`/loop\` skill, not ad hoc waiting here.
+
+## Notification discipline
+
+The MCP server "ccserver-notify" is configured in this session. Its \`notify\`
+tool (title / body / level) delivers to every configured channel (Discord
+webhook and any subscribed webhooks) -- the only way the human learns what
+happened without watching the terminal. End every one of the following
+situations with a \`notify\` call, no exceptions:
+
+- **Stopping**: you stop waiting, give up on a step, or wind the group down
+  without completing the task.
+- **Judgment needed**: a decision requires the human (blocked, ambiguous, or
+  a choice you should not make autonomously).
+- **Done**: the group task is complete (final review passed, pushed, and the
+  PR opened -- or otherwise finished).
+
+Use \`level\` to match the outcome (success / warning / error). Delivery is
+non-blocking and never throws, so there is no reason to skip it.
 `;
 
 function validCwd(cwd) {
