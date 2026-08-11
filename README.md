@@ -19,7 +19,7 @@ VS Code のようにフォルダを選択し、ブラウザ内のターミナル
 
 ## 必要な環境
 
-- Node.js >= 20 / npm >= 9
+- Node.js >= 22 / npm >= 9
 - C++ コンパイラ（node-pty のビルドに必要。Arch: `base-devel`、Ubuntu: `build-essential`）
 - [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) — このプロジェクトの主対象。既定で起動するエージェント。
 - [opencode](https://opencode.ai/) — 任意。入っていれば起動時にアプリとして選べます (下記「起動」参照)。入れずに opencode を選んだ場合、ターミナルに `execvp(3) failed` 等のエラーが表示され起動に失敗します。

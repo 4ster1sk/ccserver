@@ -65,6 +65,10 @@ before(async () => {
 
 after(() => {
   try { rmSync(runtimeDir, { recursive: true, force: true }); } catch { /* ignore */ }
+  // Release the exited-session retention timers (30s cleanup) and any
+  // pending schedule/fallback timers the tests armed, so the runner process
+  // exits promptly instead of waiting out the production retention period.
+  sessionManager.destroyAllSessions();
 });
 
 test('savedSessionPublic preserves group membership (restart filter keeps working)', () => {
