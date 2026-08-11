@@ -216,9 +216,13 @@ export async function groupsRoute(fastify, opts) {
     const workerA = memberSpecFromBody(body.workerA);
     const workerB = memberSpecFromBody(body.workerB);
     const orchestrator = memberSpecFromBody(body.orchestrator);
-    const invalidApp = (spec) => Object.prototype.hasOwnProperty.call(spec || {}, 'app') && !spec.app;
+    // copilot has no CLI-arg/env MCP injection (config-file only), so combo
+    // members can never use the group's broker tools -- refuse it explicitly
+    // here (memberSpecFromBody accepts any valid app id, copilot included).
+    const invalidApp = (spec) => Object.prototype.hasOwnProperty.call(spec || {}, 'app')
+      && (!spec.app || spec.app === 'copilot');
     if (invalidApp(workerA) || invalidApp(workerB) || invalidApp(orchestrator)) {
-      return reply.code(400).send({ error: 'workerA/workerB/orchestrator app must be claude or opencode' });
+      return reply.code(400).send({ error: 'workerA/workerB/orchestrator app must be claude or opencode (copilot is not supported in groups)' });
     }
     if ((Object.prototype.hasOwnProperty.call(workerA, 'model') && workerA.model === undefined)
       || (Object.prototype.hasOwnProperty.call(workerB, 'model') && workerB.model === undefined)
@@ -307,7 +311,11 @@ export async function groupsRoute(fastify, opts) {
       rows: 24,
       sandbox: true,
       sandboxOpts: orchestrator.sandboxOpts ?? null,
-      app: orchestrator.app,
+      // An absent orchestrator app must not fall through to createSession's
+      // defaultApp(): a config defaulting to copilot would launch a group
+      // member copilot can't run (no MCP injection). claude is the group
+      // default.
+      app: orchestrator.app || 'claude',
       model: orchestrator.model ?? null,
       groupId,
       groupRole: 'orchestrator',

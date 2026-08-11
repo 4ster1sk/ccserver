@@ -3,7 +3,10 @@
 // output (resume ids, permission prompts). Everything here is pure — host
 // lookup (which/realpath) lives in sandbox.js, I/O in sessionManager.js.
 
-export const APPS = ['claude', 'opencode'];
+// The launchable agent CLIs. Any session launcher (WS init, combo groups,
+// scheduled prompts, orchestrator restarts) keys its behavior off these ids;
+// unknown ids are rejected / fall back to the configured default app.
+export const APPS = ['claude', 'opencode', 'copilot'];
 
 // Which app new sessions launch when none is requested is configured, not
 // hardcoded here -- see sandbox.js's loadSandboxConfig() / sessionManager.js's
@@ -14,12 +17,14 @@ export function isValidApp(app) {
 }
 
 export function appDisplayName(app) {
-  return app === 'opencode' ? 'opencode' : 'Claude Code';
+  return app === 'copilot' ? 'GitHub Copilot' : app === 'opencode' ? 'opencode' : 'Claude Code';
 }
 
 // CLI args to start `app` fresh, or to resume a conversation:
 //   claude   -> claude [--resume <id>] | claude --continue (resume last)
 //   opencode -> opencode [--session <id>] | opencode -c (resume last)
+//   copilot  -> copilot (no id-based resume; the TUI keeps its own session
+//               list) | copilot --continue (resume last)
 // resumeLast ("resume the most recent conversation in the cwd") is used when
 // no session id is known, e.g. scheduled prompts / orchestrator restart where
 // the TUI never exposed an id.
@@ -27,6 +32,12 @@ export function appResumeArgs(app, resumeId, { resumeLast = false } = {}) {
   if (app === 'opencode') {
     if (resumeId) return ['--session', resumeId];
     if (resumeLast) return ['-c'];
+    return [];
+  }
+  if (app === 'copilot') {
+    // copilot exposes no conversation id in its byte stream (extractResumeSessionId
+    // returns null), so an explicit id never reaches this branch in practice.
+    if (resumeLast) return ['--continue'];
     return [];
   }
   if (resumeId) return ['--resume', resumeId];
@@ -37,6 +48,9 @@ export function appResumeArgs(app, resumeId, { resumeLast = false } = {}) {
 // Whether the given app's CLI is known to accept `--model <provider/model>`.
 // Verified on this host:
 //   opencode --help -> `-m, --model <provider/model>`
+//   copilot --help  -> `--model <model>` (confirmed on the real binary, Aug
+//                      2026; if real launches ever fail on this flag, flip
+//                      copilot back to false)
 // The local `claude` wrapper resolves to a missing /opt/claude-code/bin/claude,
 // so Claude's --model support cannot be verified here; the flag is NOT emitted
 // for claude by default (an unsupported argument would make every launch fail).
@@ -44,6 +58,7 @@ export function appResumeArgs(app, resumeId, { resumeLast = false } = {}) {
 // via CCSERVER_CLAUDE_MODEL=1.
 export function appSupportsModelFlag(app) {
   if (app === 'opencode') return true;
+  if (app === 'copilot') return true;
   if (app === 'claude') return process.env.CCSERVER_CLAUDE_MODEL === '1';
   return false;
 }
@@ -60,11 +75,12 @@ export function appModelArgs(app, model) {
 
 // Try to recover a conversation id from recent (ANSI-stripped) terminal
 // output, so an exiting session can be resumed later. claude prints
-// `claude --resume <id>`; opencode's TUI never exposes its session id in the
-// byte stream, so its resume goes through `opencode -c` instead (null here).
+// `claude --resume <id>`; opencode's and copilot's TUIs never expose their
+// session id in the byte stream, so their resume goes through
+// `opencode -c` / `copilot --continue` instead (null here).
 export function extractResumeSessionId(app, rawText) {
   const clean = rawText.replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, '');
-  if (app === 'opencode') return null;
+  if (app === 'opencode' || app === 'copilot') return null;
 
   const matches = [...clean.matchAll(/claude\s+(?:--resume|-r)\s+([a-zA-Z0-9_-]+)/gi)];
   return matches.length > 0 ? matches[matches.length - 1][1] : null;
@@ -89,6 +105,17 @@ export function extractResumeSessionId(app, rawText) {
 export function detectPermissionPrompt(app, bufNoSpace) {
   if (app === 'opencode') {
     return /Permissionrequired(?![\w.,!?;:\u3001\u3002\uff01\uff1f\u2014-])/i.test(bufNoSpace);
+  }
+  if (app === 'copilot') {
+    // copilot renders numbered permission choices (docs.github.com, Aug
+    // 2026): `1. Yes` / `2. Yes, and approve TOOL for the rest of the
+    // running session` / `3. No, and tell Copilot what to do differently`.
+    // In the space-collapsed buffer those are `1.Yes` / `2.Yes,andapprove...
+    // running session`. Enter accepts the default (Yes), matching the Enter
+    // we send. The real renderer frame is unverified (needs a logged-in
+    // session -- see the plan's §6.5); tune against a captured frame if it
+    // ever misdetects.
+    return /1\.Yes/i.test(bufNoSpace) || /runningsession/i.test(bufNoSpace);
   }
   return (
     /Doyouwantto(proceed|makethisedit|use)/i.test(bufNoSpace) ||

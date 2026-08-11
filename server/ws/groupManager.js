@@ -460,9 +460,20 @@ export async function addMember(groupId, role, options = {}) {
   const group = groups.get(groupId);
   if (!group) return { error: 'group-not-found', message: 'group not found' };
   const pref = group.memberPrefs[role] || normalizeMemberPref(null);
-  const app = hasOwn(options, 'app') && options.app !== undefined
+  let app = hasOwn(options, 'app') && options.app !== undefined
     ? options.app
     : (pref.app || defaultApp());
+  // copilot has no CLI-arg/env MCP injection (config-file only), so a combo
+  // member could never use the group's broker tools -- the launch would be
+  // pointless. An explicit copilot request is refused; a fallback (persisted
+  // pref or a defaultApp landing on copilot) is corrected to claude instead
+  // of failing the whole group launch.
+  if (app === 'copilot') {
+    if (hasOwn(options, 'app') && options.app !== undefined) {
+      return { error: 'bad-request', message: 'app must be claude or opencode (copilot is not supported in groups)' };
+    }
+    app = 'claude';
+  }
   const model = hasOwn(options, 'model') ? normalizeModel(options.model) : normalizeModel(pref.model);
   const cwd = options.cwd;
   const sandboxOpts = hasOwn(options, 'sandboxOpts')

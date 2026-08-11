@@ -2,13 +2,13 @@
 
 > **Note:** このプロジェクトは Anthropic 非公式のサードパーティツールです。Anthropic による公式サポートの対象外です。
 
-ディレクトリを指定して Claude Code (または [opencode](https://opencode.ai/)) を起動する Web フロントエンド。
+ディレクトリを指定して Claude Code ([opencode](https://opencode.ai/)、[GitHub Copilot CLI](https://github.com/github/copilot-cli) も可) を起動する Web フロントエンド。
 VS Code のようにフォルダを選択し、ブラウザ内のターミナルで操作できます。
 
 ## アーキテクチャ
 
 ```
-ブラウザ (xterm.js) <── WebSocket ──> Fastify <── node-pty ──> claude / opencode CLI
+ブラウザ (xterm.js) <── WebSocket ──> Fastify <── node-pty ──> claude / opencode / copilot CLI
                     <── HTTP REST ──>         (ディレクトリ一覧 API)
 ```
 
@@ -23,6 +23,7 @@ VS Code のようにフォルダを選択し、ブラウザ内のターミナル
 - C++ コンパイラ（node-pty のビルドに必要。Arch: `base-devel`、Ubuntu: `build-essential`）
 - [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) — このプロジェクトの主対象。既定で起動するエージェント。
 - [opencode](https://opencode.ai/) — 任意。入っていれば起動時にアプリとして選べます (下記「起動」参照)。入れずに opencode を選んだ場合、ターミナルに `execvp(3) failed` 等のエラーが表示され起動に失敗します。
+- [GitHub Copilot CLI](https://github.com/github/copilot-cli) (`copilot`) — 任意。インストール: `npm i -g @github/copilot` (またはインストールスクリプト / `brew install copilot-cli` / winget)。入れずに選んだ場合も同様に起動に失敗します。認証は初回 `/login` (OAuth) か環境変数 `GH_TOKEN` / `GITHUB_TOKEN` で行います。
 
 ## インストールと起動
 
@@ -71,7 +72,7 @@ NODE_ENV=production node server/index.js
 
 | 項目 | 選択肢 | 記憶される場所 |
 |------|--------|----------------|
-| アプリ | Claude Code / opencode | ブラウザの `localStorage` (次回以降の既定) |
+| アプリ | Claude Code / opencode / GitHub Copilot | ブラウザの `localStorage` (次回以降の既定) |
 | 起動モード | 通常起動 / 🔒 サンドボックスで起動 | 同上 |
 | GPG署名を使う | on/off (既定 off) | `localStorage` に**ディレクトリ単位**で |
 | ssh-agentを転送する | on/off (既定 off) | 同上 |
@@ -87,6 +88,14 @@ opencode を選んだ場合の挙動の違い:
 - **列数の確保**: 狭い画面 (スマホ等) では、opencode のプロンプト表示 (agent · model · provider 行) が折り返して画面の大半を占領しないよう、68 列を下限にフォントサイズを自動で縮小します。
 - Usage ボタン (下記) は Claude Code の `/usage` 専用のため、opencode セッションでは非表示になります。
 
+GitHub Copilot を選んだ場合:
+
+- コマンドは `copilot`。認証情報 (`~/.config/github-copilot` の `hosts.json`) と設定 (`~/.copilot`) はサンドボックスにも rw で見えるため、ログイン状態・モデル選択・セッション履歴はサンドボックス起動でも維持されます。
+- **再開は `copilot --continue`** (最後のセッションへの再開) のみです。会話 ID を指定しての再開はできません (copilot の TUI は ID を出力しないため)。exit 後のセッション一覧からの再開や、予約プロンプト発火時の自動復帰も `--continue` で行われます。
+- モデル入力欄に入れたモデル名は `--model <model>` として渡されます。
+- Usage ボタンは Claude Code 専用のため非表示になります。
+- **コンボ起動 (下記) では選択できません**: copilot には MCP を CLI 引数/環境変数で注入する仕組みが無い (設定ファイル経由のため) ので、グループメンバーにしても ccserver の MCP broker ツールが使えません。コンボのメンバーには claude / opencode のみ選べます。
+
 ### 予約プロンプト (タイマー)
 
 ターミナルヘッダの時計 (⏰) ボタンから、指定時刻に任意のプロンプトを自動投入できます。
@@ -94,17 +103,19 @@ opencode を選んだ場合の挙動の違い:
 
 - 時刻は **サーバーのタイムゾーン**で解釈されます (Claude Code が表示する制限解除時刻と一致)。パネルに現在のサーバー時刻とタイムゾーンを常時表示します。
 - 過ぎている時刻は翌日として扱います。
-- 予約はディスク (`.scheduled-prompts.json`) に永続化され、**ブラウザを閉じても、サーバーが再起動・クラッシュしても発火します**。発火時にセッションが生きていなければ、`claude --resume` (opencode は `opencode -c`) で会話を自動復帰させてからプロンプトを投入します (元の cwd / サンドボックス設定も復元)。サーバー停止中に発火時刻を過ぎた予約は、起動直後にまとめて発火します (12 時間以上前に過ぎた物は破棄)。
+- 予約はディスク (`.scheduled-prompts.json`) に永続化され、**ブラウザを閉じても、サーバーが再起動・クラッシュしても発火します**。発火時にセッションが生きていなければ、`claude --resume` (opencode は `opencode -c`、copilot は `copilot --continue`) で会話を自動復帰させてからプロンプトを投入します (元の cwd / サンドボックス設定も復元)。サーバー停止中に発火時刻を過ぎた予約は、起動直後にまとめて発火します (12 時間以上前に過ぎた物は破棄)。
 
 ### 使用量 (Usage) ボタン
 
-画面上部タブバー右端の **Usage** ボタンから、Claude Code の `/usage` (セッション / 週次の利用率・リセット時刻・プラン) をポップオーバーで確認できます。ボタンには現在セッションの使用率が常時表示されます (opencode セッションでは非表示)。
+画面上部タブバー右端の **Usage** ボタンから、Claude Code の `/usage` (セッション / 週次の利用率・リセット時刻・プラン) をポップオーバーで確認できます。ボタンには現在セッションの使用率が常時表示されます (opencode / copilot セッションでは非表示)。
 
 - 裏側では `claude --ax-screen-reader` を短時間起動して `/usage` の描画をパースし、結果を約 2 分キャッシュします (`/usage` の閲覧自体は API を消費しません)。「更新」ボタンで即時に再取得できます。
 - bwrap がある環境では、**Claude の設定だけを見せる最小サンドボックス** (docker/gpg/ssh なし) で起動します。無ければ claude を直接起動します。
 - API: `GET /api/usage` (`?force=1` で強制再取得)。サーバー起動時にキャッシュを 1 度ウォームします。
 
 ### コンボ起動: オーケストレーターが `send_input` でワーカーに指示するときの注意
+
+> **copilot はコンボ起動 (グループ) では選択できません** — copilot は MCP を CLI 引数/環境変数で注入する仕組みが無く (設定ファイル経由のため)、グループメンバーにしても ccserver の MCP broker ツール (`send_input` / `wait_for_handoff` 等) が使えないためです。起動モーダルのコンボ UI には選択肢が表示されず、`POST /api/groups` に `app: "copilot"` を渡しても 400 で拒否されます。
 
 コンボ起動 (2 ワーカー + オーケストレーター) では、オーケストレーターが MCP ツール `send_input` でワーカーのターミナルにテキストを流し込みます。実際に「ワーカーのタブが TUI ではなく素のシェルの `$` プロンプトに落ちていた」状態を見落として長文の指示を送り、トラブルになったことがあります (一度はシェルプロセスごと終了、一度は `eval` の構文エラー)。この種の事故を避けるため:
 
@@ -123,7 +134,7 @@ opencode を選んだ場合の挙動の違い:
 
 ## サンドボックス (bwrap + rootless docker)
 
-「🔒 サンドボックスで起動」(上記「使い方 > 起動」参照) を選ぶと、`bwrap` でファイルシステムを制限した状態で起動します。選択したプロジェクトと最小限の設定 (`~/.claude`, `~/.claude.json`, `~/.config/opencode`, `~/.local/share/opencode`, `~/.local/state/opencode` 等) だけが見え、**隣接する他プロジェクトは見えません**。
+「🔒 サンドボックスで起動」(上記「使い方 > 起動」参照) を選ぶと、`bwrap` でファイルシステムを制限した状態で起動します。選択したプロジェクトと最小限の設定 (`~/.claude`, `~/.claude.json`, `~/.config/opencode`, `~/.local/share/opencode`, `~/.local/state/opencode`, `~/.config/github-copilot`, `~/.copilot` 等) だけが見え、**隣接する他プロジェクトは見えません**。
 
 docker も安全に使えるよう、サンドボックス**内部**に rootless dockerd を起動します。`rootlesskit` (subuid マッピング) の内側で `bwrap` を動かす構成のため、`docker run -v ...` でもサンドボックス外へは到達できません (daemon 自身が制限された FS の中にいるため)。
 
@@ -211,10 +222,10 @@ cp server/sandbox.config.example.json server/sandbox.config.json
 | `sshAgent` | `false` | ssh-agent を転送 (上記参照)。UI で上書き可。 |
 | `gitBroker` | `true` | git/gh の認証情報スコープ制限 (上記参照)。 |
 | `forceSandbox` | `false` | `true` でサンドボックス外の起動を全面禁止。エージェント・シェルを問わず全セッションがサンドボックス強制になり、UI のサンドボックス切替は無効化されます。bwrap が無い環境 (または Windows) では起動をエラーで拒否します (`/usage` 取得の直接起動フォールバックも同様に禁止)。ホストに bwrap (bubblewrap) のインストールが必須です。 |
-| `defaultApp` | `"claude"` | 新規セッションの既定エージェント (`"claude"` か `"opencode"`)。UI で一度明示的に選んだ後はブラウザの記憶が優先され、この値は初回表示時の見た目とサーバー側フォールバック (予約プロンプトの自動再開など、クライアントが `app` を指定しない経路) にのみ使われます。 |
+| `defaultApp` | `"claude"` | 新規セッションの既定エージェント (`"claude"`、`"opencode"`、`"copilot"`)。UI で一度明示的に選んだ後はブラウザの記憶が優先され、この値は初回表示時の見た目とサーバー側フォールバック (予約プロンプトの自動再開など、クライアントが `app` を指定しない経路) にのみ使われます。**コンボ起動のメンバーには適用されません** (グループ内では claude が既定で、copilot はそもそも選択不可)。 |
 | `binds` | `[]` | 追加で見せるホストパス。各要素 `{ src, mode?, dest? }`。`mode` は `ro` (既定) か `rw`。存在しないパスはスキップ。`~` はホームに展開。`~/.ssh` と `~/.config/gh` は `gitBroker` の設定に関わらず常にブロックされます。 |
 | `env` | `{}` | サンドボックス内の追加環境変数 (適用順は最後 = 既定値を上書き)。例: `sshAgent: true` のときに `SSH_AUTH_SOCK` を明示指定して自動検出を上書き。 |
-| `claudeBin` | 自動検出 | claude/opencode の起動方法。`claude` を PATH から解決し、ラッパー (例: `/usr/bin/claude` → `/opt/claude-code/bin/claude`) の場合は実体のインストール先を辿ってサンドボックスへ自動的に公開します。opencode は PATH に加えて `~/.opencode/bin` も自動探索。自動検出で外れる場所にある場合や特定ビルドに固定したい場合のみ絶対パスで指定 (環境変数 `CCSERVER_CLAUDE_BIN` が優先)。 |
+| `claudeBin` | 自動検出 | claude/opencode/copilot の起動方法。`claude` を PATH から解決し、ラッパー (例: `/usr/bin/claude` → `/opt/claude-code/bin/claude`) の場合は実体のインストール先を辿ってサンドボックスへ自動的に公開します。opencode は PATH に加えて `~/.opencode/bin` も自動探索。copilot は PATH (SANDBOX_PATH) で自動解決されます (通常 `~/.local/bin/copilot`)。自動検出で外れる場所にある場合や特定ビルドに固定したい場合のみ絶対パスで指定 (環境変数 `CCSERVER_CLAUDE_BIN` が優先。copilot に個別の bin 設定はありません)。 |
 
 サンドボックスは Linux 限定です。同じプロジェクトを 2 つのサンドボックスで同時に開いた場合、docker の data-root 競合を避けるため 2 つ目は docker 無しで起動します。
 
@@ -236,6 +247,7 @@ ccserver/
 │   └── ccserver.service
 ├── tests/
 │   ├── close-confirm.spec.js       # Playwright E2E
+│   ├── copilot-launch.spec.js      # copilot 起動 + コンボ拒否 (copilot 未インストール環境では skip)
 │   ├── mobile-scroll.spec.js       # opencode TUI: タッチドラッグ→合成ホイールイベント (opencode 未インストール環境では skip)
 │   └── scroll-buttons.spec.js      # opencode TUI: スクロールボタン→メッセージスクロールキー (同上)
 ├── server/
@@ -326,7 +338,7 @@ JSON メッセージでターミナル I/O とセッション管理 (アタッ�
 
 | 方向 | type | フィールド | 説明 |
 |------|------|-----------|------|
-| → | `init` | `cwd`, `cols`, `rows`, `claudeSessionId?`, `shell?`, `sandbox?`, `sandboxOpts?`, `app?`, `resume?` | 新規セッションを起動 (`app`: `"claude"` (既定) か `"opencode"`、`shell: true` で素のシェル、`resume: true` で opencode の最終セッションに再開) |
+| → | `init` | `cwd`, `cols`, `rows`, `claudeSessionId?`, `shell?`, `sandbox?`, `sandboxOpts?`, `app?`, `resume?` | 新規セッションを起動 (`app`: `"claude"` (既定)、`"opencode"`、`"copilot"`、`shell: true` で素のシェル、`resume: true` で opencode/copilot の最終セッションに再開) |
 | → | `attach` | `sessionId`, `cols?`, `rows?` | 既存セッションに再接続 (出力バッファを `replay` で再送) |
 | → | `input` | `data` | キーボード入力 |
 | → | `resize` | `cols`, `rows` | ターミナルリサイズ |
@@ -362,7 +374,7 @@ cp docs/ccserver.service ~/.config/systemd/user/ccserver.service
 
 ```ini
 [Unit]
-Description=Claude Code Web Server
+Description=ccserver — AI CLI web server
 After=network.target
 
 [Service]

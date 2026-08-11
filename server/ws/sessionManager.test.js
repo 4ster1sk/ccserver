@@ -198,6 +198,48 @@ test('restoreSchedules: legacy schedules without a model field restore with null
   }
 });
 
+// copilot sessions persist their app in the schedule file and restore as
+// copilot (isValidApp passes), so the auto-resume path replays `--continue`.
+test('schedules round-trip a copilot app', async () => {
+  const res = sessionManager.createSession({ cwd: '/tmp', cols: 80, rows: 24, shell: true, sandbox: false });
+  assert.ok(res.session, 'shell session should spawn');
+  try {
+    res.session.app = 'copilot';
+    assert.ok(sessionManager.setScheduledPrompt(res.session.id, Date.now() + 5000, 'MARKER_COPILOT'));
+    const saved = JSON.parse(readFileSync(schedulePath(), 'utf-8'));
+    const entry = saved.find((e) => e.text === 'MARKER_COPILOT');
+    assert.equal(entry.app, 'copilot', 'the app survives into the persisted schedule');
+  } finally {
+    sessionManager.destroySession(res.session.id, { keepSchedule: false });
+  }
+
+  // Restore path: a persisted copilot entry keeps its app (isValidApp gate).
+  const savedPath = schedulePath();
+  const before = readOptionalFile(savedPath);
+  const at = Date.now() + 300;
+  writeFileSync(savedPath, JSON.stringify([{
+    at,
+    text: 'MARKER_RESTORE_COPILOT',
+    cwd: '/nonexistent-for-copilot-restore',
+    sandbox: false,
+    shell: true,
+    app: 'copilot',
+    model: null,
+    claudeSessionId: null,
+    groupId: null,
+    groupRole: null,
+  }]));
+  try {
+    const info = sessionManager.restoreSchedules();
+    assert.equal(info.restored, 1);
+    const rewritten = JSON.parse(readFileSync(savedPath, 'utf-8'));
+    assert.equal(rewritten.find((e) => e.text === 'MARKER_RESTORE_COPILOT').app, 'copilot');
+    await sleep(800);
+  } finally {
+    try { unlinkSync(savedPath); } catch { /* already gone */ }
+    if (before != null) writeFileSync(savedPath, before);
+  }
+});
 // Workers always run inside the sandbox, so their sessions start with Auto-Y
 // enabled; the orchestrator and standalone sessions keep it off.
 test('createSession defaults Auto-Y on for workers, off for orchestrator/standalone', () => {

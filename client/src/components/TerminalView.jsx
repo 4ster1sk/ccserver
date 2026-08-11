@@ -172,7 +172,7 @@ const MAX_RECONNECT_ATTEMPTS = 20;
 const PING_INTERVAL_MS = 30000;
 
 function appLabel(app) {
-  return app === 'opencode' ? 'opencode' : 'Claude Code';
+  return app === 'claude' ? 'Claude Code' : app === 'copilot' ? 'GitHub Copilot' : 'opencode';
 }
 
 // OSC 52 clipboard writes (sent by apps like opencode): update the browser
@@ -667,7 +667,7 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
           if (!shellRef.current && claudeResumeIdRef.current) {
             initMsg.claudeSessionId = claudeResumeIdRef.current;
             claudeResumeIdRef.current = null;
-          } else if (!shellRef.current && appRef.current === 'opencode' && resumeRef.current) {
+          } else if (!shellRef.current && (appRef.current === 'opencode' || appRef.current === 'copilot') && resumeRef.current) {
             initMsg.resume = true;
           }
           ws.send(JSON.stringify(initMsg));
@@ -782,10 +782,11 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
                 if (savedClaudeId) {
                   initMsg.claudeSessionId = savedClaudeId;
                   claudeResumeIdRef.current = null;
-                } else if (app === 'opencode' && resumeRef.current) {
-                  // opencode has no conversation id in its byte stream, so a
-                  // re-launch continues via `opencode -c` (last session of the
-                  // project) like the saved-session flow does.
+                } else if ((app === 'opencode' || app === 'copilot') && resumeRef.current) {
+                  // opencode/copilot have no conversation id in their byte
+                  // stream, so a re-launch continues via `-c` / `--continue`
+                  // (last session of the project) like the saved-session flow
+                  // does.
                   initMsg.resume = true;
                 }
               }

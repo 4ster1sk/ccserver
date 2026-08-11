@@ -405,6 +405,48 @@ test('listGroupMembers: live sessions report lastOutputAt/idleForMs; session-les
 // member is only destroyed AFTER the new channel + session exist, and a
 // failure anywhere leaves the old member fully usable.
 
+test('addMember refuses copilot explicitly and corrects a copilot fallback to claude', async () => {
+  const gid = await makeGroup();
+  let seenApp = null;
+  const fake = {
+    getSession: () => null,
+    createSession: (opts) => { seenApp = opts.app; return { sessionId: 'sess-c', session: {} }; },
+    destroySession: () => {},
+    writeToSession: () => false,
+  };
+  groupManager.setSessionApiForTests(fake);
+  try {
+    // An explicit copilot request is refused before any spawn.
+    const res = await groupManager.addMember(gid, 'workerA', { app: 'copilot', cwd: '/srv/proj' });
+    assert.equal(res.error, 'bad-request');
+    assert.match(res.message, /copilot is not supported in groups/);
+    assert.equal(seenApp, null, 'no spawn attempt for the refused member');
+  } finally {
+    groupManager.setSessionApiForTests(null);
+    groupManager.destroyGroup(gid);
+  }
+
+  // A persisted member pref landing on copilot (legacy group) is corrected to
+  // claude instead of failing the launch.
+  const gid2 = randomUUID();
+  await groupManager.createGroup({
+    groupId: gid2,
+    cwd: '/srv/proj',
+    orchestratorDir: join(runtimeDir, gid2),
+    memberPrefs: { workerB: { app: 'copilot' } },
+  });
+  groupsToDestroy.push(gid2);
+  groupManager.setSessionApiForTests(fake);
+  try {
+    const res = await groupManager.addMember(gid2, 'workerB', { cwd: '/srv/proj' });
+    assert.equal(res.error, undefined, `fallback-resolved addMember should not fail: ${res.message || ''}`);
+    assert.equal(seenApp, 'claude', 'copilot fallback corrected to claude');
+  } finally {
+    groupManager.setSessionApiForTests(null);
+    groupManager.destroyGroup(gid2);
+  }
+});
+
 test('addMember spawns a session and registers it with a handoff channel (open_tab path)', async () => {
   const gid = await makeGroup();
   let seenOpts = null;

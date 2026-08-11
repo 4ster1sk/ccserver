@@ -61,7 +61,7 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
   // "defaultApp") arrives via /api/dirs/home, or the user picks explicitly.
   const [appDefault, setAppDefault] = useState(() => {
     const saved = localStorage.getItem(APP_KEY);
-    return saved === 'opencode' || saved === 'claude' ? saved : 'claude';
+    return saved === 'opencode' || saved === 'copilot' || saved === 'claude' ? saved : 'claude';
   });
   const [openMenuOpen, setOpenMenuOpen] = useState(false);
   const [launchMode, setLaunchMode] = useState('single'); // 'single' | 'combo'
@@ -142,7 +142,7 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
       }
       // Seed the app picker from the server's configured default, but only
       // if the user hasn't explicitly picked one on this browser yet.
-      if (!localStorage.getItem(APP_KEY) && (data.defaultApp === 'opencode' || data.defaultApp === 'claude')) {
+      if (!localStorage.getItem(APP_KEY) && (data.defaultApp === 'opencode' || data.defaultApp === 'copilot' || data.defaultApp === 'claude')) {
         setAppDefault(data.defaultApp);
       }
       // Server-enforced sandbox: force the toggle on and lock it.
@@ -390,7 +390,7 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
             onClick={() => onOpen(currentPath, { sandbox: sandboxDefault, sandboxOpts, app: appDefault })}
             title={sandboxDefault ? 'サンドボックスで起動' : '通常起動'}
           >
-            {sandboxDefault ? '🔒 ' : ''}{appDefault === 'opencode' ? 'opencode' : 'Claude Code'}
+            {sandboxDefault ? '🔒 ' : ''}{appDefault === 'claude' ? 'Claude Code' : appDefault === 'copilot' ? 'GitHub Copilot' : 'opencode'}
           </button>
           <button
             className="btn btn-primary open-btn open-split-caret"
@@ -444,6 +444,13 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
                 >
                   <span className="open-menu-check">{appDefault === 'opencode' ? '✓' : ''}</span>
                   opencode
+                </div>
+                <div
+                  className="open-menu-item"
+                  onClick={() => chooseApp('copilot')}
+                >
+                  <span className="open-menu-check">{appDefault === 'copilot' ? '✓' : ''}</span>
+                  GitHub Copilot
                 </div>
                 <div className="open-menu-sep" />
                 <div
@@ -775,7 +782,7 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
               <span className="session-status active">
                 {session.shell
                   ? 'shell'
-                  : `${session.app === 'opencode' ? 'opencode' : 'claude'} · ${session.connected ? 'connected' : 'idle'}`}
+                  : `${session.app === 'claude' ? 'claude' : session.app === 'copilot' ? 'copilot' : 'opencode'} · ${session.connected ? 'connected' : 'idle'}`}
               </span>
               <button
                 className="btn btn-secondary session-delete-btn"
