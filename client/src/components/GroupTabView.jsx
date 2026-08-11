@@ -156,6 +156,7 @@ export default function GroupTabView({
             <span className="group-subtab-label">
               <TabIcon type="terminal" app={m.app === 'opencode' ? 'opencode' : 'claude'} shell={false} />
               {roleLabel(m.role)}
+              {m.model && <span className="group-subtab-model" title={m.model}>{m.model}</span>}
               {m.exited && <span className="group-subtab-exited" title="exited">&#10005;</span>}
             </span>
           </div>
@@ -186,6 +187,7 @@ export default function GroupTabView({
               <TerminalView
                 cwd={m.cwd}
                 app={m.app === 'opencode' ? 'opencode' : 'claude'}
+                model={m.model || null}
                 attachSessionId={m.sessionId}
                 visible={m.role === activeRole && visible}
                 // Resume settings for a dead member (exited after a restart

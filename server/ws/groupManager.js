@@ -14,6 +14,7 @@ import { fileURLToPath } from 'node:url';
 import { getSession, destroySession, createSession, writeToSession, waitUntilSettled, setSessionExitListener, setSessionCreateListener, setMcpSocketResolver, setWorkerBindsResolver, peekSavedSessions } from './sessionManager.js';
 import { startControlBroker, startHandoffChannel, stopBroker } from './mcpBroker.js';
 import { isValidApp } from './appLaunch.js';
+import { loadSandboxConfig } from './sandbox.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 // Groups survive a server restart via this file (groupId, member roles,
@@ -38,7 +39,60 @@ const MAX_HANDOFF_QUEUE = 100;
 // exhaust pty/sandbox/socket resources. Includes the orchestrator itself.
 const MAX_GROUP_MEMBERS = 8;
 
-export async function createGroup({ groupId, cwd, orchestratorDir, sandboxOpts = null, orchestratorApp = null, instructions = null }) {
+const hasOwn = (obj, key) => Object.prototype.hasOwnProperty.call(obj || {}, key);
+
+function defaultApp() {
+  return loadSandboxConfig().defaultApp || 'claude';
+}
+
+function normalizeModel(model) {
+  return typeof model === 'string' && model.length > 0 ? model : null;
+}
+
+function normalizeSandboxOpts(opts) {
+  if (!opts || typeof opts !== 'object') return null;
+  return { gpg: !!opts.gpg, sshAgent: !!opts.sshAgent };
+}
+
+function normalizeMemberPref(pref, fallback = {}) {
+  const source = pref && typeof pref === 'object' ? pref : {};
+  const app = isValidApp(source.app) ? source.app : (isValidApp(fallback.app) ? fallback.app : null);
+  const model = hasOwn(source, 'model') ? normalizeModel(source.model) : normalizeModel(fallback.model);
+  const sandboxOpts = hasOwn(source, 'sandboxOpts')
+    ? normalizeSandboxOpts(source.sandboxOpts)
+    : normalizeSandboxOpts(fallback.sandboxOpts);
+  return { app, model, sandboxOpts };
+}
+
+function normalizeMemberPrefs(memberPrefs, legacyOrchestratorApp = null, groupSandboxOpts = null) {
+  const source = memberPrefs && typeof memberPrefs === 'object' ? memberPrefs : {};
+  const roles = ['workerA', 'workerB', 'orchestrator'];
+  const out = Object.fromEntries(roles.map((role) => {
+    const legacy = role === 'orchestrator' && isValidApp(legacyOrchestratorApp)
+      ? { app: legacyOrchestratorApp }
+      : {};
+    const fallback = role === 'orchestrator' ? {} : { sandboxOpts: groupSandboxOpts };
+    return [role, normalizeMemberPref(source[role], { ...fallback, ...legacy })];
+  }));
+  // Roles beyond the fixed trio (workerC, worker-extra, ...) are created by
+  // open_tab; addMember persists their preferences, so a restart must restore
+  // them too (same group-sandbox fallback as the two built-in workers), or
+  // replacement of such a role would silently lose its model/app/sandbox.
+  for (const [role, pref] of Object.entries(source)) {
+    if (!(role in out)) out[role] = normalizeMemberPref(pref, { sandboxOpts: groupSandboxOpts });
+  }
+  return out;
+}
+
+export async function createGroup({ groupId, cwd, orchestratorDir, sandboxOpts = null, orchestratorApp = null, orchestratorModel, orchestratorSandboxOpts, memberPrefs = null, instructions = null }) {
+  const normalizedGroupSandboxOpts = normalizeSandboxOpts(sandboxOpts);
+  const normalizedMemberPrefs = normalizeMemberPrefs(memberPrefs, orchestratorApp, normalizedGroupSandboxOpts);
+  if (isValidApp(orchestratorApp)) normalizedMemberPrefs.orchestrator.app = orchestratorApp;
+  // orchestratorModel/orchestratorSandboxOpts default to undefined: an absent
+  // value must NOT clobber the orchestrator's memberPrefs (it stays the
+  // authoritative source for the launch preference).
+  if (orchestratorModel !== undefined) normalizedMemberPrefs.orchestrator.model = normalizeModel(orchestratorModel);
+  if (orchestratorSandboxOpts !== undefined) normalizedMemberPrefs.orchestrator.sandboxOpts = normalizeSandboxOpts(orchestratorSandboxOpts);
   const group = {
     id: groupId,
     createdAt: Date.now(),
@@ -54,14 +108,16 @@ export async function createGroup({ groupId, cwd, orchestratorDir, sandboxOpts =
     orchestratorDir,
     // App the orchestrator was launched with; used by the orchestrator
     // restart endpoint (POST /api/groups/:id/orchestrator).
-    orchestratorApp,
+    orchestratorApp: isValidApp(orchestratorApp) ? orchestratorApp : normalizedMemberPrefs.orchestrator.app,
+    orchestratorModel: normalizedMemberPrefs.orchestrator.model,
     // Starting text for the orchestrator's CLAUDE.md/AGENTS.md; written at
     // create time and (re)created at restore only when the files are missing,
     // so the orchestrator's own edits survive server restarts.
     instructions,
     // Per-launch sandbox flags (gpg/sshAgent) the group's workers launched
     // with; open_tab workers inherit them unless the tool overrides.
-    sandboxOpts,
+    sandboxOpts: normalizedGroupSandboxOpts,
+    memberPrefs: normalizedMemberPrefs,
     controlBroker: null, // { server, sockPath, dir } | null
     handoffChannels: new Map(), // role -> { server, sockPath, dir, role, sessionId }
     handoffQueue: [],
@@ -141,7 +197,8 @@ export function listGroupMembers(groupId) {
     out.push({
       role,
       sessionId,
-      app: session?.app ?? saved?.app ?? null,
+      app: session?.app ?? saved?.app ?? group.memberPrefs[role]?.app ?? null,
+      model: session?.model ?? saved?.model ?? group.memberPrefs[role]?.model ?? null,
       cwd: session?.cwd ?? saved?.cwd ?? null,
       exited: session ? !!session.exited : true,
       connected: !!(session?.socket),
@@ -156,7 +213,7 @@ export function listGroupMembers(groupId) {
       // conversation id; a restored member carries the saved one.
       claudeSessionId: session?.claudeSessionId ?? saved?.claudeSessionId ?? null,
       sandbox: session?.sandbox ?? saved?.sandbox ?? false,
-      sandboxOpts: session?.sandboxOpts ?? saved?.sandboxOpts ?? null,
+      sandboxOpts: session?.sandboxOpts ?? saved?.sandboxOpts ?? group.memberPrefs[role]?.sandboxOpts ?? null,
       // true when the member only exists via the restart restore, i.e. its
       // pty is gone and a re-launch (resume) is the only way back.
       restored: !session && !!saved,
@@ -208,6 +265,27 @@ export function listGroups() {
   }));
 }
 
+export function getMemberPrefs(groupId, role = null) {
+  const group = groups.get(groupId);
+  if (!group) return null;
+  if (role) return group.memberPrefs[role] ? { ...group.memberPrefs[role] } : null;
+  return structuredClone(group.memberPrefs);
+}
+
+export function setMemberPrefs(groupId, role, pref) {
+  const group = groups.get(groupId);
+  if (!group || typeof role !== 'string') return false;
+  const current = group.memberPrefs[role] || {};
+  const normalized = normalizeMemberPref(pref, current);
+  group.memberPrefs[role] = normalized;
+  if (role === 'orchestrator') {
+    group.orchestratorApp = normalized.app;
+    group.orchestratorModel = normalized.model;
+  }
+  persistGroups();
+  return true;
+}
+
 // --- persistence (groups survive a server restart) -------------------------
 
 // Best effort: group state must never crash the launch/teardown paths.
@@ -222,8 +300,10 @@ function persistGroups() {
         allowedCwds: [...g.allowedCwds],
         orchestratorDir: g.orchestratorDir,
         orchestratorApp: g.orchestratorApp || null,
+        orchestratorModel: g.orchestratorModel || null,
         instructions: g.instructions || null,
         sandboxOpts: g.sandboxOpts || null,
+        memberPrefs: g.memberPrefs || {},
         members: Object.fromEntries([...g.members]),
       });
     }
@@ -268,8 +348,10 @@ export function restoreGroups() {
       assembling: false,
       orchestratorDir: typeof e.orchestratorDir === 'string' ? e.orchestratorDir : null,
       orchestratorApp: typeof e.orchestratorApp === 'string' ? e.orchestratorApp : null,
+      orchestratorModel: normalizeModel(e.orchestratorModel),
       instructions: typeof e.instructions === 'string' ? e.instructions : null,
       sandboxOpts: e.sandboxOpts || null,
+      memberPrefs: normalizeMemberPrefs(e.memberPrefs, e.orchestratorApp, e.sandboxOpts),
       controlBroker: null,
       handoffChannels: new Map(),
       handoffQueue: [],
@@ -277,6 +359,10 @@ export function restoreGroups() {
       pendingTakes: new Set(),
       memberSaved: new Map(),
     };
+    if (group.orchestratorModel != null && !hasOwn(e.memberPrefs?.orchestrator, 'model')) {
+      group.memberPrefs.orchestrator.model = group.orchestratorModel;
+    }
+    if (!group.orchestratorApp) group.orchestratorApp = group.memberPrefs.orchestrator.app;
     if (e.members && typeof e.members === 'object') {
       for (const [role, sid] of Object.entries(e.members)) {
         if (typeof sid === 'string') group.members.set(role, sid);
@@ -286,6 +372,7 @@ export function restoreGroups() {
       if (s && s.groupId === group.id && typeof s.groupRole === 'string') {
         group.memberSaved.set(s.groupRole, {
           app: typeof s.app === 'string' ? s.app : null,
+          model: normalizeModel(s.model),
           cwd: typeof s.cwd === 'string' ? s.cwd : null,
           claudeSessionId: typeof s.claudeSessionId === 'string' ? s.claudeSessionId : null,
           sandbox: !!s.sandbox,
@@ -398,9 +485,18 @@ export async function resolveGroupMcpSocket(groupId, groupRole) {
 // allowedCwds (initialized to the shared project dir). Reuses the same
 // channel-then-session flow as the initial trio. Returns { sessionId, app }
 // or { error, message }.
-export async function addMember(groupId, role, { app, cwd, sandboxOpts = null }) {
+export async function addMember(groupId, role, options = {}) {
   const group = groups.get(groupId);
   if (!group) return { error: 'group-not-found', message: 'group not found' };
+  const pref = group.memberPrefs[role] || normalizeMemberPref(null);
+  const app = hasOwn(options, 'app') && options.app !== undefined
+    ? options.app
+    : (pref.app || defaultApp());
+  const model = hasOwn(options, 'model') ? normalizeModel(options.model) : normalizeModel(pref.model);
+  const cwd = options.cwd;
+  const sandboxOpts = hasOwn(options, 'sandboxOpts')
+    ? normalizeSandboxOpts(options.sandboxOpts)
+    : (pref.sandboxOpts || group.sandboxOpts);
   if (!isValidApp(app)) return { error: 'bad-request', message: 'app must be claude or opencode' };
   if (!WORKER_ROLE_RE.test(role)) {
     return {
@@ -447,8 +543,9 @@ export async function addMember(groupId, role, { app, cwd, sandboxOpts = null })
     sandbox: true,
     // Inherit the flags the group's workers were launched with unless the
     // tool call overrides them.
-    sandboxOpts: sandboxOpts ?? group.sandboxOpts,
+    sandboxOpts,
     app,
+    model,
     groupId,
     groupRole: role,
     mcpSocketPath: channel.sockPath,
@@ -463,7 +560,13 @@ export async function addMember(groupId, role, { app, cwd, sandboxOpts = null })
   // New member is fully in place -- only now retire the previous occupant.
   if (prevSessionId) sessionApi.destroySession(prevSessionId, { keepSchedule: false });
   registerMember(groupId, role, res.sessionId);
-  return { sessionId: res.sessionId, app };
+  group.memberPrefs[role] = { app, model, sandboxOpts: normalizeSandboxOpts(sandboxOpts) };
+  if (role === 'orchestrator') {
+    group.orchestratorApp = app;
+    group.orchestratorModel = model;
+  }
+  persistGroups();
+  return { sessionId: res.sessionId, app, model, sandboxOpts: normalizeSandboxOpts(sandboxOpts) };
 }
 
 // (Re)listen a role's handoff channel and re-register it in the group. Used

@@ -39,30 +39,30 @@ export default function App() {
     saveThemeId(themeId);
   }, [themeId]);
 
-  const openTerminalTab = useCallback((dirPath, { claudeSessionId = null, shell = false, sessionId = null, attachSessionId = null, sandbox = false, sandboxOpts = null, app = 'claude', resume = false } = {}) => {
+  const openTerminalTab = useCallback((dirPath, { claudeSessionId = null, shell = false, sessionId = null, attachSessionId = null, sandbox = false, sandboxOpts = null, app = 'claude', model = null, resume = false } = {}) => {
     const id = `terminal-${++tabIdCounter}`;
     const dirName = dirPath.split(/[/\\]/).filter(Boolean).pop() || dirPath;
     const label = shell ? `$ ${dirName}` : dirName;
     setTabs((prev) => [
       ...prev,
-      { id, type: 'terminal', label, cwd: dirPath, claudeSessionId, shell, sessionId, attachSessionId, sandbox, sandboxOpts, app, resume, exited: false },
+      { id, type: 'terminal', label, cwd: dirPath, claudeSessionId, shell, sessionId, attachSessionId, sandbox, sandboxOpts, app, model, resume, exited: false },
     ]);
     setActiveTabId(id);
     setLastDir(dirPath);
   }, []);
 
-  const handleOpen = useCallback((dirPath, { sandbox = false, sandboxOpts = null, app = 'claude', resume = false, skipResumePrompt = false } = {}) => {
+  const handleOpen = useCallback((dirPath, { sandbox = false, sandboxOpts = null, app = 'claude', model = null, resume = false, skipResumePrompt = false } = {}) => {
     // Only claude sessions carry a resumable conversation id (opencode resumes
     // the last session of the project itself via -c).
     if (!skipResumePrompt && app === 'claude') {
       const savedSessionId = localStorage.getItem(`ccserver-resume:claude:${dirPath}`);
       if (savedSessionId) {
         pendingOpenRef.current = dirPath;
-        setResumePrompt({ cwd: dirPath, sessionId: savedSessionId, sandbox, sandboxOpts, app });
+        setResumePrompt({ cwd: dirPath, sessionId: savedSessionId, sandbox, sandboxOpts, app, model });
         return;
       }
     }
-    openTerminalTab(dirPath, { sandbox, sandboxOpts, app, resume });
+    openTerminalTab(dirPath, { sandbox, sandboxOpts, app, model, resume });
   }, [openTerminalTab]);
 
   const handleOpenShell = useCallback((dirPath) => {
@@ -171,6 +171,7 @@ export default function App() {
       sessionId: session.id,
       attachSessionId: session.id,
       app: session.app === 'opencode' ? 'opencode' : 'claude',
+      model: session.model || null,
       sandbox: !!session.sandbox,
       sandboxOpts: session.sandboxOpts || null,
       // opencode re-launches resume the last session of the project (-c), so
@@ -181,7 +182,7 @@ export default function App() {
 
   const handleResume = useCallback(() => {
     if (resumePrompt) {
-      openTerminalTab(resumePrompt.cwd, { claudeSessionId: resumePrompt.sessionId, sandbox: resumePrompt.sandbox, sandboxOpts: resumePrompt.sandboxOpts, app: resumePrompt.app || 'claude' });
+      openTerminalTab(resumePrompt.cwd, { claudeSessionId: resumePrompt.sessionId, sandbox: resumePrompt.sandbox, sandboxOpts: resumePrompt.sandboxOpts, app: resumePrompt.app || 'claude', model: resumePrompt.model || null });
       setResumePrompt(null);
       pendingOpenRef.current = null;
     }
@@ -190,7 +191,7 @@ export default function App() {
   const handleNewSession = useCallback(() => {
     if (resumePrompt) {
       localStorage.removeItem(`ccserver-resume:claude:${resumePrompt.cwd}`);
-      openTerminalTab(resumePrompt.cwd, { sandbox: resumePrompt.sandbox, sandboxOpts: resumePrompt.sandboxOpts, app: resumePrompt.app || 'claude' });
+      openTerminalTab(resumePrompt.cwd, { sandbox: resumePrompt.sandbox, sandboxOpts: resumePrompt.sandboxOpts, app: resumePrompt.app || 'claude', model: resumePrompt.model || null });
       setResumePrompt(null);
       pendingOpenRef.current = null;
     }
@@ -363,6 +364,7 @@ export default function App() {
                   sandbox={tab.sandbox}
                   sandboxOpts={tab.sandboxOpts}
                   app={tab.app || 'claude'}
+                  model={tab.model || null}
                   resume={!!tab.resume}
                   notify={notify}
                   notifyEnabled={notifyEnabled}

@@ -432,6 +432,73 @@ test('openTab: unknown group errors cleanly', async () => {
   assert.equal(res.error, 'group-not-found');
 });
 
+// Issue: open_tab's app/model/sandboxOpts are optional at the wire layer.
+// An omitted model must resolve through the role's persisted preference, then
+// the app default; an explicit null model means "app default" and must
+// override any persisted preference.
+test('openTab: omitted model falls back to the persisted role preference', async () => {
+  const g = await makeGroupAsync();
+  // A fake session facade: addMember spawns via it and records the options.
+  let seenOpts = null;
+  const fake = {
+    getSession: () => null,
+    createSession: (opts) => { seenOpts = opts; return { sessionId: 'sess-m', session: {} }; },
+    destroySession: () => {},
+    writeToSession: () => false,
+  };
+  groupManager.setSessionApiForTests(fake);
+  try {
+    groupManager.setMemberPrefs(g, 'workerA', { app: 'opencode', model: 'gpt-5', sandboxOpts: { gpg: true, sshAgent: false } });
+
+    // model omitted -> persisted preference (gpt-5) is used.
+    const r1 = await tools.openTab(controlDeps(g), { role: 'workerA', cwd: `/srv/project-${g}` });
+    assert.equal(r1.error, undefined, r1.message || '');
+    assert.equal(r1.model, 'gpt-5', 'effective model returned in the tool result');
+    assert.equal(seenOpts.model, 'gpt-5');
+    assert.deepEqual(seenOpts.sandboxOpts, { gpg: true, sshAgent: false }, 'persisted per-role sandbox flags survive open_tab');
+
+    // Explicit model null -> app default (overrides the persisted preference).
+    const r2 = await tools.openTab(controlDeps(g), { role: 'workerA', model: null, cwd: `/srv/project-${g}` });
+    assert.equal(r2.model, null);
+    assert.equal(seenOpts.model, null);
+
+    // Explicit model string -> used directly.
+    const r3 = await tools.openTab(controlDeps(g), { role: 'workerA', model: 'claude-sonnet-4', cwd: `/srv/project-${g}` });
+    assert.equal(r3.model, 'claude-sonnet-4');
+    assert.equal(seenOpts.model, 'claude-sonnet-4');
+
+    // Explicit sandboxOpts override the preference.
+    const r4 = await tools.openTab(controlDeps(g), { role: 'workerA', sandboxOpts: { gpg: false, sshAgent: true }, cwd: `/srv/project-${g}` });
+    assert.deepEqual(r4.sandboxOpts, { gpg: false, sshAgent: true });
+    assert.deepEqual(seenOpts.sandboxOpts, { gpg: false, sshAgent: true });
+  } finally {
+    groupManager.setSessionApiForTests(null);
+    groupManager.destroyGroup(g);
+  }
+});
+
+test('openTab: omitted app falls back to the persisted role preference', async () => {
+  const g = await makeGroupAsync();
+  let seenApp = null;
+  const fake = {
+    getSession: () => null,
+    createSession: (opts) => { seenApp = opts.app; return { sessionId: 'sess-a', session: {} }; },
+    destroySession: () => {},
+    writeToSession: () => false,
+  };
+  groupManager.setSessionApiForTests(fake);
+  try {
+    groupManager.setMemberPrefs(g, 'workerB', { app: 'opencode', model: null, sandboxOpts: null });
+    const r = await tools.openTab(controlDeps(g), { role: 'workerB', cwd: `/srv/project-${g}` });
+    assert.equal(r.error, undefined, r.message || '');
+    assert.equal(r.app, 'opencode', 'omitted app resolves through the persisted preference');
+    assert.equal(seenApp, 'opencode');
+  } finally {
+    groupManager.setSessionApiForTests(null);
+    groupManager.destroyGroup(g);
+  }
+});
+
 // The orchestrator must never be able to spawn/replace "itself".
 test('openTab: role orchestrator is refused (self-destruction guard)', async () => {
   const g = await makeGroupAsync();

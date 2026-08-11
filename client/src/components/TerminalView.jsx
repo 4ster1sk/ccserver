@@ -217,7 +217,7 @@ function osc52Response(text) {
 
 const themeIds = getThemeIds();
 
-export default function TerminalView({ cwd, onClose, claudeSessionId, shell, sandbox, sandboxOpts, app = 'claude', resume = false, notify, notifyEnabled, notifyPermission, onToggleNotify, visible, onSessionId, onExited, attachSessionId, xtermTheme, themeId, onThemeChange, tabId, onAttention, onFocusTab, groupId, groupRole }) {
+export default function TerminalView({ cwd, onClose, claudeSessionId, shell, sandbox, sandboxOpts, app = 'claude', model = null, resume = false, notify, notifyEnabled, notifyPermission, onToggleNotify, visible, onSessionId, onExited, attachSessionId, xtermTheme, themeId, onThemeChange, tabId, onAttention, onFocusTab, groupId, groupRole }) {
   const isMobile = useMemo(() => 'ontouchstart' in window, []);
   const terminalRef = useRef(null);
   const terminalViewRef = useRef(null);
@@ -233,6 +233,7 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
   const sandboxRef = useRef(sandbox);
   const sandboxOptsRef = useRef(sandboxOpts);
   const appRef = useRef(app);
+  const modelRef = useRef(model);
   const resumeRef = useRef(resume);
   const [autoYes, setAutoYes] = useState(false);
   const [autoYesLog, setAutoYesLog] = useState([]);
@@ -657,6 +658,7 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
             sandbox: !!sandboxRef.current,
             sandboxOpts: sandboxOptsRef.current || null,
             app: appRef.current,
+            model: shellRef.current ? null : modelRef.current,
             // Group membership is carried into a re-launch so the server can
             // re-create the member's MCP channel and register it to the role.
             groupId: groupId || null,
@@ -766,6 +768,7 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
                 sandbox: !!sandboxRef.current,
                 sandboxOpts: sandboxOptsRef.current || null,
                 app: appRef.current,
+                model: shellRef.current ? null : modelRef.current,
                 groupId: groupId || null,
                 groupRole: groupRole || null,
               };
@@ -1190,7 +1193,7 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
   return (
     <div className={`terminal-view${keyboardOpen ? ' keyboard-open' : ''}${selectionMode ? ' selection-mode' : ''}`} ref={terminalViewRef}>
       <div className={`terminal-header${!sandbox && !shell ? ' no-sandbox' : ''}`}>
-        <span className="terminal-title">{sandbox ? '🔒 ' : (!shell ? '⚠️ ' : '')}{shell ? 'Terminal' : appLabel(app)} &mdash; {cwd}</span>
+        <span className="terminal-title">{sandbox ? '🔒 ' : (!shell ? '⚠️ ' : '')}{shell ? 'Terminal' : appLabel(app)}{!shell && model ? ` · ${model}` : ''} &mdash; {cwd}</span>
         <div className="header-actions">
           <div className="theme-picker" ref={themeMenuRef}>
             <button

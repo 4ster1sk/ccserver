@@ -66,6 +66,13 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
   const [openMenuOpen, setOpenMenuOpen] = useState(false);
   const [launchMode, setLaunchMode] = useState('single'); // 'single' | 'combo'
   const [comboApps, setComboApps] = useState({ workerA: 'claude', workerB: 'opencode', orchestrator: 'claude' });
+  // Free-form per-role model identifiers; empty string = omitted (server uses
+  // the persisted role preference, then the app default). null would mean
+  // "explicitly the app default", which the text input doesn't produce -- an
+  // omitted value is the practical equivalent.
+  const [comboModels, setComboModels] = useState({ workerA: '', workerB: '', orchestrator: '' });
+  // Per-role sandbox overrides; null = inherit the group-level common flags.
+  const [comboRoleSandbox, setComboRoleSandbox] = useState({ workerA: null, workerB: null, orchestrator: null });
   const [orchestratorInstructions, setOrchestratorInstructions] = useState('');
   const [sandboxOpts, setSandboxOpts] = useState(() => loadSandboxOpts(currentPath));
 
@@ -77,6 +84,8 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
   const closeOpenMenu = useCallback(() => {
     setLaunchMode('single');
     setOrchestratorInstructions('');
+    setComboModels({ workerA: '', workerB: '', orchestrator: '' });
+    setComboRoleSandbox({ workerA: null, workerB: null, orchestrator: null });
     setOpenMenuOpen(false);
   }, []);
 
@@ -496,6 +505,18 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
                     </button>
                   ))}
                 </div>
+                <div className="open-menu-model-row">
+                  <input
+                    type="text"
+                    className="open-menu-model-input"
+                    placeholder="モデル (空=既定/保存済み設定)"
+                    value={comboModels.workerA}
+                    onChange={(e) => setComboModels((c) => ({ ...c, workerA: e.target.value }))}
+                    autoComplete="off"
+                    autoCorrect="off"
+                    spellCheck={false}
+                  />
+                </div>
                 <div className="open-menu-label">ワーカーB</div>
                 <div className="open-menu-app-row">
                   {['claude', 'opencode'].map((app) => (
@@ -507,6 +528,18 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
                       {app === 'claude' ? 'Claude Code' : 'opencode'}
                     </button>
                   ))}
+                </div>
+                <div className="open-menu-model-row">
+                  <input
+                    type="text"
+                    className="open-menu-model-input"
+                    placeholder="モデル (空=既定/保存済み設定)"
+                    value={comboModels.workerB}
+                    onChange={(e) => setComboModels((c) => ({ ...c, workerB: e.target.value }))}
+                    autoComplete="off"
+                    autoCorrect="off"
+                    spellCheck={false}
+                  />
                 </div>
                 <div className="open-menu-suboptions">
                   <label className="open-menu-suboption">
@@ -526,6 +559,47 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
                     ssh-agentを転送する (両ワーカー共通)
                   </label>
                 </div>
+                {(['workerA', 'workerB']).map((role) => (
+                  <div key={role} className="open-menu-role-sandbox">
+                    <label className="open-menu-suboption">
+                      <input
+                        type="checkbox"
+                        checked={comboRoleSandbox[role] !== null}
+                        onChange={(e) => setComboRoleSandbox((s) => ({
+                          ...s,
+                          [role]: e.target.checked ? { ...sandboxOpts } : null,
+                        }))}
+                      />
+                      {role} のサンドボックスを個別設定
+                    </label>
+                    {comboRoleSandbox[role] !== null && (
+                      <div className="open-menu-suboptions">
+                        <label className="open-menu-suboption">
+                          <input
+                            type="checkbox"
+                            checked={comboRoleSandbox[role].gpg}
+                            onChange={(e) => setComboRoleSandbox((s) => ({
+                              ...s,
+                              [role]: { ...s[role], gpg: e.target.checked },
+                            }))}
+                          />
+                          {role} GPG
+                        </label>
+                        <label className="open-menu-suboption">
+                          <input
+                            type="checkbox"
+                            checked={comboRoleSandbox[role].sshAgent}
+                            onChange={(e) => setComboRoleSandbox((s) => ({
+                              ...s,
+                              [role]: { ...s[role], sshAgent: e.target.checked },
+                            }))}
+                          />
+                          {role} ssh-agent
+                        </label>
+                      </div>
+                    )}
+                  </div>
+                ))}
                 <div className="open-menu-label">オーケストレーター</div>
                 <div className="open-menu-app-row">
                   {['claude', 'opencode'].map((app) => (
@@ -537,6 +611,57 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
                       {app === 'claude' ? 'Claude Code' : 'opencode'}
                     </button>
                   ))}
+                </div>
+                <div className="open-menu-model-row">
+                  <input
+                    type="text"
+                    className="open-menu-model-input"
+                    placeholder="モデル (空=既定/保存済み設定)"
+                    value={comboModels.orchestrator}
+                    onChange={(e) => setComboModels((c) => ({ ...c, orchestrator: e.target.value }))}
+                    autoComplete="off"
+                    autoCorrect="off"
+                    spellCheck={false}
+                  />
+                </div>
+                <div className="open-menu-role-sandbox">
+                  <label className="open-menu-suboption">
+                    <input
+                      type="checkbox"
+                      checked={comboRoleSandbox.orchestrator !== null}
+                      onChange={(e) => setComboRoleSandbox((s) => ({
+                        ...s,
+                        orchestrator: e.target.checked ? { ...sandboxOpts } : null,
+                      }))}
+                    />
+                    オーケストレーターのサンドボックスを個別設定
+                  </label>
+                  {comboRoleSandbox.orchestrator !== null && (
+                    <div className="open-menu-suboptions">
+                      <label className="open-menu-suboption">
+                        <input
+                          type="checkbox"
+                          checked={comboRoleSandbox.orchestrator.gpg}
+                          onChange={(e) => setComboRoleSandbox((s) => ({
+                            ...s,
+                            orchestrator: { ...s.orchestrator, gpg: e.target.checked },
+                          }))}
+                        />
+                        オーケストレーター GPG
+                      </label>
+                      <label className="open-menu-suboption">
+                        <input
+                          type="checkbox"
+                          checked={comboRoleSandbox.orchestrator.sshAgent}
+                          onChange={(e) => setComboRoleSandbox((s) => ({
+                            ...s,
+                            orchestrator: { ...s.orchestrator, sshAgent: e.target.checked },
+                          }))}
+                        />
+                        オーケストレーター ssh-agent
+                      </label>
+                    </div>
+                  )}
                 </div>
                 <p className="open-menu-note">
                   オーケストレーターは専用の隔離ディレクトリで動作し、プロジェクトへの
@@ -559,13 +684,27 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
                 <button
                   className="btn btn-primary"
                   onClick={() => {
-                    closeOpenMenu();
+                    // Build the payload BEFORE closing the menu: closeOpenMenu
+                    // resets the draft model/sandbox state, and React state
+                    // reads inside this handler only see the pre-update
+                    // values. Only send options the user explicitly chose: an
+                    // empty model is omitted (server falls back to the
+                    // persisted role preference), and a null per-role sandbox
+                    // means "inherit the group-level flags". `app` is always
+                    // sent because it's a required choice in this UI.
+                    const roleSpec = (role) => {
+                      const spec = { app: comboApps[role] };
+                      if (comboModels[role].trim()) spec.model = comboModels[role].trim();
+                      if (comboRoleSandbox[role]) spec.sandboxOpts = comboRoleSandbox[role];
+                      return spec;
+                    };
                     onOpenCombo(currentPath, {
-                      workerA: { app: comboApps.workerA },
-                      workerB: { app: comboApps.workerB },
-                      orchestrator: { app: comboApps.orchestrator, instructions: orchestratorInstructions },
+                      workerA: roleSpec('workerA'),
+                      workerB: roleSpec('workerB'),
+                      orchestrator: { ...roleSpec('orchestrator'), instructions: orchestratorInstructions },
                       sandboxOpts,
                     });
+                    closeOpenMenu();
                   }}
                 >
                   コンボ起動

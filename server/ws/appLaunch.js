@@ -34,6 +34,30 @@ export function appResumeArgs(app, resumeId, { resumeLast = false } = {}) {
   return [];
 }
 
+// Whether the given app's CLI is known to accept `--model <provider/model>`.
+// Verified on this host:
+//   opencode --help -> `-m, --model <provider/model>`
+// The local `claude` wrapper resolves to a missing /opt/claude-code/bin/claude,
+// so Claude's --model support cannot be verified here; the flag is NOT emitted
+// for claude by default (an unsupported argument would make every launch fail).
+// Deployments whose real Claude binary is confirmed to support `--model` opt in
+// via CCSERVER_CLAUDE_MODEL=1.
+export function appSupportsModelFlag(app) {
+  if (app === 'opencode') return true;
+  if (app === 'claude') return process.env.CCSERVER_CLAUDE_MODEL === '1';
+  return false;
+}
+
+// CLI args selecting the launch model: `--model <model>` for apps whose CLI
+// supports it, and only when `model` is a non-empty string. Empty/absent/null
+// models never emit a flag (the app's own persisted/default model applies);
+// a model is never sent to an app that can't accept it.
+export function appModelArgs(app, model) {
+  if (!appSupportsModelFlag(app)) return [];
+  if (typeof model !== 'string' || model.length === 0) return [];
+  return ['--model', model];
+}
+
 // Try to recover a conversation id from recent (ANSI-stripped) terminal
 // output, so an exiting session can be resumed later. claude prints
 // `claude --resume <id>`; opencode's TUI never exposes its session id in the

@@ -100,6 +100,7 @@ export async function terminalWs(fastify, opts) {
             sandbox: !!msg.sandbox,
             sandboxOpts: msg.sandboxOpts || null,
             app: msg.app || null,
+            model: typeof msg.model === 'string' ? msg.model : null,
             resumeLast: !!msg.resume,
             groupId,
             groupRole,

@@ -147,6 +147,30 @@ test('handoff tool schema exposes only summary/status/nextRole (no identity inpu
   c.close();
 });
 
+// open_tab accepts an optional model (string or null) and an optional app;
+// cwd stays required and identity fields stay absent (model must not affect
+// authorization). The persisted-role fallback for omitted values is exercised
+// in mcpTools.test.js -- here the wire schema shape is asserted.
+test('open_tab schema: optional model/app, required cwd, no identity inputs', async () => {
+  const c = mcpClient(control.sockPath);
+  await c.connected;
+  const { tools } = await c.call('tools/list');
+  const openTab = tools.find((t) => t.name === 'open_tab');
+  assert.ok(openTab, 'open_tab is exposed');
+  const props = openTab.inputSchema.properties;
+  assert.ok('model' in props, 'model is a declared input');
+  assert.equal(props.model.anyOf[0].type, 'string');
+  assert.equal(props.model.anyOf[1].type, 'null');
+  assert.equal(props.app.type, 'string');
+  assert.deepEqual(props.app.enum, ['claude', 'opencode']);
+  assert.ok(openTab.inputSchema.required.includes('role'), 'role stays required (never defaulted)');
+  assert.ok(openTab.inputSchema.required.includes('cwd'), 'cwd stays required');
+  for (const forbidden of ['groupId', 'sessionId']) {
+    assert.ok(!(forbidden in props), `open_tab must never take ${forbidden} from the wire`);
+  }
+  c.close();
+});
+
 test('control socket: tools/call list_group_sessions over the wire', async () => {
   const c = mcpClient(control.sockPath);
   await c.connected;

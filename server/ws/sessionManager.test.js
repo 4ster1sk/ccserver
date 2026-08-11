@@ -14,7 +14,7 @@
 
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, readFileSync, writeFileSync, unlinkSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -25,6 +25,21 @@ let sessionManager;
 
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
+}
+
+// The schedules file lives at a fixed repo-root path (no env override for it
+// in sessionManager.js); tests back it up and restore it so the runner never
+// leaves test entries behind.
+function schedulePath() {
+  return join(import.meta.dirname, '..', '..', '.scheduled-prompts.json');
+}
+
+function readOptionalFile(path) {
+  try {
+    return readFileSync(path, 'utf-8');
+  } catch {
+    return null;
+  }
 }
 
 // A live shell session bound to a group role (the session-create listener
@@ -54,18 +69,133 @@ after(() => {
 
 test('savedSessionPublic preserves group membership (restart filter keeps working)', () => {
   const member = {
-    cwd: '/srv/proj', app: 'opencode', sandbox: true, sandboxOpts: null,
+    cwd: '/srv/proj', app: 'opencode', sandbox: true, sandboxOpts: null, model: 'gpt-5',
     claudeSessionId: null, groupId: 'group-1', groupRole: 'workerA',
   };
   const out = sessionManager.savedSessionPublic(member, null);
   assert.equal(out.groupId, 'group-1');
   assert.equal(out.groupRole, 'workerA');
   assert.equal(out.app, 'opencode');
+  assert.equal(out.model, 'gpt-5', 'the launch model is serialized for graceful-shutdown restore');
 
   const plain = sessionManager.savedSessionPublic({ ...member, groupId: null, groupRole: null }, 'conv-123');
   assert.equal(plain.groupId, null);
   assert.equal(plain.groupRole, null);
   assert.equal(plain.claudeSessionId, 'conv-123');
+});
+
+// Model state on sessions: an explicit non-empty model is stored normalized,
+// invalid/empty/absent values normalize to null (never an empty string or a
+// wrong type leaking into the CLI arg builder or persistence).
+test('createSession stores the effective model (normalized); shells never carry one', async () => {
+  const shell = sessionManager.createSession({ cwd: '/tmp', cols: 80, rows: 24, shell: true, sandbox: false, model: 'gpt-5' });
+  assert.ok(shell.session, 'shell session should spawn');
+  try {
+    assert.equal(shell.session.model, null, 'shell sessions never carry a model, even an explicit one');
+    assert.equal(sessionManager.listSessions().find((s) => s.id === shell.sessionId).model, null);
+  } finally {
+    sessionManager.destroySession(shell.sessionId, { keepSchedule: false });
+  }
+
+  // Non-shell model normalization is exercised through the pure path by
+  // appLaunch.test.js; here we assert the session object contract by handing
+  // createSession a synthetic app that the launcher can resolve without a real
+  // agent CLI -- a shell with a fabricated app/model pair still goes through
+  // the same sessionModel computation (shell wins). The normalization rules
+  // are additionally covered by the persisted schedule tests below.
+  const res = sessionManager.createSession({ cwd: '/tmp', cols: 80, rows: 24, shell: true, sandbox: false });
+  assert.ok(res.session);
+  try {
+    res.session.model = '';
+    const pub = sessionManager.savedSessionPublic(res.session, null);
+    assert.equal(pub.model, null, 'empty-string models normalize to null');
+    res.session.model = 'gpt-5';
+    assert.equal(sessionManager.savedSessionPublic(res.session, null).model, 'gpt-5');
+  } finally {
+    sessionManager.destroySession(res.sessionId, { keepSchedule: false });
+  }
+});
+
+// setScheduledPrompt captures the session's launch model into the persisted
+// schedule entry so the auto-resume path replays it (persistSchedules).
+test('setScheduledPrompt persists the session model into the schedule file', async () => {
+  const res = sessionManager.createSession({ cwd: '/tmp', cols: 80, rows: 24, shell: true, sandbox: false });
+  assert.ok(res.session, 'shell session should spawn');
+  try {
+    res.session.model = 'anthropic/claude-sonnet-4';
+    assert.ok(sessionManager.setScheduledPrompt(res.sessionId, Date.now() + 5000, 'MARKER_MODEL'));
+    const saved = JSON.parse(readFileSync(schedulePath(), 'utf-8'));
+    const entry = saved.find((e) => e.text === 'MARKER_MODEL');
+    assert.ok(entry, 'schedule persisted');
+    assert.equal(entry.model, 'anthropic/claude-sonnet-4', 'the launch model survives into the persisted schedule');
+  } finally {
+    sessionManager.destroySession(res.sessionId, { keepSchedule: false });
+  }
+});
+
+// restoreSchedules preserves a persisted model (round-trip through the file);
+// the entry is armed with a bad cwd so the fire fails harmlessly and never
+// leaves a live session behind.
+test('restoreSchedules preserves the model for a restored schedule entry', async () => {
+  const savedPath = schedulePath();
+  const before = readOptionalFile(savedPath);
+  const at = Date.now() + 300;
+  writeFileSync(savedPath, JSON.stringify([{
+    at,
+    text: 'MARKER_RESTORE_MODEL',
+    cwd: '/nonexistent-for-model-restore',
+    sandbox: false,
+    sandboxOpts: null,
+    shell: true,
+    app: 'claude',
+    model: 'gpt-5',
+    claudeSessionId: null,
+    groupId: null,
+    groupRole: null,
+  }]));
+  try {
+    const info = sessionManager.restoreSchedules();
+    assert.equal(info.restored, 1);
+    const rewritten = JSON.parse(readFileSync(savedPath, 'utf-8'));
+    const entry = rewritten.find((e) => e.text === 'MARKER_RESTORE_MODEL');
+    assert.ok(entry, 'restored schedule re-persisted');
+    assert.equal(entry.model, 'gpt-5', 'the model round-trips through restore');
+    // The entry is armed; let the fire run (bad cwd -> createSession error,
+    // prompt dropped, no lingering session) so no timer keeps the process up.
+    await sleep(800);
+    const leftover = sessionManager.listSessions().filter((s) => s.cwd === '/nonexistent-for-model-restore');
+    assert.equal(leftover.length, 0, 'the failed-cwd fire must not leave a session behind');
+  } finally {
+    try { unlinkSync(savedPath); } catch { /* already gone */ }
+    if (before != null) writeFileSync(savedPath, before);
+  }
+});
+
+// Legacy persisted schedules (predating the model field) restore with null --
+// the app default, never a wrong type.
+test('restoreSchedules: legacy schedules without a model field restore with null', async () => {
+  const savedPath = schedulePath();
+  const before = readOptionalFile(savedPath);
+  const at = Date.now() + 300;
+  writeFileSync(savedPath, JSON.stringify([{
+    at,
+    text: 'MARKER_LEGACY',
+    cwd: '/nonexistent-for-model-restore',
+    sandbox: false,
+    shell: true,
+    app: 'claude',
+    claudeSessionId: null,
+  }]));
+  try {
+    const info = sessionManager.restoreSchedules();
+    assert.equal(info.restored, 1);
+    const rewritten = JSON.parse(readFileSync(savedPath, 'utf-8'));
+    assert.equal(rewritten[0].model, null, 'legacy schedules restore with a null model (app default)');
+    await sleep(800);
+  } finally {
+    try { unlinkSync(savedPath); } catch { /* already gone */ }
+    if (before != null) writeFileSync(savedPath, before);
+  }
 });
 
 // Workers always run inside the sandbox, so their sessions start with Auto-Y

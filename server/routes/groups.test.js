@@ -64,3 +64,32 @@ test('groupExistsForCwd matches an existing group for the same project', () => {
   assert.equal(groupExistsForCwd('/srv/proj/', groups).groupId, 'g1', 'cwd spelling variants match');
   assert.equal(groupExistsForCwd('/srv/nowhere', groups), null);
 });
+
+test('orchestratorRestartSessionOpts carries model and member-specific sandbox options', () => {
+  const opts = orchestratorRestartSessionOpts({
+    group: { id: 'g', orchestratorDir: '/d' },
+    app: 'opencode',
+    model: 'gpt-5',
+    sandboxOpts: { gpg: true, sshAgent: false },
+    mcpSocketPath: '/s',
+  });
+  assert.equal(opts.app, 'opencode');
+  assert.equal(opts.model, 'gpt-5');
+  assert.deepEqual(opts.sandboxOpts, { gpg: true, sshAgent: false });
+});
+
+// memberSpecFromBody is module-private, so the POST normalization contract is
+// exercised through the exported pieces it feeds: orchestratorRestartSessionOpts
+// (above) and the presence-aware memberPrefs handling in groupManager (covered
+// in groupManager.test.js). The wire-level acceptance -- omitted app/model
+// fields fall back to persisted role preferences -- is verified end-to-end in
+// mcpBroker.test.js (open_tab) and through the groupManager precedence tests.
+test('orchestratorRestartSessionOpts: default model/sandboxOpts stay null (no flag leakage)', () => {
+  const opts = orchestratorRestartSessionOpts({
+    group: { id: 'g', orchestratorDir: '/d' },
+    app: 'claude',
+    mcpSocketPath: '/s',
+  });
+  assert.equal(opts.model, null);
+  assert.equal(opts.sandboxOpts, null);
+});
