@@ -5,9 +5,11 @@
 // three over the regular WS attach flow.
 //
 // The orchestrator runs in its own isolated directory (orchestratorDir) with
-// only CLAUDE.md/AGENTS.md, in a mandatory sandbox, with zero visibility of
-// the project tree. Its only reach into the workers is the control MCP server
-// socket (see mcpBroker.js / mcpTools.js).
+// only CLAUDE.md/AGENTS.md, in a mandatory sandbox. Its reach into the workers
+// is the control MCP server socket (see mcpBroker.js / mcpTools.js) plus each
+// worker's project directory mounted READ-ONLY at /workers/<role> -- basic
+// facts (README, file listing, git log) are directly readable there, but
+// nothing is writable. See DEFAULT_ORCHESTRATOR_TEMPLATE below.
 //
 // orchestratorDir is deterministic per project (hashed from the resolved cwd),
 // so the orchestrator's CLAUDE.md/AGENTS.md edits survive group launches and
@@ -72,9 +74,18 @@ Recommended turn pattern (keeps your context small):
 4. Decide the next action from the summary alone; only read_output when
    something looks stuck.
 
-You never have direct file access to the workers' project: all interaction
-goes through these tools. You are only in the loop when a worker hands off
-to you -- that is the intended division of labor.
+Your own sandbox has each worker's project directory mounted **read-only**
+at /workers/workerA and /workers/workerB -- basic facts (README, file
+listing, git log, etc.) are directly readable there, so you don't need to
+ask a worker just to see what's already in its checkout. This does not
+change how you actually work with them, though: the mount is read-only (you
+cannot edit anything there), and everything that requires a worker to think
+or act -- running commands, writing code, deciding what to do next -- still
+goes exclusively through the tools below. You are only in the loop when a
+worker hands off to you -- that is the intended division of labor. Note: a
+worker opened via open_tab after your own session started will not appear
+under /workers/<role> until you are restarted (the mount is fixed at your
+own sandbox's startup).
 
 ## Division of labor
 
@@ -153,7 +164,7 @@ function appFromBody(spec, fallback) {
 // to the project (cwd); concurrent groups for the same project are refused at
 // creation time, so at most one live group ever owns it at a time --
 // `resumeLast` maps 1:1 onto "the previous conversation").
-export function orchestratorRestartSessionOpts({ group, app, mcpSocketPath }) {
+export function orchestratorRestartSessionOpts({ group, app, mcpSocketPath, roBinds = [] }) {
   return {
     cwd: group.orchestratorDir,
     cols: 80,
@@ -165,6 +176,7 @@ export function orchestratorRestartSessionOpts({ group, app, mcpSocketPath }) {
     groupId: group.id,
     groupRole: 'orchestrator',
     mcpSocketPath,
+    roBinds,
   };
 }
 
@@ -263,6 +275,14 @@ export async function groupsRoute(fastify, opts) {
       if (res.error) return fail(`worker ${role} failed to launch: ${res.message || res.error}`);
     }
 
+    // Both workers are registered by now (addMember calls registerMember
+    // internally), so the orchestrator's ro-mounts can be derived from the
+    // live registry: each worker's cwd is mounted read-only at /workers/<role>.
+    // resolveWorkerRoBinds re-validates each role against WORKER_ROLE_RE
+    // before it becomes a mount destination (defense in depth -- roles can
+    // also enter the registry through client-controlled re-init paths).
+    const roBinds = groupManager.resolveWorkerRoBinds(groupId, 'orchestrator');
+
     const orchRes = createSession({
       cwd: orchestratorDir,
       cols: 80,
@@ -273,6 +293,7 @@ export async function groupsRoute(fastify, opts) {
       groupId,
       groupRole: 'orchestrator',
       mcpSocketPath: controlBroker ? controlBroker.sockPath : null,
+      roBinds,
     });
     if (orchRes.error || !orchRes.session) {
       return fail(`orchestrator failed to launch: ${orchRes.error || 'unknown error'}`);
@@ -345,7 +366,12 @@ export async function groupsRoute(fastify, opts) {
       return reply.code(500).send({ error: 'failed to re-create the control broker' });
     }
 
-    const res = createSession(orchestratorRestartSessionOpts({ group, app, mcpSocketPath }));
+    // Re-validate roles via resolveWorkerRoBinds (WORKER_ROLE_RE) -- the same
+    // filter the scheduler path uses, so a crafted role can never become a
+    // /workers/<role> mount destination.
+    const roBinds = groupManager.resolveWorkerRoBinds(group.id, 'orchestrator');
+
+    const res = createSession(orchestratorRestartSessionOpts({ group, app, mcpSocketPath, roBinds }));
     if (res.error || !res.session) {
       return reply.code(500).send({ error: `orchestrator restart failed: ${res.error || 'unknown error'}` });
     }
