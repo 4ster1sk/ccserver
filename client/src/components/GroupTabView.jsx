@@ -26,7 +26,6 @@ export default function GroupTabView({
   onActiveAppChange,
   onCurrentTurnChange,
   tabId,
-  onAttention,
   onFocusTab,
 }) {
   const [members, setMembers] = useState(initialMembers || []);
@@ -209,7 +208,6 @@ export default function GroupTabView({
                 notifyPermission={notifyPermission}
                 onToggleNotify={onToggleNotify}
                 tabId={tabId}
-                onAttention={onAttention}
                 onFocusTab={() => {
                   // Bring up this group tab AND the specific member whose
                   // notification was clicked.

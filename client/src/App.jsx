@@ -21,7 +21,6 @@ export default function App() {
   const [lastDir, setLastDir] = useState(() => localStorage.getItem('ccserver-last-dir'));
   const [resumePrompt, setResumePrompt] = useState(null);
   const [themeId, setThemeId] = useState(loadThemeId);
-  const [attentionTabs, setAttentionTabs] = useState(new Set());
   const [closeConfirm, setCloseConfirm] = useState(null);
   const [dontAskAgain, setDontAskAgain] = useState(false);
   const [groupActiveApp, setGroupActiveApp] = useState(null);
@@ -313,7 +312,7 @@ export default function App() {
         {tabs.map((tab) => (
           <div
             key={tab.id}
-            className={`tab-item${tab.id === activeTabId ? ' active' : ''}${attentionTabs.has(tab.id) ? ' attention' : ''}${tab.type === 'terminal' && !tab.shell && !tab.sandbox ? ' no-sandbox' : ''}`}
+            className={`tab-item${tab.id === activeTabId ? ' active' : ''}${tab.type === 'terminal' && !tab.shell && !tab.sandbox ? ' no-sandbox' : ''}`}
             onClick={() => handleTabClick(tab.id)}
           >
             <span className="tab-label">
@@ -380,11 +379,6 @@ export default function App() {
                   themeId={themeId}
                   onThemeChange={setThemeId}
                   tabId={tab.id}
-                  onAttention={() => {
-                    if (activeTabId !== tab.id) {
-                      setAttentionTabs((prev) => new Set(prev).add(tab.id));
-                    }
-                  }}
                   onFocusTab={() => handleTabClick(tab.id)}
                 />
               </Suspense>
@@ -411,11 +405,6 @@ export default function App() {
                 onActiveAppChange={setGroupActiveApp}
                 onCurrentTurnChange={(turn) => handleGroupTurnChange(tab.id, turn)}
                 tabId={tab.id}
-                onAttention={() => {
-                  if (activeTabId !== tab.id) {
-                    setAttentionTabs((prev) => new Set(prev).add(tab.id));
-                  }
-                }}
                 onFocusTab={() => handleTabClick(tab.id)}
               />
             </div>
