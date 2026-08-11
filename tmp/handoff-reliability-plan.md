@@ -85,9 +85,16 @@ worker (opencode/claude)
 
 ### フェーズ1: 原因1 (facade の getGroup 欠落) を修正
 
+> **実装時の変更**: 調査後に master (PR #39, 6c9ab71) が同一バグを `getGroupCwd` 設計で
+> 先行修正した。マージ時にその設計を採用する: facade には `getGroup` を追加せず
+> (group オブジェクトは controlBroker のソケットパス・handoff チャネル・キュー等の内部を
+> 持つため LLM 向けツールへ露出しない)、cwd のみを返す `getGroupCwd(groupId)` を facade に
+> 公開し、`repoInfo` はこれを使う。以下 2 の「テストを本番と同じ形にする」方針は
+> `getGroupManagerApi()` テストシームとして実装済み (master の `prodFacadeDeps` テストと併存)。
+
 1. `server/ws/groupManager.js` — `groupManagerApi` (749-758) に `getGroup` を追加。
-   - `getGroup` は既にモジュールから export されている (160)。facade に並べるだけ。
-   - ついでに、facade と mcpTools が使う関数の対応表をコメントで維持し、以後の
+   - (master 統合後) **追加しない**: 代わりに master の `getGroupCwd` (cwd のみ) を facade が
+     持つ。facade と mcpTools が使う関数の対応表をコメントで維持し、以後の
      追加ツールは必ず facade に入れる旨を明記。
 2. **テストを本番と同じ形にする** (再発防止の本体):
    - `mcpTools.test.js` の `controlDeps` / `handoffDeps` が注入する `groupManager` を、

@@ -9,7 +9,7 @@ import { orchestratorRestartSessionOpts, orchestratorDirForCwd, groupExistsForCw
 
 test('orchestratorRestartSessionOpts: restart continues the last conversation', () => {
   const opts = orchestratorRestartSessionOpts({
-    group: { id: 'group-1', orchestratorDir: '/tmp/orch/group-1' },
+    group: { id: 'group-1', cwd: '/srv/proj', orchestratorDir: '/tmp/orch/group-1' },
     app: 'claude',
     mcpSocketPath: '/tmp/mcp.sock',
   });
@@ -23,17 +23,19 @@ test('orchestratorRestartSessionOpts: restart continues the last conversation', 
   assert.equal(opts.groupRole, 'orchestrator');
   assert.equal(opts.mcpSocketPath, '/tmp/mcp.sock');
   assert.equal(opts.resumeLast, true, 'restart must resume the group\u2019s previous conversation');
+  assert.equal(opts.projectName, 'proj', 'notify attribution uses the real project basename, not the hashed orchestrator dir');
 });
 
 test('orchestratorRestartSessionOpts: resumeLast is independent of the app', () => {
   for (const app of ['claude', 'opencode']) {
     const opts = orchestratorRestartSessionOpts({
-      group: { id: 'g', orchestratorDir: '/d' },
+      group: { id: 'g', cwd: '/srv/proj', orchestratorDir: '/d' },
       app,
       mcpSocketPath: '/s',
     });
     assert.equal(opts.resumeLast, true, `resumeLast must be set for ${app}`);
     assert.equal(opts.app, app);
+    assert.equal(opts.projectName, 'proj', `the real project basename is attributed for ${app}`);
   }
 });
 
@@ -56,7 +58,7 @@ test('groupExistsForCwd matches an existing group for the same project', () => {
 
 test('orchestratorRestartSessionOpts carries model and member-specific sandbox options', () => {
   const opts = orchestratorRestartSessionOpts({
-    group: { id: 'g', orchestratorDir: '/d' },
+    group: { id: 'g', cwd: '/srv/proj', orchestratorDir: '/d' },
     app: 'opencode',
     model: 'gpt-5',
     sandboxOpts: { gpg: true, sshAgent: false },
@@ -65,6 +67,7 @@ test('orchestratorRestartSessionOpts carries model and member-specific sandbox o
   assert.equal(opts.app, 'opencode');
   assert.equal(opts.model, 'gpt-5');
   assert.deepEqual(opts.sandboxOpts, { gpg: true, sshAgent: false });
+  assert.equal(opts.projectName, 'proj');
 });
 
 // memberSpecFromBody is module-private, so the POST normalization contract is
@@ -75,10 +78,19 @@ test('orchestratorRestartSessionOpts carries model and member-specific sandbox o
 // mcpBroker.test.js (open_tab) and through the groupManager precedence tests.
 test('orchestratorRestartSessionOpts: default model/sandboxOpts stay null (no flag leakage)', () => {
   const opts = orchestratorRestartSessionOpts({
-    group: { id: 'g', orchestratorDir: '/d' },
+    group: { id: 'g', cwd: '/srv/proj', orchestratorDir: '/d' },
     app: 'claude',
     mcpSocketPath: '/s',
   });
   assert.equal(opts.model, null);
   assert.equal(opts.sandboxOpts, null);
+});
+
+test('orchestratorRestartSessionOpts: a group without a cwd keeps projectName null (no crash)', () => {
+  const opts = orchestratorRestartSessionOpts({
+    group: { id: 'g', cwd: null, orchestratorDir: '/d' },
+    app: 'claude',
+    mcpSocketPath: '/s',
+  });
+  assert.equal(opts.projectName, null, 'missing group cwd must not throw basename()');
 });

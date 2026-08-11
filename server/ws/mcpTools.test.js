@@ -68,6 +68,19 @@ function controlDeps(groupId) {
   };
 }
 
+// The production deps shape for broker servers: groupManager arrives as the
+// narrow groupManagerApi facade (groupManager.js), which deliberately exposes
+// getGroupCwd but NOT the raw getGroup (the group object carries controlBroker
+// socket paths, handoff channels, etc. that LLM-facing tools must not reach).
+// repo_info must work against exactly this shape.
+function prodFacadeDeps(groupId) {
+  return {
+    groupId,
+    groupManager: { getGroupCwd: (id) => groupManager.getGroupCwd(id) },
+    sessionManager: { getSession: () => null, writeToSession: () => false, waitUntilSettled: async () => ({ settled: true }) },
+  };
+}
+
 // deps the way mcpServer would build them for a worker's handoff socket:
 // sessionId comes from the closure (here a fake registered id), never from args
 function handoffDeps(groupId, role, sessionId) {
@@ -897,4 +910,33 @@ test('repoInfo: caps bite (root 100 entries, README 8KB, package keys 50)', asyn
   assert.equal(out.readme.truncated, true);
   assert.equal(out.packageJson.scripts.length, 50, 'scripts keys capped at 50');
   assert.equal(out.packageJson.dependencies.length, 50, 'dependencies keys capped at 50');
+});
+
+// Regression: production broker deps hand repo_info the narrow groupManager
+// facade (getGroupCwd only -- the full module's getGroup is never reachable),
+// which used to crash with "deps.groupManager.getGroup is not a function".
+test('repoInfo works against the production facade shape (no getGroup on groupManager)', async () => {
+  const dir = makeTmpRepo('facade');
+  writeFileSync(join(dir, 'README.md'), '# Facade Project');
+  const gid = randomUUID();
+  await groupManager.createGroup({ groupId: gid, cwd: dir, orchestratorDir: join(dir, '..', 'orch') });
+  groupsToDestroy.push(gid);
+
+  const deps = prodFacadeDeps(gid);
+  assert.equal(typeof deps.groupManager.getGroup, 'undefined', 'facade shape must not expose getGroup');
+  assert.equal(typeof deps.groupManager.getGroupCwd, 'function');
+
+  const out = await tools.repoInfo(deps);
+  assert.equal(out.error, undefined);
+  assert.equal(out.cwd, dir);
+  assert.equal(out.readme.file, 'README.md');
+  assert.ok(out.readme.text.includes('Facade Project'));
+  assert.ok(out.root.files.includes('README.md'));
+});
+
+test('repoInfo: group-not-found also works against the production facade shape', async () => {
+  const deps = prodFacadeDeps('no-such-group');
+  assert.equal(typeof deps.groupManager.getGroup, 'undefined', 'facade shape must not expose getGroup');
+  const out = await tools.repoInfo(deps);
+  assert.equal(out.error, 'group-not-found');
 });

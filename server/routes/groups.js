@@ -17,7 +17,7 @@
 
 import { randomUUID, createHash } from 'node:crypto';
 import { mkdirSync, writeFileSync, statSync, rmSync, existsSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { basename, join, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import * as groupManager from '../ws/groupManager.js';
 import { createSession, getSession } from '../ws/sessionManager.js';
@@ -150,6 +150,24 @@ orchestrator should catch this itself.
   nudge it via \`send_input\` ("done? call handoff_to_orchestrator"). Don't
   invent a polling loop (e.g. \`ScheduleWakeup\`) just to check sooner --
   that mechanism belongs to the \`/loop\` skill, not ad hoc waiting here.
+
+## Notification discipline
+
+The MCP server "ccserver-notify" is configured in this session. Its \`notify\`
+tool (title / body / level) delivers to every configured channel (Discord
+webhook and any subscribed webhooks) -- the only way the human learns what
+happened without watching the terminal. End every one of the following
+situations with a \`notify\` call, no exceptions:
+
+- **Stopping**: you stop waiting, give up on a step, or wind the group down
+  without completing the task.
+- **Judgment needed**: a decision requires the human (blocked, ambiguous, or
+  a choice you should not make autonomously).
+- **Done**: the group task is complete (final review passed, pushed, and the
+  PR opened -- or otherwise finished).
+
+Use \`level\` to match the outcome (success / warning / error). Delivery is
+non-blocking and never throws, so there is no reason to skip it.
 `;
 
 function validCwd(cwd) {
@@ -184,7 +202,9 @@ function memberSpecFromBody(spec) {
 // group's most recent orchestrator conversation (orchestratorDir is exclusive
 // to the project (cwd); concurrent groups for the same project are refused at
 // creation time, so at most one live group ever owns it at a time --
-// `resumeLast` maps 1:1 onto "the previous conversation").
+// `resumeLast` maps 1:1 onto "the previous conversation"). projectName is the
+// real project's basename: the session's cwd is the hashed orchestratorDir,
+// which must not leak into the notify footer (see sessionManager).
 export function orchestratorRestartSessionOpts({ group, app, model = null, sandboxOpts = null, mcpSocketPath }) {
   return {
     cwd: group.orchestratorDir,
@@ -197,6 +217,7 @@ export function orchestratorRestartSessionOpts({ group, app, model = null, sandb
     resumeLast: true,
     groupId: group.id,
     groupRole: 'orchestrator',
+    projectName: group.cwd ? basename(group.cwd) : null,
     mcpSocketPath,
   };
 }
@@ -330,6 +351,9 @@ export async function groupsRoute(fastify, opts) {
       model: orchestrator.model ?? null,
       groupId,
       groupRole: 'orchestrator',
+      // The session's cwd is the hashed orchestratorDir; the notify footer
+      // must attribute the orchestrator to the real project instead.
+      projectName: basename(cwd),
       mcpSocketPath: controlBroker ? controlBroker.sockPath : null,
     });
     if (orchRes.error || !orchRes.session) {
