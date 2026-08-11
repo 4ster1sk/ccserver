@@ -99,7 +99,7 @@ function normalizeModel(model) {
   return typeof model === 'string' && model.length > 0 ? model : null;
 }
 
-export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox, sandboxOpts, app, model, resumeLast, groupId = null, groupRole = null, mcpSocketPath = null }) {
+export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox, sandboxOpts, app, model, resumeLast, groupId = null, groupRole = null, mcpSocketPath = null, projectName = null }) {
   const id = randomUUID();
 
   // claude (and likely opencode) aborts immediately (SIGABRT, exit 134, no
@@ -144,15 +144,17 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox
   // Per-connection identity for ccserver-notify (see notify.js / mcpBroker.js):
   // rides to the bridge as CCSERVER_NOTIFY_IDENTITY and becomes the "_from:"
   // footer on this session's notifications. Attribution only -- never an
-  // authorization input. projectName is basename(cwd) (createSession already
-  // refuses the filesystem root for agent sessions, so a meaningful name
-  // exists).
+  // authorization input. projectName defaults to basename(cwd) (createSession
+  // already refuses the filesystem root for agent sessions, so a meaningful
+  // name exists); an explicit projectName wins when the session's cwd is not
+  // the real project path (combo orchestrators run in a hashed orchestrator
+  // dir -- see routes/groups.js).
   const notifyIdentity = useNotify ? {
     sessionId: id,
     groupId,
     groupRole,
     cwd,
-    projectName: basename(cwd),
+    projectName: projectName ?? basename(cwd),
     app: sessionApp,
   } : null;
 
