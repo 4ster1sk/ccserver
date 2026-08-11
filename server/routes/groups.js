@@ -58,11 +58,16 @@ the MCP server "ccserver" that is already configured in this session.
 Each worker is a full terminal session you can inspect and control:
 
 - list_group_sessions -- see the members of this group.
-- read_output -- read a member's recent terminal output (fallback for
-  inspecting a stuck member; avoid polling it).
+- read_output -- read a member's current screen / recent terminal output
+  (fallback for inspecting a stuck member; avoid polling it). Use its
+  \`screen\` and \`screenIdleMs\` fields for stuck/busy judgments -- a static
+  screen (large screenIdleMs) means the member is idle even if its byte
+  stream is noisy; a small screenIdleMs means it is actively redrawing
+  (spinner or progress).
 - send_input -- type text into a member's terminal (submit defaults to true).
 - open_tab / close_tab -- add or terminate worker sessions.
-- get_tab_status -- quick status of a member.
+- get_tab_status -- quick status of a member (including screenIdleMs, the
+  screen-change-based idle signal).
 - repo_info -- the repository's basic facts (top-level layout, README,
   package.json summary, git state). Shallow by design: it never returns
   source-file contents, takes no path arguments, and is capped in size.
@@ -130,6 +135,12 @@ orchestrator should catch this itself.
 - Every instruction sent via \`send_input\` MUST end with an explicit
   reminder to call \`handoff_to_orchestrator\` once done, blocked, or in
   need of input.
+- \`wait_for_handoff\` returning \`{timedOut:true}\` is NOT an error: it
+  simply means no handoff arrived within the timeout. Call it again. A
+  handoff is never lost to a timeout or a disconnect -- an event that
+  arrives while nobody is waiting stays queued, and even if your
+  connection dies mid-wait, the next \`wait_for_handoff\` (after the
+  reconnect) receives it.
 - After sending a step, don't just trust \`wait_for_handoff\` to eventually
   notify you -- it only returns once the worker actually calls the tool,
   and nothing forces that to happen. When you get any other opportunity to

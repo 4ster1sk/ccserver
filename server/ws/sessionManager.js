@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { buildSandboxSpawn, resolveApp, sandboxAvailable, loadSandboxConfig } from './sandbox.js';
 import { buildMcpConfigArgsAndEnv } from './mcpConfig.js';
 import { shouldInjectNotify, notifyEnabled, getNotifySockPath, notifyBrokerRunning } from './notify.js';
+import { createScreenModel, SCREEN_ROWS } from './screenModel.js';
 import {
   isValidApp,
   appResumeArgs,
@@ -308,6 +309,13 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox
     startedClaudeSessionId: claudeSessionId || null,
     scheduleId: null, // key into the module-level `schedules` map, if any
     pendingInjection: null, // { text, at } — scheduled prompt awaiting a freshly-resumed session
+    // Lightweight virtual screen (see screenModel.js): fed every output
+    // chunk, exposing the current visible screen and a change counter so
+    // read_output can tell "spinner still drawing" from "static screen".
+    // screenLastChangeAt is stamped when the screen visibly changes (not on
+    // every byte) -- the basis of read_output's screenIdleMs / get_tab_status.
+    screen: createScreenModel({ cols, rows: SCREEN_ROWS }),
+    screenLastChangeAt: null,
   };
 
   ptyProcess.onData((rawData) => {
@@ -316,6 +324,15 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox
     // the agent-only idle detection below). Pure activity bookkeeping.
     session.lastOutputAt = Date.now();
     appendToBuffer(session, data);
+    // Keep the virtual screen model in parallel with the buffer: it only
+    // stamps screenLastChangeAt when the visible screen actually changes,
+    // so a spinner redrawing the same line registers as activity while a
+    // byte flow that leaves the screen static does not.
+    const screenVersion = session.screen.version();
+    session.screen.feed(data);
+    if (session.screen.version() !== screenVersion) {
+      session.screenLastChangeAt = Date.now();
+    }
 
     if (session.socket && session.socket.readyState === 1) {
       try {
