@@ -49,8 +49,12 @@ const SANDBOX_KNOWN_HOSTS_DEFAULT_PATH = '/ccserver-sandbox-known-hosts-default'
 // Fixed in-sandbox paths for the MCP bridge (see mcpBroker.js / mcpConfig.js):
 // the group's control or handoff socket is bound at SANDBOX_MCP_SOCK_PATH and
 // the byte-pipe wrapper script at SANDBOX_MCP_BRIDGE_PATH, which the agent
-// CLIs are told to run via --mcp-config / OPENCODE_CONFIG_CONTENT.
+// CLIs are told to run via --mcp-config / OPENCODE_CONFIG_CONTENT. The
+// process-global notify socket (ccserver-notify, see notify.js) is bound at a
+// second fixed path the same wrapper reaches when invoked with the 'notify'
+// argument.
 const SANDBOX_MCP_SOCK_PATH = '/ccserver-sandbox-mcp.sock';
+const SANDBOX_NOTIFY_SOCK_PATH = '/ccserver-sandbox-notify.sock';
 const SANDBOX_MCP_BRIDGE_PATH = '/ccserver-sandbox-mcp-bridge';
 const MCP_BRIDGE_SCRIPT = join(__dirname, 'sandbox-mcp-wrapper.cjs');
 
@@ -128,6 +132,24 @@ export function loadSandboxConfig() {
   // a direct (unsandboxed) spawn -- when bwrap is unavailable (or on Windows).
   // Also blocks /usage's direct-launch fallback; see usage.js. Default off.
   const forceSandbox = raw.forceSandbox === true;
+  // ccserver-notify (see notify.js): the Discord webhook the notify MCP tool
+  // delivers to, plus the initial subscription seed (https webhook URLs only --
+  // a non-https URL is dropped, never trusted as a delivery target). The
+  // optional env override CCSERVER_DISCORD_WEBHOOK wins over the config file,
+  // so the webhook URL never has to live in a file at all.
+  const rawNotify = (raw.notify && typeof raw.notify === 'object') ? raw.notify : {};
+  let discordWebhook = null;
+  for (const candidate of [process.env.CCSERVER_DISCORD_WEBHOOK, rawNotify.discordWebhook]) {
+    if (typeof candidate === 'string' && candidate.startsWith('https://')) {
+      discordWebhook = candidate;
+      break;
+    }
+  }
+  const subscriptions = Array.isArray(rawNotify.subscriptions)
+    ? rawNotify.subscriptions
+      .filter((s) => s && typeof s === 'object' && typeof s.url === 'string' && s.url.startsWith('https://'))
+      .map((s) => ({ url: s.url, name: typeof s.name === 'string' && s.name.length > 0 ? s.name : null }))
+    : [];
   const binds = Array.isArray(raw.binds) ? raw.binds : [];
   const env = (raw.env && typeof raw.env === 'object') ? raw.env : {};
   // How to launch claude. Overridable because the install location is
@@ -137,7 +159,7 @@ export function loadSandboxConfig() {
   // See appLaunch.js's APPS; anything else (including unset) falls back to
   // claude -- see sessionManager.js's defaultApp().
   const defaultApp = raw.defaultApp === 'opencode' || raw.defaultApp === 'copilot' ? raw.defaultApp : 'claude';
-  return { docker, gpg, sshAgent, gitBroker, forceSandbox, binds, env, claudeBin, defaultApp, configPath };
+  return { docker, gpg, sshAgent, gitBroker, forceSandbox, binds, env, claudeBin, defaultApp, notify: { discordWebhook, subscriptions }, configPath };
 }
 
 // Locate an executable named `cmd` on the given PATH (or return it as-is if
@@ -370,7 +392,7 @@ export function sandboxAvailable() {
 
 // Build the bwrap arguments (everything after the `bwrap` executable, up to
 // but not including the trailing `-- <cmd...>`).
-function buildBwrapArgs({ cwd, docker, gpg, extraBinds, extraEnv, authSock, stateDir, claudeDir, gitBroker, mcpSocketPath }) {
+function buildBwrapArgs({ cwd, docker, gpg, extraBinds, extraEnv, authSock, stateDir, claudeDir, gitBroker, mcpSocketPath, notifySocketPath }) {
   const args = [
     '--die-with-parent',
     // Own PID namespace so the whole sandbox tree is reaped as a unit. Without
@@ -422,6 +444,16 @@ function buildBwrapArgs({ cwd, docker, gpg, extraBinds, extraEnv, authSock, stat
     args.push('--bind-try', mcpSocketPath, SANDBOX_MCP_SOCK_PATH);
     args.push('--ro-bind', MCP_BRIDGE_SCRIPT, SANDBOX_MCP_BRIDGE_PATH);
     args.push('--setenv', 'CCSANDBOX_MCP_SOCK', SANDBOX_MCP_SOCK_PATH);
+  }
+
+  // ccserver-notify: the same wrapper script, reached with the 'notify' argv
+  // so it reads CCSANDBOX_NOTIFY_MCP_SOCK (bound here) instead of
+  // CCSANDBOX_MCP_SOCK. Independent of the group brokers: standalone sandboxes
+  // (no mcpSocketPath) get notify on its own.
+  if (notifySocketPath) {
+    args.push('--bind-try', notifySocketPath, SANDBOX_NOTIFY_SOCK_PATH);
+    args.push('--ro-bind', MCP_BRIDGE_SCRIPT, SANDBOX_MCP_BRIDGE_PATH);
+    args.push('--setenv', 'CCSANDBOX_NOTIFY_MCP_SOCK', SANDBOX_NOTIFY_SOCK_PATH);
   }
 
   // Agent CLI configuration + install dirs (claude + opencode + copilot),
@@ -515,7 +547,7 @@ function buildBwrapArgs({ cwd, docker, gpg, extraBinds, extraEnv, authSock, stat
   // /usr/bin/node exists, mirroring how resolveApp follows the real
   // agent binary instead of assuming a host layout. Shared between the
   // git-broker machinery and the MCP bridge wrapper.
-  if (gitBroker || mcpSocketPath) {
+  if (gitBroker || mcpSocketPath || notifySocketPath) {
     const nodeBin = realpathSync(process.execPath);
     args.push('--ro-bind', nodeBin, SANDBOX_NODE_PATH);
   }
@@ -647,6 +679,7 @@ export function buildMinimalSandboxSpawn({ cwd, targetCommand }) {
     claudeDir: installDir,
     gitBroker: null,
     mcpSocketPath: null,
+    notifySocketPath: null,
   });
   const innerCmd = [BASH, '/ccserver-sandbox-entrypoint.sh', ...withClaude(targetCommand, command)];
   return {
@@ -670,7 +703,10 @@ export function buildMinimalSandboxSpawn({ cwd, targetCommand }) {
 //   mcpSocketPath - host path of the group's control/handoff MCP socket to
 //                 bind into the sandbox at a fixed path (combo sessions
 //                 only). null for regular sessions.
-export function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, mcpSocketPath = null }) {
+//   notifySocketPath - host path of the process-global ccserver-notify socket
+//                 to bind into the sandbox at a fixed path. null when the
+//                 session gets no notify MCP injection.
+export function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, mcpSocketPath = null, notifySocketPath = null }) {
   const { docker: cfgDocker, gpg: cfgGpg, sshAgent: cfgSshAgent, gitBroker: gitBrokerEnabled, binds, env, claudeBin } = loadSandboxConfig();
   const docker = cfgDocker && dockerSandboxAvailable();
   const gpg = sandboxOpts?.gpg ?? cfgGpg;
@@ -710,7 +746,7 @@ export function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, mcpSoc
   }
 
   const { command, installDir } = resolveApp(app, claudeBin);
-  const bwrapArgs = buildBwrapArgs({ cwd, docker, gpg, extraBinds: binds, extraEnv: env, authSock, stateDir, claudeDir: installDir, gitBroker, mcpSocketPath });
+  const bwrapArgs = buildBwrapArgs({ cwd, docker, gpg, extraBinds: binds, extraEnv: env, authSock, stateDir, claudeDir: installDir, gitBroker, mcpSocketPath, notifySocketPath });
   const innerCmd = [BASH, '/ccserver-sandbox-entrypoint.sh', ...withClaude(targetCommand, command)];
 
   const gitBrokerFields = {

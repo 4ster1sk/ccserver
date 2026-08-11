@@ -11,33 +11,72 @@
 //   opencode -> OPENCODE_CONFIG_CONTENT env var (deep-merged with project
 //               config, no file written).
 //
+// The optional `{ notify }` descriptor adds the ccserver-notify MCP server
+// (see notify.js / mcpConfig usage in sessionManager.js):
+//   { mode, sockPath }
+//     mode     - 'sandbox' (run the in-sandbox bridge, args ['notify']) or
+//                'host' (run <node> <bridge script> notify on the host --
+//                used by non-sandboxed sessions, where the fixed in-sandbox
+//                path and shebang don't exist).
+//     sockPath - host path of the process-global notify socket, injected as
+//                CCSANDBOX_NOTIFY_MCP_SOCK so the wrapper can reach it (bwrap
+//                --setenv overrides it with the in-sandbox path when sandboxed).
+//
 // Returns { args, env } for sessionManager to splice into the pty spawn.
 
-const MCP_BRIDGE_COMMAND = '/ccserver-sandbox-mcp-bridge';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-export function buildMcpConfigArgsAndEnv(app) {
+const __dirname = dirname(fileURLToPath(import.meta.url));
+
+const MCP_BRIDGE_COMMAND = '/ccserver-sandbox-mcp-bridge';
+const NOTIFY_BRIDGE_SCRIPT = join(__dirname, 'sandbox-mcp-wrapper.cjs');
+
+// The { base, args } invocation for the notify server: the in-sandbox bridge
+// when the session is sandboxed, else the host node binary running the bridge
+// script directly (the script's shebang only exists inside the sandbox).
+function notifyInvocation(notify) {
+  if (notify.mode === 'host') {
+    return { command: process.execPath, args: [NOTIFY_BRIDGE_SCRIPT, 'notify'] };
+  }
+  return { command: MCP_BRIDGE_COMMAND, args: ['notify'] };
+}
+
+export function buildMcpConfigArgsAndEnv(app, { notify } = {}) {
+  const notifySockEnv = notify ? { CCSANDBOX_NOTIFY_MCP_SOCK: notify.sockPath } : {};
+
   if (app === 'opencode') {
+    const mcp = {
+      ccserver: { type: 'local', command: [MCP_BRIDGE_COMMAND] },
+    };
+    if (notify) {
+      const inv = notifyInvocation(notify);
+      mcp['ccserver-notify'] = { type: 'local', command: [inv.command, ...inv.args] };
+    }
     return {
       args: [],
       env: {
         OPENCODE_CONFIG_CONTENT: JSON.stringify({
           $schema: 'https://opencode.ai/config.json',
-          mcp: {
-            ccserver: { type: 'local', command: [MCP_BRIDGE_COMMAND] },
-          },
+          mcp,
         }),
+        ...notifySockEnv,
       },
     };
+  }
+
+  const mcpServers = {
+    ccserver: { type: 'stdio', command: MCP_BRIDGE_COMMAND, args: [] },
+  };
+  if (notify) {
+    const inv = notifyInvocation(notify);
+    mcpServers['ccserver-notify'] = { type: 'stdio', command: inv.command, args: inv.args };
   }
   return {
     args: [
       '--mcp-config',
-      JSON.stringify({
-        mcpServers: {
-          ccserver: { type: 'stdio', command: MCP_BRIDGE_COMMAND, args: [] },
-        },
-      }),
+      JSON.stringify({ mcpServers }),
     ],
-    env: {},
+    env: notifySockEnv,
   };
 }

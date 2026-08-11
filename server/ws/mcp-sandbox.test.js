@@ -14,6 +14,7 @@ import { buildSandboxSpawn } from './sandbox.js';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
 const SANDBOX_MCP_SOCK_PATH = '/ccserver-sandbox-mcp.sock';
+const SANDBOX_NOTIFY_SOCK_PATH = '/ccserver-sandbox-notify.sock';
 const SANDBOX_MCP_BRIDGE_PATH = '/ccserver-sandbox-mcp-bridge';
 const SANDBOX_NODE_PATH = '/ccserver-sandbox-node';
 
@@ -92,6 +93,63 @@ test('buildSandboxSpawn adds no /workers mounts (worker-dir roBinds removed)', (
     });
     assert.ok(!spawn.args.includes('--ro-bind-try'), 'no ro mounts at all without an MCP socket');
     assert.ok(!spawn.args.some((a) => typeof a === 'string' && a.startsWith('/workers/')), 'no /workers/* destination');
+  } finally {
+    if (prev === undefined) delete process.env.CCSERVER_SANDBOX_CONFIG;
+    else process.env.CCSERVER_SANDBOX_CONFIG = prev;
+  }
+});
+
+// ccserver-notify in a STANDALONE sandbox: notifySocketPath set but no group
+// mcpSocketPath (standalone sessions carry no group broker). The notify socket
+// must be bound, the wrapper ro-bound, CCSANDBOX_NOTIFY_MCP_SOCK set, and the
+// node binary bound for the wrapper's shebang -- without any group-socket
+// bindings leaking in.
+test('buildSandboxSpawn binds the notify socket + wrapper when notifySocketPath is set (no group socket)', () => {
+  const prev = process.env.CCSERVER_SANDBOX_CONFIG;
+  process.env.CCSERVER_SANDBOX_CONFIG = cfgPath;
+  try {
+    const notifySock = join(tmpRoot, 'fake-notify.sock');
+    const spawn = buildSandboxSpawn({
+      cwd: tmpRoot,
+      targetCommand: ['claude'],
+      app: 'claude',
+      sandboxOpts: null,
+      notifySocketPath: notifySock,
+    });
+    const args = spawn.args;
+    const idxBind = args.indexOf(SANDBOX_NOTIFY_SOCK_PATH);
+    assert.ok(idxBind > 0, 'in-sandbox notify socket path present');
+    assert.equal(args[idxBind - 2], '--bind-try');
+    assert.equal(args[idxBind - 1], notifySock);
+    const sockEnv = args.indexOf('CCSANDBOX_NOTIFY_MCP_SOCK');
+    assert.ok(sockEnv > 0, 'CCSANDBOX_NOTIFY_MCP_SOCK set');
+    assert.equal(args[sockEnv + 1], SANDBOX_NOTIFY_SOCK_PATH);
+    const idxBridge = args.indexOf(SANDBOX_MCP_BRIDGE_PATH);
+    assert.ok(idxBridge > 0, 'bridge wrapper ro-bound for notify');
+    assert.equal(args[idxBridge - 2], '--ro-bind');
+    assert.equal(args[idxBridge - 1], join(__dirname, 'sandbox-mcp-wrapper.cjs'));
+    const idxNode = args.indexOf(SANDBOX_NODE_PATH);
+    assert.ok(idxNode > 0, 'node binary bind present (wrapper shebang)');
+    assert.ok(!args.includes(SANDBOX_MCP_SOCK_PATH), 'no group MCP socket bind (standalone)');
+    assert.ok(!args.includes('CCSANDBOX_MCP_SOCK'), 'no group socket env (standalone)');
+  } finally {
+    if (prev === undefined) delete process.env.CCSERVER_SANDBOX_CONFIG;
+    else process.env.CCSERVER_SANDBOX_CONFIG = prev;
+  }
+});
+
+test('buildSandboxSpawn without notifySocketPath adds no notify bindings', () => {
+  const prev = process.env.CCSERVER_SANDBOX_CONFIG;
+  process.env.CCSERVER_SANDBOX_CONFIG = cfgPath;
+  try {
+    const spawn = buildSandboxSpawn({
+      cwd: tmpRoot,
+      targetCommand: ['claude'],
+      app: 'claude',
+      sandboxOpts: null,
+    });
+    assert.ok(!spawn.args.includes(SANDBOX_NOTIFY_SOCK_PATH), 'no notify socket path');
+    assert.ok(!spawn.args.includes('CCSANDBOX_NOTIFY_MCP_SOCK'), 'no notify socket env');
   } finally {
     if (prev === undefined) delete process.env.CCSERVER_SANDBOX_CONFIG;
     else process.env.CCSERVER_SANDBOX_CONFIG = prev;
