@@ -674,13 +674,15 @@ function notifyFired(session, info, delivered) {
 // (fireSchedule branch 2). Group members match strictly -- only the SAME
 // group AND SAME role -- because combo workers legitimately share cwd+app
 // with each other, so a cwd+app match alone could inject into the wrong
-// worker. Non-group entries (groupId null on both sides) keep the original
-// cwd+shell+app semantics. Exported for direct unit testing.
+// worker. A model-annotated schedule must likewise only inject into a
+// session launched with the SAME model; unmodeled entries (both null) keep
+// the original cwd+shell+app semantics. Exported for direct unit testing.
 export function matchesScheduleTarget(session, entry) {
   return !!session && !session.exited && !!session.ptyProcess
     && session.cwd === entry.cwd
     && session.shell === entry.shell
     && session.app === entry.app
+    && (session.model ?? null) === (entry.model ?? null)
     && (session.groupId ?? null) === (entry.groupId ?? null)
     && (session.groupRole ?? null) === (entry.groupRole ?? null);
 }
