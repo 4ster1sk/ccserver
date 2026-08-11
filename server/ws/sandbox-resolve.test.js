@@ -38,6 +38,11 @@ test('resolveApp finds opencode via SANDBOX_PATH or its fallback dirs', { skip: 
   assert.ok(resolvesToRealBinary(r.command), `command does not resolve to a real binary: ${r.command}`);
 });
 
+test('resolveApp finds copilot via SANDBOX_PATH or its fallback dirs', { skip: !isInstalled('copilot') }, () => {
+  const r = resolveApp('copilot');
+  assert.ok(resolvesToRealBinary(r.command), `command does not resolve to a real binary: ${r.command}`);
+});
+
 test('resolveApp keeps the bare command name when SANDBOX_PATH resolves it', { skip: !isInstalled('claude') }, () => {
   const r = resolveApp('claude');
   // /usr/bin, /bin etc. are all on SANDBOX_PATH, so a claude install visible

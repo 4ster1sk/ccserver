@@ -136,7 +136,7 @@ export function loadSandboxConfig() {
   // Which agent a new session launches when the client doesn't request one.
   // See appLaunch.js's APPS; anything else (including unset) falls back to
   // claude -- see sessionManager.js's defaultApp().
-  const defaultApp = raw.defaultApp === 'opencode' ? 'opencode' : 'claude';
+  const defaultApp = raw.defaultApp === 'opencode' || raw.defaultApp === 'copilot' ? raw.defaultApp : 'claude';
   return { docker, gpg, sshAgent, gitBroker, forceSandbox, binds, env, claudeBin, defaultApp, configPath };
 }
 
@@ -232,6 +232,8 @@ function resolveAgentCommand(cmd, extraDirs = []) {
 // opencode: the resolved absolute path. Its install (e.g. an nvm bin dir) is
 //   typically NOT on the sandbox PATH, so the absolute path + installDir bind
 //   is required for it to run inside the sandbox.
+// copilot: like claude, a bare name first (its ~/.local/bin install is on
+//   SANDBOX_PATH); falls back to an absolute path for installs PATH can't see.
 export function resolveApp(app, configuredBin = loadSandboxConfig().claudeBin) {
   if (app === 'opencode') {
     const r = resolveAgentCommand('opencode', [join(HOME, '.opencode', 'bin')]);
@@ -241,6 +243,11 @@ export function resolveApp(app, configuredBin = loadSandboxConfig().claudeBin) {
       return { command: real, installDir: appInstallDir(real) };
     }
     return { command: process.platform === 'win32' ? 'opencode.exe' : 'opencode', installDir: null };
+  }
+  if (app === 'copilot') {
+    const r = resolveAgentCommand('copilot', [join(HOME, '.local', 'bin')]);
+    if (r) return { command: r.command, installDir: appInstallDir(r.path) };
+    return { command: process.platform === 'win32' ? 'copilot.exe' : 'copilot', installDir: null };
   }
   const command = configuredBin || (process.platform === 'win32' ? 'claude.exe' : 'claude');
   const r = resolveAgentCommand(command);
@@ -255,12 +262,13 @@ export function resolveClaude(configuredBin = loadSandboxConfig().claudeBin) {
   return resolveApp('claude', configuredBin);
 }
 
-// Swap a leading bare `claude`/`opencode` in a target command for the resolved
-// launcher, leaving non-agent targets (e.g. a shell) untouched. Absolute
-// commands (e.g. resolved opencode paths) pass through as-is.
+// Swap a leading bare `claude`/`opencode`/`copilot` in a target command for
+// the resolved launcher, leaving non-agent targets (e.g. a shell) untouched.
+// Absolute commands (e.g. resolved opencode paths) pass through as-is.
 function withClaude(targetCommand, command) {
   if (targetCommand[0] === 'claude' || targetCommand[0] === 'claude.exe'
-    || targetCommand[0] === 'opencode' || targetCommand[0] === 'opencode.exe') {
+    || targetCommand[0] === 'opencode' || targetCommand[0] === 'opencode.exe'
+    || targetCommand[0] === 'copilot' || targetCommand[0] === 'copilot.exe') {
     return [command, ...targetCommand.slice(1)];
   }
   return targetCommand;
@@ -426,14 +434,21 @@ function buildBwrapArgs({ cwd, docker, gpg, extraBinds, extraEnv, authSock, stat
     args.push('--setenv', 'CCSANDBOX_MCP_SOCK', SANDBOX_MCP_SOCK_PATH);
   }
 
-  // Agent CLI configuration + install dirs (claude + opencode), writable so
-  // sessions/auth state survive across sandbox launches and conversations can
-  // be resumed. ~/.local/bin is exposed so the user's own tools resolve.
-  // opencode's XDG state dir (~/.local/state/opencode) holds TUI-selected
-  // state (model.json, kv.json, session.json); without it the chosen model
-  // resets to the provider default on every launch.
+  // Agent CLI configuration + install dirs (claude + opencode + copilot),
+  // writable so sessions/auth state survive across sandbox launches and
+  // conversations can be resumed. ~/.local/bin is exposed so the user's own
+  // tools resolve. opencode's XDG state dir (~/.local/state/opencode) holds
+  // TUI-selected state (model.json, kv.json, session.json); without it the
+  // chosen model resets to the provider default on every launch. copilot's
+  // auth (~/.config/github-copilot/hosts.json) and config (~/.copilot) are
+  // bound writable so a sandboxed session keeps its login and model/session
+  // state (session history lives under ~/.copilot, so `--continue` works).
   const opencodeState = join(HOME, '.local', 'state', 'opencode');
   mkdirSync(opencodeState, { recursive: true });
+  const copilotConfig = join(HOME, '.config', 'github-copilot');
+  const copilotHome = join(HOME, '.copilot');
+  mkdirSync(copilotConfig, { recursive: true });
+  mkdirSync(copilotHome, { recursive: true });
   const appBinds = [
     [join(HOME, '.claude'), 'rw'],
     [join(HOME, '.claude.json'), 'rw'],
@@ -441,6 +456,8 @@ function buildBwrapArgs({ cwd, docker, gpg, extraBinds, extraEnv, authSock, stat
     [join(HOME, '.config', 'opencode'), 'rw'],
     [join(HOME, '.local', 'share', 'opencode'), 'rw'],
     [opencodeState, 'rw'],
+    [copilotConfig, 'rw'],
+    [copilotHome, 'rw'],
     [join(HOME, '.local', 'bin'), 'ro'],
   ];
   for (const [src, mode] of appBinds) {
