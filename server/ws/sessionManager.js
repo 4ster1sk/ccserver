@@ -370,7 +370,9 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox
             // Extract a meaningful description from the buffer
             const noSpace = cleanBuf.replace(/\s/g, '');
             let promptLine = 'permission prompt';
-            if (session.app === 'opencode') {
+            if (session.app === 'opencode' || session.app === 'copilot') {
+              // Neither TUI's byte stream exposes which tool is being approved,
+              // so the label stays generic (claude's does carry tool names).
               promptLine = 'Permission prompt (auto-approved)';
             } else {
               const editMatch = noSpace.match(/makethiseditto\s*(\S+)/i);
@@ -715,8 +717,8 @@ async function fireSchedule(scheduleId) {
   }
 
   // 3) No live session — auto-resume the conversation, then inject once ready.
-  // opencode has no session id in its TUI output, so resume the last session
-  // of the project instead of a specific one.
+  // opencode and copilot expose no session id in their TUI output, so resume
+  // the last session of the project instead of a specific one.
   // A group member gets its role's MCP socket re-created (handoff channel or
   // control broker) so the resumed session can actually reach the group --
   // otherwise the orchestrator's wait_for_handoff would wait on a worker that
@@ -747,7 +749,7 @@ async function fireSchedule(scheduleId) {
     sandboxOpts: entry.sandboxOpts,
     app: entry.app,
     model: entry.model,
-    resumeLast: entry.app === 'opencode',
+    resumeLast: entry.app === 'opencode' || entry.app === 'copilot',
     // A group member keeps its membership across the resume: groupManager's
     // session-create listener re-binds the role to the new sessionId.
     groupId: entry.groupId,
@@ -1038,8 +1040,9 @@ export function gracefulShutdown() {
       for (const [, session] of sessions) {
         const claudeId = session.claudeSessionId || extractResumeId(session);
         // claude sessions are saved when their resume id is known; opencode
-        // sessions are always saved (resume happens via `opencode -c`).
-        if (claudeId || session.app === 'opencode') {
+        // and copilot sessions are always saved (resume happens via
+        // `opencode -c` / `copilot --continue`).
+        if (claudeId || session.app === 'opencode' || session.app === 'copilot') {
           savedSessions.push(savedSessionPublic(session, claudeId));
         }
       }
