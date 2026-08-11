@@ -1,0 +1,186 @@
+// notify.js -- the server-global ccserver-notify registry + delivery. Tests
+// the pure decision and persistence paths (withConfig-style temp files, like
+// sandbox-config.test.js / groupManager.test.js) and the fetch delivery with a
+// mocked global.fetch. The broker lifecycle (Unix socket + MCP wire) is covered
+// in mcpBroker.test.js.
+
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { mkdtempSync, writeFileSync, rmSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+import {
+  notifyEnabled,
+  shouldInjectNotify,
+  subscribe,
+  unsubscribe,
+  listSubscriptions,
+  restoreNotify,
+  sendNotification,
+} from './notify.js';
+
+// Point CCSERVER_SANDBOX_CONFIG + CCSERVER_NOTIFY_PATH at temp files and
+// isolate from any CCSERVER_DISCORD_WEBHOOK leak from the environment.
+async function withNotifyConfig(sandboxJson, fn) {
+  const dir = mkdtempSync(join(tmpdir(), 'ccserver-notify-'));
+  const cfgPath = join(dir, 'sandbox.config.json');
+  const statePath = join(dir, 'notifications.json');
+  const prevCfg = process.env.CCSERVER_SANDBOX_CONFIG;
+  const prevPath = process.env.CCSERVER_NOTIFY_PATH;
+  const prevWebhook = process.env.CCSERVER_DISCORD_WEBHOOK;
+  try {
+    writeFileSync(cfgPath, JSON.stringify(sandboxJson));
+    process.env.CCSERVER_SANDBOX_CONFIG = cfgPath;
+    process.env.CCSERVER_NOTIFY_PATH = statePath;
+    delete process.env.CCSERVER_DISCORD_WEBHOOK;
+    await fn(statePath);
+  } finally {
+    if (prevCfg === undefined) delete process.env.CCSERVER_SANDBOX_CONFIG;
+    else process.env.CCSERVER_SANDBOX_CONFIG = prevCfg;
+    if (prevPath === undefined) delete process.env.CCSERVER_NOTIFY_PATH;
+    else process.env.CCSERVER_NOTIFY_PATH = prevPath;
+    if (prevWebhook === undefined) delete process.env.CCSERVER_DISCORD_WEBHOOK;
+    else process.env.CCSERVER_DISCORD_WEBHOOK = prevWebhook;
+    try { rmSync(dir, { recursive: true, force: true }); } catch { /* ignore */ }
+  }
+}
+
+test('notifyEnabled: discord-only, subscriptions-only, and neither', async () => {
+  await withNotifyConfig({ notify: { subscriptions: [] } }, async () => {
+    restoreNotify();
+    assert.equal(notifyEnabled(), false, 'no webhook + empty registry -> disabled');
+  });
+  await withNotifyConfig({ notify: { discordWebhook: 'https://discord.example/hook' } }, async () => {
+    restoreNotify();
+    assert.equal(notifyEnabled(), true, 'a Discord webhook alone enables it');
+  });
+  await withNotifyConfig({ notify: { subscriptions: [{ url: 'https://example.com/sub' }] } }, async () => {
+    restoreNotify();
+    assert.equal(notifyEnabled(), true, 'a seeded subscription alone enables it');
+  });
+});
+
+test('shouldInjectNotify: standalone agents and combo orchestrators only', () => {
+  const base = { shell: false, app: 'claude', groupId: null, groupRole: null, notifyEnabled: true };
+  assert.equal(shouldInjectNotify(base), true, 'standalone agent session');
+  assert.equal(shouldInjectNotify({ ...base, app: 'opencode' }), true, 'standalone agent (opencode)');
+  assert.equal(shouldInjectNotify({ ...base, groupId: 'g1', groupRole: 'orchestrator' }), true, 'combo orchestrator');
+  assert.equal(shouldInjectNotify({ ...base, shell: true, app: null }), false, 'shell sessions never');
+  assert.equal(shouldInjectNotify({ ...base, groupId: 'g1', groupRole: 'workerA' }), false, 'combo worker never');
+  assert.equal(shouldInjectNotify({ ...base, notifyEnabled: false }), false, 'feature disabled -> never');
+});
+
+test('subscribe/unsubscribe/list persist to the state file and restore', async () => {
+  await withNotifyConfig(
+    { notify: { subscriptions: [{ url: 'https://seed.example/webhook', name: 'seed' }] } },
+    async (statePath) => {
+      restoreNotify();
+      assert.equal(listSubscriptions().length, 1, 'config seed is the initial registry');
+      assert.equal(listSubscriptions()[0].name, 'seed');
+
+      const added = subscribe({ url: 'https://example.com/runtime' });
+      assert.equal(added.ok, true);
+      assert.ok(added.subscription.id, 'runtime subscription gets an id');
+      assert.equal(listSubscriptions().length, 2);
+
+      const saved = JSON.parse(readFileSync(statePath, 'utf-8'));
+      assert.equal(saved.subscriptions.length, 2, 'subscribe persists');
+
+      assert.deepEqual(
+        subscribe({ url: 'http://insecure.example/webhook' }),
+        { error: 'invalid-url', message: 'webhook url must be an https:// URL' },
+        'non-https urls are rejected',
+      );
+
+      assert.deepEqual(unsubscribe(added.subscription.id), { ok: true });
+      assert.equal(listSubscriptions().length, 1);
+      const after = JSON.parse(readFileSync(statePath, 'utf-8'));
+      assert.equal(after.subscriptions.length, 1, 'unsubscribe persists');
+      assert.equal(after.subscriptions[0].url, 'https://seed.example/webhook');
+
+      assert.deepEqual(unsubscribe('no-such-id'), { error: 'not-found' });
+
+      // A fresh boot re-reads config seed + persisted registry (deduped).
+      restoreNotify();
+      const urls = listSubscriptions().map((s) => s.url);
+      assert.deepEqual(urls, ['https://seed.example/webhook'], 'unsubscribed entry does not resurrect');
+    },
+  );
+});
+
+test('a persisted runtime-only subscription restores alongside the config seed', async () => {
+  await withNotifyConfig(
+    { notify: { subscriptions: [{ url: 'https://seed.example/webhook' }] } },
+    async (statePath) => {
+      writeFileSync(statePath, JSON.stringify({
+        subscriptions: [{ id: 'persisted-id', url: 'https://persisted.example/webhook', name: 'persisted', createdAt: 1 }],
+      }));
+      restoreNotify();
+      const urls = listSubscriptions().map((s) => s.url);
+      assert.ok(urls.includes('https://seed.example/webhook'), 'config seed restored');
+      assert.ok(urls.includes('https://persisted.example/webhook'), 'persisted runtime subscription restored');
+      const persisted = listSubscriptions().find((s) => s.url === 'https://persisted.example/webhook');
+      assert.equal(persisted.id, 'persisted-id', 'restore keeps the persisted id');
+    },
+  );
+});
+
+test('sendNotification POSTs { content, username } to discord and every subscription', async () => {
+  await withNotifyConfig(
+    { notify: { discordWebhook: 'https://discord.example/hook' } },
+    async () => {
+      restoreNotify();
+      subscribe({ url: 'https://hook-a.example/x', name: 'slack' });
+      subscribe({ url: 'https://hook-b.example/x' });
+
+      const calls = [];
+      const realFetch = global.fetch;
+      global.fetch = async (url, opts) => {
+        calls.push({ url: String(url), opts });
+        if (String(url).includes('hook-a')) throw new Error('unreachable');
+        return { ok: true };
+      };
+      try {
+        const res = await sendNotification({ title: 'Build failed', body: 'details here', level: 'error' });
+        assert.equal(res.ok, true);
+        assert.deepEqual(res.delivered, { discord: true, webhooks: 1, failed: 1 },
+          'discord ok, one subscription ok, the failing one counted');
+        assert.equal(calls.length, 3, 'discord + two subscriptions');
+
+        const [discord, a, b] = calls;
+        assert.equal(discord.url, 'https://discord.example/hook');
+        assert.equal(discord.opts.method, 'POST');
+        assert.equal(discord.opts.headers['Content-Type'], 'application/json');
+        const payload = JSON.parse(discord.opts.body);
+        assert.equal(payload.username, 'ccserver');
+        assert.ok(payload.content.startsWith('🚨 Build failed'), 'level emoji prefixes title');
+        assert.ok(payload.content.includes('details here'), 'body included');
+        assert.equal(a.url, 'https://hook-a.example/x');
+        assert.equal(b.url, 'https://hook-b.example/x');
+      } finally {
+        global.fetch = realFetch;
+      }
+    },
+  );
+});
+
+test('sendNotification never throws and an empty message sends nothing', async () => {
+  await withNotifyConfig({ notify: { discordWebhook: 'https://discord.example/hook' } }, async () => {
+    restoreNotify();
+    const realFetch = global.fetch;
+    global.fetch = async () => { throw new Error('network down'); };
+    try {
+      const res = await sendNotification({ title: 'x' });
+      assert.equal(res.ok, true, 'a total delivery failure still returns ok (non-blocking)');
+      assert.deepEqual(res.delivered, { discord: false, webhooks: 0, failed: 0 });
+
+      let calls = 0;
+      global.fetch = async () => { calls++; return { ok: true }; };
+      const empty = await sendNotification({});
+      assert.equal(calls, 0, 'no content -> no delivery attempted');
+      assert.deepEqual(empty.delivered, { discord: false, webhooks: 0, failed: 0 });
+    } finally {
+      global.fetch = realFetch;
+    }
+  });
+});
