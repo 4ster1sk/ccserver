@@ -400,6 +400,60 @@ test('listGroupMembers: live sessions report lastOutputAt/idleForMs; session-les
   }
 });
 
+// The orchestrator must always be the leftmost/active tab and the first
+// list_group_sessions entry, even though the real launch order (routes/groups.js)
+// registers the workers first and the orchestrator last.
+test('listGroupMembers: orchestrator is always first regardless of registration order', async () => {
+  const gid = await makeGroup();
+  const fake = {
+    getSession: () => null,
+    createSession: () => { throw new Error('unused'); },
+    destroySession: () => {},
+    writeToSession: () => false,
+  };
+  groupManager.setSessionApiForTests(fake);
+  try {
+    // Real launch order (routes/groups.js): workers first, orchestrator last;
+    // open_tab appends workerC.
+    groupManager.registerMember(gid, 'workerA', 'sess-a');
+    groupManager.registerMember(gid, 'workerB', 'sess-b');
+    groupManager.registerMember(gid, 'orchestrator', 'sess-o');
+    groupManager.registerMember(gid, 'workerC', 'sess-c');
+    assert.deepEqual(
+      groupManager.listGroupMembers(gid).map((m) => m.role),
+      ['orchestrator', 'workerA', 'workerB', 'workerC'],
+      'orchestrator must sort to the front; other roles keep insertion order',
+    );
+  } finally {
+    groupManager.setSessionApiForTests(null);
+    groupManager.destroyGroup(gid);
+  }
+});
+
+test('listGroupMembers keeps the orchestrator first after restoreGroups', async () => {
+  const gid = randomUUID();
+  const orchDir = join(runtimeDir, `restore-first-${gid}`);
+  writeFileSync(process.env.CCSERVER_GROUPS_PATH, JSON.stringify([{
+    id: gid,
+    createdAt: 1,
+    cwd: '/srv/proj',
+    allowedCwds: ['/srv/proj'],
+    orchestratorDir: orchDir,
+    orchestratorApp: 'claude',
+    instructions: null,
+    sandboxOpts: null,
+    members: { workerA: 'dead-a', workerB: 'dead-b', orchestrator: 'dead-o' },
+  }]));
+  groupsToDestroy.push(gid);
+
+  groupManager.restoreGroups();
+  const members = groupManager.listGroupMembers(gid);
+  assert.deepEqual(
+    members.map((m) => m.role),
+    ['orchestrator', 'workerA', 'workerB'],
+    'restored members keep the orchestrator first',
+  );
+});
 // --- addMember (open_tab) spawn/teardown paths, exercised with a fake
 // session facade (no real ptys): the atomic-replacement invariant -- the old
 // member is only destroyed AFTER the new channel + session exist, and a
