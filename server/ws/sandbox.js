@@ -150,6 +150,13 @@ export function loadSandboxConfig() {
       .filter((s) => s && typeof s === 'object' && typeof s.url === 'string' && s.url.startsWith('https://'))
       .map((s) => ({ url: s.url, name: typeof s.name === 'string' && s.name.length > 0 ? s.name : null }))
     : [];
+  // Attribution overrides for ccserver-notify payloads (see notify.js):
+  // notify.hostname pins the "_from:" host when the OS hostname is opaque or
+  // several hosts share a webhook (CCSERVER_HOSTNAME env wins over both, set
+  // in loadNotifyConfig); notify.attribution === false strips the footer
+  // entirely (default on).
+  const notifyHostname = typeof rawNotify.hostname === 'string' && rawNotify.hostname.length > 0 ? rawNotify.hostname : null;
+  const notifyAttribution = rawNotify.attribution !== false;
   const binds = Array.isArray(raw.binds) ? raw.binds : [];
   const env = (raw.env && typeof raw.env === 'object') ? raw.env : {};
   // How to launch claude. Overridable because the install location is
@@ -159,7 +166,7 @@ export function loadSandboxConfig() {
   // See appLaunch.js's APPS; anything else (including unset) falls back to
   // claude -- see sessionManager.js's defaultApp().
   const defaultApp = raw.defaultApp === 'opencode' || raw.defaultApp === 'copilot' ? raw.defaultApp : 'claude';
-  return { docker, gpg, sshAgent, gitBroker, forceSandbox, binds, env, claudeBin, defaultApp, notify: { discordWebhook, subscriptions }, configPath };
+  return { docker, gpg, sshAgent, gitBroker, forceSandbox, binds, env, claudeBin, defaultApp, notify: { discordWebhook, subscriptions, hostname: notifyHostname, attribution: notifyAttribution }, configPath };
 }
 
 // Locate an executable named `cmd` on the given PATH (or return it as-is if

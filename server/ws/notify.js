@@ -24,7 +24,8 @@
 
 import { randomUUID } from 'node:crypto';
 import { readFileSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { hostname } from 'node:os';
+import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadSandboxConfig } from './sandbox.js';
 
@@ -48,7 +49,15 @@ let subscriptions = [];
 let notifyBroker = null; // { server, sockPath, dir, connections } | null
 
 function loadNotifyConfig() {
-  return loadSandboxConfig().notify || { discordWebhook: null, subscriptions: [] };
+  const notify = loadSandboxConfig().notify || { discordWebhook: null, subscriptions: [], hostname: null, attribution: true };
+  return {
+    ...notify,
+    // Hostname for attribution: CCSERVER_HOSTNAME wins over the config's
+    // notify.hostname, which in turn wins over the OS hostname (same
+    // priority pattern as CCSERVER_DISCORD_WEBHOOK, see sandbox.js).
+    hostname: process.env.CCSERVER_HOSTNAME || notify.hostname || hostname(),
+    attribution: notify.attribution !== false,
+  };
 }
 
 function isValidWebhookUrl(url) {
@@ -157,6 +166,36 @@ function buildContent({ title, body, level }) {
   return `${prefix}${t}${b ? `\n${b}` : ''}`.trim();
 }
 
+// First 8 chars of a connection-scoped id (sessionId / groupId) for the
+// footer -- enough for tracing, short enough to not drown the payload.
+function shortId(id) {
+  return String(id).slice(0, 8);
+}
+
+// The project label for the footer: the session's projectName (basename of
+// its cwd, computed in sessionManager) if present, else derived from cwd. The
+// filesystem root has no meaningful name, so it is omitted.
+function projectLabel(identity) {
+  if (identity?.projectName) return String(identity.projectName);
+  const cwd = identity?.cwd;
+  if (!cwd || cwd === '/') return null;
+  return basename(cwd);
+}
+
+// Pure footer builder: "_from: <host> · <project> · group <groupShort> ·
+// session <sessionShort>". host is always present; project appears when a
+// meaningful name exists; group appears only for combo sessions (groupId set);
+// session appears when a sessionId is known. identity is the per-connection
+// attribution (see mcpBroker.js); null/undefined yields host-only.
+export function buildAttribution(identity, host) {
+  const parts = [String(host)];
+  const project = projectLabel(identity);
+  if (project) parts.push(project);
+  if (identity?.groupId) parts.push(`group ${shortId(identity.groupId)}`);
+  if (identity?.sessionId) parts.push(`session ${shortId(identity.sessionId)}`);
+  return `\n\n_from: ${parts.join(' · ')}`;
+}
+
 async function deliver(url, content) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), DELIVERY_TIMEOUT_MS);
@@ -178,10 +217,18 @@ async function deliver(url, content) {
 
 // Dispatch to every configured channel (Discord webhook + each subscribed
 // webhook), all non-blocking. Returns the delivery tally for the MCP tool's
-// result payload; never throws.
-export async function sendNotification({ title, body, level } = {}) {
-  const content = buildContent({ title, body, level });
+// result payload; never throws. `identity` is the optional per-connection
+// attribution ({ sessionId, groupId, groupRole, cwd, projectName, app }, see
+// mcpBroker.js): when present -- and notify.attribution is not disabled -- the
+// payload's content gets an "_from: host · project · group · session" footer
+// appended. Without identity the payload is delivered as before (host-only
+// footer). The notify tool's own args are unchanged.
+export async function sendNotification({ title, body, level } = {}, identity) {
   const cfg = loadNotifyConfig();
+  let content = buildContent({ title, body, level });
+  if (content && cfg.attribution) {
+    content += buildAttribution(identity, cfg.hostname);
+  }
   if (!content) {
     return { ok: true, delivered: { discord: false, webhooks: 0, failed: 0 } };
   }

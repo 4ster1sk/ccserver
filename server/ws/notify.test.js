@@ -8,7 +8,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, writeFileSync, rmSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { tmpdir } from 'node:os';
+import { tmpdir, hostname } from 'node:os';
 import {
   notifyEnabled,
   shouldInjectNotify,
@@ -183,4 +183,123 @@ test('sendNotification never throws and an empty message sends nothing', async (
       global.fetch = realFetch;
     }
   });
+});
+
+// Attribution footer: sendNotification(args, identity) appends
+// "_from: host · project · group <groupShort> · session <sessionShort>" to the
+// payload content. host comes from the resolved notify hostname, project from
+// the connection identity's projectName, group only when a groupId exists.
+test('sendNotification appends an attribution footer from the connection identity', async () => {
+  await withNotifyConfig({ notify: { discordWebhook: 'https://discord.example/hook' } }, async () => {
+    restoreNotify();
+    const calls = [];
+    const realFetch = global.fetch;
+    global.fetch = async (url, opts) => { calls.push({ url: String(url), opts }); return { ok: true }; };
+    const prevHost = process.env.CCSERVER_HOSTNAME;
+    try {
+      process.env.CCSERVER_HOSTNAME = 'test-host';
+      await sendNotification(
+        { title: 'Build failed', body: 'details here', level: 'error' },
+        { sessionId: '0123456789abcdef', groupId: 'grp-12345678', groupRole: 'orchestrator', cwd: '/srv/proj', projectName: 'proj', app: 'claude' },
+      );
+      const payload = JSON.parse(calls[0].opts.body);
+      assert.equal(payload.username, 'ccserver');
+      assert.equal(
+        payload.content,
+        '🚨 Build failed\ndetails here\n\n_from: test-host · proj · group grp-1234 · session 01234567',
+        'footer carries host, project, short group id and short session id',
+      );
+    } finally {
+      if (prevHost === undefined) delete process.env.CCSERVER_HOSTNAME;
+      else process.env.CCSERVER_HOSTNAME = prevHost;
+      global.fetch = realFetch;
+    }
+  });
+});
+
+test('sendNotification without identity carries a host-only footer', async () => {
+  await withNotifyConfig({ notify: { discordWebhook: 'https://discord.example/hook' } }, async () => {
+    restoreNotify();
+    const calls = [];
+    const realFetch = global.fetch;
+    global.fetch = async (url, opts) => { calls.push({ url: String(url), opts }); return { ok: true }; };
+    const prevHost = process.env.CCSERVER_HOSTNAME;
+    try {
+      process.env.CCSERVER_HOSTNAME = 'test-host';
+      await sendNotification({ title: 'plain', body: 'message' });
+      const payload = JSON.parse(calls[0].opts.body);
+      assert.ok(payload.content.endsWith('_from: test-host'), `footer should be host-only, got: ${payload.content}`);
+      assert.ok(!payload.content.includes('·'), 'no project/group/session segments without identity');
+    } finally {
+      if (prevHost === undefined) delete process.env.CCSERVER_HOSTNAME;
+      else process.env.CCSERVER_HOSTNAME = prevHost;
+      global.fetch = realFetch;
+    }
+  });
+});
+
+test('notify.attribution=false strips the footer entirely', async () => {
+  await withNotifyConfig({ notify: { discordWebhook: 'https://discord.example/hook', attribution: false } }, async () => {
+    restoreNotify();
+    const calls = [];
+    const realFetch = global.fetch;
+    global.fetch = async (url, opts) => { calls.push({ url: String(url), opts }); return { ok: true }; };
+    const prevHost = process.env.CCSERVER_HOSTNAME;
+    try {
+      process.env.CCSERVER_HOSTNAME = 'test-host';
+      await sendNotification(
+        { title: 'Build failed', body: 'details here', level: 'error' },
+        { sessionId: '0123456789abcdef', groupId: 'grp-1', groupRole: 'orchestrator', cwd: '/srv/proj', projectName: 'proj' },
+      );
+      const payload = JSON.parse(calls[0].opts.body);
+      assert.equal(payload.content, '🚨 Build failed\ndetails here', 'payload unchanged when attribution is off');
+      assert.ok(!payload.content.includes('_from:'), 'no footer at all');
+    } finally {
+      if (prevHost === undefined) delete process.env.CCSERVER_HOSTNAME;
+      else process.env.CCSERVER_HOSTNAME = prevHost;
+      global.fetch = realFetch;
+    }
+  });
+});
+
+// Hostname resolution precedence: CCSERVER_HOSTNAME > notify.hostname > the
+// OS hostname (os.hostname()).
+test('notify hostname precedence: env wins over config, config over os.hostname()', async () => {
+  const prevHost = process.env.CCSERVER_HOSTNAME;
+  const assertFooterHost = async (payloadHost) => {
+    const calls = [];
+    const realFetch = global.fetch;
+    global.fetch = async (url, opts) => { calls.push({ url: String(url), opts }); return { ok: true }; };
+    try {
+      await sendNotification({ title: 'x', body: 'y' });
+      const payload = JSON.parse(calls[0].opts.body);
+      assert.equal(payload.content, `x\ny\n\n_from: ${payloadHost}`);
+    } finally {
+      global.fetch = realFetch;
+    }
+  };
+  try {
+    // CCSERVER_HOSTNAME wins over notify.hostname.
+    process.env.CCSERVER_HOSTNAME = 'env-host';
+    await withNotifyConfig({ notify: { discordWebhook: 'https://discord.example/hook', hostname: 'cfg-host' } }, async () => {
+      restoreNotify();
+      await assertFooterHost('env-host');
+    });
+
+    // notify.hostname is used when the env var is absent.
+    delete process.env.CCSERVER_HOSTNAME;
+    await withNotifyConfig({ notify: { discordWebhook: 'https://discord.example/hook', hostname: 'cfg-host' } }, async () => {
+      restoreNotify();
+      await assertFooterHost('cfg-host');
+    });
+
+    // No override -> the OS hostname.
+    await withNotifyConfig({ notify: { discordWebhook: 'https://discord.example/hook' } }, async () => {
+      restoreNotify();
+      await assertFooterHost(hostname());
+    });
+  } finally {
+    if (prevHost === undefined) delete process.env.CCSERVER_HOSTNAME;
+    else process.env.CCSERVER_HOSTNAME = prevHost;
+  }
 });
