@@ -161,6 +161,15 @@ export function getGroup(groupId) {
   return groups.get(groupId) || null;
 }
 
+// Facade-only lookup for the MCP layer: repo_info needs the group's project
+// directory (and nothing else), so the facade exposes just the cwd instead of
+// the raw group object (which carries controlBroker socket paths, handoff
+// channels, handoffQueue, allowedCwds -- internals an LLM-facing tool must not
+// reach).
+export function getGroupCwd(groupId) {
+  return groups.get(groupId)?.cwd ?? null;
+}
+
 // Declare a group fully assembled (all initial members spawned): from here on
 // the "no live members" auto-destroy in onSessionExit applies. Called by the
 // POST /groups handler after the last member is registered. No-op for groups
@@ -750,6 +759,7 @@ const groupManagerApi = {
   listGroupMembers,
   isSessionInGroup,
   getRoleForSession,
+  getGroupCwd,
   setCurrentTurn,
   pushHandoff,
   takeHandoff,

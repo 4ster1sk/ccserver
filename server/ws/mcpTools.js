@@ -185,8 +185,9 @@ export function handoffToOrchestrator(deps, { summary, status = 'done', nextRole
 // --- repo_info -------------------------------------------------------------
 // Shallow repository facts for the orchestrator (control server only).
 // Security/cost posture, mirroring read_output:
-//   - cwd is the group's project directory (group.cwd) -- never taken from
-//     the wire, so there is no path argument to traverse with.
+//   - cwd is the group's project directory -- obtained through the group
+//     facade's getGroupCwd(groupId), never from the wire, so there is no path
+//     argument to traverse with.
 //   - read-only: no writes; the only command execution is the fixed git
 //     invocations below (`git -C <cwd>` with a whitelisted argument list,
 //     never caller input).
@@ -290,11 +291,10 @@ async function gitState(cwd) {
 }
 
 export async function repoInfo(deps) {
-  const group = deps.groupManager.getGroup(deps.groupId);
-  if (!group) {
+  const cwd = deps.groupManager.getGroupCwd(deps.groupId);
+  if (!cwd) {
     return { error: 'group-not-found', message: 'group not found' };
   }
-  const cwd = group.cwd;
   return {
     cwd,
     root: await rootListing(cwd),
