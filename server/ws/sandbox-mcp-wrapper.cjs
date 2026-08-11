@@ -5,12 +5,15 @@
 // sides use newline-delimited JSON (MCP's stdio framing), so this is a plain
 // byte pipe with no protocol logic.
 //
-// Which broker (control vs handoff) this reaches is decided entirely by which
-// host socket was bound at CCSANDBOX_MCP_SOCK (see mcpBroker.js) -- the
-// wrapper itself is role-agnostic.
+// Which broker this reaches is decided by argv + which host socket was bound
+// in (see mcpBroker.js / notify.js):
+//   plain    -> CCSANDBOX_MCP_SOCK  (the group's control / handoff socket)
+//   'notify' -> CCSANDBOX_NOTIFY_MCP_SOCK (the process-global notify socket)
+// The wrapper itself is role-agnostic.
 'use strict';
 const net = require('net');
-const sockPath = process.env.CCSANDBOX_MCP_SOCK;
+const isNotify = process.argv[2] === 'notify';
+const sockPath = process.env[isNotify ? 'CCSANDBOX_NOTIFY_MCP_SOCK' : 'CCSANDBOX_MCP_SOCK'];
 if (!sockPath) {
   process.stderr.write('sandbox: MCP bridge not configured\n');
   process.exit(1);

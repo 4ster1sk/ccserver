@@ -217,7 +217,7 @@ function osc52Response(text) {
 
 const themeIds = getThemeIds();
 
-export default function TerminalView({ cwd, onClose, claudeSessionId, shell, sandbox, sandboxOpts, app = 'claude', model = null, resume = false, notify, notifyEnabled, notifyPermission, onToggleNotify, visible, onSessionId, onExited, attachSessionId, xtermTheme, themeId, onThemeChange, tabId, onAttention, onFocusTab, groupId, groupRole }) {
+export default function TerminalView({ cwd, onClose, claudeSessionId, shell, sandbox, sandboxOpts, app = 'claude', model = null, resume = false, notify, notifyEnabled, notifyPermission, onToggleNotify, visible, onSessionId, onExited, attachSessionId, xtermTheme, themeId, onThemeChange, tabId, onFocusTab, groupId, groupRole }) {
   const isMobile = useMemo(() => 'ontouchstart' in window, []);
   const terminalRef = useRef(null);
   const terminalViewRef = useRef(null);
@@ -257,8 +257,6 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
   const [nowTick, setNowTick] = useState(() => Date.now());
   const notifyRef = useRef(notify);
   useEffect(() => { notifyRef.current = notify; }, [notify]);
-  const onAttentionRef = useRef(onAttention);
-  useEffect(() => { onAttentionRef.current = onAttention; }, [onAttention]);
   const onFocusTabRef = useRef(onFocusTab);
   useEffect(() => { onFocusTabRef.current = onFocusTab; }, [onFocusTab]);
   const [themeMenuOpen, setThemeMenuOpen] = useState(false);
@@ -797,26 +795,6 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
               // no handler here: the tab just sat open and blank forever,
               // with nothing telling the user what went wrong.
               term.writeln(`\r\n[Error: ${msg.message || 'unknown error'}${msg.code ? ` (${msg.code})` : ''}]`);
-            }
-            break;
-          }
-          case 'input_needed': {
-            if (onAttentionRef.current) {
-              onAttentionRef.current();
-            }
-            if (notifyRef.current) {
-              const n = notifyRef.current(appLabel(appRef.current), {
-                body: `Input needed in ${cwd}`,
-                icon: '/icon-192.png',
-                tag: `input-needed-${cwd}`,
-              });
-              if (n) {
-                n.onclick = () => {
-                  window.focus();
-                  if (onFocusTabRef.current) onFocusTabRef.current();
-                  n.close();
-                };
-              }
             }
             break;
           }

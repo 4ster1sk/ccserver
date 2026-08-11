@@ -25,5 +25,11 @@
   "//claudeBin": "How to launch claude. Default: auto — resolve 'claude' on PATH and, if it's a wrapper to the real binary (e.g. /usr/bin/claude -> /opt/claude-code/bin/claude), expose that install dir in the sandbox automatically. Set this only if claude lives somewhere the auto-detect misses, or to pin a specific build. Absolute path recommended. Env var CCSERVER_CLAUDE_BIN overrides this. (opencode and copilot are auto-resolved from PATH/~/.opencode/bin and ~/.local/bin respectively; there is no per-app bin setting for them.)",
 
   "//defaultApp": "Which agent CLI a new session launches when the client doesn't request one (legacy scheduled prompts, or a browser tab that hasn't picked one yet). 'claude' (default), 'opencode' or 'copilot'. The launch UI's own choice (remembered per browser) always wins once made; this only seeds that choice on first load and covers server-side fallback paths. Combo (group) members never use it — groups default to claude and refuse copilot.",
-  "defaultApp": "claude"
+  "defaultApp": "claude",
+
+  "//notify": "ccserver-notify MCP (通知用, 下記 README)。discordWebhook: https:// の Discord webhook URL (空文字で無効)。設定するとエージェントの notify ツールが Discord へ通知を送れる。CCSERVER_DISCORD_WEBHOOK 環境変数で上書き可。subscriptions: 初期購読 (bootstrap)。https:// の webhook URL の配列。購読ゼロかつ discordWebhook 未設定なら MCP は注入されない。",
+  "notify": {
+    "discordWebhook": "",
+    "subscriptions": []
+  }
 }

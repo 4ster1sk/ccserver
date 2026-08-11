@@ -6,7 +6,7 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import net from 'node:net';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -353,4 +353,42 @@ test('stopBroker destroys established connections', async () => {
   broker.stopBroker(channel);
   await closedByServer;
   groupManager.destroyGroup(gid);
+});
+
+// The process-global notification broker (ccserver-notify, see notify.js /
+// mcpServer.js's buildNotifyMcpServer): startNotifyBroker hosts it at the
+// caller-supplied socket (not group-derived), exposes exactly the four notify
+// tools, and stopBroker tears it down including the socket file.
+test('notify broker: startNotifyBroker + stopBroker lifecycle on a supplied socket path', async () => {
+  const notifyApi = {
+    sendNotification: async () => ({ ok: true, delivered: { discord: false, webhooks: 1, failed: 0 } }),
+    subscribe: () => ({ ok: true, subscription: { id: 'sub-1' } }),
+    unsubscribe: () => ({ ok: true }),
+    listSubscriptions: () => [{ id: 'sub-1', url: 'https://example.com/hook' }],
+  };
+  const notify = await broker.startNotifyBroker({
+    notifyApi,
+    sockPath: join(runtimeDir, 'ccserver-notify.sock'),
+  });
+  try {
+    const c = mcpClient(notify.sockPath);
+    await c.connected;
+    const init = await c.call('initialize', {
+      protocolVersion: '2024-11-05',
+      capabilities: {},
+      clientInfo: { name: 'wire-test', version: '1' },
+    });
+    assert.equal(init.serverInfo.name, 'ccserver-notify');
+    const { tools } = await c.call('tools/list');
+    assert.deepEqual(
+      tools.map((t) => t.name).sort(),
+      ['list_subscriptions', 'notify', 'subscribe', 'unsubscribe'],
+    );
+    const out = await callTool(c, 'list_subscriptions', {});
+    assert.deepEqual(out, { subscriptions: [{ id: 'sub-1', url: 'https://example.com/hook' }] });
+    c.close();
+  } finally {
+    broker.stopBroker(notify);
+    assert.equal(existsSync(notify.sockPath), false, 'stopBroker removes the socket file');
+  }
 });

@@ -67,3 +67,44 @@ test('defaultApp accepts copilot and falls back to claude for anything else', ()
     assert.equal(loadSandboxConfig().defaultApp, 'claude');
   });
 });
+
+// ccserver-notify config (see notify.js): the Discord webhook is parsed only
+// when it is an https:// URL; anything else is dropped. The env override
+// CCSERVER_DISCORD_WEBHOOK wins over the config file.
+test('notify.discordWebhook parses https URLs, rejects others, env override wins', () => {
+  withConfig({ notify: { discordWebhook: 'https://discord.com/api/webhooks/x' } }, () => {
+    assert.equal(loadSandboxConfig().notify.discordWebhook, 'https://discord.com/api/webhooks/x');
+  });
+  withConfig({ notify: { discordWebhook: 'http://insecure.example/hook' } }, () => {
+    assert.equal(loadSandboxConfig().notify.discordWebhook, null, 'non-https webhook is rejected');
+  });
+  withConfig({}, () => {
+    assert.equal(loadSandboxConfig().notify.discordWebhook, null, 'absent key -> null');
+    assert.deepEqual(loadSandboxConfig().notify.subscriptions, [], 'absent subscriptions -> []');
+  });
+  withConfig({ notify: { discordWebhook: 'https://file.example/hook' } }, () => {
+    process.env.CCSERVER_DISCORD_WEBHOOK = 'https://env.example/hook';
+    try {
+      assert.equal(loadSandboxConfig().notify.discordWebhook, 'https://env.example/hook', 'env override wins');
+    } finally {
+      delete process.env.CCSERVER_DISCORD_WEBHOOK;
+    }
+  });
+});
+
+test('notify.subscriptions seeds only https webhook urls, keeping names', () => {
+  withConfig({
+    notify: {
+      subscriptions: [
+        { url: 'https://ok.example/hook', name: 'slack' },
+        { url: 'ftp://bad.example/hook', name: 'bad' },
+        { url: 'https://another.example/hook' },
+      ],
+    },
+  }, () => {
+    assert.deepEqual(loadSandboxConfig().notify.subscriptions, [
+      { url: 'https://ok.example/hook', name: 'slack' },
+      { url: 'https://another.example/hook', name: null },
+    ]);
+  });
+});

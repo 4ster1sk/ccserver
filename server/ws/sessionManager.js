@@ -6,6 +6,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { buildSandboxSpawn, resolveApp, sandboxAvailable, loadSandboxConfig } from './sandbox.js';
 import { buildMcpConfigArgsAndEnv } from './mcpConfig.js';
+import { shouldInjectNotify, notifyEnabled, getNotifySockPath, notifyBrokerRunning } from './notify.js';
 import {
   isValidApp,
   appResumeArgs,
@@ -123,6 +124,23 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox
   // non-empty string becomes a CLI model selection. Shells never carry one.
   const sessionModel = shell ? null : normalizeModel(model);
 
+  // ccserver-notify injection (see notify.js): standalone agent sessions and
+  // combo orchestrators get the process-global notify MCP server when the
+  // feature is enabled (Discord webhook configured or subscriptions exist)
+  // AND the broker is actually listening (it is started once at boot). The
+  // broker-running check prevents injecting a dead socket path when the boot
+  // startup failed, or when a config edit enables notify without a restart.
+  // Shells and combo workers never do. The socket path is the process-global
+  // one, created once at boot (ensureNotifyBroker).
+  const useNotify = notifyBrokerRunning() && shouldInjectNotify({
+    shell: !!shell,
+    app: sessionApp,
+    groupId,
+    groupRole,
+    notifyEnabled: notifyEnabled(),
+  });
+  const notifySocketPath = useNotify ? getNotifySockPath() : null;
+
   const { SSH_AUTH_SOCK, SSH_AGENT_PID, ...cleanEnv } = process.env;
 
   let command, args;
@@ -138,34 +156,48 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox
   }
   command = resolveCommand(command);
 
-  // Combo sessions (groupId set) get their role's MCP broker injected via CLI
-  // arg / env -- no file is ever written (see mcpConfig.js). The sandbox
-  // binds the socket at a fixed path and the agent runs the bridge wrapper
-  // there, so the MCP client appears inside the sandbox without the host or
-  // the repo being touched.
-  let mcpArgs = [];
+  // forceSandbox (sandbox.config.json) overrides the client's per-launch
+  // choice: every session -- agents and shells alike -- must run sandboxed,
+  // and a launch is refused when the sandbox can't be built instead of
+  // falling back to a direct spawn. `sandboxRequested` is the mode oracle for
+  // the MCP bridge config below: a requested sandbox either builds (mode
+  // 'sandbox') or errors out (the config is then never used), so 'host' is
+  // only ever reached when the session genuinely runs unsandboxed.
+  const forceSandbox = loadSandboxConfig().forceSandbox;
+  const sandboxRequested = (forceSandbox || sandbox) && process.platform !== 'win32' && sandboxAvailable();
+
+  // MCP config injection -- never written to a file (see mcpConfig.js). Combo
+  // sessions (groupId set) get their role's broker (ccserver); notify-enabled
+  // sessions additionally get ccserver-notify, whose bridge command depends on
+  // whether this session ends up sandboxed (the fixed in-sandbox path vs. the
+  // host node+bridge). The args must be in the target command before
+  // buildSandboxSpawn runs, so the mode is derived from sandboxRequested.
   let mcpEnv = {};
-  if (mcpSocketPath && sessionApp) {
-    const injected = buildMcpConfigArgsAndEnv(sessionApp);
-    mcpArgs = injected.args;
+  if (sessionApp && (mcpSocketPath || useNotify)) {
+    const injected = buildMcpConfigArgsAndEnv(sessionApp, {
+      // ccserver (the group broker) only when the session has a group socket:
+      // standalone notify sessions must not get a broken ccserver entry (its
+      // bridge would point at a socket that is never bound for them).
+      groupMcp: !!mcpSocketPath,
+      notify: useNotify ? {
+        mode: sandboxRequested ? 'sandbox' : 'host',
+        sockPath: notifySocketPath,
+      } : undefined,
+    });
     mcpEnv = injected.env;
-    args.push(...mcpArgs);
+    args.push(...injected.args);
   }
 
   // Optionally wrap the target in a filesystem sandbox (Linux only) so it can
   // only see the project directory plus configured paths, with an isolated
-  // rootless docker inside. See sandbox.js. forceSandbox (sandbox.config.json)
-  // overrides the client's per-launch choice: every session -- agents and
-  // shells alike -- must run sandboxed, and a launch is refused when the
-  // sandbox can't be built instead of falling back to a direct spawn.
-  const forceSandbox = loadSandboxConfig().forceSandbox;
+  // rootless docker inside. See sandbox.js.
   let useSandbox = false;
   let sandboxStateDir = null;
   let sandboxGitBrokerProc = null;
   let sandboxGitBrokerDir = null;
-  if ((forceSandbox || sandbox) && process.platform !== 'win32' && sandboxAvailable()) {
+  if (sandboxRequested) {
     try {
-      const spawn = buildSandboxSpawn({ cwd, targetCommand: [command, ...args], app: sessionApp, sandboxOpts, mcpSocketPath });
+      const spawn = buildSandboxSpawn({ cwd, targetCommand: [command, ...args], app: sessionApp, sandboxOpts, mcpSocketPath, notifySocketPath });
       command = spawn.command;
       args = spawn.args;
       sandboxStateDir = spawn.stateDir || null;
@@ -244,7 +276,6 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox
     timeoutTimer: null,
     claudeSessionId: null,
     idleTimer: null,
-    idleNotified: false,
     settled: false, // reached the first idle gap (TUI init burst over) -- the send_input settle gate
     settleWaiters: [], // resolvers waiting on `settled` (see waitUntilSettled)
     lastOutputAt: null, // epoch ms of the most recent output chunk; null until the first one (activity timestamp, Issue #16)
@@ -280,11 +311,6 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox
 
     // Idle detection: reset timer on every output chunk (Claude sessions only)
     if (!session.shell) {
-      // Only reset notification state on substantial output (not cursor/control sequences)
-      const stripped = data.replace(/\x1b\[[0-9;]*[A-Za-z]/g, '').trim();
-      if (stripped.length > 2) {
-        session.idleNotified = false;
-      }
       if (session.idleTimer) {
         clearTimeout(session.idleTimer);
       }
@@ -306,17 +332,6 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox
           session.pendingInjection = null;
           const delivered = injectIntoLiveSession(session, inj.text);
           notifyFired(session, { at: inj.at, text: inj.text }, delivered);
-          return;
-        }
-        if (!session.idleNotified) {
-          const now = Date.now();
-          if (!session.lastNotifyTime || now - session.lastNotifyTime > 30000) {
-            session.idleNotified = true;
-            session.lastNotifyTime = now;
-            if (session.socket && session.socket.readyState === 1) {
-              session.socket.send(JSON.stringify({ type: 'input_needed' }));
-            }
-          }
         }
       }, IDLE_TIMEOUT_MS);
 
@@ -448,7 +463,6 @@ export function writeToSession(id, text, { submit = false } = {}) {
   if (!session?.ptyProcess || session.exited) return false;
   try {
     session.ptyProcess.write(text);
-    session.idleNotified = false;
     if (session.idleTimer) {
       clearTimeout(session.idleTimer);
       session.idleTimer = null;

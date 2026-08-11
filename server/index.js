@@ -13,6 +13,7 @@ import { groupsRoute } from './routes/groups.js';
 import { terminalWs } from './ws/terminal.js';
 import { gracefulShutdown, restoreSchedules } from './ws/sessionManager.js';
 import { restoreGroups } from './ws/groupManager.js';
+import { restoreNotify, ensureNotifyBroker, stopNotifyBroker, notifyEnabled } from './ws/notify.js';
 import { warmUsage } from './usage.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -59,12 +60,29 @@ if (process.env.NODE_ENV === 'production') {
 }
 
 const cleanup = () => {
+  stopNotifyBroker();
   gracefulShutdown().then(() => process.exit(0));
 };
 process.on('SIGTERM', cleanup);
 process.on('SIGINT', cleanup);
 
 const PORT = process.env.PORT || 3001;
+
+// ccserver-notify: restore the subscription registry, then host the
+// process-global MCP socket if the feature is enabled (Discord webhook or
+// subscriptions). Started before the server accepts connections: bwrap's
+// --bind-try snapshots the socket file at mount time, so it must exist
+// before a notify-enabled session is created.
+try {
+  restoreNotify();
+  if (notifyEnabled()) {
+    await ensureNotifyBroker();
+    fastify.log.info('ccserver-notify MCP broker started');
+  }
+} catch (err) {
+  fastify.log.error({ err }, 'Failed to start ccserver-notify broker');
+}
+
 await fastify.listen({ port: PORT, host: '0.0.0.0' });
 
 // Re-arm scheduled prompts persisted before the last shutdown/restart. Missed

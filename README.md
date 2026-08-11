@@ -105,6 +105,38 @@ GitHub Copilot を選んだ場合:
 - 過ぎている時刻は翌日として扱います。
 - 予約はディスク (`.scheduled-prompts.json`) に永続化され、**ブラウザを閉じても、サーバーが再起動・クラッシュしても発火します**。発火時にセッションが生きていなければ、`claude --resume` (opencode は `opencode -c`、copilot は `copilot --continue`) で会話を自動復帰させてからプロンプトを投入します (元の cwd / サンドボックス設定も復元)。サーバー停止中に発火時刻を過ぎた予約は、起動直後にまとめて発火します (12 時間以上前に過ぎた物は破棄)。
 
+### ccserver-notify (通知用 MCP)
+
+エージェントが**自分で呼べる**通知ツール `notify` を提供する MCP サーバーです。旧来の「一定時間アイドル → ブラウザに `input_needed` 通知」というヒューリスティックは実質機能していなかった (アイドル判定が主観的・非フォーカス時のみ等) ため**廃止**され、この MCP に置き換わりました。
+
+- 配信先は 2 種類で、**両方**に同時配信されます:
+  1. **Discord webhook** — `sandbox.config.json` の `notify.discordWebhook` (https のみ) または環境変数 `CCSERVER_DISCORD_WEBHOOK` (こちらが優先)。webhook URL は `.gitignore` 済みの `sandbox.config.json` に入れるため、リポジトリに混入しません。
+  2. **ランタイム購読 (webhook URL)** — MCP ツール `subscribe` で登録した任意の webhook (`unsubscribe` で解除、`list_subscriptions` で一覧)。購読は `.saved-notifications.json` に永続化され、サーバー再起動後も生き残ります。
+- **設定例** (`server/sandbox.config.json` に追記):
+
+  ```json
+  {
+    "notify": {
+      "discordWebhook": "https://discord.com/api/webhooks/...",
+      "subscriptions": [
+        { "url": "https://hooks.example.com/slack", "name": "slack" }
+      ]
+    }
+  }
+  ```
+
+  `subscriptions` は**初期購読のシード**です。購読ゼロ + Discord 未設定だと MCP 自体が注入されないため、購読だけから始めたい場合はここで seed します (MCP が無いと `subscribe` を呼べないため)。
+- **注入条件**: スタンドアロン (グループ外) のエージェントセッションと、コンボ起動の**オーケストレーターのみ**に注入されます。シェル・コンボのワーカーには注入されません。サンドボックス内外どちらでも動作します (サンドボックス内はソケットを bind、外はホストの node でブリッジを実行)。
+- **ツール**:
+  | ツール | 引数 | 説明 |
+  |--------|------|------|
+  | `notify` | `title`, `body`, `level?` (`info`/`success`/`warning`/`error`) | 全チャネルへ配送。`{ ok, delivered: { discord, webhooks, failed } }` |
+  | `subscribe` | `url` (https のみ), `name?` | webhook 購読を追加・永続化。`{ ok, subscription }` |
+  | `unsubscribe` | `subscriptionId` | 購読を削除・永続化。`{ ok }` / `{ error: 'not-found' }` |
+  | `list_subscriptions` | – | `{ subscriptions: [...] }` |
+- 配送は Discord 互換 JSON `{ content, username: 'ccserver' }` を global `fetch` で POST します (10 秒 timeout)。失敗してもエージェント側にはエラーを返さず、ログのみ (非ブロッキング)。
+- 予約プロンプト発火 (`schedule_fired`) のブラウザ Notification とヘッダの通知トグルは**独立した稼働機能**のため温存しています。`input_needed` に関するブラウザ側の `onAttention` / attention タブ表示も削除されました。
+
 ### 使用量 (Usage) ボタン
 
 画面上部タブバー右端の **Usage** ボタンから、Claude Code の `/usage` (セッション / 週次の利用率・リセット時刻・プラン) をポップオーバーで確認できます。ボタンには現在セッションの使用率が常時表示されます (opencode / copilot セッションでは非表示)。
@@ -210,6 +242,10 @@ cp server/sandbox.config.example.json server/sandbox.config.json
   "gitBroker": true,
   "forceSandbox": false,
   "defaultApp": "claude",
+  "notify": {
+    "discordWebhook": "",
+    "subscriptions": []
+  },
   "binds": [],
   "env": {}
 }
@@ -226,6 +262,7 @@ cp server/sandbox.config.example.json server/sandbox.config.json
 | `binds` | `[]` | 追加で見せるホストパス。各要素 `{ src, mode?, dest? }`。`mode` は `ro` (既定) か `rw`。存在しないパスはスキップ。`~` はホームに展開。`~/.ssh` と `~/.config/gh` は `gitBroker` の設定に関わらず常にブロックされます。 |
 | `env` | `{}` | サンドボックス内の追加環境変数 (適用順は最後 = 既定値を上書き)。例: `sshAgent: true` のときに `SSH_AUTH_SOCK` を明示指定して自動検出を上書き。 |
 | `claudeBin` | 自動検出 | claude/opencode/copilot の起動方法。`claude` を PATH から解決し、ラッパー (例: `/usr/bin/claude` → `/opt/claude-code/bin/claude`) の場合は実体のインストール先を辿ってサンドボックスへ自動的に公開します。opencode は PATH に加えて `~/.opencode/bin` も自動探索。copilot は PATH (SANDBOX_PATH) で自動解決されます (通常 `~/.local/bin/copilot`)。自動検出で外れる場所にある場合や特定ビルドに固定したい場合のみ絶対パスで指定 (環境変数 `CCSERVER_CLAUDE_BIN` が優先。copilot に個別の bin 設定はありません)。 |
+| `notify` | `{}` | 通知用 MCP (ccserver-notify) の設定 (上記「ccserver-notify (通知用 MCP)」参照)。`discordWebhook` は https のみ (非 https は無視)、`subscriptions` は初期購読 (https のみ)。`CCSERVER_DISCORD_WEBHOOK` 環境変数で discordWebhook を上書き可。 |
 
 サンドボックスは Linux 限定です。同じプロジェクトを 2 つのサンドボックスで同時に開いた場合、docker の data-root 競合を避けるため 2 つ目は docker 無しで起動します。
 
@@ -265,14 +302,20 @@ ccserver/
 │       ├── terminal.js             # WebSocket + node-pty ブリッジ (/ws/terminal)
 │       ├── sessionManager.js       # セッション・予約プロンプトの状態管理/永続化
 │       ├── appLaunch.js            # アプリ非依存の起動ロジック (resume引数・permission検出等)
+│       ├── notify.js               # ccserver-notify: 購読レジストリ + Discord/webhook 配送 + MCP ソケット
+│       ├── mcpConfig.js            # MCP 設定の生成 (ccserver / ccserver-notify、sandbox/host 両モード)
+│       ├── mcpServer.js            # control / handoff / notify 各 MCP サーバー (SocketTransport 含む)
+│       ├── mcpBroker.js            # Unix-socket MCP ブローカー (control/handoff はグループ毎、notify はプロセス毎 1 つ)
+│       ├── mcpTools.js             # control/handoff ツールの実装 (deps 注入)
 │       ├── sandbox.js              # bwrap + rootless docker サンドボックス構築
 │       ├── sandbox-entrypoint.sh
 │       ├── sandbox-gh-wrapper.cjs         # サンドボックス内 gh をブローカー中継に差し替え
 │       ├── sandbox-ssh-wrapper.cjs        # サンドボックス内 ssh を許可リストでゲート
 │       ├── sandbox-git-credential-helper.cjs
+│       ├── sandbox-mcp-wrapper.cjs        # MCP stdio ↔ Unix socket の中継 (argv 'notify' で通知ソケットへ)
 │       ├── sandbox-gitconfig / sandbox-known-hosts / sandbox-ssh-config
 │       ├── git-broker.js           # サンドボックス外で動く、リポジトリスコープの認証情報ブローカー
-│       └── ghAllowlist.js / gitAllowlist.js  (+ 各 *.test.js, appLaunch.test.js, sandbox-resolve.test.js)
+│       └── ghAllowlist.js / gitAllowlist.js  (+ 各 *.test.js, appLaunch.test.js, sandbox-resolve.test.js, notify.test.js)
 └── client/
     ├── package.json
     ├── index.html
