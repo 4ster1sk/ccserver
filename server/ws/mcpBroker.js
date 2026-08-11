@@ -17,7 +17,7 @@
 import { createServer } from 'node:net';
 import { rmSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { SocketTransport, buildControlMcpServer, buildHandoffMcpServer, buildNotifyMcpServer } from './mcpServer.js';
+import { SocketTransport, buildControlMcpServer, buildHandoffMcpServer, buildNotifyMcpServer, MAX_TRANSPORT_BUFFER_CHARS } from './mcpServer.js';
 
 const UID = typeof process.getuid === 'function' ? process.getuid() : 0;
 const RUNTIME_BASE = process.env.XDG_RUNTIME_DIR || `/run/user/${UID}`;
@@ -26,6 +26,12 @@ const RUNTIME_BASE = process.env.XDG_RUNTIME_DIR || `/run/user/${UID}`;
 // success, before giving up.
 const SOCKET_FILE_WAIT_MS = 2000;
 const SOCKET_FILE_POLL_MS = 20;
+
+// How long to wait for the per-connection identity frame (the notify bridge's
+// first line) before giving up on it. Bounded so a client that connects and
+// sends nothing is handed to the transport within a short grace window, never
+// held hostage on the frame.
+const IDENTITY_FRAME_GRACE_MS = 1000;
 
 function sockPathFor(groupId, tag) {
   const id = String(groupId).replace(/-/g, '');
@@ -75,18 +81,84 @@ async function listenMcp({ groupId, tag, buildServer, sockPath }) {
     connections.add(socket);
     socket.on('close', () => connections.delete(socket));
     socket.on('error', () => {});
-    const mcp = buildServer();
-    const transport = new SocketTransport(socket);
-    // mcp.connect() is async (transport.start() + the MCP initialize
-    // handshake). A rejected promise here must NOT become an unhandled
-    // rejection (Node's default --unhandled-rejections=throw would crash the
-    // whole server, every unrelated pty included) -- e.g. a sandbox torn
-    // down right after accept leaves a socket that dies mid-handshake. Log
-    // and close the connection; the broker itself stays up.
-    mcp.connect(transport).catch((err) => {
-      console.error(`[mcp-broker] ${tag} connection handshake failed: ${err.message}`);
-      try { socket.destroy(); } catch { /* already gone */ }
-    });
+
+    // Per-connection identity handoff (see notify.js / mcpConfig.js): the
+    // notify bridge wrapper writes one JSON line `{"ccserver": {...}}\n` as
+    // the very first frame, before piping the agent's MCP bytes. Read up to
+    // the first newline (bounded, with a short grace window so a client that
+    // never sends is not held forever) and decide:
+    //   - the first line parses as {"ccserver": <object>} -> that object is
+    //     this connection's identity; the bytes after the newline are the
+    //     MCP data.
+    //   - anything else (legacy wrapper, direct MCP client) -> replay the
+    //     whole buffer as MCP data and carry no identity.
+    // control/handoff buildServer closures ignore the identity argument, so
+    // this only feeds the notify server's attribution.
+    let buf = '';
+    let settled = false;
+    let graceTimer = null;
+
+    const settleConnection = (seed, identity) => {
+      if (settled) return;
+      settled = true;
+      if (graceTimer) clearTimeout(graceTimer);
+      socket.removeListener('data', onFrameData);
+      if (socket.destroyed) return;
+      // Stop the flow while the transport takes over: data that arrived
+      // after the frame read is buffered by the paused socket and replayed
+      // to the transport's own handler once it starts.
+      socket.pause();
+      const mcp = buildServer(identity);
+      const transport = new SocketTransport(socket, seed);
+      // mcp.connect() is async (transport.start() + the MCP initialize
+      // handshake). A rejected promise here must NOT become an unhandled
+      // rejection (Node's default --unhandled-rejections=throw would crash the
+      // whole server, every unrelated pty included) -- e.g. a sandbox torn
+      // down right after accept leaves a socket that dies mid-handshake. Log
+      // and close the connection; the broker itself stays up.
+      mcp.connect(transport).catch((err) => {
+        console.error(`[mcp-broker] ${tag} connection handshake failed: ${err.message}`);
+        try { socket.destroy(); } catch { /* already gone */ }
+      });
+    };
+
+    const onFrameData = (chunk) => {
+      buf += chunk;
+      const nl = buf.indexOf('\n');
+      if (nl !== -1) {
+        const line = buf.slice(0, nl);
+        const rest = buf.slice(nl + 1);
+        let identity = null;
+        let seed = buf;
+        try {
+          const parsed = JSON.parse(line);
+          if (parsed && typeof parsed === 'object' && parsed.ccserver && typeof parsed.ccserver === 'object') {
+            identity = parsed.ccserver;
+            seed = rest;
+          }
+        } catch {
+          // not JSON / not an identity frame -- replay the whole buffer
+        }
+        settleConnection(seed, identity);
+      } else if (buf.length > MAX_TRANSPORT_BUFFER_CHARS) {
+        // No newline but the buffer is at the transport's cap: this can't be
+        // a small identity frame -- replay everything and let the transport's
+        // own overflow handling drop the connection.
+        settleConnection(buf, null);
+      }
+    };
+
+    socket.setEncoding('utf-8');
+    socket.pause();
+    socket.on('data', onFrameData);
+    socket.resume();
+
+    // A client that connects but sends nothing must not hang the broker:
+    // after a short grace the (possibly empty) buffer is replayed with no
+    // identity, exactly like the legacy path.
+    graceTimer = setTimeout(() => {
+      settleConnection(buf, null);
+    }, IDENTITY_FRAME_GRACE_MS);
   });
   // Permanent error handler: an EventEmitter 'error' with zero listeners
   // throws and crashes the whole process, so this must NEVER be removed once
@@ -145,7 +217,7 @@ export async function startNotifyBroker({ notifyApi, sockPath }) {
   return listenMcp({
     sockPath,
     tag: 'notify',
-    buildServer: () => buildNotifyMcpServer({ notifyApi }),
+    buildServer: (identity) => buildNotifyMcpServer({ notifyApi, identity }),
   });
 }
 

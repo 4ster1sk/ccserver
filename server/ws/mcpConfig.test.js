@@ -37,11 +37,22 @@ test('unknown app falls back to the claude-style CLI arg (default branch)', () =
 
 // ccserver-notify injection (see notify.js): the optional `{ notify }`
 // descriptor adds the notify server to the same registration, with the bridge
-// command switching on the session's sandbox mode.
+// command switching on the session's sandbox mode. sessionManager always
+// passes the descriptor's `identity` (the per-connection attribution); it is
+// carried to the bridge as the JSON env CCSERVER_NOTIFY_IDENTITY.
+
+const identity = {
+  sessionId: 'sess-01234567-89ab',
+  groupId: 'grp-1',
+  groupRole: 'orchestrator',
+  cwd: '/srv/proj',
+  projectName: 'proj',
+  app: 'claude',
+};
 
 test('claude + notify(sandbox): ccserver and ccserver-notify both registered via the in-sandbox bridge', () => {
   const { args, env } = buildMcpConfigArgsAndEnv('claude', {
-    notify: { mode: 'sandbox', sockPath: '/run/user/1000/ccserver-notify.sock' },
+    notify: { mode: 'sandbox', sockPath: '/run/user/1000/ccserver-notify.sock', identity },
   });
   assert.equal(args[0], '--mcp-config');
   const cfg = JSON.parse(args[1]);
@@ -51,22 +62,26 @@ test('claude + notify(sandbox): ccserver and ccserver-notify both registered via
     command: '/ccserver-sandbox-mcp-bridge',
     args: ['notify'],
   });
-  assert.deepEqual(env, { CCSANDBOX_NOTIFY_MCP_SOCK: '/run/user/1000/ccserver-notify.sock' });
+  assert.deepEqual(env, {
+    CCSANDBOX_NOTIFY_MCP_SOCK: '/run/user/1000/ccserver-notify.sock',
+    CCSERVER_NOTIFY_IDENTITY: JSON.stringify(identity),
+  });
 });
 
 test('opencode + notify(sandbox): ccserver-notify is a local bridge command with the notify argv', () => {
   const { args, env } = buildMcpConfigArgsAndEnv('opencode', {
-    notify: { mode: 'sandbox', sockPath: '/run/user/1000/ccserver-notify.sock' },
+    notify: { mode: 'sandbox', sockPath: '/run/user/1000/ccserver-notify.sock', identity },
   });
   assert.deepEqual(args, []);
   const cfg = JSON.parse(env.OPENCODE_CONFIG_CONTENT);
   assert.deepEqual(cfg.mcp['ccserver-notify'].command, ['/ccserver-sandbox-mcp-bridge', 'notify']);
   assert.equal(env.CCSANDBOX_NOTIFY_MCP_SOCK, '/run/user/1000/ccserver-notify.sock');
+  assert.equal(env.CCSERVER_NOTIFY_IDENTITY, JSON.stringify(identity));
 });
 
 test('notify(host): the notify server runs as node <bridge script> notify on the host', () => {
   const { args, env } = buildMcpConfigArgsAndEnv('claude', {
-    notify: { mode: 'host', sockPath: '/run/user/1000/ccserver-notify.sock' },
+    notify: { mode: 'host', sockPath: '/run/user/1000/ccserver-notify.sock', identity },
   });
   const cfg = JSON.parse(args[1]);
   const n = cfg.mcpServers['ccserver-notify'];
@@ -74,12 +89,24 @@ test('notify(host): the notify server runs as node <bridge script> notify on the
   assert.ok(n.args[0].endsWith('sandbox-mcp-wrapper.cjs'), `bridge script path (got ${n.args[0]})`);
   assert.equal(n.args[1], 'notify');
   assert.equal(env.CCSANDBOX_NOTIFY_MCP_SOCK, '/run/user/1000/ccserver-notify.sock');
+  assert.equal(env.CCSERVER_NOTIFY_IDENTITY, JSON.stringify(identity));
 });
 
 test('no notify descriptor -> unchanged (ccserver only)', () => {
   const { args } = buildMcpConfigArgsAndEnv('claude');
   const cfg = JSON.parse(args[1]);
   assert.deepEqual(Object.keys(cfg.mcpServers), ['ccserver']);
+});
+
+// A descriptor without an identity (legacy caller, or a notify descriptor
+// built before the attribution work) must not add the env key -- the bridge
+// wrapper then sends an empty frame and notifications carry host-only
+// attribution.
+test('notify descriptor without identity -> no CCSERVER_NOTIFY_IDENTITY env key', () => {
+  const { env } = buildMcpConfigArgsAndEnv('claude', {
+    notify: { mode: 'sandbox', sockPath: '/run/user/1000/ccserver-notify.sock' },
+  });
+  assert.deepEqual(env, { CCSANDBOX_NOTIFY_MCP_SOCK: '/run/user/1000/ccserver-notify.sock' });
 });
 
 // Standalone notify session (no group socket, mcpSocketPath null): only

@@ -19,13 +19,17 @@ import * as tools from './mcpTools.js';
 
 // Newline-delimited JSON frames: a well-behaved MCP client sends a newline
 // per message, so a buffer beyond this means the peer is not speaking MCP
-// (or is hostile). Bounds the memory a single connection can pin.
-const MAX_TRANSPORT_BUFFER_CHARS = 1024 * 1024;
+// (or is hostile). Bounds the memory a single connection can pin. Exported
+// so the broker can size the pre-transport identity-frame read identically
+// (see mcpBroker.js).
+export const MAX_TRANSPORT_BUFFER_CHARS = 1024 * 1024;
 
 export class SocketTransport {
-  constructor(socket) {
+  // `initialBuffer` seeds the parser with bytes already read before the
+  // transport took over (the broker replays a non-identity first line here).
+  constructor(socket, initialBuffer = '') {
     this.socket = socket;
-    this._buf = '';
+    this._buf = initialBuffer;
     this._closed = false;
   }
 
@@ -34,33 +38,43 @@ export class SocketTransport {
     this.socket.on('data', (chunk) => {
       if (this._closed) return;
       this._buf += chunk;
-      // The socket path is reachable by anything running as the same user,
-      // not just the group's sandbox: a peer that never sends a newline
-      // must not be able to grow this buffer without bound. Over the cap,
-      // drop the connection (the in-flight partial frame is unrecoverable).
-      if (this._buf.length > MAX_TRANSPORT_BUFFER_CHARS) {
-        try { this.socket.destroy(); } catch { /* already gone */ }
-        this._closed = true;
-        return;
-      }
-      let nl;
-      while ((nl = this._buf.indexOf('\n')) !== -1) {
-        const line = this._buf.slice(0, nl);
-        this._buf = this._buf.slice(nl + 1);
-        if (line.trim()) {
-          try {
-            this.onmessage?.(JSON.parse(line));
-          } catch {
-            // drop malformed frames
-          }
-        }
-      }
+      this._drain();
     });
     this.socket.on('close', () => {
       this._closed = true;
       this.onclose?.();
     });
     this.socket.on('error', (e) => this.onerror?.(e));
+    // The broker pauses the socket while it reads the identity frame; resume
+    // it now that this transport owns the connection.
+    this.socket.resume();
+    // Drain bytes seeded before start (a replayed non-identity first line) --
+    // onmessage is wired by the MCP SDK before start() is called.
+    this._drain();
+  }
+
+  _drain() {
+    // The socket path is reachable by anything running as the same user,
+    // not just the group's sandbox: a peer that never sends a newline
+    // must not be able to grow this buffer without bound. Over the cap,
+    // drop the connection (the in-flight partial frame is unrecoverable).
+    if (this._buf.length > MAX_TRANSPORT_BUFFER_CHARS) {
+      try { this.socket.destroy(); } catch { /* already gone */ }
+      this._closed = true;
+      return;
+    }
+    let nl;
+    while ((nl = this._buf.indexOf('\n')) !== -1) {
+      const line = this._buf.slice(0, nl);
+      this._buf = this._buf.slice(nl + 1);
+      if (line.trim()) {
+        try {
+          this.onmessage?.(JSON.parse(line));
+        } catch {
+          // drop malformed frames
+        }
+      }
+    }
   }
 
   send(message) {
@@ -163,18 +177,19 @@ export function buildHandoffMcpServer(deps) {
 // the control/handoff servers it is not group-scoped: one socket hosts it for
 // the whole server, and its tools reach the shared subscription registry /
 // Discord webhook via the closed `notifyApi` facade. Identity is never taken
-// from the wire -- there is none here, the server is open to any caller who
-// reaches the socket (same-user sandboxes only).
+// from the wire -- it arrives per-connection via the broker's identity frame
+// (see mcpBroker.js) and is only an attribution (source display for the
+// "_from:" footer), never an authorization input.
 //
 // notifyApi: { sendNotification, subscribe, unsubscribe, listSubscriptions }
-export function buildNotifyMcpServer({ notifyApi }) {
+export function buildNotifyMcpServer({ notifyApi, identity }) {
   const server = new McpServer({ name: 'ccserver-notify', version: '1.0.0' });
 
   server.tool(
     'notify',
     'Deliver a notification to every configured channel (the Discord webhook set in sandbox.config.json, plus every webhook currently subscribed via subscribe). Use this when you need human attention that the terminal alone cannot provide. level is an optional severity (info/success/warning/error) reflected in the payload.',
     { title: z.string(), body: z.string(), level: z.enum(['info', 'success', 'warning', 'error']).optional() },
-    async (args) => ({ content: [{ type: 'text', text: JSON.stringify(await notifyApi.sendNotification(args)) }] }),
+    async (args) => ({ content: [{ type: 'text', text: JSON.stringify(await notifyApi.sendNotification(args, identity)) }] }),
   );
 
   server.tool(

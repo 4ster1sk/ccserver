@@ -65,6 +65,7 @@ function mcpClient(sockPath) {
     }
   });
   return {
+    raw: sock,
     connected: new Promise((resolve, reject) => {
       sock.on('connect', resolve);
       sock.on('error', reject);
@@ -390,5 +391,126 @@ test('notify broker: startNotifyBroker + stopBroker lifecycle on a supplied sock
   } finally {
     broker.stopBroker(notify);
     assert.equal(existsSync(notify.sockPath), false, 'stopBroker removes the socket file');
+  }
+});
+
+// The notify bridge wrapper writes a single `{"ccserver": <identity>}\n`
+// frame as the first bytes of a connection, before any MCP traffic. The
+// broker must attribute that connection's notifications with it -- the notify
+// tool's notifyApi.sendNotification receives it as its second argument. The
+// tool's own schema stays { title, body, level? }; the identity rides the
+// connection, never the wire.
+test('notify broker: an identity frame on connect reaches the notify tool as connection identity', async () => {
+  const seenIdentities = [];
+  const identity = {
+    sessionId: '0123456789abcdef',
+    groupId: 'grp-12345678',
+    groupRole: 'orchestrator',
+    cwd: '/srv/proj',
+    projectName: 'proj',
+    app: 'claude',
+  };
+  const notifyApi = {
+    sendNotification: async (args, connIdentity) => {
+      seenIdentities.push(connIdentity);
+      return { ok: true, delivered: { discord: false, webhooks: 0, failed: 0 } };
+    },
+    subscribe: () => ({ ok: true, subscription: { id: 'sub-1' } }),
+    unsubscribe: () => ({ ok: true }),
+    listSubscriptions: () => [],
+  };
+  const notify = await broker.startNotifyBroker({
+    notifyApi,
+    sockPath: join(runtimeDir, 'ccserver-notify-identity.sock'),
+  });
+  try {
+    const c = mcpClient(notify.sockPath);
+    await c.connected;
+    // The identity frame must be written BEFORE the MCP initialize -- exactly
+    // what the sandbox bridge does on connect.
+    c.raw.write(`${JSON.stringify({ ccserver: identity })}\n`);
+    await c.call('initialize', {
+      protocolVersion: '2024-11-05',
+      capabilities: {},
+      clientInfo: { name: 'wire-test', version: '1' },
+    });
+    await callTool(c, 'notify', { title: 'Build failed', body: 'details here', level: 'error' });
+    assert.equal(seenIdentities.length, 1);
+    assert.deepEqual(seenIdentities[0], identity, 'the frame identity is passed to sendNotification');
+    c.close();
+  } finally {
+    broker.stopBroker(notify);
+  }
+});
+
+// A client that skips the identity frame entirely (legacy wrapper without
+// CCSERVER_NOTIFY_IDENTITY, or a direct MCP client) must still work: the first
+// line is not an identity frame, so it is replayed as MCP data and the
+// connection carries no identity (host-only attribution).
+test('notify broker: frameless clients are replayed and carry no identity', async () => {
+  const seenIdentities = [];
+  const notifyApi = {
+    sendNotification: async (args, connIdentity) => {
+      seenIdentities.push(connIdentity);
+      return { ok: true, delivered: { discord: false, webhooks: 0, failed: 0 } };
+    },
+    subscribe: () => ({ ok: true, subscription: { id: 'sub-1' } }),
+    unsubscribe: () => ({ ok: true }),
+    listSubscriptions: () => [],
+  };
+  const notify = await broker.startNotifyBroker({
+    notifyApi,
+    sockPath: join(runtimeDir, 'ccserver-notify-frameless.sock'),
+  });
+  try {
+    const c = mcpClient(notify.sockPath);
+    await c.connected;
+    const init = await c.call('initialize', {
+      protocolVersion: '2024-11-05',
+      capabilities: {},
+      clientInfo: { name: 'wire-test', version: '1' },
+    });
+    assert.equal(init.serverInfo.name, 'ccserver-notify');
+    const { tools } = await c.call('tools/list');
+    assert.equal(tools.length, 4, 'all four notify tools exposed without a frame');
+    await callTool(c, 'notify', { title: 'plain', body: 'message' });
+    assert.deepEqual(seenIdentities, [null], 'no frame -> no connection identity');
+    c.close();
+  } finally {
+    broker.stopBroker(notify);
+  }
+});
+
+// A hostile identity frame must never crash the broker or leak into another
+// connection: a frame that is not the {"ccserver": ...} shape is replayed as
+// ordinary MCP bytes (dropped by the transport as malformed), and the
+// connection serves a clean notify server.
+test('notify broker: a non-ccserver first line is replayed, never treated as identity', async () => {
+  const notifyApi = {
+    sendNotification: async () => ({ ok: true, delivered: { discord: false, webhooks: 0, failed: 0 } }),
+    subscribe: () => ({ ok: true, subscription: { id: 'sub-1' } }),
+    unsubscribe: () => ({ ok: true }),
+    listSubscriptions: () => [],
+  };
+  const notify = await broker.startNotifyBroker({
+    notifyApi,
+    sockPath: join(runtimeDir, 'ccserver-notify-junk.sock'),
+  });
+  try {
+    const c = mcpClient(notify.sockPath);
+    await c.connected;
+    // {"ccserver": "not-an-object"} is not a valid identity frame.
+    c.raw.write(`${JSON.stringify({ ccserver: 'junk' })}\n`);
+    const init = await c.call('initialize', {
+      protocolVersion: '2024-11-05',
+      capabilities: {},
+      clientInfo: { name: 'wire-test', version: '1' },
+    });
+    assert.equal(init.serverInfo.name, 'ccserver-notify');
+    const { tools } = await c.call('tools/list');
+    assert.equal(tools.length, 4);
+    c.close();
+  } finally {
+    broker.stopBroker(notify);
   }
 });

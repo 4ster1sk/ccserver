@@ -2,7 +2,7 @@ import * as pty from 'node-pty';
 import { randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { writeFileSync, readFileSync, unlinkSync, rmSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { buildSandboxSpawn, resolveApp, sandboxAvailable, loadSandboxConfig } from './sandbox.js';
 import { buildMcpConfigArgsAndEnv } from './mcpConfig.js';
@@ -141,6 +141,21 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox
   });
   const notifySocketPath = useNotify ? getNotifySockPath() : null;
 
+  // Per-connection identity for ccserver-notify (see notify.js / mcpBroker.js):
+  // rides to the bridge as CCSERVER_NOTIFY_IDENTITY and becomes the "_from:"
+  // footer on this session's notifications. Attribution only -- never an
+  // authorization input. projectName is basename(cwd) (createSession already
+  // refuses the filesystem root for agent sessions, so a meaningful name
+  // exists).
+  const notifyIdentity = useNotify ? {
+    sessionId: id,
+    groupId,
+    groupRole,
+    cwd,
+    projectName: basename(cwd),
+    app: sessionApp,
+  } : null;
+
   const { SSH_AUTH_SOCK, SSH_AGENT_PID, ...cleanEnv } = process.env;
 
   let command, args;
@@ -182,6 +197,7 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox
       notify: useNotify ? {
         mode: sandboxRequested ? 'sandbox' : 'host',
         sockPath: notifySocketPath,
+        identity: notifyIdentity,
       } : undefined,
     });
     mcpEnv = injected.env;
