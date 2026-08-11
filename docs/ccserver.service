@@ -1,5 +1,5 @@
 [Unit]
-Description=Claude Code Web Server
+Description=ccserver — AI CLI web server
 After=network.target
 
 [Service]
