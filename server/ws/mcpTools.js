@@ -72,24 +72,35 @@ const MAX_SCREEN_ROWS = 40;
 // the cap -- when the cap splits a sequence, cut right after that sequence
 // (the tail then starts clean and stays at or under the cap).
 function cleanTextCut(text, maxChars) {
-  if (text.length <= maxChars) return text;
-  const limit = text.length - maxChars;
-  let cut = limit;
-  let i = 0;
-  while (i <= limit && i < text.length) {
-    if (text[i] === '\x1b') {
-      const end = ansiSequenceEnd(text, i);
-      if (end === -1) break; // dangling sequence to the end -- cut at the limit
-      if (end > limit) { // the cap splits this sequence
-        cut = end;
-        break;
+  if (text.length > maxChars) {
+    const limit = text.length - maxChars;
+    let cut = limit;
+    let i = 0;
+    while (i <= limit && i < text.length) {
+      if (text[i] === '\x1b') {
+        const end = ansiSequenceEnd(text, i);
+        if (end === -1) break; // dangling sequence to the end -- cut at the limit
+        if (end > limit) { // the cap splits this sequence
+          cut = end;
+          break;
+        }
+        i = end;
+      } else {
+        i++;
       }
-      i = end;
-    } else {
-      i++;
+    }
+    text = text.slice(cut);
+  }
+  // The stream itself may end mid-sequence (a pty chunk boundary split it),
+  // even when the cap did not: trim a dangling escape from the tail so bare
+  // control bytes never leak through stripAnsi. Only the last sequence can
+  // dangle (a dangling sequence runs to the end of the input).
+  for (let k = 0; k < text.length; k++) {
+    if (text[k] === '\x1b' && ansiSequenceEnd(text, k) === -1) {
+      return text.slice(0, k);
     }
   }
-  return text.slice(cut);
+  return text;
 }
 
 // End index (exclusive) of the escape sequence starting at `start` (which

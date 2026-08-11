@@ -728,6 +728,38 @@ test('readOutput: the 16KB text cap never splits an escape sequence (no control-
   assert.ok(out.text.startsWith('colored'), 'the cut lands after the split sequence: clean text follows');
 });
 
+test('readOutput: a dangling escape at the end of the stream never leaks into text', async () => {
+  const g = await makeGroupAsync();
+  groupManager.registerMember(g, 'workerA', 'sess-a1');
+  // The buffer tail itself ends mid-sequence (a pty chunk boundary split the
+  // sequence): with the cap biting, the returned tail would end with a bare
+  // "\x1b[31" that stripAnsi cannot remove -- the text view must not contain
+  // it. Also cover the no-cap case (short stream, dangling escape at the end).
+  const raw = 'a'.repeat(16381) + '\x1b[31';
+  const fakeSession = {
+    cwd: '/srv/project-x',
+    app: 'claude',
+    exited: false,
+    outputBuffer: [raw],
+  };
+  const deps = {
+    groupId: g,
+    groupManager: groupManager.getGroupManagerApi(),
+    sessionManager: { getSession: (id) => (id === 'sess-a1' ? fakeSession : null), writeToSession: () => false },
+  };
+  const out = tools.readOutput(deps, { sessionId: 'sess-a1' });
+  assert.equal(out.truncated, true);
+  assert.ok(out.text.length <= 16 * 1024, `text must stay capped (got ${out.text.length})`);
+  assert.ok(!out.text.includes('\x1b'), 'the dangling escape must be trimmed, not leaked');
+  assert.ok(out.text.endsWith('a'.repeat(100)), 'the visible tail survives');
+
+  const short = tools.readOutput({
+    ...deps,
+    sessionManager: { getSession: (id) => (id === 'sess-a1' ? { ...fakeSession, outputBuffer: ['plain\x1b[3'] } : null), writeToSession: () => false },
+  }, { sessionId: 'sess-a1' });
+  assert.equal(short.text, 'plain', 'a dangling escape at the end of a short stream is trimmed too');
+});
+
 test('handoff queue is capped: overflow drops the oldest entries', async () => {
   const g = await makeGroupAsync();
   groupManager.registerMember(g, 'workerA', 'sess-a1');
