@@ -7,8 +7,8 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, readFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdtempSync, rmSync, readFileSync, realpathSync } from 'node:fs';
+import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { parseMountOptions, mountHasNoexec, isTmpNoexec, bunTmpdirOverride, bunTmpdirEnv } from './bunTmpdir.js';
 
@@ -106,16 +106,19 @@ test('bunTmpdirOverride matches the real mount state of the TMPDIR', () => {
     // The mkdtemp dir sits on whatever mount the host TMPDIR does, so the
     // expected outcome is computed from the live mount table instead of
     // assuming exec (which would fail exactly on the noexec hosts this
-    // feature targets).
+    // feature targets). The dir is realpath-resolved like isTmpNoexec does:
+    // the mount table lists real paths only, so a symlinked host TMPDIR
+    // (e.g. /tmp -> /var/tmp) must not break the comparison.
     let lines = [];
     try {
       lines = readFileSync('/proc/self/mounts', 'utf-8').split('\n');
     } catch {
       // Non-linux or unreadable: no mount info, so no override is expected.
     }
-    const expected = mountHasNoexec(dir, lines) ? dir : null;
+    const overrideDir = join(homedir(), '.cache', 'opencode', 'tmp');
+    const expected = mountHasNoexec(realpathSync(dir), lines) ? overrideDir : null;
     assert.equal(bunTmpdirOverride(), expected);
-    assert.deepEqual(bunTmpdirEnv(), expected ? { BUN_TMPDIR: dir } : {});
+    assert.deepEqual(bunTmpdirEnv(), expected ? { BUN_TMPDIR: overrideDir } : {});
   } finally {
     if (before === undefined) delete process.env.TMPDIR;
     else process.env.TMPDIR = before;
