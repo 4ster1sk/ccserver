@@ -170,13 +170,14 @@ export default function App() {
       shell: !!session.shell,
       sessionId: session.id,
       attachSessionId: session.id,
-      app: session.app === 'opencode' ? 'opencode' : 'claude',
+      app: session.app === 'opencode' ? 'opencode' : session.app === 'copilot' ? 'copilot' : 'claude',
       model: session.model || null,
       sandbox: !!session.sandbox,
       sandboxOpts: session.sandboxOpts || null,
-      // opencode re-launches resume the last session of the project (-c), so
-      // a continued conversation survives the dead pty like claude's does.
-      resume: session.app === 'opencode',
+      // opencode/copilot re-launches resume the last session of the project
+      // (-c / --continue), so a continued conversation survives the dead pty
+      // like claude's does.
+      resume: session.app === 'opencode' || session.app === 'copilot',
     });
   }, [tabs, openTerminalTab]);
 
@@ -300,8 +301,9 @@ export default function App() {
 
   const activeTab = tabs.find((t) => t.id === activeTabId);
   // Usage (Claude spend) is only meaningful for claude sessions; hide it for
-  // opencode terminals and for a group tab whose active sub-tab is opencode.
-  const usageHidden = (activeTab?.type === 'terminal' && activeTab.app === 'opencode')
+  // opencode/copilot terminals and for a group tab whose active sub-tab is
+  // opencode (copilot never appears in groups).
+  const usageHidden = (activeTab?.type === 'terminal' && (activeTab.app === 'opencode' || activeTab.app === 'copilot'))
     || (activeTab?.type === 'group' && groupActiveApp === 'opencode');
 
   return (

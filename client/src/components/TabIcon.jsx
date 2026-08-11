@@ -6,6 +6,9 @@
 const shellIcon = <svg className="tab-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><path d="M3.5 5l4 3-4 3"/><path d="M8.5 12h4"/></svg>;
 const opencodeIcon = <svg className="tab-icon" viewBox="0 0 16 16" fill="currentColor"><path fillRule="evenodd" d="M4 3h8v10H4V3zm7 1H5v8h6V4z"/><path opacity="0.45" d="M6 7h4v4H6V7z"/></svg>;
 const claudeIcon = <svg className="tab-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"><path d="M8 2v12M3.2 5l9.6 6M12.8 5l-9.6 6"/></svg>;
+// GitHub Copilot: a robot head (circle + antenna + eyes), stroke style
+// matching the other app icons.
+const copilotIcon = <svg className="tab-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"><path d="M8 2.5v2"/><path d="M4.5 5h7"/><circle cx="8" cy="9.5" r="4"/><path d="M5.8 8.2h.01M10.2 8.2h.01"/><path d="M5.8 11c1.2 1.1 3.2 1.1 4.4 0"/></svg>;
 
 export default function TabIcon({ type, app, shell }) {
   if (type === 'browser') {
@@ -21,6 +24,7 @@ export default function TabIcon({ type, app, shell }) {
     const icons = [];
     if (shell) icons.push(shellIcon);
     if (app === 'opencode') icons.push(opencodeIcon);
+    if (app === 'copilot') icons.push(copilotIcon);
     if (app === 'claude' && !shell) icons.push(claudeIcon);
     return <>{icons}</>;
   }
