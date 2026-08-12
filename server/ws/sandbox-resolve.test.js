@@ -67,6 +67,24 @@ test('resolveApp reports found: false when the app is genuinely missing', { skip
   assert.equal(typeof r.command, 'string', 'the fallback bare name is still returned');
 });
 
+// The configured-claudeBin variant of the above: an absolute path pointing at
+// a removed CLI (stale "claudeBin" in sandbox.config.json, or
+// CCSERVER_CLAUDE_BIN) must read found: false just like a bare name no PATH
+// dir resolves -- the availability detection depends on it. Deterministic:
+// the env override runs on every host, no claude install needed.
+test('resolveApp reports found: false for a configured claudeBin that does not exist', () => {
+  const prevBin = process.env.CCSERVER_CLAUDE_BIN;
+  process.env.CCSERVER_CLAUDE_BIN = '/no/such/claude-xyz';
+  try {
+    const r = resolveApp('claude');
+    assert.equal(r.found, false, 'a path-form claudeBin that does not exist must read as not found');
+    assert.equal(r.command, '/no/such/claude-xyz', 'the configured bin is kept as the fallback command');
+  } finally {
+    if (prevBin === undefined) delete process.env.CCSERVER_CLAUDE_BIN;
+    else process.env.CCSERVER_CLAUDE_BIN = prevBin;
+  }
+});
+
 // installedApps() must agree with resolveApp on every app id -- host- and
 // install-state-independent (it is a pure mirror of the per-app resolution).
 test('installedApps mirrors resolveApp found flags for all three apps', () => {
