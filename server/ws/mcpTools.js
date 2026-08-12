@@ -37,15 +37,96 @@ export function listGroupSessions(deps) {
 // orchestrator's context. This is a fallback for stuck-member inspection --
 // the recommended flow is wait_for_handoff.
 //
+// The raw byte stream cannot show what the member's screen currently looks
+// like (TUI spinners redraw in place via cursor moves/line erases), so the
+// server also keeps a lightweight virtual screen per session: `screen` is
+// the current visible screen (tail of the screen model's rows),
+// `screenAlt` whether an alternate screen is active, and `screenIdleMs`
+// the time since the screen last visibly changed (bytes can keep flowing
+// while the screen is static -- a spinner keeps writing frames; a screen
+// that stopped changing means the member is idle). Prefer `screen` +
+// `screenIdleMs` for stuck/busy judgments over `text`/`raw`.
+//
 // Cost control: this feature exists to keep the orchestrator's context
 // small, so a default call must not balloon it. `tail` counts output chunks
 // (default 200 -- the server buffers up to ~512KB in chunks), and the
 // returned text is hard-capped at MAX_READOUTPUT_CHARS; when the cap bites,
 // the tail of the buffer is returned and `truncated: true` is set so the
-// caller knows the head of the output was dropped.
+// caller knows the head of the output was dropped. The text cap cuts at a
+// boundary that never splits an escape sequence (a split one would leak
+// bare control bytes through stripAnsi). The `screen` view gets its own cap
+// (a row count well under the char cap by construction).
 const DEFAULT_OUTPUT_TAIL_CHUNKS = 200;
 const MAX_OUTPUT_TAIL_CHUNKS = 100000;
 const MAX_READOUTPUT_CHARS = 16 * 1024;
+// The screen view is capped independently of the text cap: at most this many
+// of the newest rows, each of which is at most SCREEN_COLS chars, so the
+// returned screen stays well under MAX_READOUTPUT_CHARS.
+const MAX_SCREEN_ROWS = 40;
+
+// Cut `text` to at most `maxChars` chars at a boundary that does not split
+// an escape sequence, keeping the tail. stripAnsi() only removes *complete*
+// sequences, so a plain `.slice(-maxChars)` can land mid-sequence and leak
+// bare control bytes into the text view. Walk the stream from the front,
+// skip complete sequences, and cut at the last clean position at or before
+// the cap -- when the cap splits a sequence, cut right after that sequence
+// (the tail then starts clean and stays at or under the cap).
+function cleanTextCut(text, maxChars) {
+  if (text.length > maxChars) {
+    const limit = text.length - maxChars;
+    let cut = limit;
+    let i = 0;
+    while (i <= limit && i < text.length) {
+      if (text[i] === '\x1b') {
+        const end = ansiSequenceEnd(text, i);
+        if (end === -1) break; // dangling sequence to the end -- cut at the limit
+        if (end > limit) { // the cap splits this sequence
+          cut = end;
+          break;
+        }
+        i = end;
+      } else {
+        i++;
+      }
+    }
+    text = text.slice(cut);
+  }
+  // The stream itself may end mid-sequence (a pty chunk boundary split it),
+  // even when the cap did not: trim a dangling escape from the tail so bare
+  // control bytes never leak through stripAnsi. Only the last sequence can
+  // dangle (a dangling sequence runs to the end of the input).
+  for (let k = 0; k < text.length; k++) {
+    if (text[k] === '\x1b' && ansiSequenceEnd(text, k) === -1) {
+      return text.slice(0, k);
+    }
+  }
+  return text;
+}
+
+// End index (exclusive) of the escape sequence starting at `start` (which
+// must be an ESC byte), or -1 when the sequence is incomplete at the end of
+// the input. Mirrors the ANSI_RE grammar (CSI/OSC/charset/single-char).
+function ansiSequenceEnd(text, start) {
+  const next = text[start + 1];
+  if (next === '[') {
+    let j = start + 2;
+    while (j < text.length && /[0-9;?]/.test(text[j])) j++;
+    if (j >= text.length) return -1;
+    return j + 1; // final byte 0x40-0x7E (anything else still terminates it)
+  }
+  if (next === ']') {
+    let j = start + 2;
+    while (j < text.length && text[j] !== '\x07' && !(text[j] === '\x1b' && text[j + 1] === '\\')) j++;
+    if (j >= text.length) return -1;
+    return text[j] === '\x07' ? j + 1 : j + 2;
+  }
+  if (next === '(' || next === ')' || next === '=' || next === '>' || next === '#') {
+    if (text.length < start + 3) return -1;
+    return start + 3;
+  }
+  if (next === undefined) return -1;
+  return start + 2;
+}
 
 export function readOutput(deps, { sessionId, tail }) {
   const t = Number.isFinite(tail) ? tail : DEFAULT_OUTPUT_TAIL_CHUNKS;
@@ -57,10 +138,11 @@ export function readOutput(deps, { sessionId, tail }) {
   if (!session) {
     return { error: 'not-found', message: 'session not found' };
   }
-  let raw = session.outputBuffer.slice(-n).join('');
+  const joined = session.outputBuffer.slice(-n).join('');
+  let raw = joined;
   let truncated = false;
-  if (raw.length > MAX_READOUTPUT_CHARS) {
-    raw = raw.slice(-MAX_READOUTPUT_CHARS);
+  if (joined.length > MAX_READOUTPUT_CHARS) {
+    raw = joined.slice(-MAX_READOUTPUT_CHARS);
     truncated = true;
   }
   return {
@@ -69,8 +151,33 @@ export function readOutput(deps, { sessionId, tail }) {
     app: session.app,
     exited: !!session.exited,
     raw,
-    text: stripAnsi(raw),
+    // The text view cuts the FULL stream at a sequence-safe boundary (raw
+    // stays backward-compatible byte tail); see cleanTextCut.
+    text: stripAnsi(cleanTextCut(joined, MAX_READOUTPUT_CHARS)),
     truncated,
+    ...screenView(session),
+  };
+}
+
+// The screen-model view of a session (see readOutput's doc comment). Null
+// fields when the session has no screen model (e.g. a fake session in
+// tests).
+function screenView(session) {
+  const screen = session.screen;
+  if (!screen) {
+    return { screen: null, screenAlt: null, screenTruncated: null, screenIdleMs: null };
+  }
+  let rows = screen.screenRows();
+  let screenTruncated = false;
+  if (rows.length > MAX_SCREEN_ROWS) {
+    rows = rows.slice(-MAX_SCREEN_ROWS);
+    screenTruncated = true;
+  }
+  return {
+    screen: rows.join('\n'),
+    screenAlt: screen.altScreenActive(),
+    screenTruncated,
+    screenIdleMs: session.screenLastChangeAt != null ? Date.now() - session.screenLastChangeAt : null,
   };
 }
 
@@ -148,6 +255,11 @@ export function getTabStatus(deps, { sessionId }) {
     autoYes: !!session.autoYes,
     lastOutputAt: session.lastOutputAt,
     idleForMs: session.lastOutputAt != null ? Date.now() - session.lastOutputAt : null,
+    // Screen-change-based idle time (ms since the visible screen last
+    // changed; null when the session has no screen model). Unlike idleForMs
+    // (bytes-based), a spinner that keeps redrawing keeps this small -- a
+    // large value means the screen is genuinely static.
+    screenIdleMs: session.screenLastChangeAt != null ? Date.now() - session.screenLastChangeAt : null,
   };
 }
 
@@ -156,8 +268,15 @@ export function getTabStatus(deps, { sessionId }) {
 // the orchestrator can simply call wait_for_handoff again). This is the
 // recommended wait primitive: one structured call instead of polling
 // read_output.
+//
+// deps.connectionIsAlive (a per-connection function, when provided) is
+// forwarded to takeHandoff: an event is never dequeued for a connection
+// whose socket is dead, so a handoff is never lost to a disconnected wait --
+// it stays queued and the next wait_for_handoff receives it.
 export function waitForHandoff(deps, { timeoutMs = 900000 }) {
-  return deps.groupManager.takeHandoff(deps.groupId, Math.max(Number(timeoutMs) || 0, 0));
+  const opts = {};
+  if (typeof deps.connectionIsAlive === 'function') opts.isAlive = deps.connectionIsAlive;
+  return deps.groupManager.takeHandoff(deps.groupId, Math.max(Number(timeoutMs) || 0, 0), opts);
 }
 
 // Handoff (worker-only): notify the orchestrator that the worker's task is

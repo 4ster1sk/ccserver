@@ -5,6 +5,31 @@ const LAST_DIR_KEY = 'ccserver-last-dir';
 const SANDBOX_KEY = 'ccserver-sandbox-default';
 const SANDBOX_OPTS_PREFIX = 'ccserver-sandbox-opts:';
 const APP_KEY = 'ccserver-app-default';
+const COMBO_APPS_KEY = 'ccserver-combo-apps';
+const COMBO_ROLES = ['workerA', 'workerB', 'orchestrator'];
+const COMBO_DEFAULT_APPS = { workerA: 'claude', workerB: 'opencode', orchestrator: 'claude' };
+
+// Combo-mode role app picks, remembered per browser like the single-launch
+// APP_KEY so the next combo launch reuses them instead of the claude/
+// opencode defaults. Only claude/opencode are valid choices; anything else
+// falls back to the per-role default.
+function loadComboApps() {
+  try {
+    const raw = localStorage.getItem(COMBO_APPS_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === 'object') {
+        const out = {};
+        for (const role of COMBO_ROLES) {
+          const v = parsed[role];
+          out[role] = v === 'claude' || v === 'opencode' ? v : COMBO_DEFAULT_APPS[role];
+        }
+        return out;
+      }
+    }
+  } catch { /* ignore */ }
+  return { ...COMBO_DEFAULT_APPS };
+}
 
 // Per-directory opt-in sandbox flags (gpg / sshAgent), remembered separately
 // per cwd rather than as one server-wide default -- see server/sandbox.config.json's
@@ -57,6 +82,10 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
   // the sandbox toggle is overridden -- every launch is sandboxed and the
   // "通常起動" choice is disabled. Set from /api/dirs/home.
   const [forceSandbox, setForceSandbox] = useState(false);
+  // Which agent CLIs the server can actually launch ({ claude, opencode,
+  // copilot } booleans), from /api/dirs/home. null until the fetch resolves;
+  // while null every picker entry stays enabled (old-server fallback).
+  const [availableApps, setAvailableApps] = useState(null);
   // 'claude' until the server's configured default (sandbox.config.json's
   // "defaultApp") arrives via /api/dirs/home, or the user picks explicitly.
   const [appDefault, setAppDefault] = useState(() => {
@@ -65,7 +94,7 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
   });
   const [openMenuOpen, setOpenMenuOpen] = useState(false);
   const [launchMode, setLaunchMode] = useState('single'); // 'single' | 'combo'
-  const [comboApps, setComboApps] = useState({ workerA: 'claude', workerB: 'opencode', orchestrator: 'claude' });
+  const [comboApps, setComboApps] = useState(() => loadComboApps());
   // Free-form per-role model identifiers; empty string = omitted (server uses
   // the persisted role preference, then the app default). null would mean
   // "explicitly the app default", which the text input doesn't produce -- an
@@ -81,6 +110,9 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
   // otherwise the user's next "起動" -- possibly for a different project --
   // would silently fire a full combo spawn with the previous instructions.
   // One close path for every exit route so future routes can't forget.
+  // (The role app picks in comboApps are the exception: they are remembered
+  // in localStorage, see loadComboApps/chooseComboApp, and intentionally
+  // survive both modal closes and reloads.)
   const closeOpenMenu = useCallback(() => {
     setLaunchMode('single');
     setOrchestratorInstructions('');
@@ -96,9 +128,19 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
   }, [forceSandbox]);
 
   const chooseApp = useCallback((val) => {
+    if (availableApps && !availableApps[val]) return; // server lacks this CLI
     setAppDefault(val);
     localStorage.setItem(APP_KEY, val);
-  }, []);
+  }, [availableApps]);
+
+  const chooseComboApp = useCallback((role, app) => {
+    if (availableApps && !availableApps[app]) return; // server lacks this CLI
+    setComboApps((c) => {
+      const next = { ...c, [role]: app };
+      localStorage.setItem(COMBO_APPS_KEY, JSON.stringify(next));
+      return next;
+    });
+  }, [availableApps]);
 
   // gpg/sshAgent are remembered per directory, not globally -- reload whenever
   // the browser navigates to a different one.
@@ -149,6 +191,43 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
       if (data.forceSandbox) {
         setForceSandbox(true);
         setSandboxDefault(true);
+      }
+      // Server-side install detection: grey out picker entries for CLIs that
+      // don't exist here, and correct a stale default (localStorage
+      // ccserver-app-default, or the server's defaultApp) that points at an
+      // uninstalled app -- the launch button label and modal checkmark must
+      // never advertise an app that cannot start.
+      if (data.availableApps) {
+        setAvailableApps(data.availableApps);
+        const avail = ['claude', 'opencode', 'copilot'].filter((a) => data.availableApps[a]);
+        // The server's defaultApp seeding above runs in the same effect tick,
+        // so appDefault is still the stale pre-seeding value here -- evaluate
+        // the effective default (server's when the browser hasn't chosen yet,
+        // else the remembered one) before testing availability.
+        const effectiveDefault = ['claude', 'opencode', 'copilot'].includes(data.defaultApp) && !localStorage.getItem(APP_KEY)
+          ? data.defaultApp
+          : appDefault;
+        if (avail.length > 0 && !data.availableApps[effectiveDefault]) {
+          setAppDefault(avail[0]);
+        }
+        // Same rule for the combo modal's role selections: workerA and the
+        // orchestrator start as claude, workerB as opencode -- a role whose
+        // default points at a missing CLI must not stay selected-active (the
+        // launch would be refused server-side). Combo only offers
+        // claude/opencode, so the fallback is restricted to those.
+        const comboAvail = ['claude', 'opencode'].filter((a) => data.availableApps[a]);
+        if (comboAvail.length > 0) {
+          setComboApps((c) => {
+            const next = {
+              workerA: data.availableApps[c.workerA] ? c.workerA : comboAvail[0],
+              workerB: data.availableApps[c.workerB] ? c.workerB : comboAvail[0],
+              orchestrator: data.availableApps[c.orchestrator] ? c.orchestrator : comboAvail[0],
+            };
+            // Write the corrected picks through so a reload keeps them.
+            localStorage.setItem(COMBO_APPS_KEY, JSON.stringify(next));
+            return next;
+          });
+        }
       }
     }).catch(() => {});
   }, []);
@@ -432,22 +511,25 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
               <>
                 <div className="open-menu-label">アプリ</div>
                 <div
-                  className="open-menu-item"
+                  className={`open-menu-item${availableApps && !availableApps.claude ? ' open-menu-item-disabled' : ''}`}
                   onClick={() => chooseApp('claude')}
+                  title={availableApps && !availableApps.claude ? 'サーバーに未インストール' : ''}
                 >
                   <span className="open-menu-check">{appDefault === 'claude' ? '✓' : ''}</span>
                   Claude Code
                 </div>
                 <div
-                  className="open-menu-item"
+                  className={`open-menu-item${availableApps && !availableApps.opencode ? ' open-menu-item-disabled' : ''}`}
                   onClick={() => chooseApp('opencode')}
+                  title={availableApps && !availableApps.opencode ? 'サーバーに未インストール' : ''}
                 >
                   <span className="open-menu-check">{appDefault === 'opencode' ? '✓' : ''}</span>
                   opencode
                 </div>
                 <div
-                  className="open-menu-item"
+                  className={`open-menu-item${availableApps && !availableApps.copilot ? ' open-menu-item-disabled' : ''}`}
                   onClick={() => chooseApp('copilot')}
+                  title={availableApps && !availableApps.copilot ? 'サーバーに未インストール' : ''}
                 >
                   <span className="open-menu-check">{appDefault === 'copilot' ? '✓' : ''}</span>
                   GitHub Copilot
@@ -505,8 +587,9 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
                   {['claude', 'opencode'].map((app) => (
                     <button
                       key={app}
-                      className={`open-menu-app-btn${comboApps.workerA === app ? ' active' : ''}`}
-                      onClick={() => setComboApps((c) => ({ ...c, workerA: app }))}
+                      className={`open-menu-app-btn${comboApps.workerA === app ? ' active' : ''}${availableApps && !availableApps[app] ? ' open-menu-item-disabled' : ''}`}
+                      onClick={() => chooseComboApp('workerA', app)}
+                      title={availableApps && !availableApps[app] ? 'サーバーに未インストール' : ''}
                     >
                       {app === 'claude' ? 'Claude Code' : 'opencode'}
                     </button>
@@ -529,8 +612,9 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
                   {['claude', 'opencode'].map((app) => (
                     <button
                       key={app}
-                      className={`open-menu-app-btn${comboApps.workerB === app ? ' active' : ''}`}
-                      onClick={() => setComboApps((c) => ({ ...c, workerB: app }))}
+                      className={`open-menu-app-btn${comboApps.workerB === app ? ' active' : ''}${availableApps && !availableApps[app] ? ' open-menu-item-disabled' : ''}`}
+                      onClick={() => chooseComboApp('workerB', app)}
+                      title={availableApps && !availableApps[app] ? 'サーバーに未インストール' : ''}
                     >
                       {app === 'claude' ? 'Claude Code' : 'opencode'}
                     </button>
@@ -612,8 +696,9 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
                   {['claude', 'opencode'].map((app) => (
                     <button
                       key={app}
-                      className={`open-menu-app-btn${comboApps.orchestrator === app ? ' active' : ''}`}
-                      onClick={() => setComboApps((c) => ({ ...c, orchestrator: app }))}
+                      className={`open-menu-app-btn${comboApps.orchestrator === app ? ' active' : ''}${availableApps && !availableApps[app] ? ' open-menu-item-disabled' : ''}`}
+                      onClick={() => chooseComboApp('orchestrator', app)}
+                      title={availableApps && !availableApps[app] ? 'サーバーに未インストール' : ''}
                     >
                       {app === 'claude' ? 'Claude Code' : 'opencode'}
                     </button>
@@ -773,17 +858,21 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
               <span className="session-icon">
                 {session.connected ? '\u25B6' : '\u23F8'}
               </span>
-              <span className="session-cwd">{session.cwd}</span>
-              {session.sandbox ? (
-                <span className="session-badge sandbox" title="このセッションはサンドボックスで実行中">sandbox</span>
-              ) : !session.shell ? (
-                <span className="session-badge no-sandbox" title="このセッションはサンドボックス外で実行中">no sandbox</span>
-              ) : null}
-              <span className="session-status active">
-                {session.shell
-                  ? 'shell'
-                  : `${session.app === 'claude' ? 'claude' : session.app === 'copilot' ? 'copilot' : 'opencode'} · ${session.connected ? 'connected' : 'idle'}`}
-              </span>
+              <div className="session-body">
+                <div className="session-item-top">
+                  {session.sandbox ? (
+                    <span className="session-badge sandbox" title="このセッションはサンドボックスで実行中">sandbox</span>
+                  ) : !session.shell ? (
+                    <span className="session-badge no-sandbox" title="このセッションはサンドボックス外で実行中">no sandbox</span>
+                  ) : null}
+                  <span className="session-status active">
+                    {session.shell
+                      ? 'shell'
+                      : `${session.app === 'claude' ? 'claude' : session.app === 'copilot' ? 'copilot' : 'opencode'} · ${session.connected ? 'connected' : 'idle'}`}
+                  </span>
+                </div>
+                <span className="session-cwd" title={session.cwd}>{session.cwd}</span>
+              </div>
               <button
                 className="btn btn-secondary session-delete-btn"
                 onClick={(e) => { e.stopPropagation(); handleDeleteSession(session); }}
@@ -808,12 +897,16 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
                   }}
                 >
                   <span className="session-icon">{'\u26A1'}</span>
-                  <span className="session-cwd">{g.cwd}</span>
-                  <span className="session-status resumable">
-                    {g.liveCount > 0
-                      ? `group · ${g.memberCount} members · ${g.liveCount} live`
-                      : `group · ${g.memberCount} members · closed (click to reopen)`}
-                  </span>
+                  <div className="session-body">
+                    <div className="session-item-top">
+                      <span className="session-status resumable">
+                        {g.liveCount > 0
+                          ? `group · ${g.memberCount} members · ${g.liveCount} live`
+                          : `group · ${g.memberCount} members · closed (click to reopen)`}
+                      </span>
+                    </div>
+                    <span className="session-cwd" title={g.cwd}>{g.cwd}</span>
+                  </div>
                 </div>
               ))}
             </>

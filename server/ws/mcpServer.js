@@ -100,7 +100,7 @@ export function buildControlMcpServer(deps) {
 
   server.tool(
     'read_output',
-    'Read the recent terminal output of a group member session. Returns raw bytes and ANSI-stripped text. tail is a count of output chunks (default 200; the server buffers up to ~512KB of the most recent output, chunked), not characters. The returned text is capped at 16KB (the buffer tail) with truncated:true when the cap is hit. This is a fallback for inspecting a possibly-stuck member -- for normal flow, prefer wait_for_handoff.',
+    'Read the recent terminal output of a group member session. Returns raw bytes and ANSI-stripped text plus a screen view: screen (the member\'s current visible screen -- its latest rows, capped at 40 lines of 80 chars; the raw byte stream cannot show this because TUI spinners redraw in place via cursor moves and line erases), screenAlt (whether an alternate screen is active), screenTruncated (when the screen view was cut to its cap) and screenIdleMs (ms since the screen last visibly changed -- a spinner keeps this small, a static prompt makes it grow; prefer screenIdleMs over idleForMs for busy/idle judgments, since bytes can keep flowing while the screen is unchanged). tail is a count of output chunks (default 200; the server buffers up to ~512KB of the most recent output, chunked), not characters. The returned text is capped at 16KB (the buffer tail) with truncated:true when the cap is hit. This is a fallback for inspecting a possibly-stuck member -- for normal flow, prefer wait_for_handoff.',
     { sessionId: z.string(), tail: z.number().optional() },
     async (args) => ({ content: [{ type: 'text', text: JSON.stringify(tools.readOutput(deps, args)) }] }),
   );
@@ -134,7 +134,7 @@ export function buildControlMcpServer(deps) {
 
   server.tool(
     'get_tab_status',
-    'Return the live status of a group member session (exited, connected, cwd, app) plus autoYes (whether automatic permission-approval is currently enabled), lastOutputAt (epoch ms of its last output; null if none yet) and idleForMs (ms since then). A large idleForMs on a member that should be working may mean it is stuck -- check with read_output to confirm.',
+    'Return the live status of a group member session (exited, connected, cwd, app) plus autoYes (whether automatic permission-approval is currently enabled), lastOutputAt (epoch ms of its last output; null if none yet), idleForMs (ms since then -- byte-based) and screenIdleMs (ms since the screen last visibly changed; null when no live screen exists). screenIdleMs is the better stuck/busy signal: a spinner keeps redrawing the screen (small screenIdleMs) even while the model is stalled, while a static screen (large screenIdleMs) means the member is genuinely idle. A large idleForMs on a member that should be working may mean it is stuck -- check with read_output to confirm.',
     { sessionId: z.string() },
     async (args) => ({ content: [{ type: 'text', text: JSON.stringify(tools.getTabStatus(deps, args)) }] }),
   );
@@ -148,7 +148,7 @@ export function buildControlMcpServer(deps) {
 
   server.tool(
     'wait_for_handoff',
-    'Block until a worker calls handoff_to_orchestrator, or the timeout elapses. Returns the structured handoff event (worker, summary, status) -- or {timedOut:true} on timeout, in which case simply call wait_for_handoff again. Call this once per turn instead of polling read_output.',
+    'Block until a worker calls handoff_to_orchestrator, or the timeout elapses. Returns the structured handoff event (worker, summary, status) -- or {timedOut:true} on timeout, in which case simply call wait_for_handoff again. Handoffs are never lost: a handoff that arrives while no one is waiting stays queued, and even a connection that dies mid-wait does not consume it -- the next wait_for_handoff (after reconnect) receives it. Call this once per turn instead of polling read_output.',
     { timeoutMs: z.number().optional() },
     async (args) => {
       const result = await tools.waitForHandoff(deps, args);

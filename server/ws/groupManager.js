@@ -619,48 +619,110 @@ export function pushHandoff(groupId, event) {
 // Resolves with the next handoff event, or { timedOut: true } when timeoutMs
 // elapses with the queue still empty (timeoutMs <= 0 means never).
 //
+// Reliability contract (the orchestrator's wait_for_handoff depends on it):
+// an event is only ever dequeued by a waiter that can be reasonably expected
+// to deliver it. A waiter whose client connection is dead or whose request
+// was cancelled must not remove an event from the queue -- the event stays
+// queued and the next wait_for_handoff receives it.
+//
 // Only one waiter per group is ever meaningful (the orchestrator calls
 // wait_for_handoff one at a time). A client-side cancelled MCP request leaves
 // its takeHandoff promise -- and its listener -- alive server-side for up to
 // timeoutMs (15 min by default), and such a "zombie" listener, being older,
 // would consume the next pushHandoff before the real waiter ever sees it.
 // So a new takeHandoff first settles every still-pending waiter for the same
-// group as { orphaned: true } (each finish tears its own listener/timer down),
-// then registers the fresh waiter as the sole consumer.
-export function takeHandoff(groupId, timeoutMs) {
+// group as { timedOut: true } (each finish tears its own listener/timer
+// down), then registers the fresh waiter as the sole consumer.
+//
+// opts.isAlive (a function, optional): checked right before a dequeue. When
+// it returns false the waiter leaves the queue alone -- the event belongs to
+// the next waiter whose connection is actually alive. The waiter itself is
+// left pending (it cannot consume anything) until superseded or timed out.
+//
+// Dequeue is not the same as delivery: the waiter claims an event, then
+// commits the delivery on the next macrotask. A supersede arriving in the
+// same turn can still reclaim the claimed event (its connection may have died
+// or its request been cancelled between the claim and the send), so the
+// event is re-queued instead of being lost with the stale waiter. The same
+// reclaim runs when the orchestrator exits (onOrchestratorExit) or a timeout
+// fires while an event is claimed.
+export function takeHandoff(groupId, timeoutMs, opts = {}) {
   const group = groups.get(groupId);
   if (!group) return Promise.resolve({ error: 'group-not-found' });
-  for (const stale of [...group.pendingTakes]) {
-    console.warn(`[groupManager] takeHandoff(${groupId}): superseding a still-pending waiter`);
-    stale({ orphaned: true });
+  if (group.pendingTakes.size > 0) {
+    console.warn(`[groupManager] takeHandoff(${groupId}): superseding ${group.pendingTakes.size} still-pending waiter(s)`);
   }
+  settlePendingTakes(group, { timedOut: true });
   return new Promise((resolve) => {
+    const waiter = { consumed: null, finish: null, onHandoff: null };
     let settled = false;
     const finish = (val) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      group.pendingTakes.delete(finish);
-      group.handoffEmitter.off('handoff', onHandoff);
+      group.pendingTakes.delete(waiter);
+      group.handoffEmitter.off('handoff', waiter.onHandoff);
       resolve(val);
     };
-    const onHandoff = () => {
-      if (group.handoffQueue.length > 0) finish(group.handoffQueue.shift());
+    waiter.finish = finish;
+    waiter.onHandoff = () => {
+      if (group.handoffQueue.length === 0 || waiter.consumed) return;
+      if (opts.isAlive && !opts.isAlive()) return;
+      waiter.consumed = group.handoffQueue.shift();
+      // Commit the delivery on the next macrotask, not inline: a supersede
+      // (a newer takeHandoff in the same turn) must be able to reclaim the
+      // event from this waiter, so it is never delivered to a connection
+      // whose request may already be gone.
+      setTimeout(() => finish(waiter.consumed), 0);
     };
     const timer = timeoutMs > 0
-      ? setTimeout(() => finish({ timedOut: true }), timeoutMs)
+      ? setTimeout(() => {
+          reclaimConsumed(group, waiter);
+          finish({ timedOut: true });
+        }, timeoutMs)
       : null;
-    group.pendingTakes.add(finish);
-    group.handoffEmitter.on('handoff', onHandoff);
-    onHandoff();
+    group.pendingTakes.add(waiter);
+    group.handoffEmitter.on('handoff', waiter.onHandoff);
+    waiter.onHandoff();
   });
 }
 
+// Give back an event a (still-pending) waiter claimed but has not committed:
+// its delivery is suspect (dead connection, cancelled request), so the event
+// must reach the next waiter. Reference-guarded against re-queueing an event
+// that already sits in the queue.
+function reclaimConsumed(group, waiter) {
+  if (!waiter.consumed) return;
+  if (!group.handoffQueue.includes(waiter.consumed)) {
+    group.handoffQueue.unshift(waiter.consumed);
+  }
+  waiter.consumed = null;
+}
+
+// Settle every pending waiter for the group with `val`, reclaiming any event
+// a waiter already claimed. Used by supersede (a newer takeHandoff) and by
+// onOrchestratorExit (the control broker went away: no zombie waiter may
+// linger for the full timeout).
+function settlePendingTakes(group, val) {
+  for (const stale of [...group.pendingTakes]) {
+    reclaimConsumed(group, stale);
+    stale.finish(val);
+  }
+}
+
 // Stop only the control broker (orchestrator exited) -- the workers stay
-// alive so the human can keep working in them.
+// alive so the human can keep working in them. Pending wait_for_handoff
+// waiters (created by the now-destroyed control connections) are settled
+// with { timedOut: true } so no 15-minute zombie survives the broker
+// teardown; the events themselves stay in the queue (any claimed-but-
+// undelivered event is reclaimed by settlePendingTakes), so the next
+// orchestrator's wait_for_handoff still receives them.
 export function onOrchestratorExit(groupId) {
   const group = groups.get(groupId);
   if (!group) return;
+  if (group.pendingTakes.size > 0) {
+    settlePendingTakes(group, { timedOut: true });
+  }
   if (group.controlBroker) {
     stopBroker(group.controlBroker);
     group.controlBroker = null;
@@ -675,8 +737,8 @@ export function onOrchestratorExit(groupId) {
 export function destroyGroup(groupId) {
   const group = groups.get(groupId);
   if (!group) return;
-  for (const finish of [...group.pendingTakes]) {
-    finish({ error: 'group-destroyed' });
+  for (const waiter of [...group.pendingTakes]) {
+    waiter.finish({ error: 'group-destroyed' });
   }
   group.pendingTakes.clear();
   for (const sessionId of [...group.members.values()]) {
@@ -754,7 +816,17 @@ function cleanupMemberChannels(group, sessionId) {
 }
 
 // Public facade passed into broker servers (avoids exposing the module
-// namespace's internals / keeps tool deps explicit).
+// namespace's internals / keeps tool deps explicit). This IS the shape the
+// production MCP tools receive -- keep it in sync with what mcpTools.js
+// calls: a function used by a tool but missing here fails in production
+// (TypeError) while the full-module tests stay green. Every tool added to
+// mcpServer/mcpTools must have its backing groupManager function in this
+// facade, and tests must inject this facade (getGroupManagerApi), not the
+// full module.
+// Deliberately NOT in this facade: getGroup (the raw group object carries
+// controlBroker socket paths, handoff channels, the handoff queue and
+// allowedCwds -- internals LLM-facing tools must never reach; repo_info
+// needs only the project dir, which getGroupCwd provides).
 const groupManagerApi = {
   listGroupMembers,
   isSessionInGroup,
@@ -766,6 +838,13 @@ const groupManagerApi = {
   addMember,
   removeMember,
 };
+
+// Test seam: returns the exact facade the broker servers receive. Unit tests
+// must inject this -- never the full module -- so a facade/real mismatch
+// (a missing function) is caught by the tests, not only in production.
+export function getGroupManagerApi() {
+  return groupManagerApi;
+}
 
 // Session-manager facade. A `let` so tests can swap in fakes (see
 // setSessionApiForTests) to exercise addMember's spawn/teardown paths without

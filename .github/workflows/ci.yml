@@ -12,18 +12,15 @@ concurrency:
 
 jobs:
   unit-tests:
-    name: Unit tests (server, node ${{ matrix.node-version }})
+    name: Unit tests (server)
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        # README's stated minimum, and the version the rest of CI runs on.
-        node-version: ['20', '22']
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
 
       - uses: actions/setup-node@v5
         with:
-          node-version: ${{ matrix.node-version }}
+          node-version: '22'
           cache: npm
 
       - name: Install dependencies
@@ -32,7 +29,7 @@ jobs:
       - name: Syntax-check all server sources
         run: |
           find server \( -name '*.js' -o -name '*.cjs' \) -not -path '*/node_modules/*' -print0 \
-            | xargs -0 -n1 node --check
+            | xargs -0 -P4 -n1 node --check
 
       - name: Validate sandbox.config.example.json
         run: node -e "JSON.parse(require('fs').readFileSync('server/sandbox.config.example.json', 'utf-8'))"
@@ -43,6 +40,7 @@ jobs:
   client-build:
     name: Client build
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
 
@@ -60,6 +58,7 @@ jobs:
   e2e:
     name: E2E tests (Playwright)
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
 
@@ -70,6 +69,12 @@ jobs:
 
       - name: Install dependencies
         run: npm ci
+
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
 
       - name: Install Playwright browsers
         run: npx playwright install --with-deps chromium

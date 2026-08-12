@@ -65,6 +65,10 @@ before(async () => {
 
 after(() => {
   try { rmSync(runtimeDir, { recursive: true, force: true }); } catch { /* ignore */ }
+  // Release the exited-session retention timers (30s cleanup) and any
+  // pending schedule/fallback timers the tests armed, so the runner process
+  // exits promptly instead of waiting out the production retention period.
+  sessionManager.destroyAllSessions();
 });
 
 test('savedSessionPublic preserves group membership (restart filter keeps working)', () => {
@@ -113,6 +117,35 @@ test('createSession stores the effective model (normalized); shells never carry 
     assert.equal(sessionManager.savedSessionPublic(res.session, null).model, 'gpt-5');
   } finally {
     sessionManager.destroySession(res.sessionId, { keepSchedule: false });
+  }
+});
+
+// A configured claudeBin that resolves nowhere (a bare name on no searched
+// dir) must be refused with the clear not-installed error instead of reaching
+// pty.spawn (opaque execvp ENOENT / exit 127 right after "起動しました").
+// Deterministic: CCSERVER_CLAUDE_BIN overrides the config file, and no real
+// CLI install is needed.
+test('createSession refuses an uninstalled agent with a clear error', () => {
+  const cfgDir = mkdtempSync(join(tmpdir(), 'ccserver-sess-cfg-'));
+  const cfgPath = join(cfgDir, 'sandbox.config.json');
+  writeFileSync(cfgPath, JSON.stringify({ docker: false, gitBroker: false }));
+  const prevBin = process.env.CCSERVER_CLAUDE_BIN;
+  const prevCfg = process.env.CCSERVER_SANDBOX_CONFIG;
+  process.env.CCSERVER_CLAUDE_BIN = 'no-such-claude-xyz';
+  process.env.CCSERVER_SANDBOX_CONFIG = cfgPath;
+  try {
+    const res = sessionManager.createSession({
+      cwd: '/tmp', cols: 80, rows: 24, shell: false, sandbox: false, app: 'claude',
+    });
+    assert.equal(res.session, null, 'no session may be created for a missing CLI');
+    assert.match(res.error, /claude is not installed on this server/);
+    assert.match(res.error, /searched PATH/, 'the error names the search targets');
+  } finally {
+    if (prevBin === undefined) delete process.env.CCSERVER_CLAUDE_BIN;
+    else process.env.CCSERVER_CLAUDE_BIN = prevBin;
+    if (prevCfg === undefined) delete process.env.CCSERVER_SANDBOX_CONFIG;
+    else process.env.CCSERVER_SANDBOX_CONFIG = prevCfg;
+    try { rmSync(cfgDir, { recursive: true, force: true }); } catch { /* ignore */ }
   }
 });
 

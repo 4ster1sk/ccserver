@@ -9,3 +9,4 @@ playwright-report/
 .saved-notifications.json
 server/sandbox.config.json
 /tmp/
+.claude/

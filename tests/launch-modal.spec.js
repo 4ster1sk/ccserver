@@ -1,4 +1,7 @@
+import { existsSync } from 'node:fs';
+import { join } from 'node:path';
 import { test, expect } from '@playwright/test';
+import { resolveApp, SANDBOX_PATH } from '../server/ws/sandbox.js';
 
 // The launch modal's combo-mode state must not persist across closes: a
 // user who glances at combo mode, cancels, and later opens the modal for a
@@ -49,4 +52,56 @@ test('launch modal resets to single mode after an overlay-click close', async ({
 
   await page.getByRole('button', { name: '起動方法を選択' }).click();
   await expect.poll(() => page.locator('.launch-mode-btn.active').textContent()).toBe('通常起動');
+});
+
+// Combo mode's per-role app picks are remembered in localStorage
+// (ccserver-combo-apps): they survive modal closes and full reloads, so the
+// next combo launch starts with the previous selections instead of the
+// claude/opencode defaults.
+function appResolves(app) {
+  try {
+    const r = resolveApp(app).command;
+    if (r.startsWith('/')) return existsSync(r);
+    return SANDBOX_PATH.split(':').some((dir) => dir && existsSync(join(dir, r)));
+  } catch {
+    return false;
+  }
+}
+
+// The test switches every role to opencode, so it only makes sense where
+// opencode is actually installable (plain CI runners have neither CLI).
+test.skip(!appResolves('opencode'), 'opencode not installed — nothing to persist');
+
+test('combo role app picks persist across a reload', async ({ page }) => {
+  await page.goto('/');
+  const openLaunchModal = async () => {
+    await page.getByRole('button', { name: '起動方法を選択' }).click();
+  };
+  const roleAppRow = (label) =>
+    page.locator('.open-menu-label', { hasText: label }).locator('xpath=following-sibling::div[1]');
+  const activeApp = (label) => roleAppRow(label).locator('.open-menu-app-btn.active');
+
+  await openLaunchModal();
+  await page.locator('.resume-dialog .launch-mode-btn', { hasText: 'コンボ起動' }).click();
+  await expect.poll(() => page.locator('.launch-mode-btn.active').textContent()).toBe('コンボ起動');
+
+  // Switch every role to opencode.
+  for (const label of ['ワーカーA', 'ワーカーB', 'オーケストレーター']) {
+    await roleAppRow(label).getByRole('button', { name: 'opencode', exact: true }).click();
+    await expect(activeApp(label)).toHaveText('opencode');
+  }
+
+  // A plain modal close must not forget the picks...
+  await page.getByRole('button', { name: 'キャンセル' }).click();
+  await expect(page.locator('.resume-overlay')).toHaveCount(0);
+
+  // ...and neither must a full reload: the next combo launch reopens with
+  // all three roles still on opencode.
+  await page.reload();
+  await openLaunchModal();
+  await page.locator('.resume-dialog .launch-mode-btn', { hasText: 'コンボ起動' }).click();
+  await expect.poll(() => page.locator('.launch-mode-btn.active').textContent()).toBe('コンボ起動');
+  for (const label of ['ワーカーA', 'ワーカーB', 'オーケストレーター']) {
+    await expect(activeApp(label)).toHaveText('opencode');
+  }
 });

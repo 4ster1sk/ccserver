@@ -7,6 +7,8 @@ import { fileURLToPath } from 'node:url';
 import { buildSandboxSpawn, resolveApp, sandboxAvailable, loadSandboxConfig } from './sandbox.js';
 import { buildMcpConfigArgsAndEnv } from './mcpConfig.js';
 import { shouldInjectNotify, notifyEnabled, getNotifySockPath, notifyBrokerRunning } from './notify.js';
+import { createScreenModel, SCREEN_ROWS } from './screenModel.js';
+import { bunTmpdirEnv } from './bunTmpdir.js';
 import {
   isValidApp,
   appResumeArgs,
@@ -119,6 +121,28 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox
 
   // Which agent CLI this session runs. Shell sessions have no app.
   const sessionApp = shell ? null : (isValidApp(app) ? app : defaultApp());
+  const resolved = sessionApp ? resolveApp(sessionApp) : null;
+
+  // Refuse launches of an agent that doesn't exist on this host, instead of
+  // letting node-pty fail with an opaque execvp/ENOENT error (exit 127) right
+  // after the "起動しました" message. resolveApp's `found` covers every search
+  // path (PATH, the server's node bin dir, ~/.local/bin, and the app-specific
+  // extras) and honors the claudeBin override; the searched-dirs text mirrors
+  // resolveAgentCommand's candidates. A defaultApp pointing at a missing
+  // install is refused the same way: silently switching to another app would
+  // start scheduled prompts / orchestrator restarts in an unintended agent.
+  if (sessionApp && !resolved.found) {
+    const searched = {
+      claude: "PATH, the server's node bin directory, ~/.local/bin",
+      opencode: "PATH, the server's node bin directory, ~/.local/bin, ~/.opencode/bin",
+      copilot: "PATH, the server's node bin directory, ~/.local/bin",
+    }[sessionApp];
+    return {
+      sessionId: id,
+      session: null,
+      error: `Cannot launch: ${sessionApp} is not installed on this server (searched ${searched}).`,
+    };
+  }
   // Which model this session launches with. Explicit null / absent means "use
   // the app's persisted-or-default model" (no --model flag is emitted); only a
   // non-empty string becomes a CLI model selection. Shells never carry one.
@@ -165,7 +189,7 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox
     command = process.env.SHELL || (process.platform === 'win32' ? 'powershell.exe' : '/bin/bash');
     args = [];
   } else {
-    command = resolveApp(sessionApp).command;
+    command = resolved.command;
     args = appResumeArgs(sessionApp, claudeSessionId, { resumeLast });
     // Model selection must accompany fresh launches and resume alike; the
     // helper only emits the flag for apps whose CLI is verified to accept it.
@@ -263,6 +287,15 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox
       // scrolls natively, and its own drag-selection + copy-on-select writes
       // to the browser clipboard via OSC 52 (handled client-side).
       ...mcpEnv,
+      // /tmp being mounted noexec makes Bun fail to unpack + dlopen its
+      // embedded libopentui.so, so opencode's TUI dies at startup (opencode
+      // #26136/#27580). Direct host launches switch BUN_TMPDIR to
+      // ~/.cache/opencode/tmp when the host TMPDIR is noexec. Sandboxed
+      // launches don't: the sandbox's /tmp is a fresh tmpfs that is always
+      // executable, and the host-side cache dir is not bound into bwrap (with
+      // a fresh HOME it would not even exist), so setting it there would
+      // break what it is meant to fix.
+      ...(shell || sessionApp !== 'opencode' || useSandbox ? {} : bunTmpdirEnv()),
     },
   });
   } catch (err) {
@@ -310,6 +343,14 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox
     startedClaudeSessionId: claudeSessionId || null,
     scheduleId: null, // key into the module-level `schedules` map, if any
     pendingInjection: null, // { text, at } — scheduled prompt awaiting a freshly-resumed session
+    pendingInjectionTimer: null, // RESUME_INJECT_FALLBACK_MS safety net; cleared on teardown
+    // Lightweight virtual screen (see screenModel.js): fed every output
+    // chunk, exposing the current visible screen and a change counter so
+    // read_output can tell "spinner still drawing" from "static screen".
+    // screenLastChangeAt is stamped when the screen visibly changes (not on
+    // every byte) -- the basis of read_output's screenIdleMs / get_tab_status.
+    screen: createScreenModel({ cols, rows: SCREEN_ROWS }),
+    screenLastChangeAt: null,
   };
 
   ptyProcess.onData((rawData) => {
@@ -318,6 +359,15 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox
     // the agent-only idle detection below). Pure activity bookkeeping.
     session.lastOutputAt = Date.now();
     appendToBuffer(session, data);
+    // Keep the virtual screen model in parallel with the buffer: it only
+    // stamps screenLastChangeAt when the visible screen actually changes,
+    // so a spinner redrawing the same line registers as activity while a
+    // byte flow that leaves the screen static does not.
+    const screenVersion = session.screen.version();
+    session.screen.feed(data);
+    if (session.screen.version() !== screenVersion) {
+      session.screenLastChangeAt = Date.now();
+    }
 
     if (session.socket && session.socket.readyState === 1) {
       try {
@@ -348,6 +398,10 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox
         if (session.pendingInjection) {
           const inj = session.pendingInjection;
           session.pendingInjection = null;
+          if (session.pendingInjectionTimer) {
+            clearTimeout(session.pendingInjectionTimer);
+            session.pendingInjectionTimer = null;
+          }
           const delivered = injectIntoLiveSession(session, inj.text);
           notifyFired(session, { at: inj.at, text: inj.text }, delivered);
         }
@@ -451,7 +505,7 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox
       }));
     }
 
-    if (!session.socket) {
+    if (!session.socket && sessions.has(session.id)) {
       startTimeout(session, SESSION_EXITED_TIMEOUT_MS);
     }
   });
@@ -767,10 +821,13 @@ async function fireSchedule(scheduleId) {
   session.pendingInjection = { text: entry.text, at: entry.at };
   // Safety net: deliver even if the session never emits an idle gap (e.g. a
   // plain shell). The idle path normally fires first for Claude sessions.
-  setTimeout(() => {
+  // Tracked on the session so a destroyed one doesn't keep a dead timer
+  // armed (it no-ops, but holds the event loop in tests and lingers in prod).
+  session.pendingInjectionTimer = setTimeout(() => {
     if (session.exited || !session.pendingInjection) return;
     const inj = session.pendingInjection;
     session.pendingInjection = null;
+    session.pendingInjectionTimer = null;
     const delivered = injectIntoLiveSession(session, inj.text);
     notifyFired(session, inj, delivered);
   }, RESUME_INJECT_FALLBACK_MS);
@@ -950,6 +1007,11 @@ export function destroySession(id, { keepSchedule = true } = {}) {
     session.idleTimer = null;
   }
 
+  if (session.pendingInjectionTimer) {
+    clearTimeout(session.pendingInjectionTimer);
+    session.pendingInjectionTimer = null;
+  }
+
   // By default the scheduled prompt outlives the session (disconnect / idle
   // timeout / shutdown) and auto-resumes at fire time. Only an explicit
   // user-initiated teardown cancels it.
@@ -965,6 +1027,16 @@ export function destroySession(id, { keepSchedule = true } = {}) {
     } catch {
       // already dead
     }
+  }
+
+  // Force-close the pty master read stream. kill() alone only signals the
+  // child; if a grandchild still holds the slave fd (or the child lingers),
+  // the master never sees EOF and the read stream keeps the event loop
+  // alive indefinitely (hanging test runners and lingering handles in prod).
+  try {
+    session.ptyProcess.destroy();
+  } catch {
+    // already torn down
   }
 
   // Remove the sandbox's unique rootlesskit state dir. The --unshare-pid tree is

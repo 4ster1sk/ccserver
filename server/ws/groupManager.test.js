@@ -170,14 +170,15 @@ test('a newer takeHandoff supersedes a still-pending one (no zombie listener)', 
   const waitA = groupManager.takeHandoff(gid, 0);
   // Call B: the real waiter arriving while A is still unresolved. Under the
   // pre-fix implementation A's listener would stay attached and consume the
-  // next pushHandoff, leaving B stuck until timeout; now A is orphaned first.
+  // next pushHandoff, leaving B stuck until timeout; now A is superseded
+  // first.
   const waitB = groupManager.takeHandoff(gid, 0);
 
   const event = { type: 'done', from: 'workerA' };
   assert.equal(groupManager.pushHandoff(gid, event), true);
 
   const [resA, resB] = await Promise.all([waitA, waitB]);
-  assert.deepEqual(resA, { orphaned: true }, 'superseded waiter settles as orphaned, not by stealing the event');
+  assert.deepEqual(resA, { timedOut: true }, 'superseded waiter settles as timedOut, not by stealing the event');
   assert.deepEqual(resB, event, 'the latest waiter receives the pushed event');
 });
 
@@ -190,12 +191,64 @@ test('a superseded waiter is removed from pendingTakes (no zombie listener left 
   // The newer waiter supersedes A, which must not linger in pendingTakes --
   // otherwise its listener would consume the next pushHandoff before waitB.
   const waitB = groupManager.takeHandoff(gid, 0);
-  assert.equal(groupManager.getGroup(gid).pendingTakes.size, 1, 'orphaned A must not linger');
-  assert.deepEqual(await waitA, { orphaned: true });
+  assert.equal(groupManager.getGroup(gid).pendingTakes.size, 1, 'superseded A must not linger');
+  assert.deepEqual(await waitA, { timedOut: true });
 
   groupManager.pushHandoff(gid, { type: 'first' });
   assert.deepEqual(await waitB, { type: 'first' });
   assert.equal(groupManager.getGroup(gid).pendingTakes.size, 0, 'resolved waiter cleans up');
+});
+
+// The supersede reclaim: a waiter that already dequeued an event (its
+// delivery is committed only on the next macrotask) gives it back to the
+// queue when superseded -- the event must reach the fresh waiter instead of
+// being lost with the stale one.
+test('supersede reclaims an event a stale waiter already consumed', async () => {
+  const gid = await makeGroup();
+
+  const waitA = groupManager.takeHandoff(gid, 0);
+  const event = { type: 'done', from: 'workerA', summary: 'E1' };
+  groupManager.pushHandoff(gid, event); // A dequeues it (delivery not yet committed)
+
+  const waitB = groupManager.takeHandoff(gid, 0); // supersedes A, reclaiming the event
+  const [resA, resB] = await Promise.all([waitA, waitB]);
+  assert.deepEqual(resA, { timedOut: true }, 'the stale waiter settles as timedOut without the event');
+  assert.deepEqual(resB, event, 'the reclaimed event reaches the new waiter');
+});
+
+// The core no-loss guarantee: a waiter whose connection is dead must not
+// dequeue anything -- the event stays queued for the next (live) waiter.
+test('a dead (isAlive:false) waiter never consumes; the next live waiter receives the event', async () => {
+  const gid = await makeGroup();
+
+  const deadWait = groupManager.takeHandoff(gid, 0, { isAlive: () => false });
+  groupManager.pushHandoff(gid, { type: 'done', from: 'workerA', summary: 'survives death' });
+  // The dead waiter has not consumed: the queue still holds the event and a
+  // live waiter supersedes the dead one and receives it.
+  const liveWait = groupManager.takeHandoff(gid, 0, { isAlive: () => true });
+  const [resDead, resLive] = await Promise.all([deadWait, liveWait]);
+  assert.deepEqual(resDead, { timedOut: true });
+  assert.deepEqual(resLive, { type: 'done', from: 'workerA', summary: 'survives death' });
+});
+
+test('onOrchestratorExit settles pending waiters as timedOut (no 15-min zombie)', async () => {
+  const gid = await makeGroup();
+
+  const wait = groupManager.takeHandoff(gid, 0); // never times out on its own
+  assert.equal(groupManager.getGroup(gid).pendingTakes.size, 1);
+  groupManager.onOrchestratorExit(gid);
+  assert.equal(groupManager.getGroup(gid).pendingTakes.size, 0, 'waiters settled on orchestrator exit');
+  const res = await Promise.race([
+    wait,
+    new Promise((r) => setTimeout(() => r('still-pending'), 500)),
+  ]);
+  assert.deepEqual(res, { timedOut: true });
+
+  // The queue is untouched: a worker handoff after the exit is still
+  // received by the next waiter.
+  groupManager.pushHandoff(gid, { summary: 'after exit' });
+  const next = await groupManager.takeHandoff(gid, 200);
+  assert.deepEqual(next, { summary: 'after exit' });
 });
 
 test('destroyGroup settles pending takeHandoff waiters', async () => {

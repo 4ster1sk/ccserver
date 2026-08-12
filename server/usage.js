@@ -157,7 +157,16 @@ function looksReady(parsed) {
 
 function capture() {
   return new Promise((resolve) => {
-    let command = resolveClaude().command;
+    // claude not installed on this host (or claudeBin pointing at a missing
+    // path): a pty.spawn would just fail with execvp/ENOENT. Report the real
+    // cause up front -- this also backs the client's automatic Usage-button
+    // hiding (availableApps.claude === false via /dirs/home).
+    const resolvedClaude = resolveClaude();
+    if (resolvedClaude.found === false) {
+      resolve({ error: 'claude is not installed on this server' });
+      return;
+    }
+    let command = resolvedClaude.command;
     let args = ['--ax-screen-reader'];
     let spawnCwd = homedir();
     let sandboxed = false;
