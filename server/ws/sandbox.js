@@ -180,7 +180,17 @@ export function loadSandboxConfig() {
 // the command once launched.
 function which(cmd, pathEnv = SANDBOX_PATH) {
   if (!cmd) return null;
-  if (cmd.includes('/')) return cmd;
+  // A path-form command (e.g. a configured claudeBin like "/usr/bin/claude")
+  // must still exist and be executable on the host -- a stale config pointing
+  // at a removed CLI would otherwise read as "found" and defeat the
+  // availability detection that greys it out client-side.
+  if (cmd.includes('/')) {
+    try {
+      const st = statSync(cmd);
+      if (st.isFile() && (st.mode & 0o111)) return cmd;
+    } catch { /* not here */ }
+    return null;
+  }
   for (const dir of (pathEnv || '').split(':')) {
     if (!dir) continue;
     const p = join(dir, cmd);
