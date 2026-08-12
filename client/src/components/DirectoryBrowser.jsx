@@ -858,17 +858,21 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
               <span className="session-icon">
                 {session.connected ? '\u25B6' : '\u23F8'}
               </span>
-              <span className="session-cwd">{session.cwd}</span>
-              {session.sandbox ? (
-                <span className="session-badge sandbox" title="このセッションはサンドボックスで実行中">sandbox</span>
-              ) : !session.shell ? (
-                <span className="session-badge no-sandbox" title="このセッションはサンドボックス外で実行中">no sandbox</span>
-              ) : null}
-              <span className="session-status active">
-                {session.shell
-                  ? 'shell'
-                  : `${session.app === 'claude' ? 'claude' : session.app === 'copilot' ? 'copilot' : 'opencode'} · ${session.connected ? 'connected' : 'idle'}`}
-              </span>
+              <div className="session-body">
+                <div className="session-item-top">
+                  {session.sandbox ? (
+                    <span className="session-badge sandbox" title="このセッションはサンドボックスで実行中">sandbox</span>
+                  ) : !session.shell ? (
+                    <span className="session-badge no-sandbox" title="このセッションはサンドボックス外で実行中">no sandbox</span>
+                  ) : null}
+                  <span className="session-status active">
+                    {session.shell
+                      ? 'shell'
+                      : `${session.app === 'claude' ? 'claude' : session.app === 'copilot' ? 'copilot' : 'opencode'} · ${session.connected ? 'connected' : 'idle'}`}
+                  </span>
+                </div>
+                <span className="session-cwd" title={session.cwd}>{session.cwd}</span>
+              </div>
               <button
                 className="btn btn-secondary session-delete-btn"
                 onClick={(e) => { e.stopPropagation(); handleDeleteSession(session); }}
@@ -893,12 +897,16 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
                   }}
                 >
                   <span className="session-icon">{'\u26A1'}</span>
-                  <span className="session-cwd">{g.cwd}</span>
-                  <span className="session-status resumable">
-                    {g.liveCount > 0
-                      ? `group · ${g.memberCount} members · ${g.liveCount} live`
-                      : `group · ${g.memberCount} members · closed (click to reopen)`}
-                  </span>
+                  <div className="session-body">
+                    <div className="session-item-top">
+                      <span className="session-status resumable">
+                        {g.liveCount > 0
+                          ? `group · ${g.memberCount} members · ${g.liveCount} live`
+                          : `group · ${g.memberCount} members · closed (click to reopen)`}
+                      </span>
+                    </div>
+                    <span className="session-cwd" title={g.cwd}>{g.cwd}</span>
+                  </div>
                 </div>
               ))}
             </>
