@@ -24,7 +24,9 @@ let tmpRoot;
 before(() => {
   tmpRoot = mkdtempSync(join(tmpdir(), 'ccserver-mcp-sandbox-'));
   cfgPath = join(tmpRoot, 'sandbox.config.json');
-  writeFileSync(cfgPath, JSON.stringify({ docker: false, gitBroker: false }));
+  // persistentHome off: the "no ro mounts" assertions must stay about the MCP
+  // machinery, not the persistent-home bin-host bind.
+  writeFileSync(cfgPath, JSON.stringify({ docker: false, gitBroker: false, persistentHome: false }));
 });
 
 after(() => {

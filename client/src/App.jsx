@@ -20,6 +20,10 @@ export default function App() {
   const [activeTabId, setActiveTabId] = useState('browser');
   const [lastDir, setLastDir] = useState(() => localStorage.getItem('ccserver-last-dir'));
   const [resumePrompt, setResumePrompt] = useState(null);
+  // Reuse dialog for a sandboxed launch when a previous persistent sandbox
+  // exists for the project: { cwd, sandbox, sandboxOpts, app, model, resume,
+  // skipResumePrompt, reuseSandboxHome, inUse }.
+  const [sandboxPrompt, setSandboxPrompt] = useState(null);
   const [themeId, setThemeId] = useState(loadThemeId);
   const [closeConfirm, setCloseConfirm] = useState(null);
   const [dontAskAgain, setDontAskAgain] = useState(false);
@@ -64,31 +68,77 @@ export default function App() {
       .catch(() => {});
   }, []);
 
-  const openTerminalTab = useCallback((dirPath, { claudeSessionId = null, shell = false, sessionId = null, attachSessionId = null, sandbox = false, sandboxOpts = null, app = 'claude', model = null, resume = false } = {}) => {
+  const openTerminalTab = useCallback((dirPath, { claudeSessionId = null, shell = false, sessionId = null, attachSessionId = null, sandbox = false, sandboxOpts = null, app = 'claude', model = null, resume = false, reuseSandboxHome = true } = {}) => {
     const id = `terminal-${++tabIdCounter}`;
     const dirName = dirPath.split(/[/\\]/).filter(Boolean).pop() || dirPath;
     const label = shell ? `$ ${dirName}` : dirName;
     setTabs((prev) => [
       ...prev,
-      { id, type: 'terminal', label, cwd: dirPath, claudeSessionId, shell, sessionId, attachSessionId, sandbox, sandboxOpts, app, model, resume, exited: false },
+      { id, type: 'terminal', label, cwd: dirPath, claudeSessionId, shell, sessionId, attachSessionId, sandbox, sandboxOpts, app, model, resume, reuseSandboxHome, exited: false },
     ]);
     setActiveTabId(id);
     setLastDir(dirPath);
   }, []);
 
-  const handleOpen = useCallback((dirPath, { sandbox = false, sandboxOpts = null, app = 'claude', model = null, resume = false, skipResumePrompt = false } = {}) => {
+  // The post-sandbox-dialog open flow: claude's resume prompt (if a saved
+  // conversation exists), else a plain tab open. Carries the chosen
+  // reuseSandboxHome through so a resumed conversation keeps the same HOME.
+  const continueOpen = useCallback((dirPath, { sandbox = false, sandboxOpts = null, app = 'claude', model = null, resume = false, skipResumePrompt = false, reuseSandboxHome = true } = {}) => {
     // Only claude sessions carry a resumable conversation id (opencode resumes
     // the last session of the project itself via -c).
     if (!skipResumePrompt && app === 'claude') {
       const savedSessionId = localStorage.getItem(`ccserver-resume:claude:${dirPath}`);
       if (savedSessionId) {
         pendingOpenRef.current = dirPath;
-        setResumePrompt({ cwd: dirPath, sessionId: savedSessionId, sandbox, sandboxOpts, app, model });
+        setResumePrompt({ cwd: dirPath, sessionId: savedSessionId, sandbox, sandboxOpts, app, model, reuseSandboxHome });
         return;
       }
     }
-    openTerminalTab(dirPath, { sandbox, sandboxOpts, app, model, resume });
+    openTerminalTab(dirPath, { sandbox, sandboxOpts, app, model, resume, reuseSandboxHome });
   }, [openTerminalTab]);
+
+  // Sandboxed agent launch: before opening, ask the server whether a previous
+  // persistent sandbox exists for this project; if so, show the reuse dialog
+  // (existing resume prompt takes a back seat until the choice is made).
+  const handleOpen = useCallback(async (dirPath, opts = {}) => {
+    if (opts.sandbox) {
+      try {
+        const res = await authFetch(`/api/sandbox/status?cwd=${encodeURIComponent(dirPath)}`);
+        const data = res.ok ? await res.json() : null;
+        if (data?.enabled && data?.exists) {
+          pendingOpenRef.current = dirPath;
+          setSandboxPrompt({ cwd: dirPath, ...opts, inUse: data.inUse || 0 });
+          return;
+        }
+      } catch {
+        // older server / unreachable: proceed without the dialog
+      }
+    }
+    continueOpen(dirPath, opts);
+  }, [continueOpen]);
+
+  const handleSandboxReuse = useCallback(() => {
+    if (!sandboxPrompt) return;
+    const p = sandboxPrompt;
+    setSandboxPrompt(null);
+    pendingOpenRef.current = null;
+    continueOpen(p.cwd, { ...p, reuseSandboxHome: true });
+  }, [sandboxPrompt, continueOpen]);
+
+  const handleSandboxNew = useCallback(() => {
+    if (!sandboxPrompt) return;
+    const p = sandboxPrompt;
+    setSandboxPrompt(null);
+    pendingOpenRef.current = null;
+    // Wiping happens server-side at launch; nothing to clean up client-side
+    // except the persisted claude resume id has no bearing on the HOME.
+    continueOpen(p.cwd, { ...p, reuseSandboxHome: false });
+  }, [sandboxPrompt, continueOpen]);
+
+  const cancelSandboxPrompt = useCallback(() => {
+    setSandboxPrompt(null);
+    pendingOpenRef.current = null;
+  }, []);
 
   const handleOpenShell = useCallback((dirPath) => {
     openTerminalTab(dirPath, { shell: true });
@@ -208,7 +258,7 @@ export default function App() {
 
   const handleResume = useCallback(() => {
     if (resumePrompt) {
-      openTerminalTab(resumePrompt.cwd, { claudeSessionId: resumePrompt.sessionId, sandbox: resumePrompt.sandbox, sandboxOpts: resumePrompt.sandboxOpts, app: resumePrompt.app || 'claude', model: resumePrompt.model || null });
+      openTerminalTab(resumePrompt.cwd, { claudeSessionId: resumePrompt.sessionId, sandbox: resumePrompt.sandbox, sandboxOpts: resumePrompt.sandboxOpts, app: resumePrompt.app || 'claude', model: resumePrompt.model || null, reuseSandboxHome: resumePrompt.reuseSandboxHome !== false });
       setResumePrompt(null);
       pendingOpenRef.current = null;
     }
@@ -217,7 +267,7 @@ export default function App() {
   const handleNewSession = useCallback(() => {
     if (resumePrompt) {
       localStorage.removeItem(`ccserver-resume:claude:${resumePrompt.cwd}`);
-      openTerminalTab(resumePrompt.cwd, { sandbox: resumePrompt.sandbox, sandboxOpts: resumePrompt.sandboxOpts, app: resumePrompt.app || 'claude', model: resumePrompt.model || null });
+      openTerminalTab(resumePrompt.cwd, { sandbox: resumePrompt.sandbox, sandboxOpts: resumePrompt.sandboxOpts, app: resumePrompt.app || 'claude', model: resumePrompt.model || null, reuseSandboxHome: resumePrompt.reuseSandboxHome !== false });
       setResumePrompt(null);
       pendingOpenRef.current = null;
     }
@@ -397,6 +447,7 @@ export default function App() {
                   shell={tab.shell}
                   sandbox={tab.sandbox}
                   sandboxOpts={tab.sandboxOpts}
+                  reuseSandboxHome={tab.reuseSandboxHome !== false}
                   app={tab.app || 'claude'}
                   model={tab.model || null}
                   resume={!!tab.resume}
@@ -443,6 +494,37 @@ export default function App() {
             </div>
           ))}
       </div>
+      {sandboxPrompt && (
+        <div className="resume-overlay" onClick={cancelSandboxPrompt}>
+          <div className="resume-dialog" onClick={(e) => e.stopPropagation()}>
+            <h3>前回利用したサンドボックスがあります</h3>
+            <p>
+              このプロジェクトの前回のサンドボックス環境（インストール済みのツール・キャッシュ等）を引き継ぎますか？
+            </p>
+            <p className="sandbox-prompt-warn">
+              「新規作成」は前回の環境を破棄して空の状態から始めます。
+              {sandboxPrompt.inUse > 0
+                ? '（このプロジェクトのサンドボックスを利用中のセッションがあるため選択できません）'
+                : ''}
+            </p>
+            <div className="resume-actions">
+              <button className="btn btn-primary" onClick={handleSandboxReuse}>
+                使用する
+              </button>
+              <button
+                className="btn btn-secondary"
+                disabled={sandboxPrompt.inUse > 0}
+                onClick={handleSandboxNew}
+              >
+                新規作成
+              </button>
+              <button className="btn btn-secondary" onClick={cancelSandboxPrompt}>
+                キャンセル
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       {resumePrompt && (
         <div className="resume-overlay" onClick={handleNewSession}>
           <div className="resume-dialog" onClick={(e) => e.stopPropagation()}>

@@ -107,6 +107,9 @@ export async function terminalWs(fastify, opts) {
             groupRole,
             projectName,
             mcpSocketPath,
+            // Default reuse (keep the previous persistent HOME); only an
+            // explicit false (client's "新規作成" dialog) wipes it.
+            reuseSandboxHome: msg.reuseSandboxHome !== false,
           });
           if (result.error) {
             socket.send(JSON.stringify({
