@@ -32,6 +32,27 @@ test('forceSandbox defaults to false when the key is absent', () => {
   });
 });
 
+test('persistentHome defaults to true when the key is absent', () => {
+  withConfig({ docker: true }, () => {
+    assert.equal(loadSandboxConfig().persistentHome, true);
+  });
+});
+
+test('persistentHome is false only for an explicit false value', () => {
+  withConfig({ persistentHome: false }, () => {
+    assert.equal(loadSandboxConfig().persistentHome, false);
+  });
+  withConfig({ persistentHome: true }, () => {
+    assert.equal(loadSandboxConfig().persistentHome, true);
+  });
+  withConfig({ persistentHome: 'no' }, () => {
+    assert.equal(loadSandboxConfig().persistentHome, true, 'non-boolean falls back to the default (on)');
+  });
+  withConfig({}, () => {
+    assert.equal(loadSandboxConfig().persistentHome, true);
+  });
+});
+
 test('forceSandbox is true only for an explicit true value', () => {
   withConfig({ forceSandbox: true }, () => {
     assert.equal(loadSandboxConfig().forceSandbox, true);
