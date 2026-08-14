@@ -43,6 +43,19 @@ test('resolveApp finds copilot via SANDBOX_PATH or its fallback dirs', { skip: !
   assert.ok(resolvesToRealBinary(r.command), `command does not resolve to a real binary: ${r.command}`);
 });
 
+// Homebrew installs live outside SANDBOX_PATH: /opt/homebrew/bin on macOS
+// Apple Silicon (Intel Macs use /usr/local/bin, already on SANDBOX_PATH) and
+// /home/linuxbrew/.linuxbrew/bin for Linuxbrew. resolveAgentCommand must
+// still find them via its fallback dirs. Host-dependent: skip unless a
+// Homebrew install is actually present.
+const HOMEBREW_BINS = ['/opt/homebrew/bin', '/home/linuxbrew/.linuxbrew/bin'];
+
+test('resolveApp finds opencode via the Homebrew fallback dirs', { skip: !HOMEBREW_BINS.some((dir) => existsSync(join(dir, 'opencode'))) }, () => {
+  const r = resolveApp('opencode');
+  assert.equal(r.found, true, 'a Homebrew opencode install must report found: true');
+  assert.ok(resolvesToRealBinary(r.command), `command does not resolve to a real binary: ${r.command}`);
+});
+
 test('resolveApp keeps the bare command name when SANDBOX_PATH resolves it', { skip: !isInstalled('claude') }, () => {
   const r = resolveApp('claude');
   // /usr/bin, /bin etc. are all on SANDBOX_PATH, so a claude install visible

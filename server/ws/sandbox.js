@@ -253,6 +253,8 @@ function resolveAgentCommand(cmd, extraDirs = []) {
   const candidates = [
     dirname(process.execPath),
     join(HOME, '.local', 'bin'),
+    '/opt/homebrew/bin',              // Homebrew (macOS Apple Silicon)
+    '/home/linuxbrew/.linuxbrew/bin', // Linuxbrew
     ...extraDirs,
   ];
   for (const dir of candidates) {
@@ -598,7 +600,7 @@ function buildBwrapArgs({ cwd, docker, gpg, extraBinds, extraEnv, authSock, stat
 
   if (gitBroker) {
     const ghCandidates = new Set(
-      [which('gh'), '/usr/bin/gh', '/usr/local/bin/gh', join(HOME, '.local', 'bin', 'gh')].filter(Boolean),
+      [which('gh'), '/usr/bin/gh', '/usr/local/bin/gh', '/opt/homebrew/bin/gh', join(HOME, '.local', 'bin', 'gh')].filter(Boolean),
     );
     for (const ghPath of ghCandidates) {
       if (existsSync(ghPath)) args.push('--ro-bind', GH_WRAPPER_SCRIPT, ghPath);
