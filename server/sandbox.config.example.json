@@ -4,6 +4,9 @@
   "//docker": "true (default): start an isolated rootless dockerd inside the sandbox. false: no docker (lighter, no rootlesskit).",
   "docker": true,
 
+  "//persistentHome": "true (default): keep a persistent writable HOME per project (under ~/.local/share/ccserver-sandbox/home/<project>) so tools/caches installed inside the sandbox survive a session relaunch. A launch dialog offers to reuse the previous sandbox or start fresh (which wipes that HOME). false: legacy fresh-tmpfs HOME every session.",
+  "persistentHome": true,
+
   "//gpg": "true: forward the host gpg-agent (bind ~/.gnupg + the live agent/keyboxd sockets) so commit signing works inside the sandbox using the host's key/token. Coexists with docker. Default false.",
   "gpg": true,
 

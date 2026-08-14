@@ -1680,6 +1680,12 @@ body {
   word-break: break-all;
 }
 
+.sandbox-prompt-warn {
+  font-size: 13px;
+  color: var(--text-secondary);
+  margin-bottom: 16px;
+}
+
 .resume-actions {
   display: flex;
   gap: 8px;
