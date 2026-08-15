@@ -207,11 +207,11 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox
   const forceSandbox = loadSandboxConfig().forceSandbox;
   const sandboxRequested = (forceSandbox || sandbox) && process.platform !== 'win32' && sandboxAvailable();
 
-  // Opt-in tool provisioning (rtk / code-review-graph): like gpg/sshAgent, the
-  // server config supplies the default and the client's per-session
-  // sandboxOpts.tools can override per directory. The tools are provisioned
-  // into the sandbox HOME at launch, so they are only ever injected when this
-  // session is actually sandboxed.
+  // Tool provisioning (rtk / code-review-graph): the server config supplies
+  // the fallback default and the client's per-session sandboxOpts.tools (which
+  // the launch menu defaults to ON for these, remembered per directory)
+  // overrides it. The tools are provisioned into the sandbox HOME at launch,
+  // so they are only ever injected when this session is actually sandboxed.
   const tools = resolveTools(sandboxOpts);
 
   // MCP config injection -- never written to a file (see mcpConfig.js). Combo

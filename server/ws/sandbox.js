@@ -406,9 +406,10 @@ export function loadSandboxConfig() {
   const notifyAttribution = rawNotify.attribution !== false;
   const binds = Array.isArray(raw.binds) ? raw.binds : [];
   const env = (raw.env && typeof raw.env === 'object') ? raw.env : {};
-  // Opt-in tools provisioned into the sandbox HOME at launch (rtk /
-  // code-review-graph). Off by default, like gpg/sshAgent; the client's
-  // per-session sandboxOpts.tools can override per directory. See resolveTools.
+  // Tools provisioned into the sandbox HOME at launch (rtk / code-review-graph).
+  // This is the server-wide fallback (off unless enabled here); the client's
+  // launch menu defaults them to ON per session/directory and its per-session
+  // sandboxOpts.tools overrides this. See resolveTools.
   const tools = (raw.tools && typeof raw.tools === 'object' && !Array.isArray(raw.tools)) ? raw.tools : {};
   // How to launch claude. Overridable because the install location is
   // environment-specific (see resolveClaude). Env var wins over the config file.
@@ -424,13 +425,13 @@ export function loadSandboxConfig() {
   return { docker, persistentHome, gpg, sshAgent, gitBroker, forceSandbox, binds, env, tools, claudeBin, defaultApp, showUsage, notify: { discordWebhook, subscriptions, hostname: notifyHostname, attribution: notifyAttribution }, configPath };
 }
 
-// Which opt-in tools to provision into the sandbox HOME, and their pinned
-// specs. Mirrors the gpg/sshAgent opt-in flow: sandbox.config.json's "tools"
-// supplies the server default (off unless enabled) and the client's per-session
-// sandboxOpts.tools (remembered per directory, see DirectoryBrowser) overrides
-// it. Returns { rtk, codeReviewGraph, rtkSpec, crgSpec } where rtkSpec/crgSpec
-// are the { version, url, sha256, ... } payloads for sandbox-provision.sh
-// (null when the tool is disabled).
+// Which tools to provision into the sandbox HOME, and their pinned specs.
+// sandbox.config.json's "tools" supplies the server-wide fallback (off unless
+// enabled there); the client's per-session sandboxOpts.tools -- which the launch
+// menu defaults to ON for rtk / code-review-graph, remembered per directory
+// (see DirectoryBrowser) -- overrides it. Returns { rtk, codeReviewGraph,
+// rtkSpec, crgSpec } where rtkSpec/crgSpec are the { version, url, sha256, ... }
+// payloads for sandbox-provision.sh (null when the tool is disabled).
 export function resolveTools(sandboxOpts = null) {
   const cfg = loadSandboxConfig().tools;
   const per = (sandboxOpts && sandboxOpts.tools && typeof sandboxOpts.tools === 'object') ? sandboxOpts.tools : {};

@@ -15,12 +15,24 @@
 #                       `code-review-graph` then resolves on the sandbox PATH,
 #                       so the .claude settings hooks and the MCP config that
 #                       ccserver injects (see mcpConfig.js) both find it.
+#                       On first install it also synchronously runs
+#                       `code-review-graph build --repo "$PWD"` (cwd is the
+#                       session's project), because the injected
+#                       `serve --repo <cwd>` MCP server does not build lazily;
+#                       the graph lands in <repo>/.code-review-graph and
+#                       persists on the host project across sessions.
+#
+# Status lines (e.g. "[sandbox] code-review-graph をインストール中…") are echoed
+# to the terminal so the CLI shows progress while the install runs; the noisy
+# pip/build output itself stays in provision.log.
 #
 # Idempotent: each tool records
 # $HOME/.local/share/ccserver-tools/markers/<tool>-<version>. When the marker
 # matches, installation is skipped; a persistent per-project HOME therefore
 # only pays the install cost once (or again after a "new"/wipe launch, which
-# deletes the HOME). Failures are logged to
+# deletes the HOME). For code-review-graph the marker is only touched after
+# BOTH the install and the graph build succeed, so a failed build is retried
+# on the next launch. Failures are logged to
 # $HOME/.local/share/ccserver-tools/provision.log and the script exits non-zero
 # so the entrypoint can echo a hint -- the session still launches.
 #
@@ -72,6 +84,7 @@ install_rtk() {
   [ -n "$ver" ] || { log "rtk: no CCSANDBOX_RTK_VERSION"; return 0; }
   local marker="$MARKERS_DIR/rtk-$ver"
   [ -f "$marker" ] && return 0
+  echo "[sandbox] rtk をインストール中…"
   local url="${CCSANDBOX_RTK_URL:-}" sha="${CCSANDBOX_RTK_SHA256:-}"
   [ -n "$url" ] || { log "rtk: no CCSANDBOX_RTK_URL"; return 1; }
   local tmp
@@ -100,6 +113,7 @@ install_rtk() {
   rm -rf "$tmp"
   touch "$marker"
   log "rtk $ver installed -> $HOME/.local/bin/rtk"
+  echo "[sandbox] rtk 導入完了"
 }
 
 install_crg() {
@@ -107,6 +121,7 @@ install_crg() {
   [ -n "$ver" ] || { log "crg: no CCSANDBOX_CRG_VERSION"; return 0; }
   local marker="$MARKERS_DIR/code-review-graph-$ver"
   [ -f "$marker" ] && return 0
+  echo "[sandbox] code-review-graph をインストール中… (初回のみ・1分程度かかります)"
   if ! command -v python3 >/dev/null 2>&1; then
     log "crg: python3 missing in sandbox"; return 1
   fi
@@ -124,8 +139,23 @@ install_crg() {
       ln -sf "$venv/bin/$entry" "$HOME/.local/bin/$entry"
     fi
   done
+  # Build the graph for the session's project (cwd = the repo) so the injected
+  # `code-review-graph serve --repo <cwd>` MCP server has data on first use --
+  # serve does not build lazily and the graph tools exit with "No graph found"
+  # otherwise. Sync on purpose: the agent must not see an empty graph. The
+  # result lands in <repo>/.code-review-graph (rw-bound at the same path) and
+  # persists across sessions. The marker is only touched once BOTH the install
+  # and the build succeed, so a failed build is retried on the next launch.
+  local repo="${PWD:-}"
+  echo "[sandbox] code-review-graph のグラフを構築中…"
+  if ! "$venv/bin/code-review-graph" build --repo "$repo" --quiet >>"$LOG" 2>&1; then
+    log "crg: graph build failed for $repo (see $LOG)"
+    return 1
+  fi
+  log "crg: graph built for $repo"
   touch "$marker"
   log "code-review-graph $ver installed -> $venv (+ $HOME/.local/bin shims)"
+  echo "[sandbox] code-review-graph 導入完了 (グラフ構築済み)"
 }
 
 log "starting provision (rtk=${CCSANDBOX_PROVISION_RTK:-0} crg=${CCSANDBOX_PROVISION_CRG:-0})"

@@ -5,7 +5,9 @@
 #      the sandbox's restricted filesystem view (so `docker run -v ...` cannot
 #      escape to unexposed host paths).
 #   2. Optionally provision opt-in tools (rtk / code-review-graph) into the
-#      sandbox HOME (see sandbox-provision.sh).
+#      sandbox HOME (see sandbox-provision.sh). The provisioner echoes
+#      "[sandbox] … をインストール中…" status lines to the terminal so the CLI
+#      shows progress while it runs; its detailed output goes to provision.log.
 #   3. exec the real target command (claude / shell), inheriting the pty.
 #
 # Environment (set via bwrap --setenv):

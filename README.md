@@ -76,8 +76,10 @@ NODE_ENV=production node server/index.js
 | 起動モード | 通常起動 / 🔒 サンドボックスで起動 | 同上 |
 | GPG署名を使う | on/off (既定 off) | `localStorage` に**ディレクトリ単位**で |
 | ssh-agentを転送する | on/off (既定 off) | 同上 |
+| rtk を導入する | on/off (**既定 on**) | 同上 |
+| code-review-graph MCP を導入する | on/off (**既定 on**) | 同上 |
 
-サンドボックス・GPG・ssh-agent の詳細は [サンドボックス (bwrap + rootless docker)](#サンドボックス-bwrap--rootless-docker) を参照。「アプリ」と「起動モード」のどちらの項目をクリックしても、選んだ内容で即座に起動します。
+サンドボックス・GPG・ssh-agent・ツール導入 (rtk / code-review-graph) の詳細は [サンドボックス (bwrap + rootless docker)](#サンドボックス-bwrap--rootless-docker) を参照。「アプリ」と「起動モード」のどちらの項目をクリックしても、選んだ内容で即座に起動します。
 
 コンボ起動のロール別アプリ選択 (ワーカーA / ワーカーB / オーケストレーター) もブラウザの `localStorage` に記憶され、次回のコンボ起動の既定になります (初期値: ワーカーA・オーケストレーターが Claude Code、ワーカーB が opencode)。単発起動の「アプリ」記憶とは独立しており、コンボ起動には `defaultApp` は適用されません。
 
@@ -212,16 +214,17 @@ docker も安全に使えるよう、サンドボックス**内部**に rootless
 
 ### サンドボックス用ツールのプロビジョニング (rtk / code-review-graph)
 
-ホスト OS に何もインストールせず、サンドボックス**起動時にその HOME 内へ**ツールを導入する仕組みです (gpg / ssh-agent と同じく既定 off の opt-in。起動モーダルのサンドボックスサブオプションでセッション毎に切り替え、ディレクトリ毎に記憶されます。`sandbox.config.json` の `tools` でサーバー全体の既定も設定可)。
+ホスト OS に何もインストールせず、サンドボックス**起動時にその HOME 内へ**ツールを導入する仕組みです (gpg / ssh-agent と違い、rtk / code-review-graph は**起動モーダルで既定 on**。セッション毎に切り替え、ディレクトリ毎に記憶されます。`sandbox.config.json` の `tools` でサーバー全体の既定も設定可)。
 
 - **rtk** (`rtk-ai/rtk`) — LLM 向け出力圧縮 CLI プロキシ。GitHub Releases から静的バイナリを取得し、`$HOME/.local/bin/rtk` に配置します (sandbox PATH の先頭なのでエージェントからそのまま `rtk` で使えます)。バージョンと sha256 をピン留めし、検証してから導入します。
-- **code-review-graph** — ナレッジグラフ MCP + CLI。`python3 -m venv $HOME/.local/share/crg-venv` に `pip install code-review-graph==<version>` し、`code-review-graph` / `crg-daemon` のシムを `$HOME/.local/bin/` に配置します。サンドボックス起動時、ccserver が claude (`--mcp-config`) / opencode (`OPENCODE_CONFIG_CONTENT`) に対して `code-review-graph serve --repo <cwd>` の MCP サーバーを注入するため、プロジェクトの `.mcp.json` / `opencode.jsonc` に書かれた**ホスト専用の絶対パスに依存せず**動作します (copilot は MCP 注入不可のため対象外)。
+- **code-review-graph** — ナレッジグラフ MCP + CLI。`python3 -m venv $HOME/.local/share/crg-venv` に `pip install code-review-graph==<version>` し、`code-review-graph` / `crg-daemon` のシムを `$HOME/.local/bin/` に配置します。サンドボックス起動時、ccserver が claude (`--mcp-config`) / opencode (`OPENCODE_CONFIG_CONTENT`) に対して `code-review-graph serve --repo <cwd>` の MCP サーバーを注入するため、プロジェクトの `.mcp.json` / `opencode.jsonc` に書かれた**ホスト専用の絶対パスに依存せず**動作します (copilot は MCP 注入不可のため対象外)。初回インストール時は**同期で `code-review-graph build --repo <cwd>` も実行**し、プロジェクト直下の `.code-review-graph/` にグラフを構築します (注入される MCP は遅延 build しないため)。グラフはホストのプロジェクトディレクトリに永続化され、以降のセッションでも再利用されます。
 
-導入は冪等です。各ツールは `$HOME/.local/share/ccserver-tools/markers/<tool>-<version>` のマーカーで導入済みを記録し、永続 HOME を再利用する限り**初回だけ**インストールされます。**「新規作成」(wipe) 起動時は HOME ごと消えるため、次回起動で再プロビジョニング**されます。
+導入は冪等です。各ツールは `$HOME/.local/share/ccserver-tools/markers/<tool>-<version>` のマーカーで導入済みを記録し、永続 HOME を再利用する限り**初回だけ**インストールされます。code-review-graph は**インストールとグラフ構築の両方が成功した場合のみ**マーカーを作成するため、構築に失敗すると次回起動で再試行されます。**「新規作成」(wipe) 起動時は HOME ごと消えるため、次回起動で再プロビジョニング**されます。
 
 注意点:
 
-- 初回の導入には**サンドボックス内からネットワーク**が必要です (rtk: ~1-3 秒、code-review-graph: pip install で ~15-60 秒)。以降の起動はマーカー照合のみでほぼ一瞬です。
+- 初回の導入には**サンドボックス内からネットワーク**が必要です (rtk: ~1-3 秒、code-review-graph: pip install で ~15-60 秒 + グラフ構築でさらに数秒〜数十秒)。以降の起動はマーカー照合のみでほぼ一瞬です。
+- プロビジョニング中は CLI (ターミナル) に `[sandbox] … をインストール中…` などの**ステータス行**が表示されます。pip や build の詳細出力はサンドボックス内の `$HOME/.local/share/ccserver-tools/provision.log` にのみ記録されます。
 - ホストに `python3` + `venv` (`ensurepip`) が必要です (sandbox は `/usr` を ro-bind するため、ホストの python がそのまま使われます)。
 - 失敗してもセッションは起動します。ログはサンドボックス内の `$HOME/.local/share/ccserver-tools/provision.log` に残ります。
 - バージョン・URL・sha256 は `tools` を object 形式 (`{ "rtk": { "version": "v0.45.0", "url": "…", "sha256": "…" } }` など) にすることで上書きできます。既定値はコード内にピン留めされています (rtk v0.45.0 / code-review-graph 2.3.7)。
