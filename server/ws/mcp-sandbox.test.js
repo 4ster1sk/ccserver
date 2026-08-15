@@ -9,7 +9,7 @@ import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { buildSandboxSpawn } from './sandbox.js';
+import { buildSandboxSpawn, SANDBOX_PATH } from './sandbox.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -25,8 +25,10 @@ before(() => {
   tmpRoot = mkdtempSync(join(tmpdir(), 'ccserver-mcp-sandbox-'));
   cfgPath = join(tmpRoot, 'sandbox.config.json');
   // persistentHome off: the "no ro mounts" assertions must stay about the MCP
-  // machinery, not the persistent-home bin-host bind.
-  writeFileSync(cfgPath, JSON.stringify({ docker: false, gitBroker: false, persistentHome: false }));
+  // machinery, not the persistent-home bin-host bind. rtk off too: those
+  // assertions must not depend on whether the test host happens to have rtk
+  // installed (its wiring is exercised explicitly below).
+  writeFileSync(cfgPath, JSON.stringify({ docker: false, gitBroker: false, persistentHome: false, rtk: false }));
 });
 
 after(() => {
@@ -152,6 +154,90 @@ test('buildSandboxSpawn without notifySocketPath adds no notify bindings', () =>
     });
     assert.ok(!spawn.args.includes(SANDBOX_NOTIFY_SOCK_PATH), 'no notify socket path');
     assert.ok(!spawn.args.includes('CCSANDBOX_NOTIFY_MCP_SOCK'), 'no notify socket env');
+  } finally {
+    if (prev === undefined) delete process.env.CCSERVER_SANDBOX_CONFIG;
+    else process.env.CCSERVER_SANDBOX_CONFIG = prev;
+  }
+});
+
+// RTK (Rust Token Killer) wiring in the sandbox argv: the caller (sessionManager)
+// resolves rtk once and passes the descriptor in, so these are deterministic
+// regardless of whether the test host has rtk installed.
+const SANDBOX_RTK_PLUGIN_PATH = '/ccserver-sandbox-rtk.ts';
+
+test('buildSandboxSpawn wires rtk when the descriptor reports found', () => {
+  const prev = process.env.CCSERVER_SANDBOX_CONFIG;
+  process.env.CCSERVER_SANDBOX_CONFIG = cfgPath;
+  try {
+    const spawn = buildSandboxSpawn({
+      cwd: tmpRoot,
+      targetCommand: ['claude'],
+      app: 'claude',
+      sandboxOpts: null,
+      rtk: { found: true, binDir: tmpRoot },
+    });
+    assert.equal(spawn.rtk, true, 'the spawn reports rtk enabled');
+    const args = spawn.args;
+    const pluginIdx = args.indexOf(SANDBOX_RTK_PLUGIN_PATH);
+    assert.ok(pluginIdx > 0, 'vendored plugin ro-bound at the fixed path');
+    assert.equal(args[pluginIdx - 2], '--ro-bind');
+    assert.equal(args[pluginIdx - 1], join(__dirname, 'sandbox-rtk-plugin.ts'));
+    const envIdx = args.indexOf('CCSANDBOX_RTK');
+    assert.ok(envIdx > 0, 'CCSANDBOX_RTK set');
+    assert.equal(args[envIdx + 1], '1');
+    // The rtk bin dir is bound at its real path and prepended to PATH so the
+    // hook/plugin always resolve `rtk`, wherever it lives on the host.
+    const bindIdx = args.indexOf('--ro-bind', pluginIdx);
+    assert.ok(bindIdx > 0);
+    assert.equal(args[bindIdx + 1], tmpRoot);
+    assert.equal(args[bindIdx + 2], tmpRoot);
+    const pathIdx = args.indexOf('PATH');
+    assert.ok(pathIdx > 0);
+    assert.ok(String(args[pathIdx + 1]).startsWith(`${tmpRoot}:`), 'rtk bin dir prepended to PATH');
+  } finally {
+    if (prev === undefined) delete process.env.CCSERVER_SANDBOX_CONFIG;
+    else process.env.CCSERVER_SANDBOX_CONFIG = prev;
+  }
+});
+
+test('buildSandboxSpawn adds no rtk wiring when the descriptor is false', () => {
+  const prev = process.env.CCSERVER_SANDBOX_CONFIG;
+  process.env.CCSERVER_SANDBOX_CONFIG = cfgPath;
+  try {
+    const spawn = buildSandboxSpawn({
+      cwd: tmpRoot,
+      targetCommand: ['claude'],
+      app: 'claude',
+      sandboxOpts: null,
+      rtk: false,
+    });
+    assert.equal(spawn.rtk, false);
+    assert.ok(!spawn.args.includes(SANDBOX_RTK_PLUGIN_PATH), 'no plugin bind');
+    assert.ok(!spawn.args.includes('CCSANDBOX_RTK'), 'no rtk env');
+    assert.ok(!spawn.args.includes(tmpRoot + ':'), 'no PATH prepend');
+  } finally {
+    if (prev === undefined) delete process.env.CCSERVER_SANDBOX_CONFIG;
+    else process.env.CCSERVER_SANDBOX_CONFIG = prev;
+  }
+});
+
+test('buildSandboxSpawn with a found-but-null binDir wires rtk without an extra bind', () => {
+  const prev = process.env.CCSERVER_SANDBOX_CONFIG;
+  process.env.CCSERVER_SANDBOX_CONFIG = cfgPath;
+  try {
+    // rtk already under an exposed tree (~/.local/bin): found, no dir to bind.
+    const spawn = buildSandboxSpawn({
+      cwd: tmpRoot,
+      targetCommand: ['claude'],
+      app: 'claude',
+      sandboxOpts: null,
+      rtk: { found: true, binDir: null },
+    });
+    assert.equal(spawn.rtk, true);
+    assert.ok(spawn.args.includes(SANDBOX_RTK_PLUGIN_PATH), 'plugin still bound');
+    assert.ok(spawn.args.includes('CCSANDBOX_RTK'), 'env still set');
+    const pathIdx = spawn.args.indexOf('PATH');
+    assert.equal(spawn.args[pathIdx + 1], SANDBOX_PATH, 'PATH unchanged (no rtk dir to prepend)');
   } finally {
     if (prev === undefined) delete process.env.CCSERVER_SANDBOX_CONFIG;
     else process.env.CCSERVER_SANDBOX_CONFIG = prev;

@@ -4,7 +4,7 @@ import { execFileSync } from 'node:child_process';
 import { writeFileSync, readFileSync, unlinkSync, rmSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { buildSandboxSpawn, resolveApp, sandboxAvailable, loadSandboxConfig, persistentHomeDir } from './sandbox.js';
+import { buildSandboxSpawn, resolveApp, resolveRtk, sandboxAvailable, loadSandboxConfig, persistentHomeDir } from './sandbox.js';
 import { buildMcpConfigArgsAndEnv } from './mcpConfig.js';
 import { shouldInjectNotify, notifyEnabled, getNotifySockPath, notifyBrokerRunning } from './notify.js';
 import { createScreenModel, SCREEN_ROWS } from './screenModel.js';
@@ -207,6 +207,15 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox
   const forceSandbox = loadSandboxConfig().forceSandbox;
   const sandboxRequested = (forceSandbox || sandbox) && process.platform !== 'win32' && sandboxAvailable();
 
+  // RTK (Rust Token Killer) auto-rewrite for sandboxed agent sessions: resolve
+  // the host-installed rtk once so the same result feeds both the bwrap
+  // wiring (buildSandboxSpawn) and the claude/opencode arg/env injection
+  // (buildMcpConfigArgsAndEnv below). Only sandboxed sessions get it -- host
+  // (unsandboxed) launches keep their stock agent behavior. A missing rtk is
+  // not an error: the session just launches without the rewrite (see
+  // resolveRtk), matching loadSandboxConfig's graceful-degradation contract.
+  const rtkR = sandboxRequested && loadSandboxConfig().rtk ? resolveRtk() : null;
+
   // MCP config injection -- never written to a file (see mcpConfig.js). Combo
   // sessions (groupId set) get their role's broker (ccserver); notify-enabled
   // sessions additionally get ccserver-notify, whose bridge command depends on
@@ -214,7 +223,11 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox
   // host node+bridge). The args must be in the target command before
   // buildSandboxSpawn runs, so the mode is derived from sandboxRequested.
   let mcpEnv = {};
-  if (sessionApp && (mcpSocketPath || useNotify)) {
+  // RTK injection rides the same per-app delivery channels, so a session that
+  // has no MCP server to register (standalone, notify off) still enters the
+  // assembly point when rtk is available -- the injected config/arg carries
+  // only the RTK piece then (empty mcp, no --mcp-config flag).
+  if (sessionApp && (mcpSocketPath || useNotify || !!rtkR?.found)) {
     const injected = buildMcpConfigArgsAndEnv(sessionApp, {
       // ccserver (the group broker) only when the session has a group socket:
       // standalone notify sessions must not get a broken ccserver entry (its
@@ -225,6 +238,7 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox
         sockPath: notifySocketPath,
         identity: notifyIdentity,
       } : undefined,
+      rtk: !!rtkR?.found,
     });
     mcpEnv = injected.env;
     args.push(...injected.args);
@@ -254,7 +268,7 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox
       }
     }
     try {
-      const spawn = buildSandboxSpawn({ cwd, targetCommand: [command, ...args], app: sessionApp, sandboxOpts, mcpSocketPath, notifySocketPath, reuseSandboxHome });
+      const spawn = buildSandboxSpawn({ cwd, targetCommand: [command, ...args], app: sessionApp, sandboxOpts, mcpSocketPath, notifySocketPath, reuseSandboxHome, rtk: rtkR });
       command = spawn.command;
       args = spawn.args;
       sandboxStateDir = spawn.stateDir || null;

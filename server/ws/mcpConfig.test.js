@@ -159,3 +159,60 @@ test('opencode notify without a group socket registers ccserver-notify only', ()
   assert.deepEqual(Object.keys(cfg.mcp), ['ccserver-notify']);
   assert.deepEqual(cfg.mcp['ccserver-notify'].command, ['/ccserver-sandbox-mcp-bridge', 'notify']);
 });
+
+// RTK (Rust Token Killer) auto-rewrite injection (see sandbox.js's resolveRtk
+// and mcpConfig.js's doc comment): opencode registers the vendored plugin via
+// its config `plugin` key; claude gets a PreToolUse hook via an inline
+// `--settings` JSON. copilot -- which has no CLI-arg/env injection at all --
+// is never touched. With the descriptor absent (rtk defaults to false) nothing
+// is added, so pre-existing callers keep their exact output.
+
+test('opencode + rtk: the vendored plugin is registered in the injected config', () => {
+  const { args, env } = buildMcpConfigArgsAndEnv('opencode', { rtk: true });
+  assert.deepEqual(args, []);
+  const cfg = JSON.parse(env.OPENCODE_CONFIG_CONTENT);
+  assert.deepEqual(cfg.plugin, ['/ccserver-sandbox-rtk.ts']);
+  assert.ok(cfg.mcp.ccserver, 'the MCP registration is unchanged alongside the plugin');
+});
+
+test('claude + rtk: --settings carries the PreToolUse hook (merged by claude)', () => {
+  const { args, env } = buildMcpConfigArgsAndEnv('claude', { rtk: true });
+  assert.equal(args[0], '--mcp-config');
+  assert.equal(args[2], '--settings');
+  const settings = JSON.parse(args[3]);
+  assert.equal(settings.hooks.PreToolUse[0].matcher, 'Bash');
+  assert.equal(settings.hooks.PreToolUse[0].hooks[0].type, 'command');
+  assert.equal(settings.hooks.PreToolUse[0].hooks[0].command, 'rtk hook claude');
+  assert.deepEqual(env, {}, 'claude rtk injection is args-only');
+});
+
+test('no rtk descriptor -> no plugin / --settings injection', () => {
+  const c = buildMcpConfigArgsAndEnv('claude');
+  assert.equal(c.args.length, 2, 'only the --mcp-config flag + JSON, no --settings');
+  const o = buildMcpConfigArgsAndEnv('opencode');
+  assert.ok(!JSON.parse(o.env.OPENCODE_CONFIG_CONTENT).plugin, 'no plugin key');
+});
+
+test('copilot + rtk: nothing is assembled for the rewrite either', () => {
+  const { args, env } = buildMcpConfigArgsAndEnv('copilot', { rtk: true });
+  assert.deepEqual(args, [], 'no CLI args (RTK and MCP both stay empty for copilot)');
+  assert.deepEqual(env, {});
+});
+
+// A standalone sandboxed session (no group socket, no notify) still gets RTK:
+// the assembly point must emit ONLY the RTK piece -- no empty --mcp-config for
+// claude, and an opencode config carrying just the plugin.
+test('claude + rtk without a group socket or notify: --settings only, no --mcp-config', () => {
+  const { args, env } = buildMcpConfigArgsAndEnv('claude', { groupMcp: false, rtk: true });
+  assert.equal(args[0], '--settings', 'no --mcp-config for an empty mcp');
+  assert.equal(JSON.parse(args[1]).hooks.PreToolUse[0].matcher, 'Bash');
+  assert.deepEqual(env, {});
+});
+
+test('opencode + rtk without a group socket or notify: plugin in an otherwise-empty config', () => {
+  const { args, env } = buildMcpConfigArgsAndEnv('opencode', { groupMcp: false, rtk: true });
+  assert.deepEqual(args, []);
+  const cfg = JSON.parse(env.OPENCODE_CONFIG_CONTENT);
+  assert.deepEqual(cfg.plugin, ['/ccserver-sandbox-rtk.ts']);
+  assert.deepEqual(cfg.mcp, {}, 'no server registered');
+});

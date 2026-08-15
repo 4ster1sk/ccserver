@@ -58,6 +58,12 @@ const SANDBOX_NOTIFY_SOCK_PATH = '/ccserver-sandbox-notify.sock';
 const SANDBOX_MCP_BRIDGE_PATH = '/ccserver-sandbox-mcp-bridge';
 const MCP_BRIDGE_SCRIPT = join(__dirname, 'sandbox-mcp-wrapper.cjs');
 
+// RTK (Rust Token Killer, https://github.com/rtk-ai/rtk): the vendored opencode
+// plugin is ro-bound at a fixed path and referenced from the injected opencode
+// config (see mcpConfig.js's SANDBOX_RTK_PLUGIN_PATH / buildMcpConfigArgsAndEnv).
+const RTK_PLUGIN_SCRIPT = join(__dirname, 'sandbox-rtk-plugin.ts');
+const SANDBOX_RTK_PLUGIN_PATH = '/ccserver-sandbox-rtk.ts';
+
 const HOME = homedir();
 // process.getuid is undefined on Windows; the sandbox is Linux-only, but this
 // module is imported unconditionally, so guard the top-level access.
@@ -293,7 +299,14 @@ export function loadSandboxConfig() {
   // for setups that don't want it; the client also hides the button on its
   // own when claude is not installed (the capture would never succeed).
   const showUsage = raw.showUsage !== false;
-  return { docker, persistentHome, gpg, sshAgent, gitBroker, forceSandbox, binds, env, claudeBin, defaultApp, showUsage, notify: { discordWebhook, subscriptions, hostname: notifyHostname, attribution: notifyAttribution }, configPath };
+  // RTK (https://github.com/rtk-ai/rtk): pre-include the host-installed rtk
+  // binary inside the sandbox and auto-rewrite the agent's Bash tool calls
+  // through it (claude PreToolUse hook / opencode plugin) to cut token
+  // consumption. Default on. When rtk is not installed on the host the
+  // sandbox simply launches without it -- graceful, never a launch failure
+  // (unlike the agent CLIs; see resolveRtk).
+  const rtk = raw.rtk !== false;
+  return { docker, persistentHome, gpg, sshAgent, gitBroker, forceSandbox, binds, env, claudeBin, defaultApp, showUsage, rtk, notify: { discordWebhook, subscriptions, hostname: notifyHostname, attribution: notifyAttribution }, configPath };
 }
 
 // Locate an executable named `cmd` on the given PATH (or return it as-is if
@@ -448,6 +461,30 @@ export function resolveClaude(configuredBin = loadSandboxConfig().claudeBin) {
   return resolveApp('claude', configuredBin);
 }
 
+// Locate the host-installed rtk binary (RTK -- Rust Token Killer, a single
+// static binary that compresses the output of common dev commands for LLM
+// agents). Unlike the agent CLIs this is OPTIONAL: when rtk is absent the
+// sandbox simply launches without it (see loadSandboxConfig's rtk flag and
+// sessionManager). Mirrors resolveApp's search -- SANDBOX_PATH first, then the
+// fallback dirs, including ~/.cargo/bin (where `cargo install rtk` lands, which
+// is not on SANDBOX_PATH) and ~/.local/bin (the install.sh default, already on
+// SANDBOX_PATH via the exposed trees).
+//
+// Returns { found, binDir } where binDir is the host directory that must be
+// exposed inside the sandbox for `rtk` to resolve there (dirname of the
+// resolved real binary), or null when the binary already lives under an
+// always-exposed tree (~/.local, /usr, ...) and is therefore already reachable
+// on the sandbox PATH (see buildBwrapArgs' bin-host / ~/.local handling).
+export function resolveRtk() {
+  const r = resolveAgentCommand('rtk', [join(HOME, '.local', 'bin'), join(HOME, '.cargo', 'bin')]);
+  if (!r) return { found: false, binDir: null };
+  let real = r.path;
+  try { real = realpathSync(r.path); } catch { /* keep as given */ }
+  const binDir = dirname(real);
+  const exposed = ['/usr/', '/bin/', '/sbin/', '/lib/', '/lib64/', '/etc/', `${join(HOME, '.local')}/`];
+  return { found: true, binDir: exposed.some((p) => binDir.startsWith(p)) ? null : binDir };
+}
+
 // Swap a leading bare `claude`/`opencode`/`copilot` in a target command for
 // the resolved launcher, leaving non-agent targets (e.g. a shell) untouched.
 // Absolute commands (e.g. resolved opencode paths) pass through as-is.
@@ -558,7 +595,7 @@ export function sandboxAvailable() {
 // but not including the trailing `-- <cmd...>`).
 //   homeDir - host path of the persistent per-project HOME to bind at HOME
 //             (see persistentHomeDir), or null for a fresh tmpfs HOME.
-function buildBwrapArgs({ cwd, docker, gpg, extraBinds, extraEnv, authSock, stateDir, claudeDir, gitBroker, mcpSocketPath, notifySocketPath, homeDir = null }) {
+function buildBwrapArgs({ cwd, docker, gpg, extraBinds, extraEnv, authSock, stateDir, claudeDir, gitBroker, mcpSocketPath, notifySocketPath, homeDir = null, rtkEnabled = false, rtkBinDir = null }) {
   const args = [
     '--die-with-parent',
     // Own PID namespace so the whole sandbox tree is reaped as a unit. Without
@@ -680,6 +717,23 @@ function buildBwrapArgs({ cwd, docker, gpg, extraBinds, extraEnv, authSock, stat
     sandboxPath = `${SANDBOX_PATH}:${hostBinDest}`;
   } else if (existsSync(hostLocalBin)) {
     args.push('--ro-bind', hostLocalBin, hostLocalBin);
+  }
+
+  // RTK (Rust Token Killer, see resolveRtk): pre-include the host-installed
+  // rtk binary so the agent's Bash-tool output gets auto-compressed. The
+  // vendored opencode plugin is ro-bound at a fixed path and referenced from
+  // the injected opencode config (mcpConfig.js). rtk itself is bound at its
+  // real host dir when it lives outside the exposed trees (e.g. ~/.cargo/bin
+  // or Linuxbrew), and that dir is prepended to PATH below so `rtk` resolves
+  // for both the claude PreToolUse hook (`rtk hook claude`) and the plugin's
+  // `rtk rewrite` -- wherever the binary lives on the host.
+  if (rtkEnabled) {
+    args.push('--ro-bind', RTK_PLUGIN_SCRIPT, SANDBOX_RTK_PLUGIN_PATH);
+    args.push('--setenv', 'CCSANDBOX_RTK', '1');
+    if (rtkBinDir && existsSync(rtkBinDir)) {
+      args.push('--ro-bind', rtkBinDir, rtkBinDir);
+      sandboxPath = `${rtkBinDir}:${sandboxPath}`;
+    }
   }
 
   // The agent install itself, when it lives outside the exposed trees (e.g.
@@ -910,11 +964,27 @@ export function buildMinimalSandboxSpawn({ cwd, targetCommand }) {
 //                 when persistentHome is enabled in the config; the caller
 //                 (sessionManager) guards against wiping a HOME that another
 //                 live sandboxed session is still using.
-export function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, mcpSocketPath = null, notifySocketPath = null, reuseSandboxHome = true }) {
-  const { docker: cfgDocker, persistentHome, gpg: cfgGpg, sshAgent: cfgSshAgent, gitBroker: gitBrokerEnabled, binds, env, claudeBin } = loadSandboxConfig();
+//   rtk            - optional RTK descriptor ({ found, binDir }, see
+//                 resolveRtk) resolved by the caller (sessionManager) so the
+//                 same result feeds both the bwrap wiring here and the
+//                 claude/opencode arg/env injection (mcpConfig.js). Omitted
+//                 (null/undefined): resolved here from the config's rtk flag.
+//                 `false`: explicit opt-out (no rtk even when the config flag
+//                 is on -- used by buildMinimalSandboxSpawn's sibling callers
+//                 that must stay minimal). A missing rtk is never a launch
+//                 failure -- the sandbox just runs without the rewrite.
+export function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, mcpSocketPath = null, notifySocketPath = null, reuseSandboxHome = true, rtk = null }) {
+  const cfg = loadSandboxConfig();
+  const { docker: cfgDocker, persistentHome, gpg: cfgGpg, sshAgent: cfgSshAgent, gitBroker: gitBrokerEnabled, binds, env, claudeBin, rtk: cfgRtk } = cfg;
   const docker = cfgDocker && dockerSandboxAvailable();
   const gpg = sandboxOpts?.gpg ?? cfgGpg;
   const sshAgent = sandboxOpts?.sshAgent ?? cfgSshAgent;
+
+  // RTK descriptor for this launch: the caller's resolved one wins (single
+  // resolution point), else resolve from the config flag; `false` opts out.
+  const rtkInfo = rtk == null
+    ? (cfgRtk ? resolveRtk() : { found: false, binDir: null })
+    : (rtk === false ? { found: false, binDir: null } : rtk);
 
   // ssh-agent forwarding is opt-in (see loadSandboxConfig). When on, an
   // explicit env.SSH_AUTH_SOCK in the config wins; otherwise auto-discover.
@@ -967,7 +1037,7 @@ export function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, mcpSoc
   }
 
   const { command, installDir } = resolveApp(app, claudeBin);
-  const bwrapArgs = buildBwrapArgs({ cwd, docker, gpg, extraBinds: binds, extraEnv: env, authSock, stateDir, claudeDir: installDir, gitBroker, mcpSocketPath, notifySocketPath, homeDir });
+  const bwrapArgs = buildBwrapArgs({ cwd, docker, gpg, extraBinds: binds, extraEnv: env, authSock, stateDir, claudeDir: installDir, gitBroker, mcpSocketPath, notifySocketPath, homeDir, rtkEnabled: !!rtkInfo.found, rtkBinDir: rtkInfo.found ? rtkInfo.binDir : null });
   const innerCmd = [BASH, '/ccserver-sandbox-entrypoint.sh', ...withClaude(targetCommand, command)];
 
   const gitBrokerFields = {
@@ -998,6 +1068,7 @@ export function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, mcpSoc
       ],
       docker,
       stateDir,
+      rtk: !!rtkInfo.found,
       ...gitBrokerFields,
     };
   }
@@ -1007,6 +1078,7 @@ export function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, mcpSoc
     args: [...bwrapArgs, '--', ...innerCmd],
     docker,
     stateDir,
+    rtk: !!rtkInfo.found,
     ...gitBrokerFields,
   };
 }

@@ -24,7 +24,7 @@ let cfgPath;
 let tmpRoot;
 let homeRoot;
 
-function spawnArgs({ cwd, reuseSandboxHome = true, json = { docker: false, gitBroker: false } } = {}) {
+function spawnArgs({ cwd, reuseSandboxHome = true, json = { docker: false, gitBroker: false, rtk: false } } = {}) {
   writeFileSync(cfgPath, JSON.stringify(json));
   return buildSandboxSpawn({ cwd, targetCommand: ['claude'], app: 'claude', sandboxOpts: null, reuseSandboxHome }).args;
 }

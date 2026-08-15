@@ -38,6 +38,16 @@
 //                sends an empty frame and the notification carries host-only
 //                attribution.
 //
+// The optional boolean `rtk` adds the RTK (Rust Token Killer) auto-rewrite
+// for sandboxed sessions (see sandbox.js's resolveRtk / buildSandboxSpawn and
+// the vendored sandbox-rtk-plugin.ts): opencode loads the ro-bound plugin via
+// its config `plugin` key; claude gets the PreToolUse hook via an inline
+// `--settings` JSON. claude's `--settings` *merges* with the user's own
+// settings files -- a key set here overrides the same key from local/project/
+// user settings and an omitted key keeps its lower-level value -- so the hook
+// is additive and never clobbers existing settings/hooks. copilot is not
+// touched (RTK cannot transparently rewrite its CLI).
+//
 // Returns { args, env } for sessionManager to splice into the pty spawn.
 
 import { dirname, join } from 'node:path';
@@ -47,6 +57,21 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 
 const MCP_BRIDGE_COMMAND = '/ccserver-sandbox-mcp-bridge';
 const NOTIFY_BRIDGE_SCRIPT = join(__dirname, 'sandbox-mcp-wrapper.cjs');
+
+// Fixed in-sandbox paths for the RTK injection (bound by buildBwrapArgs /
+// sandbox.js): the vendored opencode plugin at SANDBOX_RTK_PLUGIN_PATH, and
+// `rtk` on the sandbox PATH (prepended there) for the claude hook command.
+const SANDBOX_RTK_PLUGIN_PATH = '/ccserver-sandbox-rtk.ts';
+// claude's PreToolUse hook: the native-binary hook (no jq) rewrites Bash tool
+// calls via `rtk rewrite` (requires rtk >= 0.37.2; the hook exits cleanly on
+// anything older). Merged into the user's settings by claude itself.
+const CLAUDE_RTK_SETTINGS = JSON.stringify({
+  hooks: {
+    PreToolUse: [
+      { matcher: 'Bash', hooks: [{ type: 'command', command: 'rtk hook claude' }] },
+    ],
+  },
+});
 
 // The { base, args } invocation for the notify server: the in-sandbox bridge
 // when the session is sandboxed, else the host node binary running the bridge
@@ -58,7 +83,7 @@ function notifyInvocation(notify) {
   return { command: MCP_BRIDGE_COMMAND, args: ['notify'] };
 }
 
-export function buildMcpConfigArgsAndEnv(app, { groupMcp = true, notify } = {}) {
+export function buildMcpConfigArgsAndEnv(app, { groupMcp = true, notify, rtk = false } = {}) {
   const notifySockEnv = notify ? { CCSANDBOX_NOTIFY_MCP_SOCK: notify.sockPath } : {};
   const notifyIdentityEnv = notify?.identity ? { CCSERVER_NOTIFY_IDENTITY: JSON.stringify(notify.identity) } : {};
 
@@ -67,7 +92,8 @@ export function buildMcpConfigArgsAndEnv(app, { groupMcp = true, notify } = {}) 
     // reach the binary as `--mcp-config` and die with "unknown option". The
     // function is the single assembly point, so refusing here guarantees no
     // copilot launch path ever injects (group launches already refuse copilot
-    // at open_tab / addMember).
+    // at open_tab / addMember). RTK is equally skipped -- its CLI cannot
+    // transparently rewrite copilot anyway.
     return { args: [], env: {} };
   }
 
@@ -78,13 +104,19 @@ export function buildMcpConfigArgsAndEnv(app, { groupMcp = true, notify } = {}) 
       const inv = notifyInvocation(notify);
       mcp['ccserver-notify'] = { type: 'local', command: [inv.command, ...inv.args] };
     }
+    const cfg = {
+      $schema: 'https://opencode.ai/config.json',
+      mcp,
+    };
+    // RTK: register the vendored plugin (ro-bound into the sandbox by
+    // buildBwrapArgs) so opencode's Bash tool calls get rewritten through the
+    // host rtk binary. `plugin` is a config array -- deep-merged with the
+    // user's own global/project plugins by opencode, never replacing them.
+    if (rtk) cfg.plugin = [SANDBOX_RTK_PLUGIN_PATH];
     return {
       args: [],
       env: {
-        OPENCODE_CONFIG_CONTENT: JSON.stringify({
-          $schema: 'https://opencode.ai/config.json',
-          mcp,
-        }),
+        OPENCODE_CONFIG_CONTENT: JSON.stringify(cfg),
         ...notifySockEnv,
         ...notifyIdentityEnv,
       },
@@ -97,11 +129,19 @@ export function buildMcpConfigArgsAndEnv(app, { groupMcp = true, notify } = {}) 
     const inv = notifyInvocation(notify);
     mcpServers['ccserver-notify'] = { type: 'stdio', command: inv.command, args: inv.args };
   }
+  const args = [];
+  // Emit --mcp-config only when there is actually a server to register. A
+  // rtk-only call (no group socket, no notify) must not pass an empty mcp
+  // config -- RTK's injection is the --settings flag alone.
+  if (groupMcp || notify) {
+    args.push('--mcp-config', JSON.stringify({ mcpServers }));
+  }
+  // RTK: the PreToolUse hook (see CLAUDE_RTK_SETTINGS). Inline JSON -- claude
+  // merges `--settings` with its settings files, so the user's own settings
+  // and hooks stay intact.
+  if (rtk) args.push('--settings', CLAUDE_RTK_SETTINGS);
   return {
-    args: [
-      '--mcp-config',
-      JSON.stringify({ mcpServers }),
-    ],
+    args,
     env: {
       ...notifySockEnv,
       ...notifyIdentityEnv,

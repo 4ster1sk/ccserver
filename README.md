@@ -290,6 +290,7 @@ cp server/sandbox.config.example.json server/sandbox.config.json
   "forceSandbox": false,
   "defaultApp": "claude",
   "showUsage": true,
+  "rtk": true,
   "notify": {
     "discordWebhook": "",
     "subscriptions": []
@@ -309,6 +310,7 @@ cp server/sandbox.config.example.json server/sandbox.config.json
 | `forceSandbox` | `false` | `true` でサンドボックス外の起動を全面禁止。エージェント・シェルを問わず全セッションがサンドボックス強制になり、UI のサンドボックス切替は無効化されます。bwrap が無い環境 (または Windows) では起動をエラーで拒否します (`/usage` 取得の直接起動フォールバックも同様に禁止)。ホストに bwrap (bubblewrap) のインストールが必須です。 |
 | `defaultApp` | `"claude"` | 新規セッションの既定エージェント (`"claude"`、`"opencode"`、`"copilot"`)。UI で一度明示的に選んだ後はブラウザの記憶が優先され、この値は初回表示時の見た目とサーバー側フォールバック (予約プロンプトの自動再開など、クライアントが `app` を指定しない経路) にのみ使われます。**コンボ起動のメンバーには適用されません** (コンボのロール別選択は別途ブラウザの `localStorage` に記憶され、copilot はそもそも選択不可)。 |
 | `showUsage` | `true` | タブバー右端の Usage ボタン (Claude Code の `/usage`) を表示するか。`false` で非表示。**claude がサーバーに無い場合は設定に関わらず自動的に非表示**になります。 |
+| `rtk` | `true` | サンドボックスに RTK (Rust Token Killer、https://github.com/rtk-ai/rtk) を組み込み、エージェントの Bash ツール出力を自動圧縮してトークン消費を削減します。ホストに `rtk` がインストールされている場合に有効 (`brew install rtk` / RTK README の install.sh / cargo)。**rtk が無い場合は警告なしで RTK なしのサンドボックスとして起動します** (エージェント CLI と違い、必須ではありません)。対応は claude (PreToolUse フック `rtk hook claude`) と opencode (同梱プラグイン) のサンドボックスセッションのみ。非サンドボックス (サンドボックス OFF) の起動や copilot には適用されません (copilot は RTK が透過的書き換え非対応のため)。ホスト側の `~/.claude` 等の設定は変更せず、`--settings` / `OPENCODE_CONFIG_CONTENT` による起動時注入のみです。 |
 | `binds` | `[]` | 追加で見せるホストパス。各要素 `{ src, mode?, dest? }`。`mode` は `ro` (既定) か `rw`。存在しないパスはスキップ。`~` はホームに展開。`~/.ssh` と `~/.config/gh` は `gitBroker` の設定に関わらず常にブロックされます。 |
 | `env` | `{}` | サンドボックス内の追加環境変数 (適用順は最後 = 既定値を上書き)。例: `sshAgent: true` のときに `SSH_AUTH_SOCK` を明示指定して自動検出を上書き。 |
 | `claudeBin` | 自動検出 | claude/opencode/copilot の起動方法。`claude` を PATH から解決し、ラッパー (例: `/usr/bin/claude` → `/opt/claude-code/bin/claude`) の場合は実体のインストール先を辿ってサンドボックスへ自動的に公開します。opencode は PATH に加えて `~/.opencode/bin` も自動探索。copilot は PATH (SANDBOX_PATH) で自動解決されます (通常 `~/.local/bin/copilot`)。自動検出で外れる場所にある場合や特定ビルドに固定したい場合のみ絶対パスで指定 (環境変数 `CCSERVER_CLAUDE_BIN` が優先。copilot に個別の bin 設定はありません)。 |
@@ -364,6 +366,7 @@ ccserver/
 │       ├── sandbox-ssh-wrapper.cjs        # サンドボックス内 ssh を許可リストでゲート
 │       ├── sandbox-git-credential-helper.cjs
 │       ├── sandbox-mcp-wrapper.cjs        # MCP stdio ↔ Unix socket の中継 (argv 'notify' で通知ソケットへ)
+│       ├── sandbox-rtk-plugin.ts          # RTK 同梱 opencode プラグイン (Bash 出力を rtk 経由に書き換え)
 │       ├── sandbox-gitconfig / sandbox-known-hosts / sandbox-ssh-config
 │       ├── git-broker.js           # サンドボックス外で動く、リポジトリスコープの認証情報ブローカー
 │       └── ghAllowlist.js / gitAllowlist.js  (+ 各 *.test.js, appLaunch.test.js, sandbox-resolve.test.js, notify.test.js)

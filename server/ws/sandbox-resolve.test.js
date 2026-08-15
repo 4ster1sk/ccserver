@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { resolveApp, installedApps, SANDBOX_PATH } from './sandbox.js';
+import { resolveApp, resolveRtk, installedApps, SANDBOX_PATH } from './sandbox.js';
 
 // which() (used by resolveApp/resolveAgentCommand) resolves against
 // SANDBOX_PATH -- a fixed constant, not the calling process's own PATH -- so
@@ -106,4 +106,26 @@ test('installedApps mirrors resolveApp found flags for all three apps', () => {
   for (const app of ['claude', 'opencode', 'copilot']) {
     assert.equal(installed[app], resolveApp(app).found, `${app} flag must match resolveApp`);
   }
+});
+
+// resolveRtk -- the RTK (Rust Token Killer) binary is OPTIONAL: unlike the
+// agent CLIs a missing rtk is not a launch failure, it just means the sandbox
+// runs without the Bash-output rewrite (graceful degradation). found reflects
+// reality; binDir is the host dir that must be exposed for `rtk` to resolve
+// inside the sandbox, or null when the binary already lives under an
+// always-exposed tree (~/.local, /usr, ...) and is already on the sandbox
+// PATH. rtk is not installed on typical CI runners, so these are host-conditional.
+const rtkInstalled = () => resolveRtk().found;
+
+test('resolveRtk finds the host rtk binary when installed', { skip: !rtkInstalled() }, () => {
+  const r = resolveRtk();
+  assert.equal(r.found, true);
+  assert.ok(r.binDir === null || typeof r.binDir === 'string',
+    'binDir is null (already exposed on the sandbox PATH) or the dir to bind');
+});
+
+test('resolveRtk reports found: false with a null binDir when rtk is genuinely missing', { skip: rtkInstalled() }, () => {
+  const r = resolveRtk();
+  assert.equal(r.found, false);
+  assert.equal(r.binDir, null);
 });
