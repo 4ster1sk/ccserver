@@ -4,9 +4,10 @@ import { FitAddon } from '@xterm/addon-fit';
 import { WebLinksAddon } from '@xterm/addon-web-links';
 import '@xterm/xterm/css/xterm.css';
 import { getThemeIds, getTheme } from '../themes.js';
-import { authWsUrl } from '../auth.js';
+import { authWsUrl, authFetch } from '../auth.js';
 import { createOsc52Handler } from '../osc52.js';
 import { dewrapSelection } from '../dewrap.js';
+import { displayPath } from '../displayPath.js';
 
 const ALL_SPECIAL_KEYS = [
   { id: 'bs', label: 'BS', data: '\x7f' },
@@ -262,6 +263,23 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
   const [themeMenuOpen, setThemeMenuOpen] = useState(false);
   const themeMenuRef = useRef(null);
   const [keyboardOpen, setKeyboardOpen] = useState(false);
+  // $HOME from /api/dirs/home, only for display: `displayPath` turns the
+  // prefix into `~` in the title/notifications while the raw cwd is kept
+  // everywhere else. The ref mirrors the state for the ws-message closure
+  // (mount effect runs once).
+  const [homeDir, setHomeDir] = useState(null);
+  const homeDirRef = useRef(null);
+  useEffect(() => {
+    authFetch('/api/dirs/home')
+      .then((r) => r.json())
+      .then((data) => {
+        if (data.home) {
+          setHomeDir(data.home);
+          homeDirRef.current = data.home;
+        }
+      })
+      .catch(() => {});
+  }, []);
   // Explicit mobile "select text" mode: a long-press gesture alone gives no
   // feedback in a PWA (no OS haptics), so entering selection is a deliberate
   // toggle instead -- its on/off state IS the confirmation. While active,
@@ -716,7 +734,7 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
             setSchedule(null);
             if (notifyRef.current) {
               const n = notifyRef.current(appLabel(appRef.current), {
-                body: `Scheduled prompt sent in ${cwd}`,
+                body: `Scheduled prompt sent in ${displayPath(cwd, homeDirRef.current)}`,
                 icon: '/icon-192.png',
                 tag: `schedule-fired-${cwd}`,
               });
@@ -1172,7 +1190,7 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
   return (
     <div className={`terminal-view${keyboardOpen ? ' keyboard-open' : ''}${selectionMode ? ' selection-mode' : ''}`} ref={terminalViewRef}>
       <div className={`terminal-header${!sandbox && !shell ? ' no-sandbox' : ''}`}>
-        <span className="terminal-title">{sandbox ? '🔒 ' : (!shell ? '⚠️ ' : '')}{shell ? 'Terminal' : appLabel(app)}{!shell && model ? ` · ${model}` : ''} &mdash; {cwd}</span>
+        <span className="terminal-title">{sandbox ? '🔒 ' : (!shell ? '⚠️ ' : '')}{shell ? 'Terminal' : appLabel(app)}{!shell && model ? ` · ${model}` : ''} &mdash; {displayPath(cwd, homeDir)}</span>
         <div className="header-actions">
           <div className="theme-picker" ref={themeMenuRef}>
             <button

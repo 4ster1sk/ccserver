@@ -121,6 +121,11 @@ test('combo launch is single-slot per directory: relaunching the same cwd activa
 
   try {
     // Navigate the browser to the temp project dir: / -> tmp -> <dirName>.
+    // Seed last-dir to '/' first so the breadcrumb root is the literal "/"
+    // crumb (a fresh profile jumps to $HOME, where the root crumb renders
+    // as "~" and this navigation would be nondeterministic).
+    await page.goto('/');
+    await page.evaluate(() => localStorage.setItem('ccserver-last-dir', '/'));
     await page.goto('/');
     await page.locator('.breadcrumb-item', { hasText: '/' }).first().click();
     await page.locator('.dir-item', { hasText: 'tmp' }).first().click();
