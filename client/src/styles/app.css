@@ -688,6 +688,21 @@ body {
   background: var(--bg-surface);
 }
 
+.session-body {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+  gap: 4px;
+}
+
+.session-item-top {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
 .session-icon {
   font-size: 14px;
   flex-shrink: 0;
@@ -698,10 +713,30 @@ body {
 .session-cwd {
   font-family: 'JetBrains Mono', 'Fira Code', monospace;
   font-size: 13px;
-  flex: 1;
+  width: 100%;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* >= 800px: revert to a single-line item (cwd then status right-aligned) */
+@media (min-width: 800px) {
+  .session-body {
+    flex-direction: row-reverse;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .session-item-top {
+    justify-content: flex-start;
+    flex-shrink: 0;
+  }
+
+  .session-cwd {
+    width: auto;
+    flex: 1;
+    min-width: 0;
+  }
 }
 
 .session-status {
@@ -752,7 +787,6 @@ body {
   font-size: 12px;
   line-height: 1;
   flex-shrink: 0;
-  margin-left: 8px;
 }
 
 /* Directory list */
