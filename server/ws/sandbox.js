@@ -1020,9 +1020,10 @@ export function buildMinimalSandboxSpawn({ cwd, targetCommand }) {
 //                 to bind into the sandbox at a fixed path. null when the
 //                 session gets no notify MCP injection.
 //   reuseSandboxHome - false to start a *fresh* persistent HOME for this
-//                 launch: the previous per-project HOME is wiped (rmSync) and
-//                 recreated empty. True (default) keeps it. Only meaningful
-//                 when persistentHome is enabled in the config; the caller
+//                 launch: the previous per-project HOME is wiped (via the same
+//                 escalated removeTree as deleteSandboxHome) and recreated
+//                 empty. True (default) keeps it. Only meaningful when
+//                 persistentHome is enabled in the config; the caller
 //                 (sessionManager) guards against wiping a HOME that another
 //                 live sandboxed session is still using.
 export function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, mcpSocketPath = null, notifySocketPath = null, reuseSandboxHome = true }) {
@@ -1047,9 +1048,16 @@ export function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, mcpSoc
   if (persistentHome) {
     homeDir = persistentHomeDir(cwd);
     if (!reuseSandboxHome) {
-      try {
-        rmSync(homeDir, { recursive: true, force: true });
-      } catch { /* best effort -- the fresh bind below replaces it anyway */ }
+      // "新規作成" must start from a clean HOME. A plain rmSync silently
+      // fails on subuid-owned files (a nested dockerd wrote to the /tmp-bound
+      // .ccserver-tmp) and the --bind below would then expose the stale
+      // content as if it were fresh. Use the same escalated removal as
+      // deleteSandboxHome, and refuse the launch rather than boot into a
+      // stale HOME (e.g. a planted .bashrc) if it still cannot be wiped.
+      const wipeErr = removeTree(homeDir);
+      if (wipeErr) {
+        throw new Error(`failed to wipe the previous sandbox HOME (${wipeErr}); refusing a "fresh" launch over stale state`);
+      }
     }
     mkdirSync(homeDir, { recursive: true });
     // Remember which project this HOME belongs to (settings-page labels).
