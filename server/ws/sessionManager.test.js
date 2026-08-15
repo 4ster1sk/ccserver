@@ -18,6 +18,7 @@ import { mkdtempSync, rmSync, readFileSync, writeFileSync, unlinkSync, existsSyn
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { persistentHomeDir } from './sandbox.js';
 
 let runtimeDir;
 let groupManager;
@@ -693,5 +694,52 @@ test('createSession notify identity: explicit projectName wins, cwd basename is 
     else process.env.CCSERVER_SANDBOX_CONFIG = prevCfg;
     try { rmSync(binDir, { recursive: true, force: true }); } catch { /* ignore */ }
     try { rmSync(cfgDir, { recursive: true, force: true }); } catch { /* ignore */ }
+  }
+});
+
+// The reuse-dialog safety rule: a "new sandbox" (wipe of the previous
+// persistent HOME) is refused while another LIVE, SANDBOXED session of the
+// same project is still using that HOME. Unsandboxed sessions don't bind the
+// persistent HOME and are unaffected; exited sessions aren't "in use".
+test('sandboxHomeConflict: refuses a wipe while a live sandboxed session shares the HOME', () => {
+  const prevHome = process.env.CCSERVER_SANDBOX_HOME_ROOT;
+  process.env.CCSERVER_SANDBOX_HOME_ROOT = join(runtimeDir, 'sandbox-home');
+  try {
+    const cwd = '/srv/proj';
+    const target = persistentHomeDir(cwd);
+    const liveSandboxed = { exited: false, sandbox: true, cwd };
+    const liveUnsandboxed = { exited: false, sandbox: false, cwd };
+    const otherProject = { exited: false, sandbox: true, cwd: '/srv/other' };
+    const exitedSandboxed = { exited: true, sandbox: true, cwd };
+    assert.equal(sessionManager.sandboxHomeConflict(target, [liveSandboxed]), true);
+    assert.equal(sessionManager.sandboxHomeConflict(target, [liveUnsandboxed]), false, 'unsandboxed sessions are unaffected');
+    assert.equal(sessionManager.sandboxHomeConflict(target, [otherProject]), false, 'other projects are unaffected');
+    assert.equal(sessionManager.sandboxHomeConflict(target, [exitedSandboxed]), false, 'exited sessions are not in use');
+    assert.equal(sessionManager.sandboxHomeConflict(target, []), false);
+    assert.equal(sessionManager.sandboxHomeConflict(persistentHomeDir('/srv/proj/'), [liveSandboxed]), true, 'cwd spelling variants normalize to the same HOME');
+  } finally {
+    if (prevHome === undefined) delete process.env.CCSERVER_SANDBOX_HOME_ROOT;
+    else process.env.CCSERVER_SANDBOX_HOME_ROOT = prevHome;
+  }
+});
+
+// sandboxHomeInUse is the endpoint-facing count built from the same rule;
+// with only shell (unsandboxed) sessions in the registry it must read 0 for
+// any cwd.
+test('sandboxHomeInUse counts only live sandboxed sessions', () => {
+  const prevHome = process.env.CCSERVER_SANDBOX_HOME_ROOT;
+  process.env.CCSERVER_SANDBOX_HOME_ROOT = join(runtimeDir, 'sandbox-home');
+  try {
+    const shell = sessionManager.createSession({ cwd: '/tmp', cols: 80, rows: 24, shell: true, sandbox: false });
+    assert.ok(shell.session, 'shell session should spawn');
+    try {
+      assert.equal(sessionManager.sandboxHomeInUse('/tmp'), 0, 'a live shell session does not hold the persistent HOME');
+      assert.equal(sessionManager.sandboxHomeInUse('/srv/unrelated'), 0);
+    } finally {
+      sessionManager.destroySession(shell.sessionId, { keepSchedule: false });
+    }
+  } finally {
+    if (prevHome === undefined) delete process.env.CCSERVER_SANDBOX_HOME_ROOT;
+    else process.env.CCSERVER_SANDBOX_HOME_ROOT = prevHome;
   }
 });

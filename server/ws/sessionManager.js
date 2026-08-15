@@ -4,7 +4,7 @@ import { execFileSync } from 'node:child_process';
 import { writeFileSync, readFileSync, unlinkSync, rmSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { buildSandboxSpawn, resolveApp, sandboxAvailable, loadSandboxConfig } from './sandbox.js';
+import { buildSandboxSpawn, resolveApp, sandboxAvailable, loadSandboxConfig, persistentHomeDir } from './sandbox.js';
 import { buildMcpConfigArgsAndEnv } from './mcpConfig.js';
 import { shouldInjectNotify, notifyEnabled, getNotifySockPath, notifyBrokerRunning } from './notify.js';
 import { createScreenModel, SCREEN_ROWS } from './screenModel.js';
@@ -101,7 +101,7 @@ function normalizeModel(model) {
   return typeof model === 'string' && model.length > 0 ? model : null;
 }
 
-export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox, sandboxOpts, app, model, resumeLast, groupId = null, groupRole = null, mcpSocketPath = null, projectName = null }) {
+export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox, sandboxOpts, app, model, resumeLast, groupId = null, groupRole = null, mcpSocketPath = null, projectName = null, reuseSandboxHome = true }) {
   const id = randomUUID();
 
   // claude (and likely opencode) aborts immediately (SIGABRT, exit 134, no
@@ -238,8 +238,23 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox
   let sandboxGitBrokerProc = null;
   let sandboxGitBrokerDir = null;
   if (sandboxRequested) {
+    // A fresh (wipe) sandbox is refused while another sandbox of the same
+    // project is still using the same persistent HOME -- deleting the host dir
+    // under a live bind mount would corrupt that session. The client disables
+    // the "new" option in the same situation (GET /api/sandbox/status), so
+    // this is the authoritative backstop.
+    if (loadSandboxConfig().persistentHome && !reuseSandboxHome) {
+      const targetPath = persistentHomeDir(cwd);
+      if (sandboxHomeConflict(targetPath, [...sessions.values()])) {
+        return {
+          sessionId: id,
+          session: null,
+          error: 'このプロジェクトのサンドボックスを利用中のセッションがあるため、新規作成（前回環境の破棄）できません。先にタブを閉じてください。',
+        };
+      }
+    }
     try {
-      const spawn = buildSandboxSpawn({ cwd, targetCommand: [command, ...args], app: sessionApp, sandboxOpts, mcpSocketPath, notifySocketPath });
+      const spawn = buildSandboxSpawn({ cwd, targetCommand: [command, ...args], app: sessionApp, sandboxOpts, mcpSocketPath, notifySocketPath, reuseSandboxHome });
       command = spawn.command;
       args = spawn.args;
       sandboxStateDir = spawn.stateDir || null;
@@ -315,6 +330,7 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox
     sandboxStateDir, // rootlesskit state dir to remove on teardown (docker only)
     sandboxGitBrokerProc, // host-side git-broker child process, killed on teardown
     sandboxGitBrokerDir, // its runtime dir (socket + allow-list), removed on teardown
+    reuseSandboxHome, // true = keep the previous persistent HOME, false = started fresh (wiped)
     ptyProcess,
     socket: null,
     outputBuffer: [],
@@ -679,6 +695,39 @@ export function scheduledPromptPublic(session) {
   if (!session?.scheduleId) return null;
   const s = schedules.get(session.scheduleId);
   return s ? { at: s.at, text: s.text } : null;
+}
+
+// Does any live, sandboxed session share `targetPath` as its persistent HOME?
+// Used to refuse a "new sandbox" (wipe) while another sandbox of the same
+// project is still using it: deleting the host dir under an active bind mount
+// would corrupt that session's HOME. Unsandboxed sessions don't bind the
+// persistent HOME and are unaffected. Exported for unit testing -- pure over
+// the live-session list.
+export function sandboxHomeConflict(targetPath, liveSessions) {
+  for (const s of liveSessions) {
+    if (!s || s.exited || !s.sandbox) continue;
+    if (persistentHomeDir(s.cwd) === targetPath) return true;
+  }
+  return false;
+}
+
+// Count of live sandboxed sessions sharing cwd's persistent HOME. Surfaced by
+// GET /api/sandbox/status so the client can disable the destructive "new"
+// option while the project's sandbox is in use.
+export function sandboxHomeInUse(cwd) {
+  return sandboxHomeInUsePath(persistentHomeDir(cwd));
+}
+
+// Count of live sandboxed sessions whose persistent HOME is exactly
+// `homePath`. Backs the settings page (GET /api/sandboxes) and the delete
+// guard: a sandbox that is currently mounted by a live session must not be
+// deleted from under it.
+export function sandboxHomeInUsePath(homePath) {
+  let n = 0;
+  for (const s of sessions.values()) {
+    if (sandboxHomeConflict(homePath, [s])) n++;
+  }
+  return n;
 }
 
 // Detach the schedule from a session that's going away, but keep it armed so it

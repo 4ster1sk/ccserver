@@ -16,10 +16,10 @@
 // outer layer. See memory: sandbox-dind-recipe.
 
 import { homedir } from 'node:os';
-import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, statSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { startGitBroker } from './git-broker.js';
 
@@ -75,8 +75,228 @@ function newStateDir() {
 }
 
 // Where per-project docker data-roots (images/layers) live, so they persist
-// across sessions of the same project.
-const DIND_ROOT = join(HOME, '.local', 'share', 'ccserver-sandbox', 'dind');
+// across sessions of the same project. Overridable via
+// CCSERVER_SANDBOX_DIND_ROOT for tests/alternate layouts.
+function dindRoot() {
+  return process.env.CCSERVER_SANDBOX_DIND_ROOT
+    || join(HOME, '.local', 'share', 'ccserver-sandbox', 'dind');
+}
+
+// Where each project's persistent writable HOME lives (see buildBwrapArgs).
+// Bound at HOME inside the sandbox so tools/caches installed by a previous
+// session of the same project survive a relaunch. Overridable via
+// CCSERVER_SANDBOX_HOME_ROOT for tests/alternate layouts.
+export function sandboxHomeRoot() {
+  return process.env.CCSERVER_SANDBOX_HOME_ROOT
+    || join(HOME, '.local', 'share', 'ccserver-sandbox', 'home');
+}
+
+// The lock file a rootless dockerd holds (flock, see sandbox-entrypoint.sh's
+// $DATA_ROOT/.ccserver-dockerd.lock) for the whole daemon lifetime. Its
+// presence on the host tells us whether a daemon -- possibly leaked from an
+// old session -- is still using a data-root.
+const DOCKERD_LOCK_NAME = '.ccserver-dockerd.lock';
+
+// True when a (live or leaked) dockerd currently holds the data-root lock for
+// this sandbox slug. Deletion must be refused then: the daemon's live overlay
+// mounts defeat every removal strategy (EBUSY) and deleting under a running
+// daemon would corrupt the data-root. flock(1) is the same util-linux binary
+// the entrypoint uses; -n makes it exit non-zero immediately when the lock is
+// held. A missing flock (ENOENT) must NOT hard-block deletion, so only a
+// non-ENOENT failure counts as "held".
+function dindLockHeld(name) {
+  const lock = join(dindRoot(), name, DOCKERD_LOCK_NAME);
+  if (!existsSync(lock)) return false;
+  try {
+    execFileSync('flock', ['-n', lock, 'true'], { stdio: 'ignore' });
+    return false;
+  } catch (err) {
+    return err.code !== 'ENOENT';
+  }
+}
+
+// Recursively remove a directory tree, escalating through successively more
+// privileged strategies when a plain rmSync hits a permission error. Returns
+// null on success, or an error message when every strategy failed (the caller
+// turns that into a clean HTTP error instead of an opaque EACCES 500).
+function removeTree(path) {
+  if (!existsSync(path)) return null;
+  const tryRemove = (fn) => {
+    try {
+      fn();
+      if (!existsSync(path)) return true;
+    } catch {
+      // fall through to the next strategy
+    }
+    return false;
+  };
+  if (tryRemove(() => rmSync(path, { recursive: true, force: true }))) return null;
+  // The offending dirs may be OURS but locked down (mode 000). As owner,
+  // chmod -R u+rwx fixes listing with no namespace dance; cheap retry.
+  if (tryRemove(() => {
+    chmodSync(path, 0o700);
+    execFileSync('chmod', ['-R', 'u+rwx', path], { stdio: 'ignore' });
+    rmSync(path, { recursive: true, force: true });
+  })) return null;
+  if (tryRemove(() => removeTreeViaRootlesskit(path))) return null;
+  if (tryRemove(() => removeTreeViaSudo(path))) return null;
+  return `permission denied removing ${path}; run manually: sudo rm -rf "${path}"`;
+}
+
+// The persistent docker data-root is written by a rootless dockerd running
+// inside a user namespace, so files created by container processes as a
+// non-root uid are owned on the host by a subuid (e.g. 100000+ for the ast
+// user) -- uids the ccserver process can neither read nor delete. containerd's
+// overlayfs snapshot dirs
+// (…/io.containerd.snapshotter.v1.overlayfs/snapshots/<id>/…) are exactly
+// where those subuid-owned files land, which is why deleting a data-root used
+// to fail with "EACCES: permission denied, scandir …/work/work". A fresh
+// rootlesskit --net=none userns uses the SAME subuid mapping the sandbox used,
+// so there the files are owned by mapped (non-root) uids that userns-root's
+// capabilities make deletable.
+function removeTreeViaRootlesskit(path) {
+  if (!existsSync(ROOTLESSKIT)) return;
+  const stateDir = join(XDG_RUNTIME_DIR, `ccserver-dind-cleanup-${randomUUID()}`);
+  mkdirSync(stateDir, { recursive: true });
+  try {
+    execFileSync(ROOTLESSKIT, [
+      `--state-dir=${stateDir}`,
+      '--net=none',
+      '--disable-host-loopback',
+      'rm', '-rf', path,
+    ], { stdio: 'ignore', timeout: 120_000 });
+  } finally {
+    try { rmSync(stateDir, { recursive: true, force: true }); } catch { /* best effort */ }
+  }
+}
+
+// Last resort for trees owned by a real root OUTSIDE the userns mapping (e.g.
+// a data-root created by a server that once ran as root): passwordless sudo.
+// Only ever runs when plain removal failed and sudo -n is actually configured.
+function removeTreeViaSudo(path) {
+  try {
+    execFileSync('sudo', ['-n', 'true'], { stdio: 'ignore' });
+    execFileSync('sudo', ['-n', 'rm', '-rf', path], { stdio: 'ignore', timeout: 120_000 });
+  } catch {
+    // no passwordless sudo, or sudo itself failed
+  }
+}
+
+// Deterministic per-project path of the persistent HOME. resolve() normalizes
+// spelling variants (trailing slash, "..", ...) so they all map to one dir,
+// mirroring orchestratorDirForCwd in routes/groups.js.
+export function persistentHomeDir(cwd) {
+  return join(sandboxHomeRoot(), slugify(resolve(cwd)));
+}
+
+// Public status for the reuse dialog: whether persistent HOME is enabled at
+// all (sandbox.config.json's persistentHome) and whether a previous sandbox
+// already left state for this cwd.
+export function sandboxHomeStatus(cwd) {
+  const enabled = loadSandboxConfig().persistentHome;
+  const path = persistentHomeDir(cwd);
+  let exists = false;
+  try { exists = statSync(path).isDirectory(); } catch { /* not there yet */ }
+  return { enabled, exists, path };
+}
+
+// Sidecar index mapping a home dir's slug back to the project path it was
+// created for (the settings page shows real paths instead of opaque slugs).
+// Lives in the home root itself -- OUTSIDE every sandbox's HOME -- so a
+// sandboxed process never sees it. Best-effort: a missing/corrupt index just
+// falls back to displaying the slug.
+function homeIndexPath() {
+  return join(sandboxHomeRoot(), '.index.json');
+}
+
+function readHomeIndex() {
+  try {
+    const raw = JSON.parse(readFileSync(homeIndexPath(), 'utf-8'));
+    return raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
+  } catch {
+    return {};
+  }
+}
+
+// Remember the project path a persistent HOME was created for. Called from
+// buildSandboxSpawn; sync (single-threaded) so concurrent launches can't race.
+function recordSandboxHome(cwd) {
+  const slug = slugify(resolve(cwd));
+  const index = readHomeIndex();
+  if (index[slug] === resolve(cwd)) return;
+  index[slug] = resolve(cwd);
+  try { writeFileSync(homeIndexPath(), JSON.stringify(index)); } catch { /* best effort */ }
+}
+
+// Enumerate the persistent sandbox homes for the settings page:
+//   { name (slug), path, cwd (real project path when the index knows it) }
+export function listSandboxHomes() {
+  const root = sandboxHomeRoot();
+  const index = readHomeIndex();
+  const entries = [];
+  let names = [];
+  try { names = readdirSync(root); } catch { return []; }
+  for (const name of names) {
+    const path = join(root, name);
+    let isDir = false;
+    try { isDir = statSync(path).isDirectory(); } catch { /* not a dir */ }
+    if (!isDir) continue;
+    entries.push({ name, path, cwd: typeof index[name] === 'string' ? index[name] : null });
+  }
+  return entries;
+}
+
+// Apparent size in bytes of a sandbox home (du -sb; recursive stat fallback).
+export function sandboxHomeSize(path) {
+  try {
+    const out = execFileSync('du', ['-sb', path], { encoding: 'utf-8', timeout: 30_000 });
+    const m = /^\s*(\d+)/.exec(out);
+    if (m) return Number(m[1]);
+  } catch { /* fall through to the stat walk */ }
+  let total = 0;
+  const walk = (p) => {
+    let st;
+    try { st = statSync(p); } catch { return; }
+    if (st.isDirectory()) {
+      let children;
+      try { children = readdirSync(p); } catch { return; }
+      for (const c of children) walk(join(p, c));
+    } else {
+      total += st.size;
+    }
+  };
+  walk(path);
+  return total;
+}
+
+// Delete a sandbox: its persistent HOME plus the matching docker data-root
+// (both keyed by the same slug). Name must be a bare slug (no separators) so
+// the caller can never escape the roots. The in-use guard lives in the route
+// (see sessionManager.sandboxHomeInUsePath). Removal is permission-tolerant:
+// containerd overlayfs snapshot dirs can be owned by subuid-mapped uids the
+// server can't read (see removeTree), and a still-running dockerd must block
+// the whole delete rather than corrupt its data-root (dindLockHeld).
+export function deleteSandboxHome(name) {
+  if (!/^[A-Za-z0-9_]+$/.test(name)) {
+    return { ok: false, error: 'invalid-sandbox-name' };
+  }
+  if (dindLockHeld(name)) {
+    return { ok: false, error: 'docker-daemon-in-use' };
+  }
+  const homeErr = removeTree(join(sandboxHomeRoot(), name));
+  const dindErr = removeTree(join(dindRoot(), name));
+  if (homeErr || dindErr) {
+    // Keep the index entry on partial failure so the settings page still
+    // shows the sandbox and the user can retry.
+    return { ok: false, error: homeErr || dindErr };
+  }
+  const index = readHomeIndex();
+  if (Object.prototype.hasOwnProperty.call(index, name)) {
+    delete index[name];
+    try { writeFileSync(homeIndexPath(), JSON.stringify(index)); } catch { /* best effort */ }
+  }
+  return { ok: true };
+}
 
 // PATH set inside the sandbox at runtime (see buildBwrapArgs' --setenv PATH
 // below). Resolving the bare "claude" command for install-dir detection must
@@ -111,6 +331,11 @@ export function loadSandboxConfig() {
     raw = {};
   }
   const docker = raw.docker !== false; // default on
+  // Keep a persistent writable HOME per project (~/.local/share/ccserver-
+  // sandbox/home/<project>, see persistentHomeDir) so tools/caches installed
+  // inside the sandbox survive a session relaunch; the client offers a reuse
+  // dialog and "new" wipes it. false restores the legacy fresh-tmpfs-HOME.
+  const persistentHome = raw.persistentHome !== false; // default on
   const gpg = raw.gpg === true;        // forward gpg-agent + ~/.gnupg (opt-in)
   // Forward the host's ssh-agent socket (opt-in, like gpg). Not needed for
   // HTTPS git (gitBroker handles that entirely host-side, see below) or for
@@ -170,7 +395,7 @@ export function loadSandboxConfig() {
   // for setups that don't want it; the client also hides the button on its
   // own when claude is not installed (the capture would never succeed).
   const showUsage = raw.showUsage !== false;
-  return { docker, gpg, sshAgent, gitBroker, forceSandbox, binds, env, claudeBin, defaultApp, showUsage, notify: { discordWebhook, subscriptions, hostname: notifyHostname, attribution: notifyAttribution }, configPath };
+  return { docker, persistentHome, gpg, sshAgent, gitBroker, forceSandbox, binds, env, claudeBin, defaultApp, showUsage, notify: { discordWebhook, subscriptions, hostname: notifyHostname, attribution: notifyAttribution }, configPath };
 }
 
 // Locate an executable named `cmd` on the given PATH (or return it as-is if
@@ -433,7 +658,9 @@ export function sandboxAvailable() {
 
 // Build the bwrap arguments (everything after the `bwrap` executable, up to
 // but not including the trailing `-- <cmd...>`).
-function buildBwrapArgs({ cwd, docker, gpg, extraBinds, extraEnv, authSock, stateDir, claudeDir, gitBroker, mcpSocketPath, notifySocketPath }) {
+//   homeDir - host path of the persistent per-project HOME to bind at HOME
+//             (see persistentHomeDir), or null for a fresh tmpfs HOME.
+function buildBwrapArgs({ cwd, docker, gpg, extraBinds, extraEnv, authSock, stateDir, claudeDir, gitBroker, mcpSocketPath, notifySocketPath, homeDir = null }) {
   const args = [
     '--die-with-parent',
     // Own PID namespace so the whole sandbox tree is reaped as a unit. Without
@@ -453,10 +680,29 @@ function buildBwrapArgs({ cwd, docker, gpg, extraBinds, extraEnv, authSock, stat
     '--ro-bind', '/sys', '/sys',
     '--proc', '/proc',
     '--dev', '/dev',
-    '--tmpfs', '/tmp',
-    // Empty writable HOME; only the config below is exposed.
-    '--tmpfs', HOME,
   ];
+
+  // /tmp: with a persistent per-project HOME the project's /tmp persists too,
+  // so tooling an agent installs into /tmp (e.g. an extracted Node runtime)
+  // survives relaunches instead of being wiped every session. It lives under
+  // the persistent home dir, so the reuse/wipe/delete flows for the HOME
+  // govern it as well. With a fresh tmpfs HOME (persistentHome off, or the
+  // minimal throwaway /usage sandbox) /tmp stays a plain tmpfs.
+  if (homeDir) {
+    const tmpDir = join(homeDir, '.ccserver-tmp');
+    mkdirSync(tmpDir, { recursive: true });
+    args.push('--bind', tmpDir, '/tmp');
+  } else {
+    args.push('--tmpfs', '/tmp');
+  }
+
+  // HOME: either the persistent per-project dir (writable, survives relaunches)
+  // or a fresh tmpfs. Only the config below is exposed on top either way.
+  if (homeDir) {
+    args.push('--bind', homeDir, HOME);
+  } else {
+    args.push('--tmpfs', HOME);
+  }
 
   // Always give the sandbox its own private, writable /run (a fresh tmpfs).
   // We deliberately do NOT reuse the host's /run: rootlesskit's older approach
@@ -526,12 +772,29 @@ function buildBwrapArgs({ cwd, docker, gpg, extraBinds, extraEnv, authSock, stat
     [opencodeState, 'rw'],
     [copilotConfig, 'rw'],
     [copilotHome, 'rw'],
-    [join(HOME, '.local', 'bin'), 'ro'],
   ];
   for (const [src, mode] of appBinds) {
     if (existsSync(src)) {
       args.push(mode === 'ro' ? '--ro-bind' : '--bind', src, src);
     }
+  }
+
+  // ~/.local/bin handling. With the legacy tmpfs HOME it is ro-bound at its
+  // real path so the user's own tools resolve. With a persistent HOME that ro
+  // bind would sit ON TOP of the persistent home's own writable .local/bin,
+  // silently blocking agent-installed tools (pip/npm --user console scripts)
+  // from ever persisting. Instead the host bin is exposed at a secondary path
+  // (…/.local/bin-host) appended to PATH, so both the persistent home's
+  // agent-installed tools AND the host user's tools resolve.
+  const hostLocalBin = join(HOME, '.local', 'bin');
+  let sandboxPath = SANDBOX_PATH;
+  if (homeDir) {
+    const hostBinDest = join(HOME, '.local', 'bin-host');
+    mkdirSync(join(homeDir, '.local', 'bin-host'), { recursive: true });
+    args.push('--ro-bind-try', hostLocalBin, hostBinDest);
+    sandboxPath = `${SANDBOX_PATH}:${hostBinDest}`;
+  } else if (existsSync(hostLocalBin)) {
+    args.push('--ro-bind', hostLocalBin, hostLocalBin);
   }
 
   // The agent install itself, when it lives outside the exposed trees (e.g.
@@ -543,7 +806,7 @@ function buildBwrapArgs({ cwd, docker, gpg, extraBinds, extraEnv, authSock, stat
 
   // Persistent per-project docker data-root, mounted at the default location.
   if (docker) {
-    const dataRoot = join(DIND_ROOT, slugify(cwd));
+    const dataRoot = join(dindRoot(), slugify(cwd));
     mkdirSync(dataRoot, { recursive: true });
     args.push('--bind', dataRoot, join(HOME, '.local', 'share', 'docker'));
   }
@@ -642,9 +905,10 @@ function buildBwrapArgs({ cwd, docker, gpg, extraBinds, extraEnv, authSock, stat
     }
 
     // Generated gitconfig points credential.helper at our script and forces
-    // useHttpPath (see sandbox-gitconfig for why). HOME is a fresh tmpfs
-    // (above) with nothing else binding ~/.gitconfig, so this is a plain
-    // bind, no merge/override gymnastics needed.
+    // useHttpPath (see sandbox-gitconfig for why). Bound over HOME/.gitconfig
+    // (a fresh tmpfs normally, or the persistent home's -- an agent-written
+    // one is shadowed on purpose so the broker's credential helper can't be
+    // overridden by a config that would leak credentials).
     args.push('--ro-bind', GENERATED_GITCONFIG, join(HOME, '.gitconfig'));
 
     args.push(
@@ -682,7 +946,7 @@ function buildBwrapArgs({ cwd, docker, gpg, extraBinds, extraEnv, authSock, stat
   args.push(
     '--setenv', 'HOME', HOME,
     '--setenv', 'XDG_RUNTIME_DIR', XDG_RUNTIME_DIR,
-    '--setenv', 'PATH', SANDBOX_PATH,
+    '--setenv', 'PATH', sandboxPath,
     '--setenv', 'CCSANDBOX_DOCKER', docker ? '1' : '0',
   );
   if (docker) {
@@ -726,6 +990,9 @@ export function buildMinimalSandboxSpawn({ cwd, targetCommand }) {
     gitBroker: null,
     mcpSocketPath: null,
     notifySocketPath: null,
+    // The /usage capture is a throwaway read: it must not create (or depend
+    // on) a persistent per-project HOME.
+    homeDir: null,
   });
   const innerCmd = [BASH, '/ccserver-sandbox-entrypoint.sh', ...withClaude(targetCommand, command)];
   return {
@@ -752,8 +1019,14 @@ export function buildMinimalSandboxSpawn({ cwd, targetCommand }) {
 //   notifySocketPath - host path of the process-global ccserver-notify socket
 //                 to bind into the sandbox at a fixed path. null when the
 //                 session gets no notify MCP injection.
-export function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, mcpSocketPath = null, notifySocketPath = null }) {
-  const { docker: cfgDocker, gpg: cfgGpg, sshAgent: cfgSshAgent, gitBroker: gitBrokerEnabled, binds, env, claudeBin } = loadSandboxConfig();
+//   reuseSandboxHome - false to start a *fresh* persistent HOME for this
+//                 launch: the previous per-project HOME is wiped (rmSync) and
+//                 recreated empty. True (default) keeps it. Only meaningful
+//                 when persistentHome is enabled in the config; the caller
+//                 (sessionManager) guards against wiping a HOME that another
+//                 live sandboxed session is still using.
+export function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, mcpSocketPath = null, notifySocketPath = null, reuseSandboxHome = true }) {
+  const { docker: cfgDocker, persistentHome, gpg: cfgGpg, sshAgent: cfgSshAgent, gitBroker: gitBrokerEnabled, binds, env, claudeBin } = loadSandboxConfig();
   const docker = cfgDocker && dockerSandboxAvailable();
   const gpg = sandboxOpts?.gpg ?? cfgGpg;
   const sshAgent = sandboxOpts?.sshAgent ?? cfgSshAgent;
@@ -765,6 +1038,23 @@ export function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, mcpSoc
   // Unique per launch (docker only); returned so the caller can remove it on
   // teardown. See newStateDir().
   const stateDir = docker ? newStateDir() : null;
+
+  // Persistent per-project HOME. reuseSandboxHome=false wipes the previous
+  // one first so the launch starts from a clean environment; the caller
+  // (sessionManager) has already refused the wipe when another live sandboxed
+  // session is still using this HOME (see sandboxHomeConflict).
+  let homeDir = null;
+  if (persistentHome) {
+    homeDir = persistentHomeDir(cwd);
+    if (!reuseSandboxHome) {
+      try {
+        rmSync(homeDir, { recursive: true, force: true });
+      } catch { /* best effort -- the fresh bind below replaces it anyway */ }
+    }
+    mkdirSync(homeDir, { recursive: true });
+    // Remember which project this HOME belongs to (settings-page labels).
+    recordSandboxHome(cwd);
+  }
 
   // Computes the repo/submodule allow-list once and spawns the host-side
   // broker for this launch; see git-broker.js. The caller (sessionManager)
@@ -792,7 +1082,7 @@ export function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, mcpSoc
   }
 
   const { command, installDir } = resolveApp(app, claudeBin);
-  const bwrapArgs = buildBwrapArgs({ cwd, docker, gpg, extraBinds: binds, extraEnv: env, authSock, stateDir, claudeDir: installDir, gitBroker, mcpSocketPath, notifySocketPath });
+  const bwrapArgs = buildBwrapArgs({ cwd, docker, gpg, extraBinds: binds, extraEnv: env, authSock, stateDir, claudeDir: installDir, gitBroker, mcpSocketPath, notifySocketPath, homeDir });
   const innerCmd = [BASH, '/ccserver-sandbox-entrypoint.sh', ...withClaude(targetCommand, command)];
 
   const gitBrokerFields = {

@@ -218,7 +218,7 @@ function osc52Response(text) {
 
 const themeIds = getThemeIds();
 
-export default function TerminalView({ cwd, onClose, claudeSessionId, shell, sandbox, sandboxOpts, app = 'claude', model = null, resume = false, notify, notifyEnabled, notifyPermission, onToggleNotify, visible, onSessionId, onExited, attachSessionId, xtermTheme, themeId, onThemeChange, tabId, onFocusTab, groupId, groupRole }) {
+export default function TerminalView({ cwd, onClose, claudeSessionId, shell, sandbox, sandboxOpts, reuseSandboxHome = true, app = 'claude', model = null, resume = false, notify, notifyEnabled, notifyPermission, onToggleNotify, visible, onSessionId, onExited, attachSessionId, xtermTheme, themeId, onThemeChange, tabId, onFocusTab, groupId, groupRole }) {
   const isMobile = useMemo(() => 'ontouchstart' in window, []);
   const terminalRef = useRef(null);
   const terminalViewRef = useRef(null);
@@ -233,6 +233,7 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
   const shellRef = useRef(shell);
   const sandboxRef = useRef(sandbox);
   const sandboxOptsRef = useRef(sandboxOpts);
+  const reuseSandboxHomeRef = useRef(reuseSandboxHome);
   const appRef = useRef(app);
   const modelRef = useRef(model);
   const resumeRef = useRef(resume);
@@ -673,6 +674,7 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
             shell: !!shellRef.current,
             sandbox: !!sandboxRef.current,
             sandboxOpts: sandboxOptsRef.current || null,
+            reuseSandboxHome: reuseSandboxHomeRef.current !== false,
             app: appRef.current,
             model: shellRef.current ? null : modelRef.current,
             // Group membership is carried into a re-launch so the server can
@@ -783,6 +785,7 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
                 shell: !!shellRef.current,
                 sandbox: !!sandboxRef.current,
                 sandboxOpts: sandboxOptsRef.current || null,
+                reuseSandboxHome: reuseSandboxHomeRef.current !== false,
                 app: appRef.current,
                 model: shellRef.current ? null : modelRef.current,
                 groupId: groupId || null,
