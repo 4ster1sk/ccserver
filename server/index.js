@@ -11,6 +11,7 @@ import { systemRoute } from './routes/system.js';
 import { usageRoute } from './routes/usage.js';
 import { groupsRoute } from './routes/groups.js';
 import { sandboxRoute } from './routes/sandbox.js';
+import { sandboxesRoute } from './routes/sandboxes.js';
 import { terminalWs } from './ws/terminal.js';
 import { gracefulShutdown, restoreSchedules } from './ws/sessionManager.js';
 import { restoreGroups } from './ws/groupManager.js';
@@ -45,6 +46,7 @@ await fastify.register(systemRoute, { prefix: '/api' });
 await fastify.register(usageRoute, { prefix: '/api' });
 await fastify.register(groupsRoute, { prefix: '/api' });
 await fastify.register(sandboxRoute, { prefix: '/api' });
+await fastify.register(sandboxesRoute, { prefix: '/api' });
 await fastify.register(terminalWs);
 
 if (process.env.NODE_ENV === 'production') {
