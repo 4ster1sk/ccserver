@@ -9,6 +9,13 @@
 #   rtk               - "Rust Token Killer" CLI proxy (static binary) from
 #                       GitHub releases, pinned version + sha256, placed at
 #                       $HOME/.local/bin/rtk (first entry on the sandbox PATH).
+#                       After install it also runs `rtk init -g --opencode
+#                       --no-patch` so the opencode plugin
+#                       ($HOME/.config/opencode/plugins/rtk.ts) is in place and
+#                       bash commands are rewritten through rtk automatically.
+#                       The marker is only touched once BOTH the binary and the
+#                       plugin install succeed, so a failed init is retried on
+#                       the next launch.
 #   code-review-graph - pip-installed MCP + CLI, in a per-project venv at
 #                       $HOME/.local/share/crg-venv with console-script shims
 #                       symlinked into $HOME/.local/bin. The bare
@@ -111,8 +118,21 @@ install_rtk() {
     log "rtk: install to $HOME/.local/bin/rtk failed"; rm -rf "$tmp"; return 1
   fi
   rm -rf "$tmp"
+  # Install the opencode plugin so bash commands are rewritten through rtk
+  # inside opencode sessions (a tool.execute.before hook, the same mechanism as
+  # crg-plugin.ts). --opencode is global-only (rtk refuses it without -g) and
+  # --no-patch keeps it non-interactive: it writes just the plugin to
+  # $HOME/.config/opencode/plugins/rtk.ts -- the dir the sandboxed opencode
+  # reads its plugins from at startup -- and never touches CLAUDE.md or
+  # settings.json. The marker is only touched once the binary AND the plugin
+  # install succeed, so a failed init is retried next launch.
+  echo "[sandbox] rtk の opencode プラグインを設定中…"
+  if ! "$HOME/.local/bin/rtk" init -g --opencode --no-patch >>"$LOG" 2>&1; then
+    log "rtk: opencode plugin init failed (see $LOG)"
+    return 1
+  fi
   touch "$marker"
-  log "rtk $ver installed -> $HOME/.local/bin/rtk"
+  log "rtk $ver installed -> $HOME/.local/bin/rtk (+ opencode plugin)"
   echo "[sandbox] rtk 導入完了"
 }
 

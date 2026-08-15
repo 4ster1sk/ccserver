@@ -142,6 +142,7 @@ test('buildMinimalSandboxSpawn (usage capture) never provisions tools', () => {
 // Create a fake `python3` that handles `-m venv <path>` by writing the pip and
 // code-review-graph shims the provisioner expects under the venv bin dir.
 function makeFakePython3(binDir) {
+  mkdirSync(binDir, { recursive: true });
   const py = join(binDir, 'python3');
   writeFileSync(py, `#!/usr/bin/env bash
 if [ "$1" = "-m" ] && [ "$2" = "venv" ]; then
@@ -166,6 +167,7 @@ exit 1
 function runCrgProvisioner({ home, cwd, buildLog, buildExit = 0 }) {
   const binDir = join(tmpRoot, 'fakebin');
   makeFakePython3(binDir);
+  mkdirSync(cwd, { recursive: true });
   return spawnSync('bash', [PROVISION_SCRIPT], {
     cwd,
     env: {
@@ -226,4 +228,98 @@ test('provisioner: a matching marker short-circuits before any install/build wor
   assert.equal(res.status, 0);
   assert.ok(!existsSync(buildLog), 'build never invoked when the marker matches');
   assert.ok(!/インストール中/.test(res.stdout), 'no install status lines on the fast path');
+});
+
+// ---------------------------------------------------------------------------
+// rtk shell tests: a fake `curl` on PATH hands the provisioner a real tarball
+// containing an `rtk` shim (records its argv, emulates the opencode plugin
+// install, exits 0 / RTK_INIT_EXIT), so we can verify the `rtk init -g
+// --opencode --no-patch` step and the marker semantics end to end.
+// ---------------------------------------------------------------------------
+
+// Build a real gzipped tarball holding an executable `rtk` shim, and plant a
+// fake `curl` on PATH that writes it wherever download() asks.
+function makeFakeRtkDownload(binDir, tarballPath) {
+  mkdirSync(binDir, { recursive: true });
+  const srcDir = join(tmpRoot, 'rtk-src');
+  mkdirSync(join(srcDir, 'rtk'), { recursive: true });
+  writeFileSync(join(srcDir, 'rtk', 'rtk'), `#!/usr/bin/env bash
+echo "$@" >> "\${RTK_INIT_LOG:-/dev/null}"
+if [ "$1" = "init" ]; then
+  if [ "\${RTK_INIT_EXIT:-0}" != "0" ]; then exit "\${RTK_INIT_EXIT}"; fi
+  mkdir -p "$HOME/.config/opencode/plugins"
+  printf '// fake rtk plugin\\n' > "$HOME/.config/opencode/plugins/rtk.ts"
+  exit 0
+fi
+exit 0
+`);
+  chmodSync(join(srcDir, 'rtk', 'rtk'), 0o755);
+  const tar = spawnSync('tar', ['-czf', tarballPath, '-C', srcDir, 'rtk'], { encoding: 'utf8' });
+  if (tar.status !== 0) throw new Error(`tar failed: ${tar.stderr}`);
+
+  const curl = join(binDir, 'curl');
+  writeFileSync(curl, `#!/usr/bin/env bash
+dest=""
+prev=""
+for a in "$@"; do
+  if [ "$prev" = "-o" ]; then dest="$a"; fi
+  prev="$a"
+done
+cp ${tarballPath} "$dest"
+exit 0
+`);
+  chmodSync(curl, 0o755);
+}
+
+function runRtkProvisioner({ home, cwd, initLog, initExit = 0 }) {
+  const binDir = join(tmpRoot, 'rtkfakebin');
+  const tarball = join(tmpRoot, 'rtk-fake.tar.gz');
+  makeFakeRtkDownload(binDir, tarball);
+  mkdirSync(cwd, { recursive: true });
+  return spawnSync('bash', [PROVISION_SCRIPT], {
+    cwd,
+    env: {
+      HOME: home,
+      PATH: `${binDir}:${process.env.PATH}`,
+      CCSANDBOX_PROVISION_RTK: '1',
+      CCSANDBOX_PROVISION_CRG: '0',
+      CCSANDBOX_RTK_VERSION: 'v9.9.9',
+      CCSANDBOX_RTK_URL: 'https://example.invalid/rtk.tar.gz',
+      CCSANDBOX_RTK_SHA256: '',
+      RTK_INIT_LOG: initLog,
+      RTK_INIT_EXIT: String(initExit),
+    },
+    encoding: 'utf8',
+  });
+}
+
+test('provisioner installs the opencode plugin via `rtk init -g --opencode --no-patch` after the rtk binary', () => {
+  const home = join(tmpRoot, 'rtk-home-ok');
+  const cwd = join(tmpRoot, 'rtk-repo-ok');
+  const initLog = join(tmpRoot, 'rtk-init-ok.log');
+  const marker = join(home, '.local', 'share', 'ccserver-tools', 'markers', 'rtk-v9.9.9');
+  const res = runRtkProvisioner({ home, cwd, initLog });
+
+  assert.equal(res.status, 0, `provisioner exited 0 (stderr: ${res.stderr})`);
+  assert.ok(existsSync(join(home, '.local', 'bin', 'rtk')), 'rtk binary installed on the sandbox PATH');
+  const calls = readFileSync(initLog, 'utf8').trim().split('\n');
+  assert.equal(calls.length, 1, 'rtk init invoked exactly once');
+  assert.equal(calls[0], 'init -g --opencode --no-patch');
+  assert.ok(existsSync(join(home, '.config', 'opencode', 'plugins', 'rtk.ts')), 'opencode plugin installed');
+  assert.ok(existsSync(marker), 'marker written after binary + plugin install succeed');
+  assert.match(res.stdout, /rtk をインストール中…/);
+  assert.match(res.stdout, /opencode プラグインを設定中…/);
+  assert.match(res.stdout, /rtk 導入完了/);
+});
+
+test('provisioner: rtk marker is not written when the opencode plugin init fails (retried next launch)', () => {
+  const home = join(tmpRoot, 'rtk-home-fail');
+  const cwd = join(tmpRoot, 'rtk-repo-fail');
+  const initLog = join(tmpRoot, 'rtk-init-fail.log');
+  const marker = join(home, '.local', 'share', 'ccserver-tools', 'markers', 'rtk-v9.9.9');
+  const res = runRtkProvisioner({ home, cwd, initLog, initExit: 3 });
+
+  assert.equal(res.status, 1, 'provisioner reports failure via exit code');
+  assert.ok(!existsSync(marker), 'no marker on plugin init failure, so the next launch retries');
+  assert.match(readFileSync(provisionLog(home), 'utf8'), /opencode plugin init failed/);
 });
