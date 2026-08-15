@@ -32,6 +32,27 @@ test('forceSandbox defaults to false when the key is absent', () => {
   });
 });
 
+test('rtk defaults to true when the key is absent', () => {
+  withConfig({ docker: true }, () => {
+    assert.equal(loadSandboxConfig().rtk, true);
+  });
+});
+
+test('rtk is false only for an explicit false value', () => {
+  withConfig({ rtk: false }, () => {
+    assert.equal(loadSandboxConfig().rtk, false);
+  });
+  withConfig({ rtk: true }, () => {
+    assert.equal(loadSandboxConfig().rtk, true);
+  });
+  withConfig({ rtk: 'no' }, () => {
+    assert.equal(loadSandboxConfig().rtk, true, 'non-boolean falls back to the default (on)');
+  });
+  withConfig({}, () => {
+    assert.equal(loadSandboxConfig().rtk, true);
+  });
+});
+
 test('persistentHome defaults to true when the key is absent', () => {
   withConfig({ docker: true }, () => {
     assert.equal(loadSandboxConfig().persistentHome, true);
