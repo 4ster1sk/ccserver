@@ -715,10 +715,17 @@ export function sandboxHomeConflict(targetPath, liveSessions) {
 // GET /api/sandbox/status so the client can disable the destructive "new"
 // option while the project's sandbox is in use.
 export function sandboxHomeInUse(cwd) {
-  const targetPath = persistentHomeDir(cwd);
+  return sandboxHomeInUsePath(persistentHomeDir(cwd));
+}
+
+// Count of live sandboxed sessions whose persistent HOME is exactly
+// `homePath`. Backs the settings page (GET /api/sandboxes) and the delete
+// guard: a sandbox that is currently mounted by a live session must not be
+// deleted from under it.
+export function sandboxHomeInUsePath(homePath) {
   let n = 0;
   for (const s of sessions.values()) {
-    if (sandboxHomeConflict(targetPath, [s])) n++;
+    if (sandboxHomeConflict(homePath, [s])) n++;
   }
   return n;
 }
