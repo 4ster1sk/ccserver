@@ -431,7 +431,10 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
         </button>
         {breadcrumbs.map((segment, i) => {
           const sep = homeBase ? '/' : (pathRoot.includes('\\') ? '\\' : '/');
-          const path = pathRoot + breadcrumbs.slice(0, i + 1).join(sep);
+          // Join through the separator too: pathRoot (e.g. the $HOME base
+          // "/home/ast", or "/") must not glue onto the first segment --
+          // "/home/ast" + "dev" became "/home/astdev".
+          const path = [pathRoot, ...breadcrumbs.slice(0, i + 1)].join(sep);
           return (
             <span key={path}>
               <span className="breadcrumb-sep">/</span>
