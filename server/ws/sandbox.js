@@ -578,8 +578,21 @@ function buildBwrapArgs({ cwd, docker, gpg, extraBinds, extraEnv, authSock, stat
     '--ro-bind', '/sys', '/sys',
     '--proc', '/proc',
     '--dev', '/dev',
-    '--tmpfs', '/tmp',
   ];
+
+  // /tmp: with a persistent per-project HOME the project's /tmp persists too,
+  // so tooling an agent installs into /tmp (e.g. an extracted Node runtime)
+  // survives relaunches instead of being wiped every session. It lives under
+  // the persistent home dir, so the reuse/wipe/delete flows for the HOME
+  // govern it as well. With a fresh tmpfs HOME (persistentHome off, or the
+  // minimal throwaway /usage sandbox) /tmp stays a plain tmpfs.
+  if (homeDir) {
+    const tmpDir = join(homeDir, '.ccserver-tmp');
+    mkdirSync(tmpDir, { recursive: true });
+    args.push('--bind', tmpDir, '/tmp');
+  } else {
+    args.push('--tmpfs', '/tmp');
+  }
 
   // HOME: either the persistent per-project dir (writable, survives relaunches)
   // or a fresh tmpfs. Only the config below is exposed on top either way.

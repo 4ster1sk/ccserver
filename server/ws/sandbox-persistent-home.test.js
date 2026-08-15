@@ -30,8 +30,8 @@ function spawnArgs({ cwd, reuseSandboxHome = true, json = { docker: false, gitBr
 }
 
 // --bind <src> <HOME> pairs, and --tmpfs <HOME> pairs (the args array also
-// carries an unrelated early '--tmpfs /tmp', so a bare indexOf('--tmpfs')
-// must not be used).
+// carries an unrelated '--tmpfs /tmp' when persistentHome is off, so a bare
+// indexOf('--tmpfs') must not be used).
 function findBindHome(args, src) {
   for (let i = 0; i < args.length - 1; i++) {
     if (args[i] === '--bind' && args[i + 1] === src && args[i + 2] === HOME) return i;
@@ -103,11 +103,30 @@ test('reuseSandboxHome false wipes the previous HOME and starts empty', () => {
   const home = persistentHomeDir(cwd);
   assert.ok(existsSync(home));
   writeFileSync(join(home, 'installed-tool'), 'x');
-  assert.deepEqual(readdirSync(home).sort(), ['.local', 'installed-tool'], 'state survives a reuse launch');
+  assert.deepEqual(readdirSync(home).sort(), ['.ccserver-tmp', '.local', 'installed-tool'], 'state survives a reuse launch');
 
   // Second launch with reuseSandboxHome:false wipes it.
   spawnArgs({ cwd, reuseSandboxHome: false });
-  assert.deepEqual(readdirSync(home).sort(), ['.local'], 'the previous tool is gone after a fresh launch');
+  assert.deepEqual(readdirSync(home).sort(), ['.ccserver-tmp', '.local'], 'the previous tool is gone after a fresh launch');
+});
+
+test('persistentHome on binds /tmp under the persistent HOME (no fresh tmpfs)', () => {
+  const cwd = join(tmpRoot, 'proj-f');
+  const args = spawnArgs({ cwd });
+  const tmpSrc = join(persistentHomeDir(cwd), '.ccserver-tmp');
+  const idx = args.indexOf('/tmp');
+  assert.ok(idx > 0, '/tmp mount present');
+  assert.equal(args[idx - 2], '--bind', '/tmp is a bind with a persistent HOME');
+  assert.equal(args[idx - 1], tmpSrc, '/tmp source lives under the persistent HOME');
+  assert.ok(existsSync(tmpSrc), 'the /tmp dir is created on the host');
+});
+
+test('persistentHome off keeps /tmp as a fresh tmpfs', () => {
+  const cwd = join(tmpRoot, 'proj-g');
+  const args = spawnArgs({ cwd, json: { docker: false, gitBroker: false, persistentHome: false } });
+  const idx = args.indexOf('/tmp');
+  assert.ok(idx > 0, '/tmp mount present');
+  assert.equal(args[idx - 1], '--tmpfs', '/tmp stays a tmpfs without a persistent HOME');
 });
 
 test('persistent home exposes host ~/.local/bin at a secondary bin-host path on PATH', () => {
