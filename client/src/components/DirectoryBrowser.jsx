@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { authFetch, getToken } from '../auth.js';
+import { displayPath } from '../displayPath.js';
 
 const LAST_DIR_KEY = 'ccserver-last-dir';
 const SANDBOX_KEY = 'ccserver-sandbox-default';
@@ -304,7 +305,7 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
   }, [onSessionClick]);
 
   const handleDeleteSession = useCallback(async (session) => {
-    if (!window.confirm(`セッションを終了しますか?\n${session.cwd}`)) return;
+    if (!window.confirm(`セッションを終了しますか?\n${displayPath(session.cwd, homeDir)}`)) return;
     try {
       const res = await authFetch(`/api/sessions/${session.id}`, { method: 'DELETE' });
       if (!res.ok) {
@@ -315,7 +316,7 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
       setError(err.message);
     }
     fetchSessions();
-  }, [fetchSessions]);
+  }, [fetchSessions, homeDir]);
 
   const handleDownload = useCallback((file) => {
     const a = document.createElement('a');
@@ -385,8 +386,15 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
     uploadFiles(e.dataTransfer.files);
   }, [uploadFiles]);
 
-  const pathRoot = currentPath.match(/^([a-zA-Z]:\\|\/)/)?.[0] || '/';
-  const breadcrumbs = currentPath.slice(pathRoot.length).split(/[/\\]/).filter(Boolean);
+  // Under $HOME the breadcrumb root renders as `~` (title carries the real
+  // path); elsewhere the drive/root prefix is shown as before. Navigation
+  // always uses the real paths.
+  const homeBase = homeDir && homeDir !== '/'
+    && (currentPath === homeDir || currentPath.startsWith(homeDir + '/'))
+    ? (homeDir.endsWith('/') ? homeDir.slice(0, -1) : homeDir)
+    : null;
+  const pathRoot = homeBase || (currentPath.match(/^([a-zA-Z]:\\|\/)/)?.[0] || '/');
+  const breadcrumbs = currentPath.slice(homeBase ? homeBase.length : pathRoot.length).split(/[/\\]/).filter(Boolean);
 
   return (
     <div
@@ -402,11 +410,15 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
       </div>
 
       <nav className="breadcrumbs">
-        <button className="breadcrumb-item" onClick={() => navigateTo(pathRoot)}>
-          {pathRoot}
+        <button
+          className="breadcrumb-item"
+          onClick={() => navigateTo(pathRoot)}
+          title={homeBase || undefined}
+        >
+          {homeBase ? '~' : pathRoot}
         </button>
         {breadcrumbs.map((segment, i) => {
-          const sep = pathRoot.includes('\\') ? '\\' : '/';
+          const sep = homeBase ? '/' : (pathRoot.includes('\\') ? '\\' : '/');
           const path = pathRoot + breadcrumbs.slice(0, i + 1).join(sep);
           return (
             <span key={path}>
@@ -572,7 +584,7 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
                 <p className="open-menu-note">
                   {forceSandbox
                     ? 'サンドボックスがサーバー設定 (forceSandbox) で強制されています。通常起動はできません。'
-                    : `サンドボックス: 隣接プロジェクトを隔離し、内部に rootless docker を用意。GPG/ssh-agentは既定オフ、このディレクトリ (${currentPath}) に記憶されます。`}
+                    : `サンドボックス: 隣接プロジェクトを隔離し、内部に rootless docker を用意。GPG/ssh-agentは既定オフ、このディレクトリ (${displayPath(currentPath, homeDir)}) に記憶されます。`}
                 </p>
               </>
             ) : (
@@ -580,7 +592,7 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
                 <p className="open-menu-note">
                   コンボ起動: 1つのプロジェクトディレクトリで動く2つのワーカーと、
                   それらをMCP経由で操作するオーケストレーターをセットで起動します。
-                  全セッション常時サンドボックスです ({currentPath})。
+                  全セッション常時サンドボックスです ({displayPath(currentPath, homeDir)})。
                 </p>
                 <div className="open-menu-label">ワーカーA</div>
                 <div className="open-menu-app-row">
@@ -871,7 +883,7 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
                       : `${session.app === 'claude' ? 'claude' : session.app === 'copilot' ? 'copilot' : 'opencode'} · ${session.connected ? 'connected' : 'idle'}`}
                   </span>
                 </div>
-                <span className="session-cwd" title={session.cwd}>{session.cwd}</span>
+                <span className="session-cwd" title={session.cwd}>{displayPath(session.cwd, homeDir)}</span>
               </div>
               <button
                 className="btn btn-secondary session-delete-btn"
@@ -905,7 +917,7 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
                           : `group · ${g.memberCount} members · closed (click to reopen)`}
                       </span>
                     </div>
-                    <span className="session-cwd" title={g.cwd}>{g.cwd}</span>
+                    <span className="session-cwd" title={g.cwd}>{displayPath(g.cwd, homeDir)}</span>
                   </div>
                 </div>
               ))}
