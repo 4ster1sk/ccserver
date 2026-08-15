@@ -210,6 +210,22 @@ docker も安全に使えるよう、サンドボックス**内部**に rootless
 
 > **セキュリティノート**: 永続 HOME はサンドボックス内から書き込み可能な**ホスト上の永続ディレクトリ**です。侵害・暴走したセッションはこのディレクトリ内に `.bashrc` 等を仕込み、**同一プロジェクトの次回セッションで実行させる**ことができます (単発セッション内の挙動が次回以降に持ち越される点が tmpfs HOME との違いです)。対象はそのプロジェクトのディレクトリに閉じていますが、機密プロジェクトで `forceSandbox` を多層防御の一部として使う場合はこの点を考慮してください。
 
+### サンドボックス用ツールのプロビジョニング (rtk / code-review-graph)
+
+ホスト OS に何もインストールせず、サンドボックス**起動時にその HOME 内へ**ツールを導入する仕組みです (gpg / ssh-agent と同じく既定 off の opt-in。起動モーダルのサンドボックスサブオプションでセッション毎に切り替え、ディレクトリ毎に記憶されます。`sandbox.config.json` の `tools` でサーバー全体の既定も設定可)。
+
+- **rtk** (`rtk-ai/rtk`) — LLM 向け出力圧縮 CLI プロキシ。GitHub Releases から静的バイナリを取得し、`$HOME/.local/bin/rtk` に配置します (sandbox PATH の先頭なのでエージェントからそのまま `rtk` で使えます)。バージョンと sha256 をピン留めし、検証してから導入します。
+- **code-review-graph** — ナレッジグラフ MCP + CLI。`python3 -m venv $HOME/.local/share/crg-venv` に `pip install code-review-graph==<version>` し、`code-review-graph` / `crg-daemon` のシムを `$HOME/.local/bin/` に配置します。サンドボックス起動時、ccserver が claude (`--mcp-config`) / opencode (`OPENCODE_CONFIG_CONTENT`) に対して `code-review-graph serve --repo <cwd>` の MCP サーバーを注入するため、プロジェクトの `.mcp.json` / `opencode.jsonc` に書かれた**ホスト専用の絶対パスに依存せず**動作します (copilot は MCP 注入不可のため対象外)。
+
+導入は冪等です。各ツールは `$HOME/.local/share/ccserver-tools/markers/<tool>-<version>` のマーカーで導入済みを記録し、永続 HOME を再利用する限り**初回だけ**インストールされます。**「新規作成」(wipe) 起動時は HOME ごと消えるため、次回起動で再プロビジョニング**されます。
+
+注意点:
+
+- 初回の導入には**サンドボックス内からネットワーク**が必要です (rtk: ~1-3 秒、code-review-graph: pip install で ~15-60 秒)。以降の起動はマーカー照合のみでほぼ一瞬です。
+- ホストに `python3` + `venv` (`ensurepip`) が必要です (sandbox は `/usr` を ro-bind するため、ホストの python がそのまま使われます)。
+- 失敗してもセッションは起動します。ログはサンドボックス内の `$HOME/.local/share/ccserver-tools/provision.log` に残ります。
+- バージョン・URL・sha256 は `tools` を object 形式 (`{ "rtk": { "version": "v0.45.0", "url": "…", "sha256": "…" } }` など) にすることで上書きできます。既定値はコード内にピン留めされています (rtk v0.45.0 / code-review-graph 2.3.7)。
+
 ### 設定ページ (作成済みサンドボックス一覧)
 
 ディレクトリブラウザの「Select a Directory」ヘッダー右端の **スパナ (🔧)** ボタンから設定タブを開けます。設定タブには**作成済みサンドボックス**が一覧表示されます:
@@ -362,6 +378,7 @@ ccserver/
 │       ├── screenModel.js          # read_output 用の軽量仮想画面 (ANSI 解釈 + 変化検知)
 │       ├── sandbox.js              # bwrap + rootless docker サンドボックス構築
 │       ├── sandbox-entrypoint.sh
+│       ├── sandbox-provision.sh            # opt-in ツール (rtk / code-review-graph) を HOME 内に導入
 │       ├── sandbox-gh-wrapper.cjs         # サンドボックス内 gh をブローカー中継に差し替え
 │       ├── sandbox-ssh-wrapper.cjs        # サンドボックス内 ssh を許可リストでゲート
 │       ├── sandbox-git-credential-helper.cjs

@@ -159,3 +159,58 @@ test('opencode notify without a group socket registers ccserver-notify only', ()
   assert.deepEqual(Object.keys(cfg.mcp), ['ccserver-notify']);
   assert.deepEqual(cfg.mcp['ccserver-notify'].command, ['/ccserver-sandbox-mcp-bridge', 'notify']);
 });
+
+// code-review-graph MCP injection (see sandbox.js resolveTools): when the opt-in
+// tool is enabled for a sandboxed session, the server is registered against the
+// bare `code-review-graph` console script the provisioner puts on the sandbox
+// PATH, scoped with `--repo <cwd>`. Disabled by default (no tools descriptor).
+
+const TOOLS_ON = { rtk: true, codeReviewGraph: true, rtkSpec: null, crgSpec: null };
+
+test('claude + crg tool enabled: code-review-graph stdio server with --repo <cwd>', () => {
+  const { args } = buildMcpConfigArgsAndEnv('claude', { tools: TOOLS_ON, cwd: '/srv/proj' });
+  const cfg = JSON.parse(args[1]);
+  assert.deepEqual(cfg.mcpServers['code-review-graph'], {
+    type: 'stdio',
+    command: 'code-review-graph',
+    args: ['serve', '--repo', '/srv/proj'],
+  });
+});
+
+test('opencode + crg tool enabled: code-review-graph local command with --repo <cwd>', () => {
+  const { env } = buildMcpConfigArgsAndEnv('opencode', { tools: TOOLS_ON, cwd: '/srv/proj' });
+  const cfg = JSON.parse(env.OPENCODE_CONFIG_CONTENT);
+  assert.deepEqual(cfg.mcp['code-review-graph'], {
+    type: 'local',
+    command: ['code-review-graph', 'serve', '--repo', '/srv/proj'],
+  });
+});
+
+test('no --repo when cwd is omitted', () => {
+  const { args } = buildMcpConfigArgsAndEnv('claude', { tools: TOOLS_ON });
+  const cfg = JSON.parse(args[1]);
+  assert.deepEqual(cfg.mcpServers['code-review-graph'].args, ['serve']);
+});
+
+test('tools off (or absent): no code-review-graph entry is injected', () => {
+  const { args } = buildMcpConfigArgsAndEnv('claude', { tools: null, cwd: '/srv/proj' });
+  const cfg = JSON.parse(args[1]);
+  assert.equal(cfg.mcpServers['code-review-graph'], undefined);
+  const { args: args2 } = buildMcpConfigArgsAndEnv('claude', { cwd: '/srv/proj' });
+  assert.equal(JSON.parse(args2[1]).mcpServers['code-review-graph'], undefined);
+});
+
+test('crg disabled but other tools on: nothing injected', () => {
+  const { args } = buildMcpConfigArgsAndEnv('claude', {
+    tools: { rtk: true, codeReviewGraph: false, rtkSpec: null, crgSpec: null },
+    cwd: '/srv/proj',
+  });
+  const cfg = JSON.parse(args[1]);
+  assert.equal(cfg.mcpServers['code-review-graph'], undefined);
+});
+
+test('copilot never gets crg injected (no MCP injection path at all)', () => {
+  const { args, env } = buildMcpConfigArgsAndEnv('copilot', { tools: TOOLS_ON, cwd: '/srv/proj' });
+  assert.deepEqual(args, []);
+  assert.deepEqual(env, {});
+});
