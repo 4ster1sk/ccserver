@@ -9,13 +9,14 @@
 #   rtk               - "Rust Token Killer" CLI proxy (static binary) from
 #                       GitHub releases, pinned version + sha256, placed at
 #                       $HOME/.local/bin/rtk (first entry on the sandbox PATH).
-#                       After install it also runs `rtk init -g --opencode
-#                       --no-patch` so the opencode plugin
-#                       ($HOME/.config/opencode/plugins/rtk.ts) is in place and
-#                       bash commands are rewritten through rtk automatically.
-#                       The marker is only touched once BOTH the binary and the
-#                       plugin install succeed, so a failed init is retried on
-#                       the next launch.
+#                       After install it also disables rtk telemetry (so the
+#                       pty never blocks on its once-per-day [y/N] prompt) and
+#                       runs `rtk init -g --opencode --no-patch` so the
+#                       opencode plugin ($HOME/.config/opencode/plugins/rtk.ts)
+#                       is in place and bash commands are rewritten through rtk
+#                       automatically. The marker is only touched once BOTH the
+#                       binary and the plugin install succeed, so a failed init
+#                       is retried on the next launch.
 #   code-review-graph - pip-installed MCP + CLI, in a per-project venv at
 #                       $HOME/.local/share/crg-venv with console-script shims
 #                       symlinked into $HOME/.local/bin. The bare
@@ -124,10 +125,18 @@ install_rtk() {
   # --no-patch keeps it non-interactive: it writes just the plugin to
   # $HOME/.config/opencode/plugins/rtk.ts -- the dir the sandboxed opencode
   # reads its plugins from at startup -- and never touches CLAUDE.md or
-  # settings.json. The marker is only touched once the binary AND the plugin
+  # settings.json.
+  #
+  # rtk's once-per-day "Enable anonymous telemetry? [y/N]" prompt blocks forever
+  # when stdin is a pty (which it is here: the sandbox terminal). Disable it
+  # explicitly so neither provisioning nor the agent's later `rtk` calls (the
+  # plugin runs `rtk rewrite` on every bash command) ever wait on input, and
+  # drive init with stdin from /dev/null as a belt-and-suspenders guard against
+  # any other prompt. The marker is only touched once the binary AND the plugin
   # install succeed, so a failed init is retried next launch.
   echo "[sandbox] rtk の opencode プラグインを設定中…"
-  if ! "$HOME/.local/bin/rtk" init -g --opencode --no-patch >>"$LOG" 2>&1; then
+  "$HOME/.local/bin/rtk" telemetry disable >>"$LOG" 2>&1 || log "rtk: telemetry disable failed (non-fatal)"
+  if ! "$HOME/.local/bin/rtk" init -g --opencode --no-patch </dev/null >>"$LOG" 2>&1; then
     log "rtk: opencode plugin init failed (see $LOG)"
     return 1
   fi

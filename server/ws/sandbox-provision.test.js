@@ -303,8 +303,9 @@ test('provisioner installs the opencode plugin via `rtk init -g --opencode --no-
   assert.equal(res.status, 0, `provisioner exited 0 (stderr: ${res.stderr})`);
   assert.ok(existsSync(join(home, '.local', 'bin', 'rtk')), 'rtk binary installed on the sandbox PATH');
   const calls = readFileSync(initLog, 'utf8').trim().split('\n');
-  assert.equal(calls.length, 1, 'rtk init invoked exactly once');
-  assert.equal(calls[0], 'init -g --opencode --no-patch');
+  assert.equal(calls.length, 2, 'telemetry disabled once, then init invoked once');
+  assert.equal(calls[0], 'telemetry disable', 'telemetry disabled so the pty never blocks on the [y/N] prompt');
+  assert.equal(calls[1], 'init -g --opencode --no-patch');
   assert.ok(existsSync(join(home, '.config', 'opencode', 'plugins', 'rtk.ts')), 'opencode plugin installed');
   assert.ok(existsSync(marker), 'marker written after binary + plugin install succeed');
   assert.match(res.stdout, /rtk をインストール中…/);
