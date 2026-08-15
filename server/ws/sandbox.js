@@ -16,7 +16,7 @@
 // outer layer. See memory: sandbox-dind-recipe.
 
 import { homedir } from 'node:os';
-import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { dirname, join, resolve } from 'node:path';
@@ -95,6 +95,97 @@ function dindRoot() {
 export function sandboxHomeRoot() {
   return process.env.CCSERVER_SANDBOX_HOME_ROOT
     || join(HOME, '.local', 'share', 'ccserver-sandbox', 'home');
+}
+
+// The lock file a rootless dockerd holds (flock, see sandbox-entrypoint.sh's
+// $DATA_ROOT/.ccserver-dockerd.lock) for the whole daemon lifetime. Its
+// presence on the host tells us whether a daemon -- possibly leaked from an
+// old session -- is still using a data-root.
+const DOCKERD_LOCK_NAME = '.ccserver-dockerd.lock';
+
+// True when a (live or leaked) dockerd currently holds the data-root lock for
+// this sandbox slug. Deletion must be refused then: the daemon's live overlay
+// mounts defeat every removal strategy (EBUSY) and deleting under a running
+// daemon would corrupt the data-root. flock(1) is the same util-linux binary
+// the entrypoint uses; -n makes it exit non-zero immediately when the lock is
+// held. A missing flock (ENOENT) must NOT hard-block deletion, so only a
+// non-ENOENT failure counts as "held".
+function dindLockHeld(name) {
+  const lock = join(dindRoot(), name, DOCKERD_LOCK_NAME);
+  if (!existsSync(lock)) return false;
+  try {
+    execFileSync('flock', ['-n', lock, 'true'], { stdio: 'ignore' });
+    return false;
+  } catch (err) {
+    return err.code !== 'ENOENT';
+  }
+}
+
+// Recursively remove a directory tree, escalating through successively more
+// privileged strategies when a plain rmSync hits a permission error. Returns
+// null on success, or an error message when every strategy failed (the caller
+// turns that into a clean HTTP error instead of an opaque EACCES 500).
+function removeTree(path) {
+  if (!existsSync(path)) return null;
+  const tryRemove = (fn) => {
+    try {
+      fn();
+      if (!existsSync(path)) return true;
+    } catch {
+      // fall through to the next strategy
+    }
+    return false;
+  };
+  if (tryRemove(() => rmSync(path, { recursive: true, force: true }))) return null;
+  // The offending dirs may be OURS but locked down (mode 000). As owner,
+  // chmod -R u+rwx fixes listing with no namespace dance; cheap retry.
+  if (tryRemove(() => {
+    chmodSync(path, 0o700);
+    execFileSync('chmod', ['-R', 'u+rwx', path], { stdio: 'ignore' });
+    rmSync(path, { recursive: true, force: true });
+  })) return null;
+  if (tryRemove(() => removeTreeViaRootlesskit(path))) return null;
+  if (tryRemove(() => removeTreeViaSudo(path))) return null;
+  return `permission denied removing ${path}; run manually: sudo rm -rf "${path}"`;
+}
+
+// The persistent docker data-root is written by a rootless dockerd running
+// inside a user namespace, so files created by container processes as a
+// non-root uid are owned on the host by a subuid (e.g. 100000+ for the ast
+// user) -- uids the ccserver process can neither read nor delete. containerd's
+// overlayfs snapshot dirs
+// (…/io.containerd.snapshotter.v1.overlayfs/snapshots/<id>/…) are exactly
+// where those subuid-owned files land, which is why deleting a data-root used
+// to fail with "EACCES: permission denied, scandir …/work/work". A fresh
+// rootlesskit --net=none userns uses the SAME subuid mapping the sandbox used,
+// so there the files are owned by mapped (non-root) uids that userns-root's
+// capabilities make deletable.
+function removeTreeViaRootlesskit(path) {
+  if (!existsSync(ROOTLESSKIT)) return;
+  const stateDir = join(XDG_RUNTIME_DIR, `ccserver-dind-cleanup-${randomUUID()}`);
+  mkdirSync(stateDir, { recursive: true });
+  try {
+    execFileSync(ROOTLESSKIT, [
+      `--state-dir=${stateDir}`,
+      '--net=none',
+      '--disable-host-loopback',
+      'rm', '-rf', path,
+    ], { stdio: 'ignore', timeout: 120_000 });
+  } finally {
+    try { rmSync(stateDir, { recursive: true, force: true }); } catch { /* best effort */ }
+  }
+}
+
+// Last resort for trees owned by a real root OUTSIDE the userns mapping (e.g.
+// a data-root created by a server that once ran as root): passwordless sudo.
+// Only ever runs when plain removal failed and sudo -n is actually configured.
+function removeTreeViaSudo(path) {
+  try {
+    execFileSync('sudo', ['-n', 'true'], { stdio: 'ignore' });
+    execFileSync('sudo', ['-n', 'rm', '-rf', path], { stdio: 'ignore', timeout: 120_000 });
+  } catch {
+    // no passwordless sudo, or sudo itself failed
+  }
 }
 
 // Deterministic per-project path of the persistent HOME. resolve() normalizes
@@ -187,13 +278,24 @@ export function sandboxHomeSize(path) {
 // Delete a sandbox: its persistent HOME plus the matching docker data-root
 // (both keyed by the same slug). Name must be a bare slug (no separators) so
 // the caller can never escape the roots. The in-use guard lives in the route
-// (see sessionManager.sandboxHomeInUsePath).
+// (see sessionManager.sandboxHomeInUsePath). Removal is permission-tolerant:
+// containerd overlayfs snapshot dirs can be owned by subuid-mapped uids the
+// server can't read (see removeTree), and a still-running dockerd must block
+// the whole delete rather than corrupt its data-root (dindLockHeld).
 export function deleteSandboxHome(name) {
   if (!/^[A-Za-z0-9_]+$/.test(name)) {
     return { ok: false, error: 'invalid-sandbox-name' };
   }
-  rmSync(join(sandboxHomeRoot(), name), { recursive: true, force: true });
-  rmSync(join(dindRoot(), name), { recursive: true, force: true });
+  if (dindLockHeld(name)) {
+    return { ok: false, error: 'docker-daemon-in-use' };
+  }
+  const homeErr = removeTree(join(sandboxHomeRoot(), name));
+  const dindErr = removeTree(join(dindRoot(), name));
+  if (homeErr || dindErr) {
+    // Keep the index entry on partial failure so the settings page still
+    // shows the sandbox and the user can retry.
+    return { ok: false, error: homeErr || dindErr };
+  }
   const index = readHomeIndex();
   if (Object.prototype.hasOwnProperty.call(index, name)) {
     delete index[name];

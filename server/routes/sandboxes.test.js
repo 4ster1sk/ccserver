@@ -8,6 +8,7 @@ import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import Fastify from 'fastify';
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync } from 'node:fs';
+import { spawn, spawnSync, execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { sandboxesRoute } from './sandboxes.js';
@@ -92,6 +93,69 @@ test('DELETE /api/sandboxes/:name removes the HOME, matching dind root and index
   assert.equal(existsSync(join(process.env.CCSERVER_SANDBOX_DIND_ROOT, slug)), false, 'docker data-root removed');
   const afterIndex = JSON.parse(readFileSync(index, 'utf-8'));
   assert.equal(afterIndex[slug], undefined, 'index entry cleared');
+});
+
+test('DELETE /api/sandboxes/:name refuses while a dockerd holds the data-root lock', async () => {
+  const cwd = '/srv/locked';
+  const slug = slugFromCwd(cwd);
+  const dind = join(process.env.CCSERVER_SANDBOX_DIND_ROOT, slug);
+  mkdirSync(dind, { recursive: true });
+  writeFileSync(join(dind, 'state'), 'z');
+  const lock = join(dind, '.ccserver-dockerd.lock');
+  const proc = spawn('flock', [lock, 'sleep', '30'], { stdio: 'ignore' });
+  try {
+    // Wait until the child actually holds the lock.
+    const deadline = Date.now() + 3000;
+    let held = false;
+    while (Date.now() < deadline) {
+      if (spawnSync('flock', ['-n', lock, 'true'], { stdio: 'ignore' }).status !== 0) {
+        held = true;
+        break;
+      }
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    assert.ok(held, 'the flock holder should be observable');
+    const res = await del(slug);
+    assert.equal(res.statusCode, 409, 'a held lock must refuse deletion');
+    assert.equal(existsSync(dind), true, 'data-root must be left untouched');
+  } finally {
+    proc.kill();
+    await new Promise((r) => proc.once('exit', r));
+  }
+});
+
+test('DELETE /api/sandboxes/:name returns a clean error when the dind root cannot be removed', async (t) => {
+  const cwd = '/srv/stuck';
+  const slug = slugFromCwd(cwd);
+  const dind = join(process.env.CCSERVER_SANDBOX_DIND_ROOT, slug);
+  const snap = join(dind, 'snap');
+  mkdirSync(snap, { recursive: true });
+  writeFileSync(join(snap, 'layer'), 'x');
+  // A bind mount on an entry makes rmSync fail with EBUSY, like a live
+  // container's overlayfs mountpoint -- every removal strategy must give up
+  // and surface a clean message instead of an opaque 500.
+  let mounted = false;
+  try {
+    execFileSync('mount', ['--bind', snap, snap], { stdio: 'ignore' });
+    mounted = true;
+  } catch {
+    // mount not permitted in this environment (nested sandbox): skip.
+  }
+  try {
+    if (!mounted) {
+      t.skip('mount --bind unavailable');
+      return;
+    }
+    const res = await del(slug);
+    assert.notEqual(res.statusCode, 200, 'deletion must not succeed while the root is stuck');
+    const body = res.json();
+    assert.ok(typeof body.error === 'string' && body.error.length > 0, 'a clean error message is present');
+    assert.notEqual(body.error, 'Internal Server Error', 'must not be the opaque Fastify 500');
+  } finally {
+    if (mounted) {
+      try { execFileSync('umount', [snap], { stdio: 'ignore' }); } catch { /* ignore */ }
+    }
+  }
 });
 
 test('DELETE /api/sandboxes/:name refuses path-like names', async () => {

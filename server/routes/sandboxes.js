@@ -35,7 +35,18 @@ export async function sandboxesRoute(fastify) {
     }
     const res = deleteSandboxHome(name);
     if (!res.ok) {
-      return reply.code(400).send({ error: res.error || 'invalid sandbox name' });
+      if (res.error === 'docker-daemon-in-use') {
+        return reply.code(409).send({
+          error: 'このサンドボックスの docker デーモンがまだ起動中のため削除できません。しばらく待つか、サーバーを再起動してからもう一度お試しください。',
+        });
+      }
+      if (res.error === 'invalid-sandbox-name') {
+        return reply.code(400).send({ error: res.error });
+      }
+      // Permission trouble removing the data-root/HOME (e.g. containerd
+      // overlayfs dirs owned by a subuid the server can't read). Surfaced as a
+      // clean 500 with the reason instead of the raw EACCES.
+      return reply.code(500).send({ error: `削除に失敗しました: ${res.error}` });
     }
     return { success: true, name };
   });
