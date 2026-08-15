@@ -398,12 +398,189 @@ body {
 }
 
 .browser-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
   margin-bottom: 20px;
 }
 
 .browser-header h1 {
   font-size: 24px;
   font-weight: 600;
+}
+
+.settings-icon-btn {
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  padding: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: color 0.15s, border-color 0.15s;
+}
+
+.settings-icon-btn:hover {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+/* Settings page */
+.settings-view {
+  padding: 20px;
+  overflow-y: auto;
+  height: 100%;
+}
+
+.settings-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 20px;
+}
+
+.settings-header h2 {
+  font-size: 22px;
+  font-weight: 600;
+}
+
+.settings-section {
+  margin-bottom: 24px;
+}
+
+.settings-section h3 {
+  font-size: 15px;
+  font-weight: 600;
+  margin-bottom: 12px;
+  color: var(--text-secondary);
+}
+
+.settings-empty {
+  color: var(--text-secondary);
+  padding: 16px 0;
+}
+
+.settings-error {
+  color: var(--error);
+  padding: 16px 0;
+}
+
+.sandbox-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.sandbox-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-secondary);
+}
+
+.sandbox-row:last-child {
+  border-bottom: none;
+}
+
+/* Sandbox rows mirror the Active Sessions 2-line layout (see the
+   session-list-2line work): on narrow screens the path gets its own (bottom)
+   line that truncates with an ellipsis instead of being squeezed, the badge /
+   size sit right-aligned on line 1, and the ✕ delete button spans both lines
+   vertically centered. >= 800px reverts to the single-line layout. */
+.sandbox-body {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+  gap: 4px;
+}
+
+.sandbox-item-top {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.sandbox-name {
+  width: 100%;
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* >= 800px: single-line row (path on the left, badge + size on the right) */
+@media (min-width: 800px) {
+  .sandbox-body {
+    flex-direction: row-reverse;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .sandbox-item-top {
+    justify-content: flex-start;
+    flex-shrink: 0;
+  }
+
+  .sandbox-name {
+    width: auto;
+    flex: 1;
+    min-width: 0;
+  }
+}
+
+.sandbox-size {
+  flex: 0 0 auto;
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  font-size: 12px;
+  color: var(--text-secondary);
+  text-align: right;
+}
+
+.sandbox-inuse-badge {
+  flex: 0 0 auto;
+  font-size: 11px;
+  color: #f9e2af;
+  border: 1px solid #f9e2af;
+  border-radius: 999px;
+  padding: 1px 8px;
+}
+
+.sandbox-delete-btn {
+  flex: 0 0 auto;
+  width: 26px;
+  height: 26px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 13px;
+  transition: color 0.15s, border-color 0.15s;
+}
+
+.sandbox-delete-btn:hover:not(:disabled) {
+  color: var(--error);
+  border-color: var(--error);
+}
+
+.sandbox-delete-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
 }
 
 .subtitle {
@@ -2000,6 +2177,10 @@ body {
   }
 
   .dir-item {
+    padding: 12px;
+  }
+
+  .settings-view {
     padding: 12px;
   }
 

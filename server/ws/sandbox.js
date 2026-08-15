@@ -16,7 +16,7 @@
 // outer layer. See memory: sandbox-dind-recipe.
 
 import { homedir } from 'node:os';
-import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, statSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { dirname, join, resolve } from 'node:path';
@@ -75,14 +75,18 @@ function newStateDir() {
 }
 
 // Where per-project docker data-roots (images/layers) live, so they persist
-// across sessions of the same project.
-const DIND_ROOT = join(HOME, '.local', 'share', 'ccserver-sandbox', 'dind');
+// across sessions of the same project. Overridable via
+// CCSERVER_SANDBOX_DIND_ROOT for tests/alternate layouts.
+function dindRoot() {
+  return process.env.CCSERVER_SANDBOX_DIND_ROOT
+    || join(HOME, '.local', 'share', 'ccserver-sandbox', 'dind');
+}
 
 // Where each project's persistent writable HOME lives (see buildBwrapArgs).
 // Bound at HOME inside the sandbox so tools/caches installed by a previous
 // session of the same project survive a relaunch. Overridable via
 // CCSERVER_SANDBOX_HOME_ROOT for tests/alternate layouts.
-function homeRoot() {
+export function sandboxHomeRoot() {
   return process.env.CCSERVER_SANDBOX_HOME_ROOT
     || join(HOME, '.local', 'share', 'ccserver-sandbox', 'home');
 }
@@ -91,7 +95,7 @@ function homeRoot() {
 // spelling variants (trailing slash, "..", ...) so they all map to one dir,
 // mirroring orchestratorDirForCwd in routes/groups.js.
 export function persistentHomeDir(cwd) {
-  return join(homeRoot(), slugify(resolve(cwd)));
+  return join(sandboxHomeRoot(), slugify(resolve(cwd)));
 }
 
 // Public status for the reuse dialog: whether persistent HOME is enabled at
@@ -103,6 +107,93 @@ export function sandboxHomeStatus(cwd) {
   let exists = false;
   try { exists = statSync(path).isDirectory(); } catch { /* not there yet */ }
   return { enabled, exists, path };
+}
+
+// Sidecar index mapping a home dir's slug back to the project path it was
+// created for (the settings page shows real paths instead of opaque slugs).
+// Lives in the home root itself -- OUTSIDE every sandbox's HOME -- so a
+// sandboxed process never sees it. Best-effort: a missing/corrupt index just
+// falls back to displaying the slug.
+function homeIndexPath() {
+  return join(sandboxHomeRoot(), '.index.json');
+}
+
+function readHomeIndex() {
+  try {
+    const raw = JSON.parse(readFileSync(homeIndexPath(), 'utf-8'));
+    return raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
+  } catch {
+    return {};
+  }
+}
+
+// Remember the project path a persistent HOME was created for. Called from
+// buildSandboxSpawn; sync (single-threaded) so concurrent launches can't race.
+function recordSandboxHome(cwd) {
+  const slug = slugify(resolve(cwd));
+  const index = readHomeIndex();
+  if (index[slug] === resolve(cwd)) return;
+  index[slug] = resolve(cwd);
+  try { writeFileSync(homeIndexPath(), JSON.stringify(index)); } catch { /* best effort */ }
+}
+
+// Enumerate the persistent sandbox homes for the settings page:
+//   { name (slug), path, cwd (real project path when the index knows it) }
+export function listSandboxHomes() {
+  const root = sandboxHomeRoot();
+  const index = readHomeIndex();
+  const entries = [];
+  let names = [];
+  try { names = readdirSync(root); } catch { return []; }
+  for (const name of names) {
+    const path = join(root, name);
+    let isDir = false;
+    try { isDir = statSync(path).isDirectory(); } catch { /* not a dir */ }
+    if (!isDir) continue;
+    entries.push({ name, path, cwd: typeof index[name] === 'string' ? index[name] : null });
+  }
+  return entries;
+}
+
+// Apparent size in bytes of a sandbox home (du -sb; recursive stat fallback).
+export function sandboxHomeSize(path) {
+  try {
+    const out = execFileSync('du', ['-sb', path], { encoding: 'utf-8', timeout: 30_000 });
+    const m = /^\s*(\d+)/.exec(out);
+    if (m) return Number(m[1]);
+  } catch { /* fall through to the stat walk */ }
+  let total = 0;
+  const walk = (p) => {
+    let st;
+    try { st = statSync(p); } catch { return; }
+    if (st.isDirectory()) {
+      let children;
+      try { children = readdirSync(p); } catch { return; }
+      for (const c of children) walk(join(p, c));
+    } else {
+      total += st.size;
+    }
+  };
+  walk(path);
+  return total;
+}
+
+// Delete a sandbox: its persistent HOME plus the matching docker data-root
+// (both keyed by the same slug). Name must be a bare slug (no separators) so
+// the caller can never escape the roots. The in-use guard lives in the route
+// (see sessionManager.sandboxHomeInUsePath).
+export function deleteSandboxHome(name) {
+  if (!/^[A-Za-z0-9_]+$/.test(name)) {
+    return { ok: false, error: 'invalid-sandbox-name' };
+  }
+  rmSync(join(sandboxHomeRoot(), name), { recursive: true, force: true });
+  rmSync(join(dindRoot(), name), { recursive: true, force: true });
+  const index = readHomeIndex();
+  if (Object.prototype.hasOwnProperty.call(index, name)) {
+    delete index[name];
+    try { writeFileSync(homeIndexPath(), JSON.stringify(index)); } catch { /* best effort */ }
+  }
+  return { ok: true };
 }
 
 // PATH set inside the sandbox at runtime (see buildBwrapArgs' --setenv PATH
@@ -600,7 +691,7 @@ function buildBwrapArgs({ cwd, docker, gpg, extraBinds, extraEnv, authSock, stat
 
   // Persistent per-project docker data-root, mounted at the default location.
   if (docker) {
-    const dataRoot = join(DIND_ROOT, slugify(cwd));
+    const dataRoot = join(dindRoot(), slugify(cwd));
     mkdirSync(dataRoot, { recursive: true });
     args.push('--bind', dataRoot, join(HOME, '.local', 'share', 'docker'));
   }
@@ -846,6 +937,8 @@ export function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, mcpSoc
       } catch { /* best effort -- the fresh bind below replaces it anyway */ }
     }
     mkdirSync(homeDir, { recursive: true });
+    // Remember which project this HOME belongs to (settings-page labels).
+    recordSandboxHome(cwd);
   }
 
   // Computes the repo/submodule allow-list once and spawns the host-side

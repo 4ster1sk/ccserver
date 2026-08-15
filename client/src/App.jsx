@@ -1,6 +1,7 @@
 import { useState, useCallback, useRef, useEffect, lazy, Suspense } from 'react';
 import DirectoryBrowser from './components/DirectoryBrowser.jsx';
 import SystemMonitor from './components/SystemMonitor.jsx';
+import SettingsView from './components/SettingsView.jsx';
 import UsageButton from './components/UsageButton.jsx';
 import TabIcon from './components/TabIcon.jsx';
 import GroupTabView from './components/GroupTabView.jsx';
@@ -143,6 +144,16 @@ export default function App() {
   const handleOpenShell = useCallback((dirPath) => {
     openTerminalTab(dirPath, { shell: true });
   }, [openTerminalTab]);
+
+  // Settings page as a tab (singleton): the gear button in the directory
+  // browser opens/activates it; it is closable like any dynamic tab.
+  const openSettingsTab = useCallback(() => {
+    setTabs((prev) => {
+      if (prev.some((t) => t.type === 'settings')) return prev;
+      return [...prev, { id: 'settings', type: 'settings', label: 'Settings' }];
+    });
+    setActiveTabId('settings');
+  }, []);
 
   // Combo launch: ask the server to spawn 2 workers + 1 orchestrator as one
   // group, then add a single group tab for all three (each member attaches
@@ -427,11 +438,16 @@ export default function App() {
       </div>
       <div className="tab-content">
         <div style={{ display: activeTabId === 'browser' ? 'flex' : 'none', height: '100%', flexDirection: 'column' }}>
-          <DirectoryBrowser onOpen={handleOpen} onOpenShell={handleOpenShell} onOpenCombo={handleOpenCombo} onOpenGroup={handleOpenGroup} onSessionClick={handleSessionClick} initialPath={lastDir} groupsVersion={groupsVersion} />
+          <DirectoryBrowser onOpen={handleOpen} onOpenShell={handleOpenShell} onOpenCombo={handleOpenCombo} onOpenGroup={handleOpenGroup} onSessionClick={handleSessionClick} onOpenSettings={openSettingsTab} initialPath={lastDir} groupsVersion={groupsVersion} />
         </div>
         <div style={{ display: activeTabId === 'monitor' ? 'flex' : 'none', height: '100%', flexDirection: 'column' }}>
           <SystemMonitor visible={activeTabId === 'monitor'} />
         </div>
+        {tabs.some((t) => t.type === 'settings') && (
+          <div style={{ display: activeTabId === 'settings' ? 'flex' : 'none', height: '100%', flexDirection: 'column' }}>
+            <SettingsView />
+          </div>
+        )}
         {tabs
           .filter((t) => t.type === 'terminal')
           .map((tab) => (
