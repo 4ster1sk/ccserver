@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, useCallback, useMemo } from 'react';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
-import { WebLinksAddon } from '@xterm/addon-web-links';
+import { WrappedLinkProvider } from '../wrappedLinks';
 import '@xterm/xterm/css/xterm.css';
 import { getThemeIds, getTheme } from '../themes.js';
 import { authWsUrl, authFetch } from '../auth.js';
@@ -390,10 +390,12 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
     });
 
     const fitAddon = new FitAddon();
-    const webLinksAddon = new WebLinksAddon();
+    // WebLinksAddon は実改行で折り返されたURL（isWrapped=false の続き行）を連結しないため、
+    // 行をまたぐURLも復元する WrappedLinkProvider を使う。
+    const wrappedLinks = new WrappedLinkProvider(term);
 
     term.loadAddon(fitAddon);
-    term.loadAddon(webLinksAddon);
+    term.registerLinkProvider(wrappedLinks);
     term.open(terminalRef.current);
     fitAddon.fit();
 
