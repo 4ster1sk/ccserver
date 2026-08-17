@@ -1,6 +1,6 @@
 import { mkdtempSync, mkdirSync, rmSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { join, basename } from 'node:path';
 import { test, expect } from '@playwright/test';
 
 // The display layer abbreviates $HOME as `~` (client/src/displayPath.js) in
@@ -87,10 +87,14 @@ test('breadcrumbs under $HOME render the root as ~ and navigate on click', async
     await expect(rootCrumb).toHaveAttribute('title', homedir());
     await expect(page.locator('.breadcrumb-item', { hasText: 'project' })).toBeVisible();
 
-    // Clicking the ~ crumb navigates back to $HOME itself (single ~ crumb).
+    // Clicking the ~ crumb navigates back to $HOME itself. Under $HOME the
+    // breadcrumb renders the full path (root + home dir segments) instead of
+    // a lone ~ crumb, so parents of $HOME stay reachable.
     await rootCrumb.click();
-    await expect(page.locator('.breadcrumb-item', { hasText: '~' }).first()).toBeVisible();
+    await expect(page.locator('.breadcrumb-item', { hasText: '~' })).not.toBeVisible();
     await expect(page.locator('.breadcrumb-item', { hasText: 'project' })).not.toBeVisible();
+    await expect(page.locator('.breadcrumb-item').first()).toHaveText('/');
+    await expect(page.locator('.breadcrumb-item', { hasText: basename(homedir()) })).toBeVisible();
   } finally {
     rmSync(base, { recursive: true, force: true });
   }

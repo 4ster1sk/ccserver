@@ -390,7 +390,7 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
   // path); elsewhere the drive/root prefix is shown as before. Navigation
   // always uses the real paths.
   const homeBase = homeDir && homeDir !== '/'
-    && (currentPath === homeDir || currentPath.startsWith(homeDir + '/'))
+    && currentPath.startsWith(homeDir + '/')
     ? (homeDir.endsWith('/') ? homeDir.slice(0, -1) : homeDir)
     : null;
   const pathRoot = homeBase || (currentPath.match(/^([a-zA-Z]:\\|\/)/)?.[0] || '/');
