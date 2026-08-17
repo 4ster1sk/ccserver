@@ -386,9 +386,10 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
     uploadFiles(e.dataTransfer.files);
   }, [uploadFiles]);
 
-  // Under $HOME the breadcrumb root renders as `~` (title carries the real
-  // path); elsewhere the drive/root prefix is shown as before. Navigation
-  // always uses the real paths.
+  // Under $HOME subdirectories the breadcrumb root renders as `~` (title
+  // carries the real path); at $HOME itself and elsewhere the drive/root
+  // prefix is shown, so $HOME's parents stay reachable. Navigation always
+  // uses the real paths.
   const homeBase = homeDir && homeDir !== '/'
     && currentPath.startsWith(homeDir + '/')
     ? (homeDir.endsWith('/') ? homeDir.slice(0, -1) : homeDir)
