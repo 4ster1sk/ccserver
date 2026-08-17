@@ -16,6 +16,8 @@ import {
   extractResumeSessionId,
   detectPermissionPrompt,
 } from './appLaunch.js';
+import { stripAnsi } from './mcpTools.js';
+import { findSessionLimitReset } from './sessionLimitDetect.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const SAVED_SESSIONS_PATH = process.env.CCSERVER_SAVED_SESSIONS_PATH || join(__dirname, '..', '..', '.saved-sessions.json');
@@ -356,6 +358,17 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox
     autoYesLog: [],
     autoYesPending: null,
     autoYesBuf: '',
+    // Session-limit auto-resume detection (see sessionLimitDetect.js).
+    // limitDetectBuf holds a sliding window of RAW bytes, not yet
+    // ANSI-stripped: a pty chunk boundary can split an escape sequence
+    // mid-sequence, and stripping each chunk independently would leak the
+    // tail of a split sequence as bare control bytes. Accumulating raw
+    // bytes and stripping the whole window each time lets the next chunk's
+    // arrival complete a sequence the previous chunk left dangling.
+    // lastAutoLimitResetAt is the resetAtMs already scheduled for, so a TUI
+    // redraw of the same status line doesn't re-arm the schedule every chunk.
+    limitDetectBuf: '',
+    lastAutoLimitResetAt: null,
     startedClaudeSessionId: claudeSessionId || null,
     scheduleId: null, // key into the module-level `schedules` map, if any
     pendingInjection: null, // { text, at } — scheduled prompt awaiting a freshly-resumed session
@@ -375,6 +388,42 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox
     // the agent-only idle detection below). Pure activity bookkeeping.
     session.lastOutputAt = Date.now();
     appendToBuffer(session, data);
+
+    // Session-limit auto-resume detection -- role/app agnostic, applies to
+    // every session per the plan (a shell session simply never matches).
+    // See sessionLimitDetect.js for the regex/timezone-math and the
+    // limitDetectBuf field above for why raw bytes are accumulated instead
+    // of stripping each chunk independently.
+    session.limitDetectBuf = (session.limitDetectBuf + data).slice(-LIMIT_DETECT_BUF_MAX_CHARS);
+    const limitMatch = findSessionLimitReset(stripAnsi(session.limitDetectBuf));
+    if (limitMatch && limitMatch.resetAtMs !== session.lastAutoLimitResetAt) {
+      // Identify this limit event by its resetAtMs so the TUI redrawing the
+      // same status line (which keeps re-matching every chunk) doesn't
+      // re-arm the schedule on every redraw.
+      session.lastAutoLimitResetAt = limitMatch.resetAtMs;
+      const existingSid = scheduleForSession(session.id);
+      const existing = existingSid ? schedules.get(existingSid) : null;
+      // A manual schedule (set via the browser's clock panel) is never
+      // clobbered by the auto-detector, even if it looks stale relative to
+      // the new reset time -- the user's explicit intent wins. An existing
+      // 'auto-session-limit' schedule is safe to replace with this fresher
+      // detection (normally unreachable here, since the resetAtMs guard
+      // above already filters out same-event redraws).
+      if (!existing || existing.source === 'auto-session-limit') {
+        const scheduled = setScheduledPrompt(
+          session.id,
+          limitMatch.resetAtMs + SESSION_LIMIT_RESUME_DELAY_MS,
+          SESSION_LIMIT_RESUME_MESSAGE,
+          { source: 'auto-session-limit' },
+        );
+        if (!scheduled) {
+          console.warn(`[session-limit] could not auto-schedule a resume for session ${session.id} (reset ${new Date(limitMatch.resetAtMs).toISOString()})`);
+        }
+      } else {
+        console.warn(`[session-limit] session ${session.id} hit its limit, but a manual schedule already exists -- not overriding it`);
+      }
+    }
+
     // Keep the virtual screen model in parallel with the buffer: it only
     // stamps screenLastChangeAt when the visible screen actually changes,
     // so a spinner redrawing the same line registers as activity while a
@@ -609,6 +658,14 @@ export function waitUntilSettled(id, { timeoutMs = SETTLE_WAIT_TIMEOUT_MS } = {}
 
 const MAX_SCHEDULE_AHEAD_MS = 48 * 60 * 60 * 1000; // 48h
 
+// Session-limit auto-resume detection (see sessionLimitDetect.js and the
+// onData handler above). The status line is short, so a window well past its
+// longest plausible rendering (including redraws/padding) is cheap to keep
+// and to re-strip/re-match on every chunk.
+const LIMIT_DETECT_BUF_MAX_CHARS = 2048;
+const SESSION_LIMIT_RESUME_DELAY_MS = 60 * 1000; // fire 1 minute after reset
+const SESSION_LIMIT_RESUME_MESSAGE = 'セッション制限がリセットされました。作業を続けてください。';
+
 // The server's IANA timezone (e.g. "Asia/Tokyo"). Claude Code prints its
 // rate-limit reset times in this zone, so scheduling is interpreted here too.
 let SERVER_TZ = 'UTC';
@@ -662,6 +719,7 @@ function persistSchedules() {
         claudeSessionId: s.claudeSessionId || null,
         groupId: s.groupId || null,
         groupRole: s.groupRole || null,
+        source: s.source || 'manual',
       });
     }
     if (arr.length > 0) {
@@ -694,7 +752,7 @@ function scheduleForSession(sessionId) {
 export function scheduledPromptPublic(session) {
   if (!session?.scheduleId) return null;
   const s = schedules.get(session.scheduleId);
-  return s ? { at: s.at, text: s.text } : null;
+  return s ? { at: s.at, text: s.text, source: s.source } : null;
 }
 
 // Does any live, sandboxed session share `targetPath` as its persistent HOME?
@@ -884,7 +942,11 @@ async function fireSchedule(scheduleId) {
 
 // Schedule a prompt to be injected at absolute epoch `at`. Returns the public
 // view on success, or null if the time is invalid (past / too far ahead).
-export function setScheduledPrompt(id, at, text) {
+// `source` distinguishes a user-set schedule ('manual', the default, set via
+// the browser's clock panel) from one the session-limit auto-detector armed
+// ('auto-session-limit') -- see the onData handler below, which uses this to
+// avoid clobbering a manual schedule.
+export function setScheduledPrompt(id, at, text, { source = 'manual' } = {}) {
   const session = sessions.get(id);
   if (!session) return null;
 
@@ -911,12 +973,13 @@ export function setScheduledPrompt(id, at, text) {
     sessionId: id,
     groupId: session.groupId || null,
     groupRole: session.groupRole || null,
+    source,
     timer: setTimeout(() => fireSchedule(scheduleId), delay),
   };
   schedules.set(scheduleId, entry);
   session.scheduleId = scheduleId;
   persistSchedules();
-  return { at, text };
+  return { at, text, source };
 }
 
 export function cancelScheduledPrompt(id) {
@@ -969,6 +1032,11 @@ export function restoreSchedules() {
       // role (see fireSchedule), so a member isn't orphaned by a reboot.
       groupId: e.groupId || null,
       groupRole: e.groupRole || null,
+      // Legacy entries (no source field) fall back to 'manual' -- the safe
+      // direction, since a manual schedule is protected from being clobbered
+      // by the auto-detector while an 'auto-session-limit' one is not (see
+      // the onData handler).
+      source: e.source === 'auto-session-limit' ? 'auto-session-limit' : 'manual',
       sessionId: null,
       timer: null,
     };

@@ -19,6 +19,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { persistentHomeDir } from './sandbox.js';
+import { findSessionLimitReset } from './sessionLimitDetect.js';
 
 let runtimeDir;
 let groupManager;
@@ -26,6 +27,30 @@ let sessionManager;
 
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
+}
+
+// Renders `epochMs` as claude's own "resets HH:MMam/pm" wall-clock format in
+// the given IANA zone, for building a realistic session-limit message.
+function zonedTimeString(epochMs, timeZone) {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone, hour: 'numeric', minute: '2-digit', hour12: true,
+  }).formatToParts(new Date(epochMs));
+  const map = {};
+  for (const p of parts) map[p.type] = p.value;
+  return `${map.hour}:${map.minute}${map.dayPeriod.toLowerCase()}`;
+}
+
+// Builds a realistic "You've hit your session limit" line resetting at
+// `epochMs` in `timeZone` (default Asia/Tokyo, matching the plan's example).
+function sessionLimitLine(epochMs, timeZone = 'Asia/Tokyo') {
+  return `You've hit your session limit · resets ${zonedTimeString(epochMs, timeZone)} (${timeZone})`;
+}
+
+// Single-quotes a string for a POSIX shell command line (the message itself
+// contains an apostrophe -- "You've" -- so a naive `'${line}'` would close
+// the quote early and hand the rest to bash as unquoted syntax).
+function shellQuote(s) {
+  return `'${s.replace(/'/g, `'\\''`)}'`;
 }
 
 // The schedules file lives at a fixed repo-root path (no env override for it
@@ -741,5 +766,81 @@ test('sandboxHomeInUse counts only live sandboxed sessions', () => {
   } finally {
     if (prevHome === undefined) delete process.env.CCSERVER_SANDBOX_HOME_ROOT;
     else process.env.CCSERVER_SANDBOX_HOME_ROOT = prevHome;
+  }
+});
+
+// Session-limit auto-resume detection (see sessionLimitDetect.js and the
+// onData handler in sessionManager.js). A real shell session stands in for
+// an agent: `echo` writes the exact bytes through the pty -> onData path,
+// so these exercise the actual production code, not a re-implementation.
+test('onData session-limit detection: auto-arms a resume schedule 1 minute after reset', async () => {
+  const res = sessionManager.createSession({ cwd: '/tmp', cols: 80, rows: 24, shell: true, sandbox: false });
+  const { sessionId, session } = res;
+  assert.ok(session, 'shell session should spawn');
+  try {
+    await sleep(400); // let the shell reach its prompt
+    const resetAt = Date.now() + 60 * 60 * 1000; // 1h ahead -- comfortably "still today"
+    const line = sessionLimitLine(resetAt);
+    const expected = findSessionLimitReset(line, resetAt - 60000);
+    assert.ok(expected, 'sanity: the constructed line must itself be parseable');
+
+    sessionManager.writeToSession(sessionId, `echo ${shellQuote(line)}`, { submit: true });
+    await sleep(1200);
+
+    const scheduled = sessionManager.scheduledPromptPublic(session);
+    assert.ok(scheduled, 'a schedule must have been auto-armed');
+    assert.equal(scheduled.source, 'auto-session-limit');
+    assert.equal(scheduled.at, expected.resetAtMs + 60000, 'fires exactly 1 minute after the parsed reset time');
+    assert.equal(scheduled.text, 'セッション制限がリセットされました。作業を続けてください。');
+  } finally {
+    sessionManager.destroySession(sessionId, { keepSchedule: false });
+  }
+});
+
+test('onData session-limit detection: does not override an existing manual schedule', async () => {
+  const res = sessionManager.createSession({ cwd: '/tmp', cols: 80, rows: 24, shell: true, sandbox: false });
+  const { sessionId, session } = res;
+  assert.ok(session, 'shell session should spawn');
+  try {
+    await sleep(400);
+    assert.ok(sessionManager.setScheduledPrompt(sessionId, Date.now() + 30000, 'MANUAL_MARKER'));
+    const manualScheduleId = session.scheduleId;
+    assert.ok(manualScheduleId);
+
+    const line = sessionLimitLine(Date.now() + 60 * 60 * 1000);
+    sessionManager.writeToSession(sessionId, `echo ${shellQuote(line)}`, { submit: true });
+    await sleep(1200);
+
+    const scheduled = sessionManager.scheduledPromptPublic(session);
+    assert.equal(scheduled.text, 'MANUAL_MARKER', 'the manual schedule must survive the auto-detection');
+    assert.equal(scheduled.source, 'manual');
+    assert.equal(session.scheduleId, manualScheduleId, 'the manual schedule entry itself is left untouched');
+  } finally {
+    sessionManager.destroySession(sessionId, { keepSchedule: false });
+  }
+});
+
+test('onData session-limit detection: a redraw of the same reset time does not re-arm', async () => {
+  const res = sessionManager.createSession({ cwd: '/tmp', cols: 80, rows: 24, shell: true, sandbox: false });
+  const { sessionId, session } = res;
+  assert.ok(session, 'shell session should spawn');
+  try {
+    await sleep(400);
+    const line = sessionLimitLine(Date.now() + 60 * 60 * 1000);
+
+    sessionManager.writeToSession(sessionId, `echo ${shellQuote(line)}`, { submit: true });
+    await sleep(1200);
+    const firstScheduleId = session.scheduleId;
+    assert.ok(firstScheduleId, 'first detection must arm a schedule');
+    const firstAt = sessionManager.scheduledPromptPublic(session).at;
+
+    // The TUI redrawing the identical status line (same resetAtMs) must not
+    // cancel-and-reschedule -- same scheduleId, same fire time.
+    sessionManager.writeToSession(sessionId, `echo ${shellQuote(line)}`, { submit: true });
+    await sleep(1200);
+    assert.equal(session.scheduleId, firstScheduleId, 'redraw of the same event does not re-arm the schedule');
+    assert.equal(sessionManager.scheduledPromptPublic(session).at, firstAt);
+  } finally {
+    sessionManager.destroySession(sessionId, { keepSchedule: false });
   }
 });
