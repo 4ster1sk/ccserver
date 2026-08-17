@@ -23,6 +23,32 @@ test('findSessionLimitReset: matches when Ink cursor-positioning strips all spac
   assert.equal(result.resetAtMs, Date.UTC(2026, 7, 17, 17, 10, 0, 0));
 });
 
+test('findSessionLimitReset: matches a real captured frame (normal spacing, stray \\r, trailing /upgrade line)', () => {
+  // Captured via the orchestrator's read_output raw field when a real
+  // session hit its limit. The Ink renderer's redraw left a bare \r mid-
+  // buffer and a following "/upgrade to increase your usage limit." line
+  // glued on with no separating newline.
+  const now = Date.UTC(2026, 7, 17, 0, 0, 0); // 09:00 JST
+  const text = "  ⎿  You've hit your session limit · resets 2:10am (Asia/Tokyo)\r    /upgrade to increase your usage limit.";
+  const result = findSessionLimitReset(text, now);
+  assert.ok(result);
+  assert.equal(result.timeZone, 'Asia/Tokyo');
+  assert.equal(result.resetAtMs, Date.UTC(2026, 7, 17, 17, 10, 0, 0));
+});
+
+test('findSessionLimitReset: matches a real captured frame (Ink word-by-word rendering, no spaces at all)', () => {
+  // Same status line as above, captured on a different render pass where
+  // Ink drew it via cursor-absolute-position escapes -- ANSI stripping left
+  // no spaces between words at all, not even the collapsed-but-present kind
+  // the synthetic test above uses.
+  const now = Date.UTC(2026, 7, 17, 0, 0, 0);
+  const text = " ⎿ You'vehityoursessionlimit·resets2:10am(Asia/Tokyo)";
+  const result = findSessionLimitReset(text, now);
+  assert.ok(result);
+  assert.equal(result.timeZone, 'Asia/Tokyo');
+  assert.equal(result.resetAtMs, Date.UTC(2026, 7, 17, 17, 10, 0, 0));
+});
+
 test('findSessionLimitReset: matches with irregular extra whitespace too', () => {
   const now = Date.UTC(2026, 7, 17, 0, 0, 0);
   const text = "You've   hit your   session limit· resets   2:10am  (Asia/Tokyo)";
