@@ -163,6 +163,15 @@ GitHub Copilot を選んだ場合:
 - API: `GET /api/usage` (`?force=1` で強制再取得)。サーバー起動時にキャッシュを 1 度ウォームします。
 - ボタンは設定ファイルの `showUsage: false` で非表示にできます。さらに **claude がサーバーにインストールされていない環境では、設定に関わらず自動的に非表示**になります (この場合 `GET /api/usage` は `claude is not installed on this server` を返します)。
 
+### ccserver-usage (使用量参照用 MCP)
+
+エージェントが**自分で**上記の Usage スナップショットを読める MCP ツール `get_usage` を提供します。`ccserver-notify` とは独立した別の MCP サーバーで、`server/usage.js` の `getUsage()` (上記ボタンが叩くのと同じキャッシュ/キャプチャロジック) を同一プロセス内で直接呼ぶだけです (HTTP 経由ではありません)。
+
+- **ツール**: `get_usage({ force?: boolean })` — `{ usage, updatedAt, cached, sandboxed?, error? }` を返します (`GET /api/usage` と同じ形)。`force: true` で強制再取得 (最大 15 秒程度かかることがあります)。
+- **注入条件**: **`claude` セッションのみ** (`/usage` は Claude Code CLI 固有の機能のため opencode/copilot には注入されません)。シェルセッションには注入されません。`ccserver-notify` と異なり、コンボのワーカー/オーケストレーター/スタンドアロンは区別せず、対象となる claude セッション全てに注入されます。
+- **有効化条件**: サーバーに claude バイナリがインストールされていて、かつ `showUsage` が明示的に `false` でないときのみ (`showUsage: false` は Usage ボタンだけでなくこの MCP ツールの注入も無効化します)。
+- サンドボックス内外どちらでも動作します (サンドボックス内はソケットを bind、外はホストの node でブリッジを実行) — 仕組みは `ccserver-notify` と同じパターンですが、`get_usage` は接続元によらず同じ結果を返すため識別情報 (identity) は一切やり取りしません。
+
 ### コンボ起動: オーケストレーターが `send_input` でワーカーに指示するときの注意
 
 > **copilot はコンボ起動 (グループ) では選択できません** — copilot は MCP を CLI 引数/環境変数で注入する仕組みが無く (設定ファイル経由のため)、グループメンバーにしても ccserver の MCP broker ツール (`send_input` / `wait_for_handoff` 等) が使えないためです。起動モーダルのコンボ UI には選択肢が表示されず、`POST /api/groups` に `app: "copilot"` を渡しても 400 で拒否されます。
@@ -311,7 +320,7 @@ cp server/sandbox.config.example.json server/sandbox.config.json
 | `gitBroker` | `true` | git/gh の認証情報スコープ制限 (上記参照)。 |
 | `forceSandbox` | `false` | `true` でサンドボックス外の起動を全面禁止。エージェント・シェルを問わず全セッションがサンドボックス強制になり、UI のサンドボックス切替は無効化されます。bwrap が無い環境 (または Windows) では起動をエラーで拒否します (`/usage` 取得の直接起動フォールバックも同様に禁止)。ホストに bwrap (bubblewrap) のインストールが必須です。 |
 | `defaultApp` | `"claude"` | 新規セッションの既定エージェント (`"claude"`、`"opencode"`、`"copilot"`)。UI で一度明示的に選んだ後はブラウザの記憶が優先され、この値は初回表示時の見た目とサーバー側フォールバック (予約プロンプトの自動再開など、クライアントが `app` を指定しない経路) にのみ使われます。**コンボ起動のメンバーには適用されません** (コンボのロール別選択は別途ブラウザの `localStorage` に記憶され、copilot はそもそも選択不可)。 |
-| `showUsage` | `true` | タブバー右端の Usage ボタン (Claude Code の `/usage`) を表示するか。`false` で非表示。**claude がサーバーに無い場合は設定に関わらず自動的に非表示**になります。 |
+| `showUsage` | `true` | タブバー右端の Usage ボタン (Claude Code の `/usage`) を表示するか。`false` で非表示。**claude がサーバーに無い場合は設定に関わらず自動的に非表示**になります。`ccserver-usage` MCP (`get_usage` ツール、下記参照) の注入もこのフラグで一緒に無効化されます。 |
 | `binds` | `[]` | 追加で見せるホストパス。各要素 `{ src, mode?, dest? }`。`mode` は `ro` (既定) か `rw`。存在しないパスはスキップ。`~` はホームに展開。`~/.ssh` と `~/.config/gh` は `gitBroker` の設定に関わらず常にブロックされます。 |
 | `env` | `{}` | サンドボックス内の追加環境変数 (適用順は最後 = 既定値を上書き)。例: `sshAgent: true` のときに `SSH_AUTH_SOCK` を明示指定して自動検出を上書き。 |
 | `claudeBin` | 自動検出 | claude/opencode/copilot の起動方法。`claude` を PATH から解決し、ラッパー (例: `/usr/bin/claude` → `/opt/claude-code/bin/claude`) の場合は実体のインストール先を辿ってサンドボックスへ自動的に公開します。opencode は PATH に加えて `~/.opencode/bin` も自動探索。copilot は PATH (SANDBOX_PATH) で自動解決されます (通常 `~/.local/bin/copilot`)。自動検出で外れる場所にある場合や特定ビルドに固定したい場合のみ絶対パスで指定 (環境変数 `CCSERVER_CLAUDE_BIN` が優先。copilot に個別の bin 設定はありません)。 |
@@ -356,9 +365,10 @@ ccserver/
 │       ├── sessionManager.js       # セッション・予約プロンプトの状態管理/永続化
 │       ├── appLaunch.js            # アプリ非依存の起動ロジック (resume引数・permission検出等)
 │       ├── notify.js               # ccserver-notify: 購読レジストリ + Discord/webhook 配送 + MCP ソケット
-│       ├── mcpConfig.js            # MCP 設定の生成 (ccserver / ccserver-notify、sandbox/host 両モード)
-│       ├── mcpServer.js            # control / handoff / notify 各 MCP サーバー (SocketTransport 含む)
-│       ├── mcpBroker.js            # Unix-socket MCP ブローカー (control/handoff はグループ毎、notify はプロセス毎 1 つ)
+│       ├── usageMcp.js             # ccserver-usage: get_usage MCP ツール (server/usage.js の getUsage を直接呼ぶ)
+│       ├── mcpConfig.js            # MCP 設定の生成 (ccserver / ccserver-notify / ccserver-usage、sandbox/host 両モード)
+│       ├── mcpServer.js            # control / handoff / notify / usage 各 MCP サーバー (SocketTransport 含む)
+│       ├── mcpBroker.js            # Unix-socket MCP ブローカー (control/handoff はグループ毎、notify/usage はプロセス毎 1 つ)
 │       ├── mcpTools.js             # control/handoff ツールの実装 (deps 注入)
 │       ├── screenModel.js          # read_output 用の軽量仮想画面 (ANSI 解釈 + 変化検知)
 │       ├── sandbox.js              # bwrap + rootless docker サンドボックス構築
@@ -366,7 +376,7 @@ ccserver/
 │       ├── sandbox-gh-wrapper.cjs         # サンドボックス内 gh をブローカー中継に差し替え
 │       ├── sandbox-ssh-wrapper.cjs        # サンドボックス内 ssh を許可リストでゲート
 │       ├── sandbox-git-credential-helper.cjs
-│       ├── sandbox-mcp-wrapper.cjs        # MCP stdio ↔ Unix socket の中継 (argv 'notify' で通知ソケットへ)
+│       ├── sandbox-mcp-wrapper.cjs        # MCP stdio ↔ Unix socket の中継 (argv 'notify'/'usage' でそれぞれのソケットへ)
 │       ├── sandbox-gitconfig / sandbox-known-hosts / sandbox-ssh-config
 │       ├── git-broker.js           # サンドボックス外で動く、リポジトリスコープの認証情報ブローカー
 │       └── ghAllowlist.js / gitAllowlist.js  (+ 各 *.test.js, appLaunch.test.js, sandbox-resolve.test.js, notify.test.js)

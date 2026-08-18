@@ -15,6 +15,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 
 const SANDBOX_MCP_SOCK_PATH = '/ccserver-sandbox-mcp.sock';
 const SANDBOX_NOTIFY_SOCK_PATH = '/ccserver-sandbox-notify.sock';
+const SANDBOX_USAGE_SOCK_PATH = '/ccserver-sandbox-usage.sock';
 const SANDBOX_MCP_BRIDGE_PATH = '/ccserver-sandbox-mcp-bridge';
 const SANDBOX_NODE_PATH = '/ccserver-sandbox-node';
 
@@ -152,6 +153,59 @@ test('buildSandboxSpawn without notifySocketPath adds no notify bindings', () =>
     });
     assert.ok(!spawn.args.includes(SANDBOX_NOTIFY_SOCK_PATH), 'no notify socket path');
     assert.ok(!spawn.args.includes('CCSANDBOX_NOTIFY_MCP_SOCK'), 'no notify socket env');
+  } finally {
+    if (prev === undefined) delete process.env.CCSERVER_SANDBOX_CONFIG;
+    else process.env.CCSERVER_SANDBOX_CONFIG = prev;
+  }
+});
+
+// ccserver-usage (see usageMcp.js): same shape as the notify socket bindings
+// above, independent of both the group socket and the notify socket -- a
+// claude session may carry any combination of the three.
+test('buildSandboxSpawn binds the usage socket + wrapper when usageSocketPath is set (no group/notify socket)', () => {
+  const prev = process.env.CCSERVER_SANDBOX_CONFIG;
+  process.env.CCSERVER_SANDBOX_CONFIG = cfgPath;
+  try {
+    const usageSock = join(tmpRoot, 'fake-usage.sock');
+    const spawn = buildSandboxSpawn({
+      cwd: tmpRoot,
+      targetCommand: ['claude'],
+      app: 'claude',
+      sandboxOpts: null,
+      usageSocketPath: usageSock,
+    });
+    const args = spawn.args;
+    const idxBind = args.indexOf(SANDBOX_USAGE_SOCK_PATH);
+    assert.ok(idxBind > 0, 'in-sandbox usage socket path present');
+    assert.equal(args[idxBind - 2], '--bind-try');
+    assert.equal(args[idxBind - 1], usageSock);
+    const sockEnv = args.indexOf('CCSANDBOX_USAGE_MCP_SOCK');
+    assert.ok(sockEnv > 0, 'CCSANDBOX_USAGE_MCP_SOCK set');
+    assert.equal(args[sockEnv + 1], SANDBOX_USAGE_SOCK_PATH);
+    const idxBridge = args.indexOf(SANDBOX_MCP_BRIDGE_PATH);
+    assert.ok(idxBridge > 0, 'bridge wrapper ro-bound for usage');
+    const idxNode = args.indexOf(SANDBOX_NODE_PATH);
+    assert.ok(idxNode > 0, 'node binary bind present (wrapper shebang)');
+    assert.ok(!args.includes(SANDBOX_MCP_SOCK_PATH), 'no group MCP socket bind');
+    assert.ok(!args.includes(SANDBOX_NOTIFY_SOCK_PATH), 'no notify socket bind');
+  } finally {
+    if (prev === undefined) delete process.env.CCSERVER_SANDBOX_CONFIG;
+    else process.env.CCSERVER_SANDBOX_CONFIG = prev;
+  }
+});
+
+test('buildSandboxSpawn without usageSocketPath adds no usage bindings', () => {
+  const prev = process.env.CCSERVER_SANDBOX_CONFIG;
+  process.env.CCSERVER_SANDBOX_CONFIG = cfgPath;
+  try {
+    const spawn = buildSandboxSpawn({
+      cwd: tmpRoot,
+      targetCommand: ['claude'],
+      app: 'claude',
+      sandboxOpts: null,
+    });
+    assert.ok(!spawn.args.includes(SANDBOX_USAGE_SOCK_PATH), 'no usage socket path');
+    assert.ok(!spawn.args.includes('CCSANDBOX_USAGE_MCP_SOCK'), 'no usage socket env');
   } finally {
     if (prev === undefined) delete process.env.CCSERVER_SANDBOX_CONFIG;
     else process.env.CCSERVER_SANDBOX_CONFIG = prev;

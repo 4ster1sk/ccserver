@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { buildSandboxSpawn, resolveApp, sandboxAvailable, loadSandboxConfig, persistentHomeDir } from './sandbox.js';
 import { buildMcpConfigArgsAndEnv } from './mcpConfig.js';
 import { shouldInjectNotify, notifyEnabled, getNotifySockPath, notifyBrokerRunning } from './notify.js';
+import { shouldInjectUsage, usageEnabled, getUsageSockPath, usageBrokerRunning } from './usageMcp.js';
 import { createScreenModel, SCREEN_ROWS } from './screenModel.js';
 import { bunTmpdirEnv } from './bunTmpdir.js';
 import {
@@ -184,6 +185,19 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox
     app: sessionApp,
   } : null;
 
+  // ccserver-usage injection (see usageMcp.js): every claude session (shells,
+  // opencode and copilot excluded -- see shouldInjectUsage) gets the
+  // process-global get_usage MCP tool when the feature is enabled (claude
+  // installed AND showUsage not explicitly disabled) AND the broker is
+  // actually listening. Unlike notify, worker/orchestrator/standalone are not
+  // distinguished -- every member of a combo group that runs claude gets it.
+  const useUsage = usageBrokerRunning() && shouldInjectUsage({
+    shell: !!shell,
+    app: sessionApp,
+    usageEnabled: usageEnabled(),
+  });
+  const usageSocketPath = useUsage ? getUsageSockPath() : null;
+
   const { SSH_AUTH_SOCK, SSH_AGENT_PID, ...cleanEnv } = process.env;
 
   let command, args;
@@ -216,7 +230,7 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox
   // host node+bridge). The args must be in the target command before
   // buildSandboxSpawn runs, so the mode is derived from sandboxRequested.
   let mcpEnv = {};
-  if (sessionApp && (mcpSocketPath || useNotify)) {
+  if (sessionApp && (mcpSocketPath || useNotify || useUsage)) {
     const injected = buildMcpConfigArgsAndEnv(sessionApp, {
       // ccserver (the group broker) only when the session has a group socket:
       // standalone notify sessions must not get a broken ccserver entry (its
@@ -226,6 +240,10 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox
         mode: sandboxRequested ? 'sandbox' : 'host',
         sockPath: notifySocketPath,
         identity: notifyIdentity,
+      } : undefined,
+      usage: useUsage ? {
+        mode: sandboxRequested ? 'sandbox' : 'host',
+        sockPath: usageSocketPath,
       } : undefined,
     });
     mcpEnv = injected.env;
@@ -256,7 +274,7 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox
       }
     }
     try {
-      const spawn = buildSandboxSpawn({ cwd, targetCommand: [command, ...args], app: sessionApp, sandboxOpts, mcpSocketPath, notifySocketPath, reuseSandboxHome });
+      const spawn = buildSandboxSpawn({ cwd, targetCommand: [command, ...args], app: sessionApp, sandboxOpts, mcpSocketPath, notifySocketPath, usageSocketPath, reuseSandboxHome });
       command = spawn.command;
       args = spawn.args;
       sandboxStateDir = spawn.stateDir || null;
