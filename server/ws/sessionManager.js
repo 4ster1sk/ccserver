@@ -434,7 +434,9 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox
           SESSION_LIMIT_RESUME_MESSAGE,
           { source: 'auto-session-limit' },
         );
-        if (!scheduled) {
+        if (scheduled) {
+          notifyScheduleState(session);
+        } else {
           console.warn(`[session-limit] could not auto-schedule a resume for session ${session.id} (reset ${new Date(limitMatch.resetAtMs).toISOString()})`);
         }
       } else {
@@ -846,6 +848,33 @@ function injectIntoLiveSession(session, text) {
     return true;
   } catch {
     return false;
+  }
+}
+
+// Build a schedule_state payload including server timezone info so the client
+// can display/interpret times in the server's zone (matching Claude Code).
+// Exported so terminal.js's WS-request handlers (schedule_prompt,
+// cancel_schedule, get_schedule, init, attach) can reuse the same payload
+// shape as the server-internal push paths below.
+export function buildScheduleStateMsg(scheduled, error) {
+  const { tz, now } = getServerTimeInfo();
+  return JSON.stringify({
+    type: 'schedule_state',
+    scheduled,
+    serverTz: tz,
+    serverNow: now,
+    ...(error ? { error } : {}),
+  });
+}
+
+// Push the current schedule state to a session's socket. Needed by any
+// server-internal path that arms/changes a schedule without a client request
+// to respond to (e.g. the auto-session-limit detector in onData) -- unlike
+// schedule_prompt/cancel_schedule/get_schedule, those paths have no
+// request/response leg to piggyback the push on.
+function notifyScheduleState(session) {
+  if (session?.socket && session.socket.readyState === 1) {
+    session.socket.send(buildScheduleStateMsg(scheduledPromptPublic(session)));
   }
 }
 

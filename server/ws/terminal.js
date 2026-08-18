@@ -11,22 +11,9 @@ import {
   cancelScheduledPrompt,
   scheduledPromptPublic,
   computeNextLocalTime,
-  getServerTimeInfo,
   resolveMcpSocketForSession,
+  buildScheduleStateMsg as scheduleStateMsg,
 } from './sessionManager.js';
-
-// Build a schedule_state payload including server timezone info so the client
-// can display/interpret times in the server's zone (matching Claude Code).
-function scheduleStateMsg(scheduled, error) {
-  const { tz, now } = getServerTimeInfo();
-  return JSON.stringify({
-    type: 'schedule_state',
-    scheduled,
-    serverTz: tz,
-    serverNow: now,
-    ...(error ? { error } : {}),
-  });
-}
 
 export async function terminalWs(fastify, opts) {
   fastify.get('/ws/terminal', { websocket: true }, (socket, req) => {
