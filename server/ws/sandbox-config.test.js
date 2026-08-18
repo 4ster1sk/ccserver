@@ -74,12 +74,15 @@ test('forceSandbox coexists with the other config keys', () => {
   });
 });
 
-test('defaultApp accepts copilot and falls back to claude for anything else', () => {
+test('defaultApp accepts supported apps and falls back to claude for anything else', () => {
   withConfig({ defaultApp: 'copilot' }, () => {
     assert.equal(loadSandboxConfig().defaultApp, 'copilot');
   });
   withConfig({ defaultApp: 'opencode' }, () => {
     assert.equal(loadSandboxConfig().defaultApp, 'opencode');
+  });
+  withConfig({ defaultApp: 'codex' }, () => {
+    assert.equal(loadSandboxConfig().defaultApp, 'codex');
   });
   withConfig({ defaultApp: 'bogus' }, () => {
     assert.equal(loadSandboxConfig().defaultApp, 'claude');

@@ -43,6 +43,11 @@ test('resolveApp finds copilot via SANDBOX_PATH or its fallback dirs', { skip: !
   assert.ok(resolvesToRealBinary(r.command), `command does not resolve to a real binary: ${r.command}`);
 });
 
+test('resolveApp finds codex via SANDBOX_PATH or its fallback dirs', { skip: !isInstalled('codex') }, () => {
+  const r = resolveApp('codex');
+  assert.ok(resolvesToRealBinary(r.command), `command does not resolve to a real binary: ${r.command}`);
+});
+
 // Homebrew installs live outside SANDBOX_PATH: /opt/homebrew/bin on macOS
 // Apple Silicon (Intel Macs use /usr/local/bin, already on SANDBOX_PATH) and
 // /home/linuxbrew/.linuxbrew/bin for Linuxbrew. resolveAgentCommand must
@@ -102,8 +107,8 @@ test('resolveApp reports found: false for a configured claudeBin that does not e
 // install-state-independent (it is a pure mirror of the per-app resolution).
 test('installedApps mirrors resolveApp found flags for all three apps', () => {
   const installed = installedApps();
-  assert.deepEqual(Object.keys(installed).sort(), ['claude', 'copilot', 'opencode']);
-  for (const app of ['claude', 'opencode', 'copilot']) {
+  assert.deepEqual(Object.keys(installed).sort(), ['claude', 'codex', 'copilot', 'opencode']);
+  for (const app of ['claude', 'opencode', 'copilot', 'codex']) {
     assert.equal(installed[app], resolveApp(app).found, `${app} flag must match resolveApp`);
   }
 });

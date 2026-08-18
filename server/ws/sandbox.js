@@ -393,7 +393,7 @@ export function loadSandboxConfig() {
   // Which agent a new session launches when the client doesn't request one.
   // See appLaunch.js's APPS; anything else (including unset) falls back to
   // claude -- see sessionManager.js's defaultApp().
-  const defaultApp = raw.defaultApp === 'opencode' || raw.defaultApp === 'copilot' ? raw.defaultApp : 'claude';
+  const defaultApp = raw.defaultApp === 'opencode' || raw.defaultApp === 'copilot' || raw.defaultApp === 'codex' ? raw.defaultApp : 'claude';
   // Show the client's top-bar Usage button (Claude Code /usage spend). Off
   // for setups that don't want it; the client also hides the button on its
   // own when claude is not installed (the capture would never succeed).
@@ -527,6 +527,11 @@ export function resolveApp(app, configuredBin = loadSandboxConfig().claudeBin) {
     if (r) return { command: r.command, installDir: appInstallDir(r.path), found: true };
     return { command: process.platform === 'win32' ? 'copilot.exe' : 'copilot', installDir: null, found: false };
   }
+  if (app === 'codex') {
+    const r = resolveAgentCommand('codex', [join(HOME, '.local', 'bin')]);
+    if (r) return { command: r.command, installDir: appInstallDir(r.path), found: true };
+    return { command: process.platform === 'win32' ? 'codex.exe' : 'codex', installDir: null, found: false };
+  }
   const command = configuredBin || (process.platform === 'win32' ? 'claude.exe' : 'claude');
   const r = resolveAgentCommand(command);
   // Keep the bare name when PATH resolves it (the sandbox PATH can too); use
@@ -545,6 +550,7 @@ export function installedApps() {
     claude: resolveApp('claude').found,
     opencode: resolveApp('opencode').found,
     copilot: resolveApp('copilot').found,
+    codex: resolveApp('codex').found,
   };
 }
 
@@ -559,7 +565,8 @@ export function resolveClaude(configuredBin = loadSandboxConfig().claudeBin) {
 function withClaude(targetCommand, command) {
   if (targetCommand[0] === 'claude' || targetCommand[0] === 'claude.exe'
     || targetCommand[0] === 'opencode' || targetCommand[0] === 'opencode.exe'
-    || targetCommand[0] === 'copilot' || targetCommand[0] === 'copilot.exe') {
+    || targetCommand[0] === 'copilot' || targetCommand[0] === 'copilot.exe'
+    || targetCommand[0] === 'codex' || targetCommand[0] === 'codex.exe') {
     return [command, ...targetCommand.slice(1)];
   }
   return targetCommand;
@@ -761,7 +768,7 @@ function buildBwrapArgs({ cwd, docker, gpg, extraBinds, extraEnv, authSock, stat
     args.push('--ro-bind', MCP_BRIDGE_SCRIPT, SANDBOX_MCP_BRIDGE_PATH);
   }
 
-  // Agent CLI configuration + install dirs (claude + opencode + copilot),
+  // Agent CLI configuration + install dirs (claude + opencode + copilot + codex),
   // writable so sessions/auth state survive across sandbox launches and
   // conversations can be resumed. ~/.local/bin is exposed so the user's own
   // tools resolve. opencode's XDG state dir (~/.local/state/opencode) holds
@@ -774,6 +781,7 @@ function buildBwrapArgs({ cwd, docker, gpg, extraBinds, extraEnv, authSock, stat
   mkdirSync(opencodeState, { recursive: true });
   const copilotConfig = join(HOME, '.config', 'github-copilot');
   const copilotHome = join(HOME, '.copilot');
+  const codexHome = join(HOME, '.codex');
   mkdirSync(copilotConfig, { recursive: true });
   mkdirSync(copilotHome, { recursive: true });
   const appBinds = [
@@ -785,6 +793,7 @@ function buildBwrapArgs({ cwd, docker, gpg, extraBinds, extraEnv, authSock, stat
     [opencodeState, 'rw'],
     [copilotConfig, 'rw'],
     [copilotHome, 'rw'],
+    [codexHome, 'rw'],
   ];
   for (const [src, mode] of appBinds) {
     if (existsSync(src)) {

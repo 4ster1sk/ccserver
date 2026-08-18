@@ -256,14 +256,14 @@ export default function App() {
       shell: !!session.shell,
       sessionId: session.id,
       attachSessionId: session.id,
-      app: session.app === 'opencode' ? 'opencode' : session.app === 'copilot' ? 'copilot' : 'claude',
+      app: session.app === 'opencode' ? 'opencode' : session.app === 'copilot' ? 'copilot' : session.app === 'codex' ? 'codex' : 'claude',
       model: session.model || null,
       sandbox: !!session.sandbox,
       sandboxOpts: session.sandboxOpts || null,
       // opencode/copilot re-launches resume the last session of the project
       // (-c / --continue), so a continued conversation survives the dead pty
       // like claude's does.
-      resume: session.app === 'opencode' || session.app === 'copilot',
+      resume: session.app === 'opencode' || session.app === 'copilot' || session.app === 'codex',
     });
   }, [tabs, openTerminalTab]);
 
@@ -394,7 +394,7 @@ export default function App() {
   // `availableApps` null/absent (fetch pending or failed, older server) means
   // "unknown", not "claude missing" -- the button stays shown in that case and
   // is only auto-hidden when the server actually reports claude absent.
-  const usageHidden = (activeTab?.type === 'terminal' && (activeTab.app === 'opencode' || activeTab.app === 'copilot'))
+  const usageHidden = (activeTab?.type === 'terminal' && (activeTab.app === 'opencode' || activeTab.app === 'copilot' || activeTab.app === 'codex'))
     || (activeTab?.type === 'group' && groupActiveApp === 'opencode')
     || !usagePrefs.showUsage
     || (usagePrefs.availableApps && !usagePrefs.availableApps.claude);

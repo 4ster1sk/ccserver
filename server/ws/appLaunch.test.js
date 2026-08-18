@@ -40,13 +40,14 @@ function accumulateDetect(app, chunks) {
 const OPENCODE_PERMISSION_BOX_RAW = '                                                                   \x1b[0m\x1b[30;3H\x1b[38;2;245;167;66m\x1b[48;2;20;20;20m┃\x1b[0m\x1b[30;4H\x1b[38;2;255;255;255m\x1b[48;2;20;20;20m  \x1b[0m\x1b[30;6H\x1b[38;2;245;167;66m\x1b[48;2;20;20;20m△\x1b[0m\x1b[30;7H\x1b[38;2;255;255;255m\x1b[48;2;20;20;20m \x1b[0m\x1b[30;8H\x1b[38;2;238;238;238m\x1b[48;2;20;20;20mPermission required\x1b[0m\x1b[30;27H\x1b[38;2;255;255;255m\x1b[48;2;20;20;20m                                                                                            \x1b[0m\x1b[31;3H\x1b[38;2;245;167;66m\x1b[48;2;20;20;20m┃\x1b[0m\x1b[31;4H\x1b[38;2;255;255;255m\x1b[48;2;20;20;20m    \x1b[0m\x1b[31;8H\x1b[38;2;128;128;128m\x1b[48;2;20;20;20m←\x1b[0m\x1b[31;9H\x1b[38;2;255;255;255m\x1b[48;2;20;20;20m \x1b[0m\x1b[31;10H\x1b[38;2;238;238;238m\x1b[48;2;20;20;20mAccess external directory /tmp\x1b[0m\x1b[31;40H\x1b[38;2;255;255;255m\x1b[48;2;20;20;20m                                                                               \x1b[0m\x1b[32;3H\x1b[38;2;245;167;66m\x1b[48;2;20;20;20m┃\x1b[0m\x1b[32;4H\x1b[38;2;255;255;255m\x1b[48;2;20;20;20m                                                                                                                   \x1b[0m\x1b[33;3H\x1b[38;2;245;167;66m\x1b[48;2;20;20;20m┃\x1b[0m\x1b[33;4H\x1b[38;2;255;255;255m\x1b[48;2;20;20;20m  \x1b[0m\x1b[33;6H\x1b[38;2;128;128;128m\x1b[48;2;20;20;20mPatterns\x1b[0m\x1b[33;14H\x1b[38;2;255;255;255m\x1b[48;2;20;20;20m                                                                                                         \x1b[0m\x1b[34;3H\x1b[38;2;245;167;66m\x1b[48;2;20;20;20m┃\x1b[0m\x1b[34;4H\x1b[38;2;255;255;255m\x1b[48;2;20;20;20m                                                                                                                   \x1b[0m\x1b[35;3H\x1b[38;2;245;167;66m\x1b[48;2;20;20;20m┃\x1b[0m\x1b[35;4H\x1b[38;2;255;255;255m\x1b[48;2;20;20;20m  \x1b[0m\x1b[35;6H\x1b[38;2;238;238;238m\x1b[48;2;20;20;20m- /tmp/*\x1b[0m\x1b[35;14H\x1b[38;2;255;255;255m\x1b[48;2;20;20;20m                                                                                                         \x1b[0m\x1b[36;3H\x1b[38;2;245;167;66m\x1b[48;2;20;20;20m┃\x1b[0m\x1b[36;4H\x1b[38;2;255;255;255m\x1b[48;2;20;20;20m                                                                                                                   \x1b[0m\x1b[37;3H\x1b[38;2;245;167;66m\x1b[48;2;20;20;20m┃\x1b[0m\x1b[37;6H\x1b[38;2;255;255;255m\x1b[48;2;30;30;30m     \x1b[0m\x1b[37;12H\x1b[38;2;255;255;255m\x1b[48;2;30;30;30m \x1b[0m\x1b[37;14H\x1b[38;2;255;255;255m\x1b[48;2;30;30;30m                            \x1b[0m\x1b[37;43H\x1b[38;2;255;255;255m\x1b[48;2;30;30;30m           \x1b[0m\x1b[37;55H\x1b[38;2;255;255;255m\x1b[48;2;30;30;30m \x1b[0m\x1b[37;57H\x1b[38;2;255;255;255m\x1b[48;2;30;30;30m   \x1b[0m\x1b[38;3H\x1b[38;2;245;167;66m\x1b[48;2;20;20;20m┃\x1b[0m\x1b[38;4H\x1b[38;2;255;255;255m\x1b[48;2;30;30;30m  \x1b[0m\x1b[38;6H\x1b[38;2;255;255;255m\x1b[48;2;245;167;66m \x1b[0m\x1b[38;7H\x1b[38;2;10;10;10m\x1b[48;2;245;167;66mAllow once\x1b[0m\x1b[38;17H\x1b[38;2;255;255;255m\x1b[48;2;245;167;66m \x1b[0m\x1b[38;18H\x1b[38;2;255;255;255m\x1b[48;2;30;30;30m  \x1b[0m\x1b[38;20H\x1b[38;2;128;128;128m\x1b[48;2;30;30;30mAllow always\x1b[0m\x1b[38;32H\x1b[38;2;255;255;255m\x1b[48;2;30;30;30m   \x1b[0m\x1b[38;35H\x1b[38;2;128;128;128m\x1b[48;2;30;30;30mReject\x1b[0m\x1b[38;41H\x1b[38;2;255;255;255m\x1b[48;2;30;30;30m             ';
 
 test('APPS covers all three agents', () => {
-  assert.deepEqual(APPS, ['claude', 'opencode', 'copilot']);
+  assert.deepEqual(APPS, ['claude', 'opencode', 'copilot', 'codex']);
 });
 
 test('isValidApp accepts only known apps', () => {
   assert.ok(isValidApp('claude'));
   assert.ok(isValidApp('opencode'));
   assert.ok(isValidApp('copilot'));
+  assert.ok(isValidApp('codex'));
   assert.ok(!isValidApp('bogus'));
   assert.ok(!isValidApp(undefined));
   assert.ok(!isValidApp(null));
@@ -56,6 +57,7 @@ test('appDisplayName maps apps to labels', () => {
   assert.equal(appDisplayName('opencode'), 'opencode');
   assert.equal(appDisplayName('copilot'), 'GitHub Copilot');
   assert.equal(appDisplayName('claude'), 'Claude Code');
+  assert.equal(appDisplayName('codex'), 'OpenAI Codex');
   assert.equal(appDisplayName('bogus'), 'Claude Code');
 });
 
@@ -82,9 +84,17 @@ test('appResumeArgs: copilot resumes only via --continue (no id-based resume)', 
   assert.deepEqual(appResumeArgs('copilot', 'abc123', { resumeLast: true }), ['--continue']);
 });
 
+test('appResumeArgs: codex resumes by id or --last', () => {
+  assert.deepEqual(appResumeArgs('codex', null), []);
+  assert.deepEqual(appResumeArgs('codex', 'session-1'), ['resume', 'session-1']);
+  assert.deepEqual(appResumeArgs('codex', null, { resumeLast: true }), ['resume', '--last']);
+  assert.deepEqual(appResumeArgs('codex', 'session-1', { resumeLast: true }), ['resume', 'session-1']);
+});
+
 test('appSupportsModelFlag: opencode verified, copilot verified, claude opt-in only', () => {
   assert.equal(appSupportsModelFlag('opencode'), true, 'opencode --help confirms -m/--model');
   assert.equal(appSupportsModelFlag('copilot'), true, 'copilot --help confirms --model (real binary, Aug 2026)');
+  assert.equal(appSupportsModelFlag('codex'), true, 'Codex documents --model');
   // claude's --model support cannot be verified on this host (the local
   // wrapper resolves to a missing binary), so it must default to off and only
   // turn on via the documented opt-in env var.
@@ -127,6 +137,13 @@ test('appModelArgs: copilot emits --model for a non-empty string model', () => {
   assert.deepEqual(appModelArgs('copilot', null), [], 'null model must be omitted');
   assert.deepEqual(appModelArgs('copilot', undefined), [], 'absent model must be omitted');
   assert.deepEqual(appModelArgs('copilot', 42), [], 'non-string model must be omitted');
+});
+
+test('appModelArgs: codex preserves arbitrary model names as one argv value', () => {
+  assert.deepEqual(appModelArgs('codex', 'gpt-5.6 terra'), ['--model', 'gpt-5.6 terra']);
+  assert.deepEqual(appModelArgs('codex', ''), []);
+  assert.deepEqual(appModelArgs('codex', null), []);
+  assert.deepEqual(appModelArgs('codex', 42), []);
 });
 
 test('appModelArgs: claude never emits --model unless the capability is enabled', () => {
@@ -172,6 +189,10 @@ test('extractResumeSessionId: copilot never exposes a stream id', () => {
   assert.equal(extractResumeSessionId('copilot', 'copilot --continue'), null);
   assert.equal(extractResumeSessionId('copilot', 'copilot --resume=<session-id>'), null);
   assert.equal(extractResumeSessionId('copilot', ''), null);
+});
+
+test('extractResumeSessionId: codex is intentionally not inferred from TUI output', () => {
+  assert.equal(extractResumeSessionId('codex', 'codex resume session-1'), null);
 });
 
 test('detectPermissionPrompt: claude Ink prompts', () => {

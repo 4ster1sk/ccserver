@@ -6,7 +6,7 @@
 // The launchable agent CLIs. Any session launcher (WS init, combo groups,
 // scheduled prompts, orchestrator restarts) keys its behavior off these ids;
 // unknown ids are rejected / fall back to the configured default app.
-export const APPS = ['claude', 'opencode', 'copilot'];
+export const APPS = ['claude', 'opencode', 'copilot', 'codex'];
 
 // Which app new sessions launch when none is requested is configured, not
 // hardcoded here -- see sandbox.js's loadSandboxConfig() / sessionManager.js's
@@ -17,7 +17,7 @@ export function isValidApp(app) {
 }
 
 export function appDisplayName(app) {
-  return app === 'copilot' ? 'GitHub Copilot' : app === 'opencode' ? 'opencode' : 'Claude Code';
+  return app === 'copilot' ? 'GitHub Copilot' : app === 'codex' ? 'OpenAI Codex' : app === 'opencode' ? 'opencode' : 'Claude Code';
 }
 
 // CLI args to start `app` fresh, or to resume a conversation:
@@ -40,6 +40,10 @@ export function appResumeArgs(app, resumeId, { resumeLast = false } = {}) {
     if (resumeLast) return ['--continue'];
     return [];
   }
+  if (app === 'codex') {
+    const args = resumeId ? ['resume', resumeId] : resumeLast ? ['resume', '--last'] : [];
+    return args;
+  }
   if (resumeId) return ['--resume', resumeId];
   if (resumeLast) return ['--continue'];
   return [];
@@ -59,6 +63,7 @@ export function appResumeArgs(app, resumeId, { resumeLast = false } = {}) {
 export function appSupportsModelFlag(app) {
   if (app === 'opencode') return true;
   if (app === 'copilot') return true;
+  if (app === 'codex') return true;
   if (app === 'claude') return process.env.CCSERVER_CLAUDE_MODEL === '1';
   return false;
 }
@@ -80,7 +85,7 @@ export function appModelArgs(app, model) {
 // `opencode -c` / `copilot --continue` instead (null here).
 export function extractResumeSessionId(app, rawText) {
   const clean = rawText.replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, '');
-  if (app === 'opencode' || app === 'copilot') return null;
+  if (app === 'opencode' || app === 'copilot' || app === 'codex') return null;
 
   const matches = [...clean.matchAll(/claude\s+(?:--resume|-r)\s+([a-zA-Z0-9_-]+)/gi)];
   return matches.length > 0 ? matches[matches.length - 1][1] : null;
@@ -117,6 +122,9 @@ export function detectPermissionPrompt(app, bufNoSpace) {
     // ever misdetects.
     return /1\.Yes/i.test(bufNoSpace) || /runningsession/i.test(bufNoSpace);
   }
+  // Codex approval rendering is not verified on this host. Do not auto-approve
+  // an unverified frame; the user can answer it in the terminal.
+  if (app === 'codex') return false;
   return (
     /Doyouwantto(proceed|makethisedit|use)/i.test(bufNoSpace) ||
     /Yes,allow/i.test(bufNoSpace) ||

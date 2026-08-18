@@ -220,3 +220,12 @@ test('copilot + usage: nothing is assembled (copilot has no MCP injection at all
   assert.deepEqual(args, []);
   assert.deepEqual(env, {});
 });
+
+test('codex MCP injection is disabled until the CLI is verified', () => {
+  const { args, env } = buildMcpConfigArgsAndEnv('codex', {
+    groupMcp: true,
+    notify: { mode: 'sandbox', sockPath: '/run/user/1000/ccserver-notify.sock' },
+  });
+  assert.deepEqual(args, []);
+  assert.deepEqual(env, {});
+});

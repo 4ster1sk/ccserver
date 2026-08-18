@@ -522,9 +522,9 @@ export async function addMember(groupId, role, options = {}) {
   // pointless. An explicit copilot request is refused; a fallback (persisted
   // pref or a defaultApp landing on copilot) is corrected to claude instead
   // of failing the whole group launch.
-  if (app === 'copilot') {
+  if (app === 'copilot' || app === 'codex') {
     if (hasOwn(options, 'app') && options.app !== undefined) {
-      return { error: 'bad-request', message: 'app must be claude or opencode (copilot is not supported in groups)' };
+      return { error: 'bad-request', message: 'app must be claude or opencode (Copilot and Codex are not supported in groups)' };
     }
     app = 'claude';
   }
@@ -533,7 +533,7 @@ export async function addMember(groupId, role, options = {}) {
   const sandboxOpts = hasOwn(options, 'sandboxOpts')
     ? normalizeSandboxOpts(options.sandboxOpts)
     : (pref.sandboxOpts || group.sandboxOpts);
-  if (!isValidApp(app)) return { error: 'bad-request', message: 'app must be claude or opencode' };
+  if (!isValidApp(app) || app === 'copilot' || app === 'codex') return { error: 'bad-request', message: 'app must be claude or opencode (Copilot and Codex are not supported in groups)' };
   if (!WORKER_ROLE_RE.test(role)) {
     return {
       error: 'invalid-role',

@@ -9,6 +9,7 @@ const claudeIcon = <svg className="tab-icon" viewBox="0 0 16 16" fill="none" str
 // GitHub Copilot: a robot head (circle + antenna + eyes), stroke style
 // matching the other app icons.
 const copilotIcon = <svg className="tab-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"><path d="M8 2.5v2"/><path d="M4.5 5h7"/><circle cx="8" cy="9.5" r="4"/><path d="M5.8 8.2h.01M10.2 8.2h.01"/><path d="M5.8 11c1.2 1.1 3.2 1.1 4.4 0"/></svg>;
+const codexIcon = <svg className="tab-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"><path d="M3 4.5 8 2l5 2.5v7L8 14l-5-2.5z"/><path d="m3 4.5 5 2.7 5-2.7M8 7.2V14"/></svg>;
 
 export default function TabIcon({ type, app, shell }) {
   if (type === 'browser') {
@@ -28,6 +29,7 @@ export default function TabIcon({ type, app, shell }) {
     if (shell) icons.push(shellIcon);
     if (app === 'opencode') icons.push(opencodeIcon);
     if (app === 'copilot') icons.push(copilotIcon);
+    if (app === 'codex') icons.push(codexIcon);
     if (app === 'claude' && !shell) icons.push(claudeIcon);
     return <>{icons}</>;
   }

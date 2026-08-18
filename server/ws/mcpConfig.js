@@ -85,7 +85,7 @@ export function buildMcpConfigArgsAndEnv(app, { groupMcp = true, notify, usage }
   const notifyIdentityEnv = notify?.identity ? { CCSERVER_NOTIFY_IDENTITY: JSON.stringify(notify.identity) } : {};
   const usageSockEnv = usage ? { CCSANDBOX_USAGE_MCP_SOCK: usage.sockPath } : {};
 
-  if (app === 'copilot') {
+  if (app === 'copilot' || app === 'codex') {
     // No CLI-arg/env MCP injection exists for copilot: assembling one would
     // reach the binary as `--mcp-config` and die with "unknown option". The
     // function is the single assembly point, so refusing here guarantees no
