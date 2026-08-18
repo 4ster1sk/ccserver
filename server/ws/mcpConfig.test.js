@@ -221,11 +221,14 @@ test('copilot + usage: nothing is assembled (copilot has no MCP injection at all
   assert.deepEqual(env, {});
 });
 
-test('codex MCP injection is disabled until the CLI is verified', () => {
+test('codex gets per-process MCP config overrides without writing config.toml', () => {
   const { args, env } = buildMcpConfigArgsAndEnv('codex', {
     groupMcp: true,
     notify: { mode: 'sandbox', sockPath: '/run/user/1000/ccserver-notify.sock' },
   });
-  assert.deepEqual(args, []);
-  assert.deepEqual(env, {});
+  assert.deepEqual(args, [
+    '-c', 'mcp_servers.ccserver={command="/ccserver-sandbox-mcp-bridge",args=[]}',
+    '-c', 'mcp_servers.ccserver-notify={command="/ccserver-sandbox-mcp-bridge",args=["notify"]}',
+  ]);
+  assert.deepEqual(env, { CCSANDBOX_NOTIFY_MCP_SOCK: '/run/user/1000/ccserver-notify.sock' });
 });

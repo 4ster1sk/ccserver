@@ -27,7 +27,7 @@ VS Code のようにフォルダを選択し、ブラウザ内のターミナル
 - [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) — Usage表示など、一部の機能で使用します。インストールされていない場合も、opencodeやCopilot CLIだけで通常のセッションを利用できます。
 - [opencode](https://opencode.ai/) — インストール: [公式サイト](https://opencode.ai/)を参照。入れずに選んだ場合、ターミナルに `execvp(3) failed` 等のエラーが表示され起動に失敗します。
 - [GitHub Copilot CLI](https://github.com/github/copilot-cli) (`copilot`) — インストール: `npm i -g @github/copilot` (またはインストールスクリプト / `brew install copilot-cli` / winget)。入れずに選んだ場合も同様に起動に失敗します。認証は初回 `/login` (OAuth) か環境変数 `GH_TOKEN` / `GITHUB_TOKEN` で行います。
-- [OpenAI Codex CLI](https://developers.openai.com/codex/cli/) (`codex`) — OpenAI公式手順でインストールします。新規起動は `codex`、モデルは `--model <model>`、再開は `codex resume <id>` または `codex resume --last` です。ccserverは実CLI未検証のためCodexへのMCP注入とコンボ起動を無効化しています。
+- [OpenAI Codex CLI](https://developers.openai.com/codex/cli/) (`codex`) — OpenAI公式手順でインストールします。新規起動は `codex`、モデルは `--model <model>`、再開は `codex resume <id>` または `codex resume --last` です。
 
 ## インストールと起動
 
@@ -107,7 +107,7 @@ GitHub Copilot を選んだ場合:
 OpenAI Codexについて:
 
 - 単体起動でモデル入力と `codex resume` / `codex resume --last` を利用できます。CodexのTUI出力からセッションIDは推測しません。
-- Codexの永続 `codex mcp add` は自動実行しません。起動単位の `-c` MCP設定は実CLIで検証できていないため注入せず、コンボ起動・`open_tab`のapp指定からCodexを拒否します。
+- Codexの永続 `codex mcp add` は自動実行しません。ccserverは起動単位の `-c mcp_servers.<name>=...` でMCPを注入するため、`~/.codex/config.toml`を変更せずにコンボ起動でも利用できます。
 - サンドボックスではプロジェクト単位の永続HOME内に `~/.codex` を保持します。Codex自身のsandbox/approval policyはccserver側から無条件に緩和しません。
 
 ### 予約プロンプト (タイマー)
