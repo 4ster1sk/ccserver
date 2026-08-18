@@ -18,7 +18,9 @@ import { join } from 'node:path';
 import { buildMinimalSandboxSpawn, resolveClaude, sandboxAvailable, loadSandboxConfig } from './ws/sandbox.js';
 
 const CACHE_TTL_MS = 60 * 1000;       // serve cache without re-capturing
-const CAPTURE_TIMEOUT_MS = 15 * 1000; // hard cap on a single capture
+// The first capture can include Claude startup, the project trust prompt, and
+// a network-backed usage refresh. Fifteen seconds is too short for that path.
+const CAPTURE_TIMEOUT_MS = 30 * 1000; // hard cap on a single capture
 const BOOT_DELAY_MS = 3000;           // wait for claude's TUI to come up before typing
 const SETTLE_MS = 900;                // quiet period after the dashboard looks ready
 const TRUST_SETTLE_MS = 1500;         // let the UI replace the trust dialog before typing
