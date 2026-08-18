@@ -518,13 +518,11 @@ export async function addMember(groupId, role, options = {}) {
     ? options.app
     : (pref.app || defaultApp());
   // copilot has no CLI-arg/env MCP injection (config-file only), so a combo
-  // member could never use the group's broker tools -- the launch would be
-  // pointless. An explicit copilot request is refused; a fallback (persisted
-  // pref or a defaultApp landing on copilot) is corrected to claude instead
-  // of failing the whole group launch.
-  if (app === 'copilot' || app === 'codex') {
+  // member could never use the group's broker tools. An explicit copilot
+  // request is refused; a fallback is corrected to claude.
+  if (app === 'copilot') {
     if (hasOwn(options, 'app') && options.app !== undefined) {
-      return { error: 'bad-request', message: 'app must be claude or opencode (Copilot and Codex are not supported in groups)' };
+      return { error: 'bad-request', message: 'app must be claude, opencode, or codex (Copilot is not supported in groups)' };
     }
     app = 'claude';
   }
@@ -533,7 +531,7 @@ export async function addMember(groupId, role, options = {}) {
   const sandboxOpts = hasOwn(options, 'sandboxOpts')
     ? normalizeSandboxOpts(options.sandboxOpts)
     : (pref.sandboxOpts || group.sandboxOpts);
-  if (!isValidApp(app) || app === 'copilot' || app === 'codex') return { error: 'bad-request', message: 'app must be claude or opencode (Copilot and Codex are not supported in groups)' };
+  if (!isValidApp(app) || app === 'copilot') return { error: 'bad-request', message: 'app must be claude, opencode, or codex (Copilot is not supported in groups)' };
   if (!WORKER_ROLE_RE.test(role)) {
     return {
       error: 'invalid-role',

@@ -114,10 +114,10 @@ export function buildControlMcpServer(deps) {
 
   server.tool(
     'open_tab',
-    'Open a new worker session inside this group (with its own handoff channel) and return its sessionId. role must be a worker role (workerA, workerB, ...) -- never orchestrator. cwd is restricted to the group project directory. app (claude or opencode) is optional: omitted values fall back to the role\'s persisted preferences, then to the group defaults. copilot and codex are NOT supported in groups because their MCP injection is disabled, so they could never reach this group\'s broker tools, and are refused. For a genuinely new member, sandboxOpts.gpg / sandboxOpts.sshAgent cannot exceed what the calling orchestrator session itself currently has enabled -- a request for a flag the orchestrator does not hold is silently downgraded to false; check the returned sandboxOpts to see what was actually granted. Restarting an already-registered role (role currently has a member) always keeps that member\'s existing sandboxOpts regardless of what this call requests.',
+    'Open a new worker session inside this group (with its own handoff channel) and return its sessionId. role must be a worker role (workerA, workerB, ...) -- never orchestrator. cwd is restricted to the group project directory. app (claude, opencode, or codex) is optional: omitted values fall back to the role\'s persisted preferences, then to the group defaults. copilot is not supported in groups because its MCP configuration is file-based and cannot be injected per session. For a genuinely new member, sandboxOpts.gpg / sandboxOpts.sshAgent cannot exceed what the calling orchestrator session itself currently has enabled -- a request for a flag the orchestrator does not hold is silently downgraded to false; check the returned sandboxOpts to see what was actually granted. Restarting an already-registered role (role currently has a member) always keeps that member\'s existing sandboxOpts regardless of what this call requests.',
     {
       role: z.string().regex(/^worker[A-Za-z0-9_-]+$/),
-      app: z.enum(['claude', 'opencode']).optional(),
+      app: z.enum(['claude', 'opencode', 'codex']).optional(),
       model: z.string().nullable().optional(),
       cwd: z.string(),
       sandboxOpts: z.object({ gpg: z.boolean().optional(), sshAgent: z.boolean().optional() }).optional(),

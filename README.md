@@ -27,7 +27,7 @@ VS Code のようにフォルダを選択し、ブラウザ内のターミナル
 - [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) — Usage表示など、一部の機能で使用します。インストールされていない場合も、opencodeやCopilot CLIだけで通常のセッションを利用できます。
 - [opencode](https://opencode.ai/) — インストール: [公式サイト](https://opencode.ai/)を参照。入れずに選んだ場合、ターミナルに `execvp(3) failed` 等のエラーが表示され起動に失敗します。
 - [GitHub Copilot CLI](https://github.com/github/copilot-cli) (`copilot`) — インストール: `npm i -g @github/copilot` (またはインストールスクリプト / `brew install copilot-cli` / winget)。入れずに選んだ場合も同様に起動に失敗します。認証は初回 `/login` (OAuth) か環境変数 `GH_TOKEN` / `GITHUB_TOKEN` で行います。
-- [OpenAI Codex CLI](https://developers.openai.com/codex/cli/) (`codex`) — OpenAI公式手順でインストールします。新規起動は `codex`、モデルは `--model <model>`、再開は `codex resume <id>` または `codex resume --last` です。ccserverは実CLI未検証のためCodexへのMCP注入とコンボ起動を無効化しています。
+- [OpenAI Codex CLI](https://developers.openai.com/codex/cli/) (`codex`) — OpenAI公式手順でインストールします。新規起動は `codex`、モデルは `--model <model>`、再開は `codex resume <id>` または `codex resume --last` です。
 
 ## インストールと起動
 
@@ -107,7 +107,7 @@ GitHub Copilot を選んだ場合:
 OpenAI Codexについて:
 
 - 単体起動でモデル入力と `codex resume` / `codex resume --last` を利用できます。CodexのTUI出力からセッションIDは推測しません。
-- Codexの永続 `codex mcp add` は自動実行しません。起動単位の `-c` MCP設定は実CLIで検証できていないため注入せず、コンボ起動・`open_tab`のapp指定からCodexを拒否します。
+- Codexの永続 `codex mcp add` は自動実行しません。ccserverは起動単位の `-c mcp_servers.<name>=...` でMCPを注入するため、`~/.codex/config.toml`を変更せずにコンボ起動でも利用できます。
 - サンドボックスではプロジェクト単位の永続HOME内に `~/.codex` を保持します。Codex自身のsandbox/approval policyはccserver側から無条件に緩和しません。
 
 ### 予約プロンプト (タイマー)
@@ -179,7 +179,7 @@ OpenAI Codexについて:
 
 - **ツール**: `get_usage({ force?: boolean })` — `{ usage, updatedAt, cached, sandboxed?, error? }` を返します (`GET /api/usage` と同じ形)。`force: true` で強制再取得 (最大 15 秒程度かかることがあります)。
 - **注入条件**: **`claude` セッションのみ** (`/usage` は Claude Code CLI 固有の機能のため opencode/copilot には注入されません)。シェルセッションには注入されません。`ccserver-notify` と異なり、コンボのワーカー/オーケストレーター/スタンドアロンは区別せず、対象となる claude セッション全てに注入されます。
-- **有効化条件**: サーバーに claude バイナリがインストールされていて、かつ `showUsage` が明示的に `false` でないときのみ (`showUsage: false` は Usage ボタンだけでなくこの MCP ツールの注入も無効化します)。
+- **オプトイン**: デフォルトでは注入されません。サーバーに claude バイナリがインストールされ、設定ファイルで `usageMcp: true` を明示した場合のみ注入されます。Usage ボタンの `showUsage` 設定とは独立しています。
 - サンドボックス内外どちらでも動作します (サンドボックス内はソケットを bind、外はホストの node でブリッジを実行) — 仕組みは `ccserver-notify` と同じパターンですが、`get_usage` は接続元によらず同じ結果を返すため識別情報 (identity) は一切やり取りしません。
 
 ### コンボ起動: オーケストレーターが `send_input` でワーカーに指示するときの注意
@@ -312,6 +312,7 @@ cp server/sandbox.config.example.json server/sandbox.config.json
   "forceSandbox": false,
   "defaultApp": "claude",
   "showUsage": true,
+  "usageMcp": false,
   "notify": {
     "discordWebhook": "",
     "subscriptions": []
@@ -330,7 +331,8 @@ cp server/sandbox.config.example.json server/sandbox.config.json
 | `gitBroker` | `true` | git/gh の認証情報スコープ制限 (上記参照)。 |
 | `forceSandbox` | `false` | `true` でサンドボックス外の起動を全面禁止。エージェント・シェルを問わず全セッションがサンドボックス強制になり、UI のサンドボックス切替は無効化されます。bwrap が無い環境 (または Windows) では起動をエラーで拒否します (`/usage` 取得の直接起動フォールバックも同様に禁止)。ホストに bwrap (bubblewrap) のインストールが必須です。 |
 | `defaultApp` | `"claude"` | 新規セッションの既定エージェント (`"claude"`、`"opencode"`、`"copilot"`)。UI で一度明示的に選んだ後はブラウザの記憶が優先され、この値は初回表示時の見た目とサーバー側フォールバック (予約プロンプトの自動再開など、クライアントが `app` を指定しない経路) にのみ使われます。**コンボ起動のメンバーには適用されません** (コンボのロール別選択は別途ブラウザの `localStorage` に記憶され、copilot はそもそも選択不可)。 |
-| `showUsage` | `true` | タブバー右端の Usage ボタン (Claude Code の `/usage`) を表示するか。`false` で非表示。**claude がサーバーに無い場合は設定に関わらず自動的に非表示**になります。`ccserver-usage` MCP (`get_usage` ツール、下記参照) の注入もこのフラグで一緒に無効化されます。 |
+| `showUsage` | `true` | タブバー右端の Usage ボタン (Claude Code の `/usage`) を表示するか。`false` で非表示。**claude がサーバーに無い場合は設定に関わらず自動的に非表示**になります。 |
+| `usageMcp` | `false` | Claude セッションへ `ccserver-usage` MCP (`get_usage` ツール) を注入するか。安全のため既定はオフで、`true` の明示時だけ有効です。`showUsage` とは独立しています。 |
 | `binds` | `[]` | 追加で見せるホストパス。各要素 `{ src, mode?, dest? }`。`mode` は `ro` (既定) か `rw`。存在しないパスはスキップ。`~` はホームに展開。`~/.ssh` と `~/.config/gh` は `gitBroker` の設定に関わらず常にブロックされます。 |
 | `env` | `{}` | サンドボックス内の追加環境変数 (適用順は最後 = 既定値を上書き)。例: `sshAgent: true` のときに `SSH_AUTH_SOCK` を明示指定して自動検出を上書き。 |
 | `claudeBin` | 自動検出 | claude/opencode/copilot の起動方法。`claude` を PATH から解決し、ラッパー (例: `/usr/bin/claude` → `/opt/claude-code/bin/claude`) の場合は実体のインストール先を辿ってサンドボックスへ自動的に公開します。opencode は PATH に加えて `~/.opencode/bin` も自動探索。copilot は PATH (SANDBOX_PATH) で自動解決されます (通常 `~/.local/bin/copilot`)。自動検出で外れる場所にある場合や特定ビルドに固定したい場合のみ絶対パスで指定 (環境変数 `CCSERVER_CLAUDE_BIN` が優先。copilot に個別の bin 設定はありません)。 |

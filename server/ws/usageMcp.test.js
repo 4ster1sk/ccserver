@@ -34,14 +34,23 @@ async function withUsageConfig(sandboxJson, claudeBin, fn) {
   }
 }
 
-test('usageEnabled: claude installed + showUsage unset -> true (default on)', async () => {
+test('usageEnabled: claude installed + usageMcp unset -> false (default off)', async () => {
   await withUsageConfig({}, process.execPath, async () => {
+    assert.equal(usageEnabled(), false);
+  });
+});
+
+test('usageEnabled: claude installed + usageMcp:true -> true', async () => {
+  await withUsageConfig({ usageMcp: true }, process.execPath, async () => {
     assert.equal(usageEnabled(), true);
   });
 });
 
-test('usageEnabled: claude installed + showUsage:false -> false', async () => {
-  await withUsageConfig({ showUsage: false }, process.execPath, async () => {
+test('usageEnabled: showUsage does not control MCP injection', async () => {
+  await withUsageConfig({ showUsage: false, usageMcp: true }, process.execPath, async () => {
+    assert.equal(usageEnabled(), true);
+  });
+  await withUsageConfig({ showUsage: true, usageMcp: false }, process.execPath, async () => {
     assert.equal(usageEnabled(), false);
   });
 });
