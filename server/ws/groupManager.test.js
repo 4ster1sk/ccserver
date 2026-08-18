@@ -507,6 +507,121 @@ test('listGroupMembers keeps the orchestrator first after restoreGroups', async 
     'restored members keep the orchestrator first',
   );
 });
+// --- getOrchestratorSandboxOpts / getRegisteredMemberSandboxOpts: the
+// resolution helpers openTab (mcpTools.js) uses to cap a genuinely new
+// member's sandboxOpts against the orchestrator's own current grant, and to
+// keep an already-registered member's sandboxOpts unchanged across a restart
+// (see the sandboxOpts privilege-escalation fix plan).
+
+test('getOrchestratorSandboxOpts: prefers the live orchestrator session sandboxOpts', async () => {
+  const gid = await makeGroup();
+  const fake = {
+    getSession: (id) => (id === 'orch-sess' ? { sandboxOpts: { gpg: true, sshAgent: false } } : null),
+    createSession: () => { throw new Error('unused'); },
+    destroySession: () => {},
+    writeToSession: () => false,
+  };
+  groupManager.setSessionApiForTests(fake);
+  try {
+    groupManager.registerMember(gid, 'orchestrator', 'orch-sess');
+    assert.deepEqual(groupManager.getOrchestratorSandboxOpts(gid), { gpg: true, sshAgent: false });
+  } finally {
+    groupManager.setSessionApiForTests(null);
+    groupManager.destroyGroup(gid);
+  }
+});
+
+test('getOrchestratorSandboxOpts: falls back to memberSaved when no live session', async () => {
+  const gid = randomUUID();
+  const orchDir = join(runtimeDir, `orch-saved-${gid}`);
+  writeFileSync(process.env.CCSERVER_GROUPS_PATH, JSON.stringify([{
+    id: gid,
+    createdAt: 1,
+    cwd: '/srv/proj',
+    allowedCwds: ['/srv/proj'],
+    orchestratorDir: orchDir,
+    orchestratorApp: 'claude',
+    instructions: null,
+    sandboxOpts: null,
+    members: { orchestrator: 'dead-orch-sess' },
+  }]));
+  writeFileSync(process.env.CCSERVER_SAVED_SESSIONS_PATH, JSON.stringify([
+    { cwd: orchDir, claudeSessionId: null, sandbox: true, sandboxOpts: { gpg: false, sshAgent: true }, app: 'claude', groupId: gid, groupRole: 'orchestrator' },
+  ]));
+  groupsToDestroy.push(gid);
+
+  groupManager.restoreGroups();
+  assert.deepEqual(groupManager.getOrchestratorSandboxOpts(gid), { gpg: false, sshAgent: true });
+});
+
+test('getOrchestratorSandboxOpts: falls back to memberPrefs.orchestrator.sandboxOpts when no session or saved info', async () => {
+  const gid = randomUUID();
+  await groupManager.createGroup({
+    groupId: gid,
+    cwd: '/srv/proj',
+    orchestratorDir: join(runtimeDir, gid),
+    orchestratorSandboxOpts: { gpg: true, sshAgent: true },
+  });
+  groupsToDestroy.push(gid);
+  assert.deepEqual(groupManager.getOrchestratorSandboxOpts(gid), { gpg: true, sshAgent: true });
+});
+
+test('getOrchestratorSandboxOpts: unknown groupId returns null', () => {
+  assert.equal(groupManager.getOrchestratorSandboxOpts('no-such-group'), null);
+});
+
+test('getRegisteredMemberSandboxOpts: unregistered role reports registered:false, sandboxOpts:null', async () => {
+  const gid = await makeGroup();
+  assert.deepEqual(groupManager.getRegisteredMemberSandboxOpts(gid, 'workerA'), { registered: false, sandboxOpts: null });
+});
+
+test('getRegisteredMemberSandboxOpts: registered role prefers the live session sandboxOpts', async () => {
+  const gid = await makeGroup();
+  const fake = {
+    getSession: (id) => (id === 'live-worker' ? { sandboxOpts: { gpg: true, sshAgent: true } } : null),
+    createSession: () => { throw new Error('unused'); },
+    destroySession: () => {},
+    writeToSession: () => false,
+  };
+  groupManager.setSessionApiForTests(fake);
+  try {
+    groupManager.registerMember(gid, 'workerA', 'live-worker');
+    assert.deepEqual(groupManager.getRegisteredMemberSandboxOpts(gid, 'workerA'), {
+      registered: true,
+      sandboxOpts: { gpg: true, sshAgent: true },
+    });
+  } finally {
+    groupManager.setSessionApiForTests(null);
+    groupManager.destroyGroup(gid);
+  }
+});
+
+test('getRegisteredMemberSandboxOpts: dead session falls back to memberSaved (the restart case)', async () => {
+  const gid = randomUUID();
+  const orchDir = join(runtimeDir, `worker-saved-${gid}`);
+  writeFileSync(process.env.CCSERVER_GROUPS_PATH, JSON.stringify([{
+    id: gid,
+    createdAt: 1,
+    cwd: '/srv/proj',
+    allowedCwds: ['/srv/proj'],
+    orchestratorDir: orchDir,
+    orchestratorApp: 'claude',
+    instructions: null,
+    sandboxOpts: null,
+    members: { workerA: 'dead-worker-sess' },
+  }]));
+  writeFileSync(process.env.CCSERVER_SAVED_SESSIONS_PATH, JSON.stringify([
+    { cwd: '/srv/proj', claudeSessionId: 'conv-1', sandbox: true, sandboxOpts: { gpg: true, sshAgent: false }, app: 'claude', groupId: gid, groupRole: 'workerA' },
+  ]));
+  groupsToDestroy.push(gid);
+
+  groupManager.restoreGroups();
+  assert.deepEqual(groupManager.getRegisteredMemberSandboxOpts(gid, 'workerA'), {
+    registered: true,
+    sandboxOpts: { gpg: true, sshAgent: false },
+  });
+});
+
 // --- addMember (open_tab) spawn/teardown paths, exercised with a fake
 // session facade (no real ptys): the atomic-replacement invariant -- the old
 // member is only destroyed AFTER the new channel + session exist, and a
