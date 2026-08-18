@@ -641,7 +641,7 @@ test('addMember refuses copilot explicitly and corrects a copilot fallback to cl
     // An explicit copilot request is refused before any spawn.
     const res = await groupManager.addMember(gid, 'workerA', { app: 'copilot', cwd: '/srv/proj' });
     assert.equal(res.error, 'bad-request');
-    assert.match(res.message, /copilot is not supported in groups/);
+    assert.match(res.message, /not supported in groups/);
     assert.equal(seenApp, null, 'no spawn attempt for the refused member');
   } finally {
     groupManager.setSessionApiForTests(null);

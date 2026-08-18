@@ -252,9 +252,9 @@ export async function groupsRoute(fastify, opts) {
     // members can never use the group's broker tools -- refuse it explicitly
     // here (memberSpecFromBody accepts any valid app id, copilot included).
     const invalidApp = (spec) => Object.prototype.hasOwnProperty.call(spec || {}, 'app')
-      && (!spec.app || spec.app === 'copilot');
+      && (!spec.app || spec.app === 'copilot' || spec.app === 'codex');
     if (invalidApp(workerA) || invalidApp(workerB) || invalidApp(orchestrator)) {
-      return reply.code(400).send({ error: 'workerA/workerB/orchestrator app must be claude or opencode (copilot is not supported in groups)' });
+      return reply.code(400).send({ error: 'workerA/workerB/orchestrator app must be claude or opencode (Copilot and Codex are not supported in groups)' });
     }
     if ((Object.prototype.hasOwnProperty.call(workerA, 'model') && workerA.model === undefined)
       || (Object.prototype.hasOwnProperty.call(workerB, 'model') && workerB.model === undefined)

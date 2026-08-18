@@ -139,6 +139,7 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox
       claude: "PATH, the server's node bin directory, ~/.local/bin",
       opencode: "PATH, the server's node bin directory, ~/.local/bin, ~/.opencode/bin",
       copilot: "PATH, the server's node bin directory, ~/.local/bin",
+      codex: "PATH, the server's node bin directory, ~/.local/bin",
     }[sessionApp];
     return {
       sessionId: id,
@@ -520,7 +521,7 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox
             // Extract a meaningful description from the buffer
             const noSpace = cleanBuf.replace(/\s/g, '');
             let promptLine = 'permission prompt';
-            if (session.app === 'opencode' || session.app === 'copilot') {
+            if (session.app === 'opencode' || session.app === 'copilot' || session.app === 'codex') {
               // Neither TUI's byte stream exposes which tool is being approved,
               // so the label stays generic (claude's does carry tool names).
               promptLine = 'Permission prompt (auto-approved)';
@@ -963,7 +964,7 @@ async function fireSchedule(scheduleId) {
     sandboxOpts: entry.sandboxOpts,
     app: entry.app,
     model: entry.model,
-    resumeLast: entry.app === 'opencode' || entry.app === 'copilot',
+    resumeLast: entry.app === 'opencode' || entry.app === 'copilot' || entry.app === 'codex',
     // A group member keeps its membership across the resume: groupManager's
     // session-create listener re-binds the role to the new sessionId.
     groupId: entry.groupId,
@@ -1283,7 +1284,7 @@ export function gracefulShutdown() {
         // claude sessions are saved when their resume id is known; opencode
         // and copilot sessions are always saved (resume happens via
         // `opencode -c` / `copilot --continue`).
-        if (claudeId || session.app === 'opencode' || session.app === 'copilot') {
+        if (claudeId || session.app === 'opencode' || session.app === 'copilot' || session.app === 'codex') {
           savedSessions.push(savedSessionPublic(session, claudeId));
         }
       }

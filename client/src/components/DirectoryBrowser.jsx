@@ -91,8 +91,9 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
   // "defaultApp") arrives via /api/dirs/home, or the user picks explicitly.
   const [appDefault, setAppDefault] = useState(() => {
     const saved = localStorage.getItem(APP_KEY);
-    return saved === 'opencode' || saved === 'copilot' || saved === 'claude' ? saved : 'claude';
+    return saved === 'opencode' || saved === 'copilot' || saved === 'codex' || saved === 'claude' ? saved : 'claude';
   });
+  const [codexModel, setCodexModel] = useState(() => localStorage.getItem('ccserver-codex-model') || '');
   const [openMenuOpen, setOpenMenuOpen] = useState(false);
   const [launchMode, setLaunchMode] = useState('single'); // 'single' | 'combo'
   const [comboApps, setComboApps] = useState(() => loadComboApps());
@@ -185,7 +186,7 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
       }
       // Seed the app picker from the server's configured default, but only
       // if the user hasn't explicitly picked one on this browser yet.
-      if (!localStorage.getItem(APP_KEY) && (data.defaultApp === 'opencode' || data.defaultApp === 'copilot' || data.defaultApp === 'claude')) {
+      if (!localStorage.getItem(APP_KEY) && (data.defaultApp === 'opencode' || data.defaultApp === 'copilot' || data.defaultApp === 'codex' || data.defaultApp === 'claude')) {
         setAppDefault(data.defaultApp);
       }
       // Server-enforced sandbox: force the toggle on and lock it.
@@ -200,12 +201,12 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
       // never advertise an app that cannot start.
       if (data.availableApps) {
         setAvailableApps(data.availableApps);
-        const avail = ['claude', 'opencode', 'copilot'].filter((a) => data.availableApps[a]);
+        const avail = ['claude', 'opencode', 'copilot', 'codex'].filter((a) => data.availableApps[a]);
         // The server's defaultApp seeding above runs in the same effect tick,
         // so appDefault is still the stale pre-seeding value here -- evaluate
         // the effective default (server's when the browser hasn't chosen yet,
         // else the remembered one) before testing availability.
-        const effectiveDefault = ['claude', 'opencode', 'copilot'].includes(data.defaultApp) && !localStorage.getItem(APP_KEY)
+        const effectiveDefault = ['claude', 'opencode', 'copilot', 'codex'].includes(data.defaultApp) && !localStorage.getItem(APP_KEY)
           ? data.defaultApp
           : appDefault;
         if (avail.length > 0 && !data.availableApps[effectiveDefault]) {
@@ -494,10 +495,10 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
         <div className="open-split">
           <button
             className="btn btn-primary open-btn open-split-main"
-            onClick={() => onOpen(currentPath, { sandbox: sandboxDefault, sandboxOpts, app: appDefault })}
+            onClick={() => onOpen(currentPath, { sandbox: sandboxDefault, sandboxOpts, app: appDefault, model: appDefault === 'codex' ? codexModel.trim() || null : null })}
             title={sandboxDefault ? 'サンドボックスで起動' : '通常起動'}
           >
-            {sandboxDefault ? '🔒 ' : ''}{appDefault === 'claude' ? 'Claude Code' : appDefault === 'copilot' ? 'GitHub Copilot' : 'opencode'}
+            {sandboxDefault ? '🔒 ' : ''}{appDefault === 'claude' ? 'Claude Code' : appDefault === 'copilot' ? 'GitHub Copilot' : appDefault === 'codex' ? 'OpenAI Codex' : 'opencode'}
           </button>
           <button
             className="btn btn-primary open-btn open-split-caret"
@@ -562,6 +563,28 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
                   <span className="open-menu-check">{appDefault === 'copilot' ? '✓' : ''}</span>
                   GitHub Copilot
                 </div>
+                <div
+                  className={`open-menu-item${availableApps && !availableApps.codex ? ' open-menu-item-disabled' : ''}`}
+                  onClick={() => chooseApp('codex')}
+                  title={availableApps && !availableApps.codex ? 'サーバーに未インストール' : ''}
+                >
+                  <span className="open-menu-check">{appDefault === 'codex' ? '✓' : ''}</span>
+                  OpenAI Codex
+                </div>
+                {appDefault === 'codex' && (
+                  <div className="open-menu-model-row">
+                    <input
+                      type="text"
+                      className="open-menu-model-input"
+                      placeholder="Codexモデル (空=既定)"
+                      value={codexModel}
+                      onChange={(e) => { setCodexModel(e.target.value); localStorage.setItem('ccserver-codex-model', e.target.value); }}
+                      autoComplete="off"
+                      autoCorrect="off"
+                      spellCheck={false}
+                    />
+                  </div>
+                )}
                 <div className="open-menu-sep" />
                 <div
                   className={`open-menu-item${forceSandbox ? ' open-menu-item-disabled' : ''}`}
@@ -832,7 +855,7 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
               ) : (
                 <button
                   className="btn btn-primary"
-                  onClick={() => { closeOpenMenu(); onOpen(currentPath, { sandbox: sandboxDefault, sandboxOpts, app: appDefault }); }}
+                  onClick={() => { closeOpenMenu(); onOpen(currentPath, { sandbox: sandboxDefault, sandboxOpts, app: appDefault, model: appDefault === 'codex' ? codexModel.trim() || null : null }); }}
                 >
                   起動
                 </button>
@@ -896,7 +919,7 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
                   <span className="session-status active">
                     {session.shell
                       ? 'shell'
-                      : `${session.app === 'claude' ? 'claude' : session.app === 'copilot' ? 'copilot' : 'opencode'} · ${session.connected ? 'connected' : 'idle'}`}
+                      : `${session.app === 'claude' ? 'claude' : session.app === 'copilot' ? 'copilot' : session.app === 'codex' ? 'codex' : 'opencode'} · ${session.connected ? 'connected' : 'idle'}`}
                   </span>
                 </div>
                 <span className="session-cwd" title={session.cwd}>{displayPath(session.cwd, homeDir)}</span>
@@ -955,7 +978,12 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
               key={dir.path}
               className="dir-item"
               onClick={() => navigateTo(dir.path)}
-              onDoubleClick={() => onOpen(dir.path, { sandbox: sandboxDefault, sandboxOpts: loadSandboxOpts(dir.path), app: appDefault })}
+              onDoubleClick={() => onOpen(dir.path, {
+                sandbox: sandboxDefault,
+                sandboxOpts: loadSandboxOpts(dir.path),
+                app: appDefault,
+                model: appDefault === 'codex' ? codexModel.trim() || null : null,
+              })}
               role="button"
               tabIndex={0}
               onKeyDown={(e) => {

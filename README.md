@@ -4,13 +4,13 @@
 
 > **Note:** このプロジェクトは対応するAI CLIの各ベンダー・プロジェクトとは無関係の非公式サードパーティツールです。各ベンダー・プロジェクトによる公式サポートの対象外です。
 
-ディレクトリを指定して複数の AI CLI ([Claude Code](https://docs.anthropic.com/en/docs/claude-code)、[opencode](https://opencode.ai/)、[GitHub Copilot CLI](https://github.com/github/copilot-cli)) を起動・管理する Web フロントエンド。
+ディレクトリを指定して複数の AI CLI ([Claude Code](https://docs.anthropic.com/en/docs/claude-code)、[opencode](https://opencode.ai/)、[GitHub Copilot CLI](https://github.com/github/copilot-cli)、[OpenAI Codex CLI](https://developers.openai.com/codex/cli/)) を起動・管理する Web フロントエンド。
 VS Code のようにフォルダを選択し、ブラウザ内のターミナルで操作できます。
 
 ## アーキテクチャ
 
 ```
-ブラウザ (xterm.js) <── WebSocket ──> Fastify <── node-pty ──> claude / opencode / copilot CLI
+ブラウザ (xterm.js) <── WebSocket ──> Fastify <── node-pty ──> claude / opencode / copilot / codex CLI
                     <── HTTP REST ──>         (ディレクトリ一覧 API)
 ```
 
@@ -23,10 +23,11 @@ VS Code のようにフォルダを選択し、ブラウザ内のターミナル
 
 - Node.js >= 22 / npm >= 9
 - C++ コンパイラ（node-pty のビルドに必要。Arch: `base-devel`、Ubuntu: `build-essential`）
-- 対応する AI CLI のいずれか 1 つ以上 — Claude Code、[opencode](https://opencode.ai/)、[GitHub Copilot CLI](https://github.com/github/copilot-cli) (`copilot`) の各CLIは個別に任意です。サーバーにインストールされているCLIだけを起動時に選べます。
+- 対応する AI CLI のいずれか 1 つ以上 — Claude Code、[opencode](https://opencode.ai/)、[GitHub Copilot CLI](https://github.com/github/copilot-cli) (`copilot`)、[OpenAI Codex CLI](https://developers.openai.com/codex/cli/) (`codex`) の各CLIは個別に任意です。サーバーにインストールされているCLIだけを起動時に選べます。
 - [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) — Usage表示など、一部の機能で使用します。インストールされていない場合も、opencodeやCopilot CLIだけで通常のセッションを利用できます。
 - [opencode](https://opencode.ai/) — インストール: [公式サイト](https://opencode.ai/)を参照。入れずに選んだ場合、ターミナルに `execvp(3) failed` 等のエラーが表示され起動に失敗します。
 - [GitHub Copilot CLI](https://github.com/github/copilot-cli) (`copilot`) — インストール: `npm i -g @github/copilot` (またはインストールスクリプト / `brew install copilot-cli` / winget)。入れずに選んだ場合も同様に起動に失敗します。認証は初回 `/login` (OAuth) か環境変数 `GH_TOKEN` / `GITHUB_TOKEN` で行います。
+- [OpenAI Codex CLI](https://developers.openai.com/codex/cli/) (`codex`) — OpenAI公式手順でインストールします。新規起動は `codex`、モデルは `--model <model>`、再開は `codex resume <id>` または `codex resume --last` です。ccserverは実CLI未検証のためCodexへのMCP注入とコンボ起動を無効化しています。
 
 ## インストールと起動
 
@@ -75,7 +76,7 @@ NODE_ENV=production node server/index.js
 
 | 項目 | 選択肢 | 記憶される場所 |
 |------|--------|----------------|
-| アプリ | Claude Code / opencode / GitHub Copilot | ブラウザの `localStorage` (次回以降の既定) |
+| アプリ | Claude Code / opencode / GitHub Copilot / OpenAI Codex | ブラウザの `localStorage` (次回以降の既定) |
 | 起動モード | 通常起動 / 🔒 サンドボックスで起動 | 同上 |
 | GPG署名を使う | on/off (既定 off) | `localStorage` に**ディレクトリ単位**で |
 | ssh-agentを転送する | on/off (既定 off) | 同上 |
@@ -102,6 +103,12 @@ GitHub Copilot を選んだ場合:
 - モデル入力欄に入れたモデル名は `--model <model>` として渡されます。
 - Usage ボタンは Claude Code 専用のため非表示になります。
 - **コンボ起動 (下記) では選択できません**: copilot には MCP を CLI 引数/環境変数で注入する仕組みが無い (設定ファイル経由のため) ので、グループメンバーにしても ccserver の MCP broker ツールが使えません。コンボのメンバーには claude / opencode のみ選べます。
+
+OpenAI Codexについて:
+
+- 単体起動でモデル入力と `codex resume` / `codex resume --last` を利用できます。CodexのTUI出力からセッションIDは推測しません。
+- Codexの永続 `codex mcp add` は自動実行しません。起動単位の `-c` MCP設定は実CLIで検証できていないため注入せず、コンボ起動・`open_tab`のapp指定からCodexを拒否します。
+- サンドボックスではプロジェクト単位の永続HOME内に `~/.codex` を保持します。Codex自身のsandbox/approval policyはccserver側から無条件に緩和しません。
 
 ### 予約プロンプト (タイマー)
 
@@ -418,7 +425,7 @@ CCSERVER_TOKEN=some-secret NODE_ENV=production node server/index.js
 | メソッド | パス | 説明 |
 |---|---|---|
 | GET | `/api/dirs?path=<path>&showHidden=1` | 指定パスのサブディレクトリ/ファイル一覧 |
-| GET | `/api/dirs/home` | `{ home, defaultApp }` — サーバーのホームディレクトリと、設定ファイルの既定起動アプリ |
+| GET | `/api/dirs/home` | `{ home, defaultApp, availableApps }` — サーバーのホームディレクトリ、既定起動アプリ、検出済みCLI (`claude`/`opencode`/`copilot`/`codex`) |
 | POST | `/api/dirs` | `{ parent, name }` でフォルダ作成 |
 | GET | `/api/sessions` | 実行中セッションの一覧 |
 | DELETE | `/api/sessions/:id` | セッションを終了する (予約プロンプトも解除) |
