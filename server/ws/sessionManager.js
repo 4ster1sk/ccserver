@@ -189,7 +189,7 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox
   // ccserver-usage injection (see usageMcp.js): every claude session (shells,
   // opencode and copilot excluded -- see shouldInjectUsage) gets the
   // process-global get_usage MCP tool when the feature is enabled (claude
-  // installed AND showUsage not explicitly disabled) AND the broker is
+  // installed AND usageMcp explicitly enabled) AND the broker is
   // actually listening. Unlike notify, worker/orchestrator/standalone are not
   // distinguished -- every member of a combo group that runs claude gets it.
   const useUsage = usageBrokerRunning() && shouldInjectUsage({

@@ -90,8 +90,8 @@ try {
 }
 
 // ccserver-usage: host the process-global get_usage MCP socket when the
-// feature is enabled (claude installed AND showUsage not explicitly
-// disabled). Same bind-before-listen ordering requirement as notify above.
+// feature is enabled (claude installed AND usageMcp explicitly enabled). Same
+// bind-before-listen ordering requirement as notify above.
 try {
   if (usageEnabled()) {
     await ensureUsageBroker();

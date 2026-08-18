@@ -113,6 +113,21 @@ test('showUsage is false only for an explicit false value', () => {
   });
 });
 
+test('usageMcp is opt-in and only true for an explicit true value', () => {
+  withConfig({}, () => {
+    assert.equal(loadSandboxConfig().usageMcp, false);
+  });
+  withConfig({ usageMcp: true }, () => {
+    assert.equal(loadSandboxConfig().usageMcp, true);
+  });
+  withConfig({ usageMcp: false }, () => {
+    assert.equal(loadSandboxConfig().usageMcp, false);
+  });
+  withConfig({ usageMcp: 'yes' }, () => {
+    assert.equal(loadSandboxConfig().usageMcp, false);
+  });
+});
+
 // ccserver-notify config (see notify.js): the Discord webhook is parsed only
 // when it is an https:// URL; anything else is dropped. The env override
 // CCSERVER_DISCORD_WEBHOOK wins over the config file.

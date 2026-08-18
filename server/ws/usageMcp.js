@@ -37,10 +37,10 @@ export function getUsageSockPath() {
 // Whether the get_usage MCP tool should exist on this server at all: claude
 // itself must be installed (the capture would never succeed otherwise -- see
 // usage.js's resolveClaude() === false path), and the config must not
-// explicitly disable it via showUsage:false (which already hides the
-// client's Usage button, and now also gates the MCP tool the same way).
+// explicitly enable it via usageMcp:true. The UI's showUsage setting is kept
+// independent so displaying the Usage button does not expose an MCP tool.
 export function usageEnabled() {
-  return resolveClaude().found !== false && loadSandboxConfig().showUsage !== false;
+  return resolveClaude().found !== false && loadSandboxConfig().usageMcp === true;
 }
 
 // Pure injection decision for createSession: claude sessions only (opencode

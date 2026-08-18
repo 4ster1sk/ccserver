@@ -398,7 +398,10 @@ export function loadSandboxConfig() {
   // for setups that don't want it; the client also hides the button on its
   // own when claude is not installed (the capture would never succeed).
   const showUsage = raw.showUsage !== false;
-  return { docker, persistentHome, gpg, sshAgent, gitBroker, forceSandbox, binds, env, claudeBin, defaultApp, showUsage, notify: { discordWebhook, subscriptions, hostname: notifyHostname, attribution: notifyAttribution }, configPath };
+  // The Usage MCP is exposed to every Claude session, so keep it opt-in
+  // independently of the UI's showUsage setting.
+  const usageMcp = raw.usageMcp === true;
+  return { docker, persistentHome, gpg, sshAgent, gitBroker, forceSandbox, binds, env, claudeBin, defaultApp, showUsage, usageMcp, notify: { discordWebhook, subscriptions, hostname: notifyHostname, attribution: notifyAttribution }, configPath };
 }
 
 // Locate an executable named `cmd` on the given PATH (or return it as-is if
