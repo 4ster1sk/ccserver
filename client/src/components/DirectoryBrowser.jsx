@@ -978,7 +978,12 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
               key={dir.path}
               className="dir-item"
               onClick={() => navigateTo(dir.path)}
-              onDoubleClick={() => onOpen(dir.path, { sandbox: sandboxDefault, sandboxOpts: loadSandboxOpts(dir.path), app: appDefault })}
+              onDoubleClick={() => onOpen(dir.path, {
+                sandbox: sandboxDefault,
+                sandboxOpts: loadSandboxOpts(dir.path),
+                app: appDefault,
+                model: appDefault === 'codex' ? codexModel.trim() || null : null,
+              })}
               role="button"
               tabIndex={0}
               onKeyDown={(e) => {
