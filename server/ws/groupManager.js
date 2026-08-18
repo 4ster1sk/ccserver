@@ -240,6 +240,42 @@ export function listGroupMembers(groupId) {
   });
 }
 
+// Resolve the orchestrator's *current* effective sandboxOpts (gpg/sshAgent):
+// the live session's value when connected, else the last-known/persisted
+// preference. Used by openTab (mcpTools.js) to cap what a genuinely new
+// member can be granted -- the orchestrator is a live LLM reachable by
+// prompt injection (see MAX_GROUP_MEMBERS above) and must not be able to
+// grant a new member more than it itself currently holds. Mirrors
+// listGroupMembers' own resolution order (session -> saved -> memberPrefs)
+// so the answer always matches what the UI would show for the
+// orchestrator's row.
+export function getOrchestratorSandboxOpts(groupId) {
+  const group = groups.get(groupId);
+  if (!group) return null;
+  const sessionId = group.members.get('orchestrator');
+  const session = sessionId ? sessionApi.getSession(sessionId) : null;
+  const saved = group.memberSaved.get('orchestrator');
+  return session?.sandboxOpts ?? saved?.sandboxOpts ?? group.memberPrefs.orchestrator?.sandboxOpts ?? null;
+}
+
+// Whether `role` is already a registered member of the group, and if so its
+// last-known effective sandboxOpts (same session -> saved -> memberPrefs
+// resolution as above). Used by openTab to tell a genuine new-member request
+// apart from a restart of an already-registered role: a restart must keep
+// exactly the privileges the member already had, regardless of what the
+// tool call requests (see the sandboxOpts privilege-escalation fix plan).
+export function getRegisteredMemberSandboxOpts(groupId, role) {
+  const group = groups.get(groupId);
+  if (!group || !group.members.has(role)) return { registered: false, sandboxOpts: null };
+  const sessionId = group.members.get(role);
+  const session = sessionId ? sessionApi.getSession(sessionId) : null;
+  const saved = group.memberSaved.get(role);
+  return {
+    registered: true,
+    sandboxOpts: session?.sandboxOpts ?? saved?.sandboxOpts ?? group.memberPrefs[role]?.sandboxOpts ?? null,
+  };
+}
+
 // Compact public listing for GET /api/groups (client "groups" section).
 export function listGroups() {
   return [...groups.values()].map((g) => ({
@@ -837,6 +873,8 @@ const groupManagerApi = {
   takeHandoff,
   addMember,
   removeMember,
+  getOrchestratorSandboxOpts,
+  getRegisteredMemberSandboxOpts,
 };
 
 // Test seam: returns the exact facade the broker servers receive. Unit tests
