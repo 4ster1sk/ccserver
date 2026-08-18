@@ -844,3 +844,89 @@ test('onData session-limit detection: a redraw of the same reset time does not r
     sessionManager.destroySession(sessionId, { keepSchedule: false });
   }
 });
+
+// Backend push regression guard: the auto-session-limit detector arms the
+// schedule via setScheduledPrompt, but it's a server-internal trigger (pty
+// output monitoring), not a client request to answer -- unlike
+// schedule_prompt/cancel_schedule/get_schedule/init/attach, it has no
+// response leg to piggyback a schedule_state push on. Without an explicit
+// push (notifyScheduleState in sessionManager.js) the client's clock panel,
+// which is entirely push-driven with no polling, never learns the schedule
+// was armed until the next init/attach.
+test('onData session-limit detection: auto-arm pushes schedule_state to the socket', async () => {
+  const res = sessionManager.createSession({ cwd: '/tmp', cols: 80, rows: 24, shell: true, sandbox: false });
+  const { sessionId, session } = res;
+  assert.ok(session, 'shell session should spawn');
+  const sent = [];
+  session.socket = { readyState: 1, send: (m) => sent.push(m) };
+  try {
+    await sleep(400);
+    const line = sessionLimitLine(Date.now() + 60 * 60 * 1000);
+    sessionManager.writeToSession(sessionId, `echo ${shellQuote(line)}`, { submit: true });
+    await sleep(1200);
+
+    const stateMsgs = sent
+      .map((m) => { try { return JSON.parse(m); } catch { return null; } })
+      .filter((m) => m?.type === 'schedule_state');
+    assert.equal(stateMsgs.length, 1, 'exactly one schedule_state push for the auto-arm');
+    assert.ok(stateMsgs[0].scheduled, 'the push carries the newly-armed schedule');
+    assert.equal(stateMsgs[0].scheduled.source, 'auto-session-limit');
+  } finally {
+    sessionManager.destroySession(sessionId, { keepSchedule: false });
+  }
+});
+
+test('onData session-limit detection: no schedule_state push when a manual schedule blocks the auto-arm', async () => {
+  const res = sessionManager.createSession({ cwd: '/tmp', cols: 80, rows: 24, shell: true, sandbox: false });
+  const { sessionId, session } = res;
+  assert.ok(session, 'shell session should spawn');
+  try {
+    await sleep(400);
+    assert.ok(sessionManager.setScheduledPrompt(sessionId, Date.now() + 30000, 'MANUAL_MARKER'));
+
+    // Attach the socket only after the manual schedule is set, so the
+    // manual setScheduledPrompt call itself (which goes through the
+    // schedule_prompt WS handler in production, not through this helper) is
+    // excluded from `sent` -- this test only cares about the auto-detect path.
+    const sent = [];
+    session.socket = { readyState: 1, send: (m) => sent.push(m) };
+
+    const line = sessionLimitLine(Date.now() + 60 * 60 * 1000);
+    sessionManager.writeToSession(sessionId, `echo ${shellQuote(line)}`, { submit: true });
+    await sleep(1200);
+
+    const stateMsgs = sent
+      .map((m) => { try { return JSON.parse(m); } catch { return null; } })
+      .filter((m) => m?.type === 'schedule_state');
+    assert.equal(stateMsgs.length, 0, 'the schedule is unchanged, so no push should fire');
+  } finally {
+    sessionManager.destroySession(sessionId, { keepSchedule: false });
+  }
+});
+
+test('onData session-limit detection: a redraw of the same reset time does not re-push', async () => {
+  const res = sessionManager.createSession({ cwd: '/tmp', cols: 80, rows: 24, shell: true, sandbox: false });
+  const { sessionId, session } = res;
+  assert.ok(session, 'shell session should spawn');
+  const sent = [];
+  session.socket = { readyState: 1, send: (m) => sent.push(m) };
+  try {
+    await sleep(400);
+    const line = sessionLimitLine(Date.now() + 60 * 60 * 1000);
+    const stateMsgCount = () => sent.filter((m) => {
+      try { return JSON.parse(m).type === 'schedule_state'; } catch { return false; }
+    }).length;
+
+    sessionManager.writeToSession(sessionId, `echo ${shellQuote(line)}`, { submit: true });
+    await sleep(1200);
+    assert.equal(stateMsgCount(), 1, 'first detection pushes once');
+
+    // The TUI redrawing the identical status line must not re-arm, and
+    // therefore must not re-push either.
+    sessionManager.writeToSession(sessionId, `echo ${shellQuote(line)}`, { submit: true });
+    await sleep(1200);
+    assert.equal(stateMsgCount(), 1, 'redraw of the same event does not re-push');
+  } finally {
+    sessionManager.destroySession(sessionId, { keepSchedule: false });
+  }
+});
