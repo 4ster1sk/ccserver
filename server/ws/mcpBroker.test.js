@@ -522,6 +522,47 @@ test('notify broker: a non-ccserver first line is replayed, never treated as ide
   }
 });
 
+// The process-global usage broker (ccserver-usage, see usageMcp.js /
+// mcpServer.js's buildUsageMcpServer): startUsageBroker hosts it at the
+// caller-supplied socket, exposes exactly the one get_usage tool, and carries
+// no identity frame (unlike notify -- get_usage answers the same regardless
+// of caller, so a plain MCP client with no frame at all works identically).
+test('usage broker: startUsageBroker + stopBroker lifecycle on a supplied socket path', async () => {
+  const calls = [];
+  const usageApi = {
+    getUsage: async (args) => {
+      calls.push(args);
+      return { usage: { limits: [{ label: 'Current session', pct: 42 }] }, updatedAt: 123, cached: true };
+    },
+  };
+  const usage = await broker.startUsageBroker({
+    usageApi,
+    sockPath: join(runtimeDir, 'ccserver-usage.sock'),
+  });
+  try {
+    const c = mcpClient(usage.sockPath);
+    await c.connected;
+    const init = await c.call('initialize', {
+      protocolVersion: '2024-11-05',
+      capabilities: {},
+      clientInfo: { name: 'wire-test', version: '1' },
+    });
+    assert.equal(init.serverInfo.name, 'ccserver-usage');
+    const { tools } = await c.call('tools/list');
+    assert.deepEqual(tools.map((t) => t.name), ['get_usage']);
+    const out = await callTool(c, 'get_usage', {});
+    assert.deepEqual(out, { usage: { limits: [{ label: 'Current session', pct: 42 }] }, updatedAt: 123, cached: true });
+    assert.deepEqual(calls, [{ force: false }], 'no args -> force defaults to false');
+
+    await callTool(c, 'get_usage', { force: true });
+    assert.deepEqual(calls[1], { force: true });
+    c.close();
+  } finally {
+    broker.stopBroker(usage);
+    assert.equal(existsSync(usage.sockPath), false, 'stopBroker removes the socket file');
+  }
+});
+
 // --- handoff reliability: events survive a dead wait (Issue: handoff loss)
 // ---------------------------------------------------------------------------
 

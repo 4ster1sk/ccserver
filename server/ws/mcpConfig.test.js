@@ -159,3 +159,64 @@ test('opencode notify without a group socket registers ccserver-notify only', ()
   assert.deepEqual(Object.keys(cfg.mcp), ['ccserver-notify']);
   assert.deepEqual(cfg.mcp['ccserver-notify'].command, ['/ccserver-sandbox-mcp-bridge', 'notify']);
 });
+
+// ccserver-usage injection (see usageMcp.js): the optional `{ usage }`
+// descriptor adds the usage server, same mode/sockPath shape as notify but
+// with no identity (get_usage carries no per-connection attribution). Only
+// ever passed for claude sessions by sessionManager, but buildMcpConfigArgsAndEnv
+// itself does not enforce that -- it just assembles what it's given.
+
+test('claude + usage(sandbox): ccserver-usage registered via the in-sandbox bridge with the usage argv', () => {
+  const { args, env } = buildMcpConfigArgsAndEnv('claude', {
+    usage: { mode: 'sandbox', sockPath: '/run/user/1000/ccserver-usage.sock' },
+  });
+  assert.equal(args[0], '--mcp-config');
+  const cfg = JSON.parse(args[1]);
+  assert.ok(cfg.mcpServers.ccserver, 'ccserver stays registered alongside usage');
+  assert.deepEqual(cfg.mcpServers['ccserver-usage'], {
+    type: 'stdio',
+    command: '/ccserver-sandbox-mcp-bridge',
+    args: ['usage'],
+  });
+  assert.deepEqual(env, { CCSANDBOX_USAGE_MCP_SOCK: '/run/user/1000/ccserver-usage.sock' });
+});
+
+test('claude + usage(host): the usage server runs as node <bridge script> usage on the host', () => {
+  const { args, env } = buildMcpConfigArgsAndEnv('claude', {
+    usage: { mode: 'host', sockPath: '/run/user/1000/ccserver-usage.sock' },
+  });
+  const cfg = JSON.parse(args[1]);
+  const u = cfg.mcpServers['ccserver-usage'];
+  assert.equal(u.command, process.execPath, 'host mode invokes the node binary directly');
+  assert.ok(u.args[0].endsWith('sandbox-mcp-wrapper.cjs'), `bridge script path (got ${u.args[0]})`);
+  assert.equal(u.args[1], 'usage');
+  assert.equal(env.CCSANDBOX_USAGE_MCP_SOCK, '/run/user/1000/ccserver-usage.sock');
+});
+
+test('claude + notify + usage together: both servers registered independently', () => {
+  const { args, env } = buildMcpConfigArgsAndEnv('claude', {
+    notify: { mode: 'sandbox', sockPath: '/run/user/1000/ccserver-notify.sock', identity },
+    usage: { mode: 'sandbox', sockPath: '/run/user/1000/ccserver-usage.sock' },
+  });
+  const cfg = JSON.parse(args[1]);
+  assert.deepEqual(Object.keys(cfg.mcpServers).sort(), ['ccserver', 'ccserver-notify', 'ccserver-usage']);
+  assert.deepEqual(env, {
+    CCSANDBOX_NOTIFY_MCP_SOCK: '/run/user/1000/ccserver-notify.sock',
+    CCSERVER_NOTIFY_IDENTITY: JSON.stringify(identity),
+    CCSANDBOX_USAGE_MCP_SOCK: '/run/user/1000/ccserver-usage.sock',
+  });
+});
+
+test('no usage descriptor -> unchanged (ccserver only)', () => {
+  const { args } = buildMcpConfigArgsAndEnv('claude');
+  const cfg = JSON.parse(args[1]);
+  assert.deepEqual(Object.keys(cfg.mcpServers), ['ccserver']);
+});
+
+test('copilot + usage: nothing is assembled (copilot has no MCP injection at all)', () => {
+  const { args, env } = buildMcpConfigArgsAndEnv('copilot', {
+    usage: { mode: 'sandbox', sockPath: '/run/user/1000/ccserver-usage.sock' },
+  });
+  assert.deepEqual(args, []);
+  assert.deepEqual(env, {});
+});
