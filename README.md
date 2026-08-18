@@ -1,8 +1,10 @@
 # ccserver
 
+> **Context & Coordination Server** — AI CLIセッションのコンテキスト管理とエージェント間連携を行う Web サーバー。
+
 > **Note:** このプロジェクトは Anthropic 非公式のサードパーティツールです。Anthropic による公式サポートの対象外です。
 
-ディレクトリを指定して Claude Code ([opencode](https://opencode.ai/)、[GitHub Copilot CLI](https://github.com/github/copilot-cli) も可) を起動する Web フロントエンド。
+ディレクトリを指定して複数の AI CLI ([Claude Code](https://docs.anthropic.com/en/docs/claude-code)、[opencode](https://opencode.ai/)、[GitHub Copilot CLI](https://github.com/github/copilot-cli)) を起動・管理する Web フロントエンド。
 VS Code のようにフォルダを選択し、ブラウザ内のターミナルで操作できます。
 
 ## アーキテクチャ
@@ -21,9 +23,10 @@ VS Code のようにフォルダを選択し、ブラウザ内のターミナル
 
 - Node.js >= 22 / npm >= 9
 - C++ コンパイラ（node-pty のビルドに必要。Arch: `base-devel`、Ubuntu: `build-essential`）
-- [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) — このプロジェクトの主対象。既定で起動するエージェント。
-- [opencode](https://opencode.ai/) — 任意。入っていれば起動時にアプリとして選べます (下記「起動」参照)。入れずに opencode を選んだ場合、ターミナルに `execvp(3) failed` 等のエラーが表示され起動に失敗します。
-- [GitHub Copilot CLI](https://github.com/github/copilot-cli) (`copilot`) — 任意。インストール: `npm i -g @github/copilot` (またはインストールスクリプト / `brew install copilot-cli` / winget)。入れずに選んだ場合も同様に起動に失敗します。認証は初回 `/login` (OAuth) か環境変数 `GH_TOKEN` / `GITHUB_TOKEN` で行います。
+- 対応する AI CLI のいずれか 1 つ以上 — Claude Code、[opencode](https://opencode.ai/)、[GitHub Copilot CLI](https://github.com/github/copilot-cli) (`copilot`) の各CLIは個別に任意です。サーバーにインストールされているCLIだけを起動時に選べます。
+- [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) — Usage表示など、一部の機能で使用します。インストールされていない場合も、opencodeやCopilot CLIだけで通常のセッションを利用できます。
+- [opencode](https://opencode.ai/) — インストール: [公式サイト](https://opencode.ai/)を参照。入れずに選んだ場合、ターミナルに `execvp(3) failed` 等のエラーが表示され起動に失敗します。
+- [GitHub Copilot CLI](https://github.com/github/copilot-cli) (`copilot`) — インストール: `npm i -g @github/copilot` (またはインストールスクリプト / `brew install copilot-cli` / winget)。入れずに選んだ場合も同様に起動に失敗します。認証は初回 `/login` (OAuth) か環境変数 `GH_TOKEN` / `GITHUB_TOKEN` で行います。
 
 ## インストールと起動
 
@@ -68,7 +71,7 @@ NODE_ENV=production node server/index.js
 
 ### 起動 (アプリ・サンドボックス)
 
-「Claude Code」ボタン右の **▼** から開くモーダルで、起動方法を選べます:
+起動ボタン右の **▼** から開くモーダルで、起動方法を選べます:
 
 | 項目 | 選択肢 | 記憶される場所 |
 |------|--------|----------------|
@@ -481,7 +484,7 @@ cp docs/ccserver.service ~/.config/systemd/user/ccserver.service
 
 ```ini
 [Unit]
-Description=ccserver — AI CLI web server
+Description=ccserver — Context & Coordination Server
 After=network.target
 
 [Service]

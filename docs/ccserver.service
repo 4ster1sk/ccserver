@@ -1,5 +1,5 @@
 [Unit]
-Description=ccserver — AI CLI web server
+Description=ccserver — Context & Coordination Server
 After=network.target
 
 [Service]

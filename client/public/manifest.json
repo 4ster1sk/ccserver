@@ -1,7 +1,7 @@
 {
-  "name": "Claude Code Terminal",
-  "short_name": "Claude Code",
-  "description": "Web-based Claude Code terminal",
+  "name": "ccserver - Context & Coordination Server",
+  "short_name": "ccserver",
+  "description": "Web-based AI CLI session server",
   "start_url": "/",
   "display": "standalone",
   "background_color": "#1e1e2e",
