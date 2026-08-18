@@ -170,7 +170,7 @@ test('open_tab schema: optional model/app, required cwd, no identity inputs', as
   assert.equal(props.model.anyOf[0].type, 'string');
   assert.equal(props.model.anyOf[1].type, 'null');
   assert.equal(props.app.type, 'string');
-  assert.deepEqual(props.app.enum, ['claude', 'opencode']);
+  assert.deepEqual(props.app.enum, ['claude', 'opencode', 'codex']);
   assert.ok(openTab.inputSchema.required.includes('role'), 'role stays required (never defaulted)');
   assert.ok(openTab.inputSchema.required.includes('cwd'), 'cwd stays required');
   for (const forbidden of ['groupId', 'sessionId']) {
