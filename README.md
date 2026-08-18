@@ -2,7 +2,7 @@
 
 > **Context & Coordination Server** — AI CLIセッションのコンテキスト管理とエージェント間連携を行う Web サーバー。
 
-> **Note:** このプロジェクトは Anthropic 非公式のサードパーティツールです。Anthropic による公式サポートの対象外です。
+> **Note:** このプロジェクトは対応するAI CLIの各ベンダー・プロジェクトとは無関係の非公式サードパーティツールです。各ベンダー・プロジェクトによる公式サポートの対象外です。
 
 ディレクトリを指定して複数の AI CLI ([Claude Code](https://docs.anthropic.com/en/docs/claude-code)、[opencode](https://opencode.ai/)、[GitHub Copilot CLI](https://github.com/github/copilot-cli)) を起動・管理する Web フロントエンド。
 VS Code のようにフォルダを選択し、ブラウザ内のターミナルで操作できます。
