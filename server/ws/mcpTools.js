@@ -204,19 +204,51 @@ export async function sendInput(deps, { sessionId, text, submit = true }) {
     : { error: 'not-found', message: 'session not found or exited' };
 }
 
+// Cap a requested sandboxOpts against the orchestrator's own (see
+// groupManager.getOrchestratorSandboxOpts): a flag can never be granted to a
+// genuinely new member that the orchestrator does not itself currently
+// hold. Missing requested / cap flags resolve to false (deny by default).
+function capSandboxOpts(requested, cap) {
+  if (!requested) return requested;
+  return {
+    gpg: !!requested.gpg && !!cap?.gpg,
+    sshAgent: !!requested.sshAgent && !!cap?.sshAgent,
+  };
+}
+
 // Open a new member session (worker role) inside the group, with its own
 // handoff channel. cwd is restricted to the group's allowedCwds (initialized
 // to the shared project directory -- see groupManager). app/model/sandboxOpts
 // are optional at the wire layer: omitted values fall back to the role's
 // persisted preference, then to the group/app defaults. sandboxOpts (gpg /
 // ssh-agent forwarding) defaults to the group's launch flags; an explicit
-// override is honored. The result carries the effective app/model/sandbox
-// settings so the caller can record what actually launched.
+// override is honored, subject to two guards against a prompt-injected
+// orchestrator escalating privileges via a worker (see the sandboxOpts
+// privilege-escalation fix plan):
+//   - genuinely new member (role not yet in group.members): the requested
+//     gpg/sshAgent is capped against the orchestrator's OWN current grant
+//     (getOrchestratorSandboxOpts) -- a flag the orchestrator doesn't itself
+//     hold is silently downgraded to false, never an error.
+//   - restart of an already-registered role: the request is ignored entirely
+//     and the member's last-known sandboxOpts (getRegisteredMemberSandboxOpts)
+//     is reused as-is, so a restart can neither escalate nor be downgraded by
+//     whatever the orchestrator currently has.
+// The result carries the effective app/model/sandbox settings so the caller
+// can record what actually launched (and see whether/how sandboxOpts was
+// capped).
 export async function openTab(deps, { role, app, model, cwd, sandboxOpts }) {
   const options = { cwd };
   if (app !== undefined) options.app = app;
   if (model !== undefined) options.model = model;
-  if (sandboxOpts !== undefined) options.sandboxOpts = sandboxOpts;
+  if (sandboxOpts !== undefined) {
+    const existing = deps.groupManager.getRegisteredMemberSandboxOpts(deps.groupId, role);
+    if (existing.registered) {
+      options.sandboxOpts = existing.sandboxOpts;
+    } else {
+      const cap = deps.groupManager.getOrchestratorSandboxOpts(deps.groupId);
+      options.sandboxOpts = capSandboxOpts(sandboxOpts, cap);
+    }
+  }
   const res = await deps.groupManager.addMember(deps.groupId, role, options);
   if (res.error) return { error: res.error, message: res.message };
   return {

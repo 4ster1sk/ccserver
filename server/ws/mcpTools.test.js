@@ -497,10 +497,14 @@ test('openTab: omitted model falls back to the persisted role preference', async
     assert.equal(r3.model, 'claude-sonnet-4');
     assert.equal(seenOpts.model, 'claude-sonnet-4');
 
-    // Explicit sandboxOpts override the preference.
+    // workerA is already a registered member at this point (r1 registered it).
+    // Per the sandboxOpts privilege-escalation fix, a request against an
+    // already-registered role is ignored entirely -- the member keeps
+    // exactly the sandboxOpts it already had (see the dedicated openTab
+    // cap/restart tests below), so this request does NOT take effect.
     const r4 = await tools.openTab(controlDeps(g), { role: 'workerA', sandboxOpts: { gpg: false, sshAgent: true }, cwd: `/srv/project-${g}` });
-    assert.deepEqual(r4.sandboxOpts, { gpg: false, sshAgent: true });
-    assert.deepEqual(seenOpts.sandboxOpts, { gpg: false, sshAgent: true });
+    assert.deepEqual(r4.sandboxOpts, { gpg: true, sshAgent: false }, 'restart keeps the existing grant, the request is not honored');
+    assert.deepEqual(seenOpts.sandboxOpts, { gpg: true, sshAgent: false });
   } finally {
     groupManager.setSessionApiForTests(null);
     groupManager.destroyGroup(g);
@@ -549,6 +553,200 @@ test('openTab: non-worker role formats are refused', async () => {
   for (const bad of ['boss', 'Orchestrator', 'worker', 'orchestrator', ''] ) {
     const res = await tools.openTab(controlDeps(g), { role: bad, app: 'claude', cwd: `/srv/project-${g}` });
     assert.equal(res.error, 'invalid-role', `role ${JSON.stringify(bad)} should be refused`);
+  }
+});
+
+// --- open_tab sandboxOpts privilege-escalation guard: a genuinely new
+// member's requested gpg/sshAgent can never exceed the orchestrator's own
+// current grant, and a restart of an already-registered role keeps exactly
+// what it already had (the request is not even read). See mcpTools.js's
+// openTab/capSandboxOpts and groupManager.js's getOrchestratorSandboxOpts /
+// getRegisteredMemberSandboxOpts.
+
+test('openTab: sandboxOpts cannot exceed what the orchestrator itself currently holds (privilege escalation guard)', async () => {
+  const g = await makeGroupAsync();
+  let seenOpts = null;
+  const fake = {
+    getSession: (id) => (id === 'orch-sess' ? { sandboxOpts: { gpg: false, sshAgent: false } } : null),
+    createSession: (opts) => { seenOpts = opts; return { sessionId: 'sess-c', session: {} }; },
+    destroySession: () => {},
+    writeToSession: () => false,
+  };
+  groupManager.setSessionApiForTests(fake);
+  try {
+    groupManager.registerMember(g, 'orchestrator', 'orch-sess');
+    const res = await tools.openTab(controlDeps(g), {
+      role: 'workerC', cwd: `/srv/project-${g}`, sandboxOpts: { gpg: true, sshAgent: true },
+    });
+    assert.equal(res.error, undefined, res.message || '');
+    assert.deepEqual(res.sandboxOpts, { gpg: false, sshAgent: false }, 'downgraded to the orchestrator\'s own grant, not an error');
+    assert.deepEqual(seenOpts.sandboxOpts, { gpg: false, sshAgent: false }, 'the spawned session never actually gets the escalated flags');
+  } finally {
+    groupManager.setSessionApiForTests(null);
+    groupManager.destroyGroup(g);
+  }
+});
+
+test('openTab: gpg/sshAgent are capped independently', async () => {
+  const g = await makeGroupAsync();
+  let seenOpts = null;
+  const fake = {
+    getSession: (id) => (id === 'orch-sess' ? { sandboxOpts: { gpg: true, sshAgent: false } } : null),
+    createSession: (opts) => { seenOpts = opts; return { sessionId: 'sess-c', session: {} }; },
+    destroySession: () => {},
+    writeToSession: () => false,
+  };
+  groupManager.setSessionApiForTests(fake);
+  try {
+    groupManager.registerMember(g, 'orchestrator', 'orch-sess');
+    const res = await tools.openTab(controlDeps(g), {
+      role: 'workerC', cwd: `/srv/project-${g}`, sandboxOpts: { gpg: true, sshAgent: true },
+    });
+    assert.deepEqual(res.sandboxOpts, { gpg: true, sshAgent: false }, 'gpg passes through, sshAgent alone is capped');
+    assert.deepEqual(seenOpts.sandboxOpts, { gpg: true, sshAgent: false });
+  } finally {
+    groupManager.setSessionApiForTests(null);
+    groupManager.destroyGroup(g);
+  }
+});
+
+test('openTab: a request within the orchestrator\'s own grant passes through unchanged', async () => {
+  const g = await makeGroupAsync();
+  let seenOpts = null;
+  const fake = {
+    getSession: (id) => (id === 'orch-sess' ? { sandboxOpts: { gpg: true, sshAgent: true } } : null),
+    createSession: (opts) => { seenOpts = opts; return { sessionId: 'sess-c', session: {} }; },
+    destroySession: () => {},
+    writeToSession: () => false,
+  };
+  groupManager.setSessionApiForTests(fake);
+  try {
+    groupManager.registerMember(g, 'orchestrator', 'orch-sess');
+    const res = await tools.openTab(controlDeps(g), {
+      role: 'workerC', cwd: `/srv/project-${g}`, sandboxOpts: { gpg: true, sshAgent: true },
+    });
+    assert.deepEqual(res.sandboxOpts, { gpg: true, sshAgent: true }, 'legitimate equal-privilege delegation is not blocked');
+    assert.deepEqual(seenOpts.sandboxOpts, { gpg: true, sshAgent: true });
+  } finally {
+    groupManager.setSessionApiForTests(null);
+    groupManager.destroyGroup(g);
+  }
+});
+
+test('openTab: omitted sandboxOpts is unaffected by the cap', async () => {
+  const g = await makeGroupAsync();
+  let seenOpts = null;
+  const fake = {
+    // The orchestrator holds nothing -- if the cap wrongly applied to the
+    // omitted-request fallback path, this would force sandboxOpts to
+    // {gpg:false, sshAgent:false} instead of leaving the existing fallback
+    // (pref.sandboxOpts || group.sandboxOpts, both null here) alone.
+    getSession: (id) => (id === 'orch-sess' ? { sandboxOpts: { gpg: false, sshAgent: false } } : null),
+    createSession: (opts) => { seenOpts = opts; return { sessionId: 'sess-c', session: {} }; },
+    destroySession: () => {},
+    writeToSession: () => false,
+  };
+  groupManager.setSessionApiForTests(fake);
+  try {
+    groupManager.registerMember(g, 'orchestrator', 'orch-sess');
+    const res = await tools.openTab(controlDeps(g), { role: 'workerC', cwd: `/srv/project-${g}` });
+    assert.equal(res.sandboxOpts, null);
+    assert.equal(seenOpts.sandboxOpts, null);
+  } finally {
+    groupManager.setSessionApiForTests(null);
+    groupManager.destroyGroup(g);
+  }
+});
+
+test('openTab: restarting a registered member keeps its existing sandboxOpts even when the orchestrator has less', async () => {
+  const g = await makeGroupAsync();
+  let seenOpts = null;
+  const fake = {
+    getSession: (id) => {
+      if (id === 'orch-sess') return { sandboxOpts: { gpg: false, sshAgent: false } };
+      return null; // workerA's own session is "dead" -- resolution falls through to memberPrefs
+    },
+    createSession: (opts) => { seenOpts = opts; return { sessionId: 'sess-a2', session: {} }; },
+    destroySession: () => {},
+    writeToSession: () => false,
+  };
+  groupManager.setSessionApiForTests(fake);
+  try {
+    groupManager.registerMember(g, 'orchestrator', 'orch-sess');
+    groupManager.registerMember(g, 'workerA', 'dead-a');
+    groupManager.setMemberPrefs(g, 'workerA', { sandboxOpts: { gpg: true, sshAgent: true } });
+
+    const res = await tools.openTab(controlDeps(g), {
+      role: 'workerA', cwd: `/srv/project-${g}`, sandboxOpts: { gpg: true, sshAgent: true },
+    });
+    assert.deepEqual(res.sandboxOpts, { gpg: true, sshAgent: true }, 'restart is not downgraded by the orchestrator\'s lower grant');
+    assert.deepEqual(seenOpts.sandboxOpts, { gpg: true, sshAgent: true });
+  } finally {
+    groupManager.setSessionApiForTests(null);
+    groupManager.destroyGroup(g);
+  }
+});
+
+test('openTab: restarting a registered member ignores a request to escalate beyond its own existing grant', async () => {
+  const g = await makeGroupAsync();
+  let seenOpts = null;
+  const fake = {
+    getSession: (id) => {
+      if (id === 'orch-sess') return { sandboxOpts: { gpg: true, sshAgent: true } };
+      return null;
+    },
+    createSession: (opts) => { seenOpts = opts; return { sessionId: 'sess-a2', session: {} }; },
+    destroySession: () => {},
+    writeToSession: () => false,
+  };
+  groupManager.setSessionApiForTests(fake);
+  try {
+    groupManager.registerMember(g, 'orchestrator', 'orch-sess');
+    groupManager.registerMember(g, 'workerA', 'dead-a');
+    groupManager.setMemberPrefs(g, 'workerA', { sandboxOpts: { gpg: false, sshAgent: false } });
+
+    // workerA never had gpg/sshAgent; asking for it on "restart" must not
+    // grant it, even though the orchestrator itself currently holds both
+    // (a restart-disguised escalation attempt).
+    const res = await tools.openTab(controlDeps(g), {
+      role: 'workerA', cwd: `/srv/project-${g}`, sandboxOpts: { gpg: true, sshAgent: true },
+    });
+    assert.deepEqual(res.sandboxOpts, { gpg: false, sshAgent: false });
+    assert.deepEqual(seenOpts.sandboxOpts, { gpg: false, sshAgent: false });
+  } finally {
+    groupManager.setSessionApiForTests(null);
+    groupManager.destroyGroup(g);
+  }
+});
+
+test('openTab: a genuinely new member (never registered) is still capped even if a same-named role existed and was closed earlier', async () => {
+  const g = await makeGroupAsync();
+  let seenOpts = null;
+  const fake = {
+    getSession: (id) => {
+      if (id === 'orch-sess') return { sandboxOpts: { gpg: false, sshAgent: false } };
+      return null;
+    },
+    createSession: (opts) => { seenOpts = opts; return { sessionId: 'sess-a2', session: {} }; },
+    destroySession: () => {},
+    writeToSession: () => false,
+  };
+  groupManager.setSessionApiForTests(fake);
+  try {
+    groupManager.registerMember(g, 'orchestrator', 'orch-sess');
+    groupManager.registerMember(g, 'workerA', 'dead-a');
+    groupManager.setMemberPrefs(g, 'workerA', { sandboxOpts: { gpg: true, sshAgent: true } });
+    // closeTab's backend: removeMember deletes the role from group.members.
+    groupManager.removeMember(g, 'dead-a');
+
+    const res = await tools.openTab(controlDeps(g), {
+      role: 'workerA', cwd: `/srv/project-${g}`, sandboxOpts: { gpg: true, sshAgent: true },
+    });
+    assert.deepEqual(res.sandboxOpts, { gpg: false, sshAgent: false }, 'closed-then-reopened role is a new member, capped by the orchestrator again');
+    assert.deepEqual(seenOpts.sandboxOpts, { gpg: false, sshAgent: false });
+  } finally {
+    groupManager.setSessionApiForTests(null);
+    groupManager.destroyGroup(g);
   }
 });
 
