@@ -52,9 +52,12 @@ const SANDBOX_KNOWN_HOSTS_DEFAULT_PATH = '/ccserver-sandbox-known-hosts-default'
 // CLIs are told to run via --mcp-config / OPENCODE_CONFIG_CONTENT. The
 // process-global notify socket (ccserver-notify, see notify.js) is bound at a
 // second fixed path the same wrapper reaches when invoked with the 'notify'
+// argument. The process-global usage socket (ccserver-usage, see
+// usageMcp.js) is bound at a third fixed path, reached with the 'usage'
 // argument.
 const SANDBOX_MCP_SOCK_PATH = '/ccserver-sandbox-mcp.sock';
 const SANDBOX_NOTIFY_SOCK_PATH = '/ccserver-sandbox-notify.sock';
+const SANDBOX_USAGE_SOCK_PATH = '/ccserver-sandbox-usage.sock';
 const SANDBOX_MCP_BRIDGE_PATH = '/ccserver-sandbox-mcp-bridge';
 const MCP_BRIDGE_SCRIPT = join(__dirname, 'sandbox-mcp-wrapper.cjs');
 
@@ -660,7 +663,7 @@ export function sandboxAvailable() {
 // but not including the trailing `-- <cmd...>`).
 //   homeDir - host path of the persistent per-project HOME to bind at HOME
 //             (see persistentHomeDir), or null for a fresh tmpfs HOME.
-function buildBwrapArgs({ cwd, docker, gpg, extraBinds, extraEnv, authSock, stateDir, claudeDir, gitBroker, mcpSocketPath, notifySocketPath, homeDir = null }) {
+function buildBwrapArgs({ cwd, docker, gpg, extraBinds, extraEnv, authSock, stateDir, claudeDir, gitBroker, mcpSocketPath, notifySocketPath, usageSocketPath, homeDir = null }) {
   const args = [
     '--die-with-parent',
     // Own PID namespace so the whole sandbox tree is reaped as a unit. Without
@@ -741,10 +744,20 @@ function buildBwrapArgs({ cwd, docker, gpg, extraBinds, extraEnv, authSock, stat
     args.push('--setenv', 'CCSANDBOX_NOTIFY_MCP_SOCK', SANDBOX_NOTIFY_SOCK_PATH);
   }
 
-  // The bridge wrapper is shared by the group socket and the notify socket
-  // (bound once -- a combo orchestrator may have both) and its node shebang
-  // lives at SANDBOX_NODE_PATH (ro-bound with the git-broker branch below).
-  if (mcpSocketPath || notifySocketPath) {
+  // ccserver-usage: same wrapper script again, reached with the 'usage' argv
+  // so it reads CCSANDBOX_USAGE_MCP_SOCK (bound here) instead. Independent of
+  // both the group brokers and notify -- a claude session may have any
+  // combination of the three sockets bound.
+  if (usageSocketPath) {
+    args.push('--bind-try', usageSocketPath, SANDBOX_USAGE_SOCK_PATH);
+    args.push('--setenv', 'CCSANDBOX_USAGE_MCP_SOCK', SANDBOX_USAGE_SOCK_PATH);
+  }
+
+  // The bridge wrapper is shared by the group socket, the notify socket and
+  // the usage socket (bound once -- a combo orchestrator may have all three)
+  // and its node shebang lives at SANDBOX_NODE_PATH (ro-bound with the
+  // git-broker branch below).
+  if (mcpSocketPath || notifySocketPath || usageSocketPath) {
     args.push('--ro-bind', MCP_BRIDGE_SCRIPT, SANDBOX_MCP_BRIDGE_PATH);
   }
 
@@ -856,7 +869,7 @@ function buildBwrapArgs({ cwd, docker, gpg, extraBinds, extraEnv, authSock, stat
   // /usr/bin/node exists, mirroring how resolveApp follows the real
   // agent binary instead of assuming a host layout. Shared between the
   // git-broker machinery and the MCP bridge wrapper.
-  if (gitBroker || mcpSocketPath || notifySocketPath) {
+  if (gitBroker || mcpSocketPath || notifySocketPath || usageSocketPath) {
     const nodeBin = realpathSync(process.execPath);
     args.push('--ro-bind', nodeBin, SANDBOX_NODE_PATH);
   }
@@ -990,6 +1003,7 @@ export function buildMinimalSandboxSpawn({ cwd, targetCommand }) {
     gitBroker: null,
     mcpSocketPath: null,
     notifySocketPath: null,
+    usageSocketPath: null,
     // The /usage capture is a throwaway read: it must not create (or depend
     // on) a persistent per-project HOME.
     homeDir: null,
@@ -1019,6 +1033,9 @@ export function buildMinimalSandboxSpawn({ cwd, targetCommand }) {
 //   notifySocketPath - host path of the process-global ccserver-notify socket
 //                 to bind into the sandbox at a fixed path. null when the
 //                 session gets no notify MCP injection.
+//   usageSocketPath - host path of the process-global ccserver-usage socket
+//                 to bind into the sandbox at a fixed path. null when the
+//                 session gets no usage MCP injection.
 //   reuseSandboxHome - false to start a *fresh* persistent HOME for this
 //                 launch: the previous per-project HOME is wiped (via the same
 //                 escalated removeTree as deleteSandboxHome) and recreated
@@ -1026,7 +1043,7 @@ export function buildMinimalSandboxSpawn({ cwd, targetCommand }) {
 //                 persistentHome is enabled in the config; the caller
 //                 (sessionManager) guards against wiping a HOME that another
 //                 live sandboxed session is still using.
-export function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, mcpSocketPath = null, notifySocketPath = null, reuseSandboxHome = true }) {
+export function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, mcpSocketPath = null, notifySocketPath = null, usageSocketPath = null, reuseSandboxHome = true }) {
   const { docker: cfgDocker, persistentHome, gpg: cfgGpg, sshAgent: cfgSshAgent, gitBroker: gitBrokerEnabled, binds, env, claudeBin } = loadSandboxConfig();
   const docker = cfgDocker && dockerSandboxAvailable();
   const gpg = sandboxOpts?.gpg ?? cfgGpg;
@@ -1090,7 +1107,7 @@ export function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, mcpSoc
   }
 
   const { command, installDir } = resolveApp(app, claudeBin);
-  const bwrapArgs = buildBwrapArgs({ cwd, docker, gpg, extraBinds: binds, extraEnv: env, authSock, stateDir, claudeDir: installDir, gitBroker, mcpSocketPath, notifySocketPath, homeDir });
+  const bwrapArgs = buildBwrapArgs({ cwd, docker, gpg, extraBinds: binds, extraEnv: env, authSock, stateDir, claudeDir: installDir, gitBroker, mcpSocketPath, notifySocketPath, usageSocketPath, homeDir });
   const innerCmd = [BASH, '/ccserver-sandbox-entrypoint.sh', ...withClaude(targetCommand, command)];
 
   const gitBrokerFields = {

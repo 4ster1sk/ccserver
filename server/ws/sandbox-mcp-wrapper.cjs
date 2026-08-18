@@ -6,9 +6,10 @@
 // byte pipe with no protocol logic.
 //
 // Which broker this reaches is decided by argv + which host socket was bound
-// in (see mcpBroker.js / notify.js):
+// in (see mcpBroker.js / notify.js / usageMcp.js):
 //   plain    -> CCSANDBOX_MCP_SOCK  (the group's control / handoff socket)
 //   'notify' -> CCSANDBOX_NOTIFY_MCP_SOCK (the process-global notify socket)
+//   'usage'  -> CCSANDBOX_USAGE_MCP_SOCK (the process-global usage socket)
 // The wrapper itself is role-agnostic.
 //
 // In notify mode the wrapper additionally writes a single JSON line
@@ -16,11 +17,17 @@
 // MCP bytes -- so the server can attribute this connection's notifications
 // (see mcpBroker.js). The identity comes from the CCSERVER_NOTIFY_IDENTITY
 // env set by mcpConfig.js; absent or unparseable it sends an empty object
-// (host-only attribution).
+// (host-only attribution). Usage mode carries no identity (get_usage answers
+// the same regardless of caller), so it never writes this frame.
 'use strict';
 const net = require('net');
-const isNotify = process.argv[2] === 'notify';
-const sockPath = process.env[isNotify ? 'CCSANDBOX_NOTIFY_MCP_SOCK' : 'CCSANDBOX_MCP_SOCK'];
+const mode = process.argv[2];
+const isNotify = mode === 'notify';
+const MODE_SOCK_ENV = {
+  notify: 'CCSANDBOX_NOTIFY_MCP_SOCK',
+  usage: 'CCSANDBOX_USAGE_MCP_SOCK',
+};
+const sockPath = process.env[MODE_SOCK_ENV[mode] || 'CCSANDBOX_MCP_SOCK'];
 if (!sockPath) {
   process.stderr.write('sandbox: MCP bridge not configured\n');
   process.exit(1);

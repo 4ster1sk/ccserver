@@ -215,3 +215,23 @@ export function buildNotifyMcpServer({ notifyApi, identity }) {
 
   return server;
 }
+
+// Process-global usage server (ccserver-usage, see usageMcp.js). Like
+// ccserver-notify it is not group-scoped: one socket hosts it for the whole
+// server. Unlike notify, get_usage carries no per-connection identity -- it
+// always returns the same server-wide snapshot regardless of who asks -- so
+// buildServer's identity argument is simply unused here.
+//
+// usageApi: { getUsage }
+export function buildUsageMcpServer({ usageApi }) {
+  const server = new McpServer({ name: 'ccserver-usage', version: '1.0.0' });
+
+  server.tool(
+    'get_usage',
+    'Get the current Claude usage snapshot (session/weekly percentage used, reset times, plan). Cached ~1 minute server-side; pass force:true to bypass the cache and re-capture immediately (slower, up to ~15s).',
+    { force: z.boolean().optional() },
+    async (args) => ({ content: [{ type: 'text', text: JSON.stringify(await usageApi.getUsage({ force: !!args?.force })) }] }),
+  );
+
+  return server;
+}

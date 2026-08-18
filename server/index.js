@@ -16,6 +16,7 @@ import { terminalWs } from './ws/terminal.js';
 import { gracefulShutdown, restoreSchedules } from './ws/sessionManager.js';
 import { restoreGroups } from './ws/groupManager.js';
 import { restoreNotify, ensureNotifyBroker, stopNotifyBroker, notifyEnabled } from './ws/notify.js';
+import { ensureUsageBroker, stopUsageBroker, usageEnabled } from './ws/usageMcp.js';
 import { warmUsage } from './usage.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -65,6 +66,7 @@ if (process.env.NODE_ENV === 'production') {
 
 const cleanup = () => {
   stopNotifyBroker();
+  stopUsageBroker();
   gracefulShutdown().then(() => process.exit(0));
 };
 process.on('SIGTERM', cleanup);
@@ -85,6 +87,18 @@ try {
   }
 } catch (err) {
   fastify.log.error({ err }, 'Failed to start ccserver-notify broker');
+}
+
+// ccserver-usage: host the process-global get_usage MCP socket when the
+// feature is enabled (claude installed AND showUsage not explicitly
+// disabled). Same bind-before-listen ordering requirement as notify above.
+try {
+  if (usageEnabled()) {
+    await ensureUsageBroker();
+    fastify.log.info('ccserver-usage MCP broker started');
+  }
+} catch (err) {
+  fastify.log.error({ err }, 'Failed to start ccserver-usage broker');
 }
 
 await fastify.listen({ port: PORT, host: '0.0.0.0' });

@@ -10,6 +10,11 @@
 //                     registering it would hand the agent a broken server.
 //   ccserver-notify - the process-global notification server (see notify.js),
 //                     registered when the `{ notify }` descriptor is passed.
+//   ccserver-usage  - the process-global usage server (see usageMcp.js),
+//                     registered when the `{ usage }` descriptor is passed.
+//                     claude sessions only (sessionManager never passes it
+//                     for opencode/copilot -- see usageMcp.js's
+//                     shouldInjectUsage).
 //
 //   claude   -> CLI arg `--mcp-config '<inline JSON>'` (process-scoped, does
 //               not touch ~/.claude.json's shared projects key, so parallel
@@ -38,6 +43,12 @@
 //                sends an empty frame and the notification carries host-only
 //                attribution.
 //
+// The optional `{ usage }` descriptor adds the ccserver-usage MCP server
+// (get_usage, see usageMcp.js): `{ mode, sockPath }`, same mode/sockPath
+// shape as notify but with no identity (get_usage carries no per-connection
+// attribution). Only ever passed for claude sessions (sessionManager gates
+// it on shouldInjectUsage), but the assembly here doesn't need to know that.
+//
 // Returns { args, env } for sessionManager to splice into the pty spawn.
 
 import { dirname, join } from 'node:path';
@@ -47,6 +58,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 
 const MCP_BRIDGE_COMMAND = '/ccserver-sandbox-mcp-bridge';
 const NOTIFY_BRIDGE_SCRIPT = join(__dirname, 'sandbox-mcp-wrapper.cjs');
+const USAGE_BRIDGE_ARG = ['usage'];
 
 // The { base, args } invocation for the notify server: the in-sandbox bridge
 // when the session is sandboxed, else the host node binary running the bridge
@@ -58,9 +70,20 @@ function notifyInvocation(notify) {
   return { command: MCP_BRIDGE_COMMAND, args: ['notify'] };
 }
 
-export function buildMcpConfigArgsAndEnv(app, { groupMcp = true, notify } = {}) {
+// Same shape as notifyInvocation, for the ccserver-usage bridge (the wrapper
+// script is shared -- it picks its socket env by argv, see
+// sandbox-mcp-wrapper.cjs).
+function usageInvocation(usage) {
+  if (usage.mode === 'host') {
+    return { command: process.execPath, args: [NOTIFY_BRIDGE_SCRIPT, ...USAGE_BRIDGE_ARG] };
+  }
+  return { command: MCP_BRIDGE_COMMAND, args: USAGE_BRIDGE_ARG };
+}
+
+export function buildMcpConfigArgsAndEnv(app, { groupMcp = true, notify, usage } = {}) {
   const notifySockEnv = notify ? { CCSANDBOX_NOTIFY_MCP_SOCK: notify.sockPath } : {};
   const notifyIdentityEnv = notify?.identity ? { CCSERVER_NOTIFY_IDENTITY: JSON.stringify(notify.identity) } : {};
+  const usageSockEnv = usage ? { CCSANDBOX_USAGE_MCP_SOCK: usage.sockPath } : {};
 
   if (app === 'copilot') {
     // No CLI-arg/env MCP injection exists for copilot: assembling one would
@@ -97,6 +120,10 @@ export function buildMcpConfigArgsAndEnv(app, { groupMcp = true, notify } = {}) 
     const inv = notifyInvocation(notify);
     mcpServers['ccserver-notify'] = { type: 'stdio', command: inv.command, args: inv.args };
   }
+  if (usage) {
+    const inv = usageInvocation(usage);
+    mcpServers['ccserver-usage'] = { type: 'stdio', command: inv.command, args: inv.args };
+  }
   return {
     args: [
       '--mcp-config',
@@ -105,6 +132,7 @@ export function buildMcpConfigArgsAndEnv(app, { groupMcp = true, notify } = {}) 
     env: {
       ...notifySockEnv,
       ...notifyIdentityEnv,
+      ...usageSockEnv,
     },
   };
 }

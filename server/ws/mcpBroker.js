@@ -17,7 +17,7 @@
 import { createServer } from 'node:net';
 import { rmSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { SocketTransport, buildControlMcpServer, buildHandoffMcpServer, buildNotifyMcpServer, MAX_TRANSPORT_BUFFER_CHARS } from './mcpServer.js';
+import { SocketTransport, buildControlMcpServer, buildHandoffMcpServer, buildNotifyMcpServer, buildUsageMcpServer, MAX_TRANSPORT_BUFFER_CHARS } from './mcpServer.js';
 
 const UID = typeof process.getuid === 'function' ? process.getuid() : 0;
 const RUNTIME_BASE = process.env.XDG_RUNTIME_DIR || `/run/user/${UID}`;
@@ -229,6 +229,18 @@ export async function startNotifyBroker({ notifyApi, sockPath }) {
     sockPath,
     tag: 'notify',
     buildServer: (identity) => buildNotifyMcpServer({ notifyApi, identity }),
+  });
+}
+
+// The process-global usage broker (ccserver-usage, see usageMcp.js). One per
+// server process. NOT group-scoped, and NOT session-attributed (unlike
+// notify) -- get_usage always returns the same server-wide snapshot
+// regardless of which session asks.
+export async function startUsageBroker({ usageApi, sockPath }) {
+  return listenMcp({
+    sockPath,
+    tag: 'usage',
+    buildServer: () => buildUsageMcpServer({ usageApi }),
   });
 }
 
