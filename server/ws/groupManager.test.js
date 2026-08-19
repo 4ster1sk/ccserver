@@ -7,7 +7,11 @@
 //   - addMember refuses to grow a full group (member cap) before any spawn
 //   - destroyGroup leaves the orchestratorDir in place (it is a per-project
 //     resource reused across group launches for the same project)
-//   - restoreGroups does not overwrite an orchestrator's edited CLAUDE.md
+//   - restoreGroups no longer writes CLAUDE.md/AGENTS.md (generation moved to
+//     generateOrchestratorClaudeMdSrc, called right before every spawn)
+//   - generateOrchestratorClaudeMdSrc merges the repo template with the
+//     group's saved custom instructions and writes it to a host-only path,
+//     picking up template edits and instruction changes on every call
 //   - groupExistsForCwd (routes/groups.js) matches a real registered group,
 //     i.e. POST /groups's 409 duplicate-project check sees the live listing
 //
@@ -16,7 +20,7 @@
 
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, rmSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync, existsSync, readFileSync, writeFileSync, cpSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -24,12 +28,25 @@ import { randomUUID } from 'node:crypto';
 let runtimeDir;
 let groupManager;
 let groupsToDestroy = [];
+// A throwaway copy of the real template, seeded from it once up front. The
+// "template edit lands on the next generation" test below mutates this copy
+// (never the real, repo-tracked server/ws/orchestrator-template.md): other
+// test files (e.g. sessionManager.test.js) read that real file concurrently
+// as their content oracle, and node --test runs files in parallel by
+// default, so mutating it in place would be a cross-file race.
+let templateCopyPath;
 
 before(async () => {
   runtimeDir = mkdtempSync(join(tmpdir(), 'ccserver-gm-test-'));
   process.env.XDG_RUNTIME_DIR = runtimeDir;
   process.env.CCSERVER_GROUPS_PATH = join(runtimeDir, 'saved-groups.json');
   process.env.CCSERVER_SAVED_SESSIONS_PATH = join(runtimeDir, 'saved-sessions.json');
+  // generateOrchestratorClaudeMdSrc's output dir must never land under the
+  // real home directory during tests -- see the env override in groupManager.js.
+  process.env.CCSERVER_ORCHESTRATOR_GENERATED_ROOT = join(runtimeDir, 'orchestrator-generated');
+  templateCopyPath = join(runtimeDir, 'orchestrator-template.md');
+  cpSync(join(import.meta.dirname, 'orchestrator-template.md'), templateCopyPath);
+  process.env.CCSERVER_ORCHESTRATOR_TEMPLATE_PATH = templateCopyPath;
   groupManager = await import('./groupManager.js');
 });
 
@@ -63,7 +80,8 @@ test('persistGroups writes the member registry; destroyGroup removes the entry',
   assert.equal(entry.orchestratorApp, 'opencode');
 
   // The orchestratorDir is a per-project resource: destroying the group must
-  // not remove it (its CLAUDE.md survives for the next group on the project).
+  // not remove it (it is reused as the cwd for the next group on the project;
+  // CLAUDE.md/AGENTS.md are generated fresh at that group's own spawn time).
   const orchDir = join(runtimeDir, gid);
   mkdirSync(orchDir, { recursive: true });
   groupManager.destroyGroup(gid);
@@ -107,10 +125,10 @@ test('restoreGroups rebuilds a group from the persisted file (restart survival)'
     [['workerA', 'dead-sess-a'], ['orchestrator', 'dead-sess-o']],
   );
   assert.equal(group.controlBroker, null, 'brokers are recreated lazily');
-
-  // Orchestrator dir + instruction files are brought back for resume/restart.
-  assert.equal(readFileSync(join(orchDir, 'CLAUDE.md'), 'utf-8'), '# Orchestrator instructions');
-  assert.equal(readFileSync(join(orchDir, 'AGENTS.md'), 'utf-8'), '# Orchestrator instructions');
+  // Instructions metadata is restored -- generation into an actual
+  // CLAUDE.md/AGENTS.md happens only at the next real (re)spawn, via
+  // generateOrchestratorClaudeMdSrc (see the dedicated tests below).
+  assert.equal(group.instructions, '# Orchestrator instructions');
 
   // Session-less members surface as exited (skeleton only -- no saved-session
   // entry to match in this test).
@@ -121,11 +139,9 @@ test('restoreGroups rebuilds a group from the persisted file (restart survival)'
   groupManager.destroyGroup(gid);
 });
 
-test('restoreGroups does not overwrite an edited CLAUDE.md on restart', async () => {
+test('restoreGroups does not write CLAUDE.md/AGENTS.md (generation happens only at actual spawn time)', async () => {
   const gid = randomUUID();
-  const orchDir = join(runtimeDir, `orch-edit-${gid}`);
-  mkdirSync(orchDir, { recursive: true });
-  writeFileSync(join(orchDir, 'CLAUDE.md'), '# Orchestrator edited this');
+  const orchDir = join(runtimeDir, `orch-nowrite-${gid}`);
   writeFileSync(process.env.CCSERVER_GROUPS_PATH, JSON.stringify([{
     id: gid,
     createdAt: 1,
@@ -140,13 +156,9 @@ test('restoreGroups does not overwrite an edited CLAUDE.md on restart', async ()
 
   const info = groupManager.restoreGroups();
   assert.equal(info.restored, 1);
-  assert.equal(
-    readFileSync(join(orchDir, 'CLAUDE.md'), 'utf-8'),
-    '# Orchestrator edited this',
-    'an orchestrator\u2019s edits must survive a server restart',
-  );
-  // CLAUDE.md exists, so the block skips AGENTS.md too -- it is not recreated.
-  assert.equal(existsSync(join(orchDir, 'AGENTS.md')), false, 'AGENTS.md is left untouched when CLAUDE.md exists');
+  assert.equal(existsSync(orchDir), true, 'orchestratorDir itself is still (re)created');
+  assert.equal(existsSync(join(orchDir, 'CLAUDE.md')), false, 'restoreGroups no longer writes CLAUDE.md');
+  assert.equal(existsSync(join(orchDir, 'AGENTS.md')), false, 'restoreGroups no longer writes AGENTS.md');
   groupsToDestroy.push(gid);
 });
 
@@ -967,4 +979,63 @@ test('addMember stores the effective launch data as the role preference (atomic 
     groupManager.setSessionApiForTests(null);
     groupManager.destroyGroup(gid);
   }
+});
+
+// generateOrchestratorClaudeMdSrc: merges server/ws/orchestrator-template.md
+// with the group's saved custom instructions and writes the result to a
+// host-only path (see sandbox.js's ro-bind overlay). templateCopyPath (set
+// in before()) is a throwaway copy seeded from the real template via
+// CCSERVER_ORCHESTRATOR_TEMPLATE_PATH -- the "template edit lands on the
+// next generation" case below edits it in place, which would race with
+// other test files reading the real, repo-tracked template concurrently if
+// it targeted that file directly.
+
+test('generateOrchestratorClaudeMdSrc: no custom instructions -> content is exactly the template', async () => {
+  const gid = await makeGroup();
+  const dest = groupManager.generateOrchestratorClaudeMdSrc(gid);
+  assert.ok(dest, 'a destination path is returned');
+  const template = readFileSync(templateCopyPath, 'utf-8');
+  assert.equal(readFileSync(dest, 'utf-8'), template);
+});
+
+test('generateOrchestratorClaudeMdSrc: custom instructions are appended under a dedicated heading, template stays intact', async () => {
+  const gid = randomUUID();
+  await groupManager.createGroup({
+    groupId: gid,
+    cwd: '/srv/proj-custom',
+    orchestratorDir: join(runtimeDir, gid),
+    instructions: '# My custom project notes',
+  });
+  groupsToDestroy.push(gid);
+  const dest = groupManager.generateOrchestratorClaudeMdSrc(gid);
+  const content = readFileSync(dest, 'utf-8');
+  const template = readFileSync(templateCopyPath, 'utf-8');
+  assert.ok(content.startsWith(template), 'template is included verbatim (never substituted)');
+  assert.match(content, /## プロジェクト固有の指示 \(ユーザー設定\)/);
+  assert.match(content, /# My custom project notes/);
+});
+
+test('generateOrchestratorClaudeMdSrc: same orchestratorDir -> same path, regenerated content reflects a template edit', async () => {
+  const gid = await makeGroup('/srv/proj-regen');
+  const destA = groupManager.generateOrchestratorClaudeMdSrc(gid);
+  const destB = groupManager.generateOrchestratorClaudeMdSrc(gid);
+  assert.equal(destA, destB, 'the generated path is stable for a given orchestratorDir');
+
+  const original = readFileSync(templateCopyPath, 'utf-8');
+  try {
+    writeFileSync(templateCopyPath, '# Edited Orchestrator Template\n');
+    const destC = groupManager.generateOrchestratorClaudeMdSrc(gid);
+    assert.equal(destC, destA, 'still the same path');
+    assert.equal(
+      readFileSync(destC, 'utf-8'),
+      '# Edited Orchestrator Template\n',
+      'a template edit lands on the very next generation, no caching',
+    );
+  } finally {
+    writeFileSync(templateCopyPath, original);
+  }
+});
+
+test('generateOrchestratorClaudeMdSrc: unknown groupId returns null', () => {
+  assert.equal(groupManager.generateOrchestratorClaudeMdSrc(randomUUID()), null);
 });

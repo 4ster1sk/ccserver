@@ -16,7 +16,7 @@ import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, readFileSync, writeFileSync, unlinkSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { persistentHomeDir } from './sandbox.js';
 import { findSessionLimitReset } from './sessionLimitDetect.js';
@@ -85,6 +85,9 @@ before(async () => {
   process.env.XDG_RUNTIME_DIR = runtimeDir;
   // Group persistence must never touch the repo-root state file during tests.
   process.env.CCSERVER_GROUPS_PATH = join(runtimeDir, 'saved-groups.json');
+  // generateOrchestratorClaudeMdSrc's output dir must never land under the
+  // real home directory during tests -- see the env override in groupManager.js.
+  process.env.CCSERVER_ORCHESTRATOR_GENERATED_ROOT = join(runtimeDir, 'orchestrator-generated');
   groupManager = await import('./groupManager.js');
   sessionManager = await import('./sessionManager.js');
 });
@@ -614,6 +617,74 @@ test('fireSchedule drops the prompt when the member group no longer exists', asy
   // groupId (invisible in the UI + unable to hand off).
   const leftover = sessionManager.listSessions().filter((s) => s.groupId === gid);
   assert.equal(leftover.length, 0, 'no MCP-less orphan session was spawned');
+});
+
+// Orchestrator CLAUDE.md/AGENTS.md ro-bind overlay (see groupManager's
+// generateOrchestratorClaudeMdSrc): the auto-resume path must regenerate it
+// on every respawn, same resolver-registration pattern as mcpSocketPath. The
+// dead session here is shell-spawned (sandbox: false, like shellMember uses
+// throughout this file), so the observable proof that the resolver actually
+// ran end-to-end is the role being rebound at all -- had resolution failed,
+// the fail-closed guard below would have dropped the resume entirely and
+// left the role bound to the dead session forever.
+test('fireSchedule auto-resume of a dead orchestrator regenerates its CLAUDE.md overlay and rebinds the role', async () => {
+  const gid = randomUUID();
+  const orchestratorDir = join(runtimeDir, `orch-resume-${gid}`);
+  await groupManager.createGroup({ groupId: gid, cwd: '/tmp', orchestratorDir });
+
+  const workerKeepAlive = shellMember('/tmp', gid, 'workerA'); // keeps the group alive
+  const deadOrch = shellMember('/tmp', gid, 'orchestrator');
+  const deadOrchId = deadOrch.id;
+
+  const generatedPath = join(process.env.CCSERVER_ORCHESTRATOR_GENERATED_ROOT, `${basename(orchestratorDir)}.md`);
+  assert.equal(existsSync(generatedPath), false, 'nothing generated yet before the first (re)spawn');
+
+  assert.ok(sessionManager.setScheduledPrompt(deadOrch.id, Date.now() + 700, 'MARKER_ORCH_RESUME'));
+  sessionManager.destroySession(deadOrch.id); // keepSchedule defaults true
+
+  await sleep(2500); // branch 3: resolvers (mcpSocketPath + orchestratorClaudeMdSrc) + createSession
+
+  const group = groupManager.getGroup(gid);
+  assert.ok(group, 'group survives (workerA alive)');
+  const member = group.members.get('orchestrator');
+  assert.ok(member, 'orchestrator still registered');
+  assert.notEqual(member, deadOrchId, 'role rebound to the resumed session -- proves the overlay resolver did not drop the prompt');
+
+  assert.ok(existsSync(generatedPath), 'the CLAUDE.md/AGENTS.md overlay source was (re)generated for the resume');
+  const template = readFileSync(join(import.meta.dirname, 'orchestrator-template.md'), 'utf-8');
+  assert.equal(readFileSync(generatedPath, 'utf-8'), template);
+
+  sessionManager.destroySession(member, { keepSchedule: false });
+  sessionManager.destroySession(workerKeepAlive.id, { keepSchedule: false });
+  groupManager.destroyGroup(gid);
+});
+
+// Fail-closed counterpart of the above: when the overlay can't be generated
+// (here, simulated by a group with no orchestratorDir -- generateOrchestratorClaudeMdSrc
+// returns null in that case, same as a torn-down group), the resume must be
+// dropped rather than launch an orchestrator with no CLAUDE.md overlay at
+// all -- mirrors the existing mcpSocketPath drop policy.
+test('fireSchedule drops the prompt when the orchestrator CLAUDE.md overlay cannot be generated', async () => {
+  const gid = randomUUID();
+  await groupManager.createGroup({ groupId: gid, cwd: '/tmp', orchestratorDir: null });
+
+  const workerKeepAlive = shellMember('/tmp', gid, 'workerA');
+  const deadOrch = shellMember('/tmp', gid, 'orchestrator');
+  const deadOrchId = deadOrch.id;
+
+  assert.ok(sessionManager.setScheduledPrompt(deadOrch.id, Date.now() + 500, 'MARKER_ORCH_DROP'));
+  sessionManager.destroySession(deadOrch.id);
+
+  await sleep(1800);
+
+  const group = groupManager.getGroup(gid);
+  assert.ok(group, 'group survives (workerA alive)');
+  assert.equal(group.members.get('orchestrator'), deadOrchId, 'role was never rebound -- the resume was dropped, not launched without an overlay');
+  const leftover = sessionManager.listSessions().filter((s) => s.groupId === gid && s.groupRole === 'orchestrator');
+  assert.equal(leftover.length, 0, 'no orchestrator session (dead or alive) was (re)spawned for this role');
+
+  sessionManager.destroySession(workerKeepAlive.id, { keepSchedule: false });
+  groupManager.destroyGroup(gid);
 });
 
 // The old idle heuristic sent `input_needed` to the client on an idle agent

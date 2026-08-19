@@ -8,15 +8,21 @@
 // only CLAUDE.md/AGENTS.md, in a mandatory sandbox. Its reach into the workers
 // is the control MCP server socket (see mcpBroker.js / mcpTools.js) -- basic
 // project facts are obtained through the repo_info tool, never by direct
-// filesystem access. See DEFAULT_ORCHESTRATOR_TEMPLATE below.
+// filesystem access. CLAUDE.md/AGENTS.md are generated fresh on every
+// (re)spawn from server/ws/orchestrator-template.md plus the group's saved
+// custom instructions, then ro-bind mounted over the two files -- see
+// groupManager.generateOrchestratorClaudeMdSrc and sandbox.js's
+// buildBwrapArgs. The orchestrator (a live LLM reachable through prompt
+// injection from worker output) can never persist an edit to its own
+// operating rules.
 //
 // orchestratorDir is deterministic per project (hashed from the resolved cwd),
-// so the orchestrator's CLAUDE.md/AGENTS.md edits survive group launches and
-// server restarts for the same project. Concurrent groups for one cwd are
-// refused at creation time, so at most one live group ever owns a dir at once.
+// so it survives group launches and server restarts for the same project.
+// Concurrent groups for one cwd are refused at creation time, so at most one
+// live group ever owns a dir at once.
 
 import { randomUUID, createHash } from 'node:crypto';
-import { mkdirSync, writeFileSync, statSync, rmSync, existsSync } from 'node:fs';
+import { mkdirSync, statSync, rmSync, existsSync } from 'node:fs';
 import { basename, join, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import * as groupManager from '../ws/groupManager.js';
@@ -27,11 +33,14 @@ import { isValidApp } from '../ws/appLaunch.js';
 const ORCHESTRATOR_ROOT = join(homedir(), '.local', 'share', 'ccserver-sandbox', 'orchestrator');
 
 // The orchestrator dir is derived deterministically from the project path
-// (not the random groupId), so the orchestrator's CLAUDE.md/AGENTS.md edits
-// survive the group being destroyed and a new group launching for the same
-// project. resolve() normalizes spelling variants (trailing slash, "..", ...)
-// so they all map to the same dir. 24 hex chars (96 bits) of the sha256 is
-// plenty of collision headroom for a handful of projects.
+// (not the random groupId), so it can be reused as the orchestrator's cwd
+// (scratch space) across the group being destroyed and a new group launching
+// for the same project -- see destroyGroup's comment in groupManager.js.
+// CLAUDE.md/AGENTS.md themselves are never persisted here (see the header
+// comment above); only the dir itself is reused. resolve() normalizes
+// spelling variants (trailing slash, "..", ...) so they all map to the same
+// dir. 24 hex chars (96 bits) of the sha256 is plenty of collision headroom
+// for a handful of projects.
 export function orchestratorDirForCwd(cwd) {
   const hash = createHash('sha256').update(resolve(cwd)).digest('hex').slice(0, 24);
   return join(ORCHESTRATOR_ROOT, hash);
@@ -45,130 +54,6 @@ export function groupExistsForCwd(cwd, groups) {
   const target = resolve(cwd);
   return groups.find((g) => resolve(g.cwd) === target) || null;
 }
-
-// A starting text for the orchestrator's CLAUDE.md/AGENTS.md -- nothing more.
-// ccserver holds NO opinion on workflows: this is a scratch template the user
-// edits in the launch modal (or later, directly in the orchestrator's
-// CLAUDE.md). It is never parsed or branched on.
-const DEFAULT_ORCHESTRATOR_TEMPLATE = `# Orchestrator
-
-You orchestrate the two worker agents in this group (workerA / workerB) via
-the MCP server "ccserver" that is already configured in this session.
-
-Each worker is a full terminal session you can inspect and control:
-
-- list_group_sessions -- see the members of this group.
-- read_output -- read a member's current screen / recent terminal output
-  (fallback for inspecting a stuck member; avoid polling it). Use its
-  \`screen\` and \`screenIdleMs\` fields for stuck/busy judgments -- a static
-  screen (large screenIdleMs) means the member is idle even if its byte
-  stream is noisy; a small screenIdleMs means it is actively redrawing
-  (spinner or progress).
-- send_input -- type text into a member's terminal (submit defaults to true).
-- open_tab / close_tab -- add or terminate worker sessions.
-- get_tab_status -- quick status of a member (including screenIdleMs, the
-  screen-change-based idle signal).
-- repo_info -- the repository's basic facts (top-level layout, README,
-  package.json summary, git state). Shallow by design: it never returns
-  source-file contents, takes no path arguments, and is capped in size.
-
-Recommended turn pattern (keeps your context small):
-
-1. send_input to a worker with the next step.
-2. Call wait_for_handoff once and await the result.
-3. The worker calls handoff_to_orchestrator when its task is done, blocked,
-   or needs input -- wait_for_handoff returns that structured summary.
-4. Decide the next action from the summary alone; only read_output when
-   something looks stuck.
-
-You have no direct access to the project files: your sandbox contains only
-your own orchestrator directory, and worker checkouts are NOT mounted into
-it. Repository facts you can see are limited to what repo_info returns
-(top-level layout, README, package.json summary, git state) -- nothing
-deeper. Everything that requires seeing a file's contents, running a
-command, writing code, or deciding what to do next goes exclusively through
-the tools below: hand the work to a worker via send_input. You are only in
-the loop when a worker hands off to you -- that is the intended division of
-labor.
-
-## Division of labor
-
-workerA and workerB are fixed role names, not app names -- both run as
-OpenCode Go sessions in this group:
-
-- workerA (OpenCode Go): writes the implementation plan (placed under
-  \`./tmp/\` in the worker's repo) and creates the working branch. After
-  workerB's self-review stage passes, workerA does the final diff review,
-  pushes, and opens the PR.
-- workerB (OpenCode Go): implements and commits against workerA's plan,
-  then runs its own self-review stage (below) before handing off for
-  final review.
-
-## Self-review stage (after workerB reports implementation done)
-
-Do not hand a freshly implemented change straight to workerA for review --
-that makes workerA do all the quality gatekeeping. Instead, make workerB
-raise the quality bar on its own first:
-
-1. When workerB hands off reporting the implementation done, send \`/new\`
-   to workerB to start a fresh session (a clean context avoids the bias of
-   reviewing its own just-written reasoning).
-2. In that new session, have it review the diff it just produced against:
-   plan compliance, correctness/bugs, and unnecessary complexity/verbosity.
-3. If it finds issues, have it fix and commit them, then repeat from step 1.
-4. Cap this loop at 3 rounds. If issues remain after 3 rounds, hand off to
-   workerA anyway with the outstanding issues noted, rather than looping
-   forever.
-5. Once the self-review comes back clean (or the cap is hit), hand off to
-   workerA for the final review -> push -> PR stage.
-
-## Handoff discipline
-
-Confirmed in practice, not just a theoretical risk: a worker can finish its
-task, sit idle at a clean prompt, and never call \`handoff_to_orchestrator\`
-on its own -- even when the instruction you sent explicitly said to hand
-off when done. \`wait_for_handoff\` then blocks forever with no notification,
-because the tool only returns when the worker actually calls it. Do not
-rely on a human manually nudging it in the worker's terminal -- the
-orchestrator should catch this itself.
-
-- Every instruction sent via \`send_input\` MUST end with an explicit
-  reminder to call \`handoff_to_orchestrator\` once done, blocked, or in
-  need of input.
-- \`wait_for_handoff\` returning \`{timedOut:true}\` is NOT an error: it
-  simply means no handoff arrived within the timeout. Call it again. A
-  handoff is never lost to a timeout or a disconnect -- an event that
-  arrives while nobody is waiting stays queued, and even if your
-  connection dies mid-wait, the next \`wait_for_handoff\` (after the
-  reconnect) receives it.
-- After sending a step, don't just trust \`wait_for_handoff\` to eventually
-  notify you -- it only returns once the worker actually calls the tool,
-  and nothing forces that to happen. When you get any other opportunity to
-  act (a new user message, another worker's handoff, etc.) while one is
-  still pending, spend one \`read_output\` call checking whether it's
-  sitting at an idle/finished prompt without having handed off; if so,
-  nudge it via \`send_input\` ("done? call handoff_to_orchestrator"). Don't
-  invent a polling loop (e.g. \`ScheduleWakeup\`) just to check sooner --
-  that mechanism belongs to the \`/loop\` skill, not ad hoc waiting here.
-
-## Notification discipline
-
-The MCP server "ccserver-notify" is configured in this session. Its \`notify\`
-tool (title / body / level) delivers to every configured channel (Discord
-webhook and any subscribed webhooks) -- the only way the human learns what
-happened without watching the terminal. End every one of the following
-situations with a \`notify\` call, no exceptions:
-
-- **Stopping**: you stop waiting, give up on a step, or wind the group down
-  without completing the task.
-- **Judgment needed**: a decision requires the human (blocked, ambiguous, or
-  a choice you should not make autonomously).
-- **Done**: the group task is complete (final review passed, pushed, and the
-  PR opened -- or otherwise finished).
-
-Use \`level\` to match the outcome (success / warning / error). Delivery is
-non-blocking and never throws, so there is no reason to skip it.
-`;
 
 function validCwd(cwd) {
   if (typeof cwd !== 'string' || !cwd.startsWith('/') || cwd === '/') return false;
@@ -205,7 +90,7 @@ function memberSpecFromBody(spec) {
 // `resumeLast` maps 1:1 onto "the previous conversation"). projectName is the
 // real project's basename: the session's cwd is the hashed orchestratorDir,
 // which must not leak into the notify footer (see sessionManager).
-export function orchestratorRestartSessionOpts({ group, app, model = null, sandboxOpts = null, mcpSocketPath }) {
+export function orchestratorRestartSessionOpts({ group, app, model = null, sandboxOpts = null, mcpSocketPath, orchestratorClaudeMdSrc = null }) {
   return {
     cwd: group.orchestratorDir,
     cols: 80,
@@ -219,6 +104,7 @@ export function orchestratorRestartSessionOpts({ group, app, model = null, sandb
     groupRole: 'orchestrator',
     projectName: group.cwd ? basename(group.cwd) : null,
     mcpSocketPath,
+    orchestratorClaudeMdSrc,
   };
 }
 
@@ -267,9 +153,9 @@ export async function groupsRoute(fastify, opts) {
 
     const groupId = randomUUID();
     const orchestratorDir = orchestratorDirForCwd(cwd);
-    // Only a dir this request created is cleaned up on failure or overwritten
-    // with the default template: a reused dir holds the project's accumulated
-    // orchestrator notes and must survive a failed launch.
+    // Only a dir this request created is cleaned up on failure: a reused dir
+    // is a per-project resource (see the header comment) that must survive a
+    // failed launch.
     const dirAlreadyExisted = existsSync(orchestratorDir);
     try {
       mkdirSync(orchestratorDir, { recursive: true, mode: 0o700 });
@@ -277,25 +163,10 @@ export async function groupsRoute(fastify, opts) {
       return reply.code(500).send({ error: `Failed to create orchestrator dir: ${err.message}` });
     }
 
-    const explicitInstructions = (body.orchestrator && typeof body.orchestrator.instructions === 'string'
+    const instructions = (body.orchestrator && typeof body.orchestrator.instructions === 'string'
       && body.orchestrator.instructions.trim())
       ? body.orchestrator.instructions
       : null;
-    // Reusing an existing dir: keep whatever the orchestrator wrote there
-    // (CLAUDE.md/AGENTS.md) unless the user explicitly supplied instructions
-    // for this launch. A fresh dir gets the default template.
-    const instructions = explicitInstructions || (dirAlreadyExisted ? null : DEFAULT_ORCHESTRATOR_TEMPLATE);
-    // Both files: opencode prefers AGENTS.md and falls back to CLAUDE.md;
-    // claude reads CLAUDE.md. Same content either way.
-    if (instructions) {
-      try {
-        writeFileSync(join(orchestratorDir, 'CLAUDE.md'), instructions);
-        writeFileSync(join(orchestratorDir, 'AGENTS.md'), instructions);
-      } catch (err) {
-        if (!dirAlreadyExisted) { try { rmSync(orchestratorDir, { recursive: true, force: true }); } catch { /* best effort */ } }
-        return reply.code(500).send({ error: `Failed to write orchestrator instructions: ${err.message}` });
-      }
-    }
 
     // Broker start failures (socket path collision, permission errors, ...)
     // must surface as a launch error, not a silent "success".
@@ -323,6 +194,27 @@ export async function groupsRoute(fastify, opts) {
       if (!dirAlreadyExisted) { try { rmSync(orchestratorDir, { recursive: true, force: true }); } catch { /* best effort */ } }
       return reply.code(400).send({ error: message });
     };
+
+    // Merge the template with `instructions` and write the result to the
+    // host-only overlay path; sandbox.js ro-binds it over CLAUDE.md/AGENTS.md
+    // (see the header comment). Generated only now that the group record
+    // exists (group.instructions is what the merge reads).
+    let orchestratorClaudeMdSrc;
+    try {
+      orchestratorClaudeMdSrc = groupManager.generateOrchestratorClaudeMdSrc(groupId);
+    } catch (err) {
+      return fail(`failed to generate orchestrator instructions: ${err.message}`);
+    }
+    // A null return (group/orchestratorDir unexpectedly missing) is just as
+    // fatal as a thrown error here: launching with orchestratorClaudeMdSrc
+    // unset means createSession skips the ro-bind entirely and the
+    // orchestrator gets a plain writable CLAUDE.md/AGENTS.md -- silently
+    // reopening the self-modification hole this whole mechanism exists to
+    // close. Fail closed, matching the auto-resume resolver in
+    // sessionManager.js's fireSchedule.
+    if (!orchestratorClaudeMdSrc) {
+      return fail('failed to generate orchestrator instructions: no CLAUDE.md overlay was produced');
+    }
 
     // Workers reuse addMember (the open_tab path) so validation, channel
     // creation, session spawn and registration can't drift between the
@@ -355,6 +247,7 @@ export async function groupsRoute(fastify, opts) {
       // must attribute the orchestrator to the real project instead.
       projectName: basename(cwd),
       mcpSocketPath: controlBroker ? controlBroker.sockPath : null,
+      orchestratorClaudeMdSrc,
     });
     if (orchRes.error || !orchRes.session) {
       return fail(`orchestrator failed to launch: ${orchRes.error || 'unknown error'}`);
@@ -435,7 +328,23 @@ export async function groupsRoute(fastify, opts) {
       return reply.code(500).send({ error: 'failed to re-create the control broker' });
     }
 
-    const res = createSession(orchestratorRestartSessionOpts({ group, app, model, sandboxOpts, mcpSocketPath }));
+    // Regenerated on every restart (see groupManager.generateOrchestratorClaudeMdSrc):
+    // picks up any template edit since the orchestrator's last launch, and
+    // always overrides whatever it may have tried to write to the previous
+    // (ro-bound) CLAUDE.md/AGENTS.md.
+    let orchestratorClaudeMdSrc;
+    try {
+      orchestratorClaudeMdSrc = groupManager.generateOrchestratorClaudeMdSrc(group.id);
+    } catch (err) {
+      return reply.code(500).send({ error: `failed to generate orchestrator instructions: ${err.message}` });
+    }
+    // See the same guard in POST /groups: a null return must not fall
+    // through to a restart without the ro-bind overlay.
+    if (!orchestratorClaudeMdSrc) {
+      return reply.code(500).send({ error: 'failed to generate orchestrator instructions: no CLAUDE.md overlay was produced' });
+    }
+
+    const res = createSession(orchestratorRestartSessionOpts({ group, app, model, sandboxOpts, mcpSocketPath, orchestratorClaudeMdSrc }));
     if (res.error || !res.session) {
       return reply.code(500).send({ error: `orchestrator restart failed: ${res.error || 'unknown error'}` });
     }

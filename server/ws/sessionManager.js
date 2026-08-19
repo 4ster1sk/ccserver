@@ -74,6 +74,33 @@ export async function resolveMcpSocketForSession(groupId, groupRole) {
   return null;
 }
 
+// Resolvers of the orchestrator's freshly generated CLAUDE.md/AGENTS.md
+// source path (template + saved per-project instructions, merged host-side
+// on every launch). groupManager registers one (generateOrchestratorClaudeMdSrc)
+// -- same resolver-registration pattern as mcpSocketResolvers above, needed
+// for the same reason: the scheduled-prompt auto-resume path lives here and
+// cannot import groupManager.js (circular import).
+const orchestratorClaudeMdResolvers = new Set();
+
+export function setOrchestratorClaudeMdResolver(fn) {
+  orchestratorClaudeMdResolvers.add(fn);
+}
+
+// Resolve the host path of the orchestrator's generated CLAUDE.md/AGENTS.md
+// overlay. Resolves to null when no resolver can produce one (group gone) --
+// the caller then treats this the same as an unresolvable mcpSocketPath.
+export async function resolveOrchestratorClaudeMdSrc(groupId) {
+  for (const fn of orchestratorClaudeMdResolvers) {
+    try {
+      const src = await fn(groupId);
+      if (src) return src;
+    } catch {
+      // try the next resolver
+    }
+  }
+  return null;
+}
+
 function resolveCommand(cmd) {
   if (process.platform !== 'win32') return cmd;
   try {
@@ -104,7 +131,7 @@ function normalizeModel(model) {
   return typeof model === 'string' && model.length > 0 ? model : null;
 }
 
-export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox, sandboxOpts, app, model, resumeLast, groupId = null, groupRole = null, mcpSocketPath = null, projectName = null, reuseSandboxHome = true }) {
+export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox, sandboxOpts, app, model, resumeLast, groupId = null, groupRole = null, mcpSocketPath = null, projectName = null, reuseSandboxHome = true, orchestratorClaudeMdSrc = null }) {
   const id = randomUUID();
 
   // claude (and likely opencode) aborts immediately (SIGABRT, exit 134, no
@@ -275,7 +302,7 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox
       }
     }
     try {
-      const spawn = buildSandboxSpawn({ cwd, targetCommand: [command, ...args], app: sessionApp, sandboxOpts, mcpSocketPath, notifySocketPath, usageSocketPath, reuseSandboxHome });
+      const spawn = buildSandboxSpawn({ cwd, targetCommand: [command, ...args], app: sessionApp, sandboxOpts, mcpSocketPath, notifySocketPath, usageSocketPath, reuseSandboxHome, orchestratorClaudeMdSrc });
       command = spawn.command;
       args = spawn.args;
       sandboxStateDir = spawn.stateDir || null;
@@ -954,6 +981,21 @@ async function fireSchedule(scheduleId) {
     console.warn(`[scheduler] dropping prompt for group member ${entry.groupRole} of ${entry.groupId}: MCP socket unavailable`);
     return;
   }
+  // The orchestrator's CLAUDE.md/AGENTS.md overlay must be regenerated on
+  // every respawn (see groupManager.generateOrchestratorClaudeMdSrc) -- this
+  // auto-resume path is the one spawn site that can't call it directly
+  // (would create an import cycle with groupManager.js), so it goes through
+  // the same resolver-registration pattern as mcpSocketPath above. Same
+  // fail-closed policy too: an orchestrator that can't get a fresh overlay
+  // must not fall back to launching without one (that would be a silent
+  // regression back to the writable-CLAUDE.md hole this mechanism closes).
+  const orchestratorClaudeMdSrc = entry.groupId && entry.groupRole === 'orchestrator'
+    ? await resolveOrchestratorClaudeMdSrc(entry.groupId)
+    : null;
+  if (entry.groupId && entry.groupRole === 'orchestrator' && !orchestratorClaudeMdSrc) {
+    console.warn(`[scheduler] dropping prompt for orchestrator of ${entry.groupId}: CLAUDE.md generation unavailable`);
+    return;
+  }
   const res = createSession({
     cwd: entry.cwd,
     cols: 80,
@@ -970,6 +1012,7 @@ async function fireSchedule(scheduleId) {
     groupId: entry.groupId,
     groupRole: entry.groupRole,
     mcpSocketPath,
+    orchestratorClaudeMdSrc,
   });
   if (!res?.session) return;
   const session = res.session;
