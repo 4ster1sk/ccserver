@@ -33,11 +33,14 @@ import { isValidApp } from '../ws/appLaunch.js';
 const ORCHESTRATOR_ROOT = join(homedir(), '.local', 'share', 'ccserver-sandbox', 'orchestrator');
 
 // The orchestrator dir is derived deterministically from the project path
-// (not the random groupId), so the orchestrator's CLAUDE.md/AGENTS.md edits
-// survive the group being destroyed and a new group launching for the same
-// project. resolve() normalizes spelling variants (trailing slash, "..", ...)
-// so they all map to the same dir. 24 hex chars (96 bits) of the sha256 is
-// plenty of collision headroom for a handful of projects.
+// (not the random groupId), so it can be reused as the orchestrator's cwd
+// (scratch space) across the group being destroyed and a new group launching
+// for the same project -- see destroyGroup's comment in groupManager.js.
+// CLAUDE.md/AGENTS.md themselves are never persisted here (see the header
+// comment above); only the dir itself is reused. resolve() normalizes
+// spelling variants (trailing slash, "..", ...) so they all map to the same
+// dir. 24 hex chars (96 bits) of the sha256 is plenty of collision headroom
+// for a handful of projects.
 export function orchestratorDirForCwd(cwd) {
   const hash = createHash('sha256').update(resolve(cwd)).digest('hex').slice(0, 24);
   return join(ORCHESTRATOR_ROOT, hash);
