@@ -813,7 +813,7 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
                 <div className="open-menu-label">オーケストレーターへの指示</div>
                 <textarea
                   className="open-menu-instructions"
-                  placeholder="空の場合は既定テンプレートが使われます"
+                  placeholder="既定テンプレートに追記されます（空欄でもテンプレートは常に適用されます）。オーケストレーター自身はこの内容を書き換えられません。"
                   value={orchestratorInstructions}
                   onChange={(e) => setOrchestratorInstructions(e.target.value)}
                   rows={5}

@@ -94,3 +94,20 @@ test('orchestratorRestartSessionOpts: a group without a cwd keeps projectName nu
   });
   assert.equal(opts.projectName, null, 'missing group cwd must not throw basename()');
 });
+
+test('orchestratorRestartSessionOpts: orchestratorClaudeMdSrc passes through to the session opts', () => {
+  const withSrc = orchestratorRestartSessionOpts({
+    group: { id: 'g', cwd: '/srv/proj', orchestratorDir: '/d' },
+    app: 'claude',
+    mcpSocketPath: '/s',
+    orchestratorClaudeMdSrc: '/host/orchestrator-generated/abc.md',
+  });
+  assert.equal(withSrc.orchestratorClaudeMdSrc, '/host/orchestrator-generated/abc.md');
+
+  const withoutSrc = orchestratorRestartSessionOpts({
+    group: { id: 'g', cwd: '/srv/proj', orchestratorDir: '/d' },
+    app: 'claude',
+    mcpSocketPath: '/s',
+  });
+  assert.equal(withoutSrc.orchestratorClaudeMdSrc, null, 'defaults to null when omitted');
+});

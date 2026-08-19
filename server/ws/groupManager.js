@@ -8,10 +8,11 @@
 // here, by this process, never declared by clients.
 
 import { EventEmitter } from 'node:events';
-import { mkdirSync, writeFileSync, readFileSync, unlinkSync, existsSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { mkdirSync, writeFileSync, readFileSync, unlinkSync } from 'node:fs';
+import { basename, dirname, join } from 'node:path';
+import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
-import { getSession, destroySession, createSession, writeToSession, waitUntilSettled, setSessionExitListener, setSessionCreateListener, setMcpSocketResolver, peekSavedSessions } from './sessionManager.js';
+import { getSession, destroySession, createSession, writeToSession, waitUntilSettled, setSessionExitListener, setSessionCreateListener, setMcpSocketResolver, setOrchestratorClaudeMdResolver, peekSavedSessions } from './sessionManager.js';
 import { startControlBroker, startHandoffChannel, stopBroker } from './mcpBroker.js';
 import { isValidApp } from './appLaunch.js';
 import { loadSandboxConfig } from './sandbox.js';
@@ -21,6 +22,20 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 // orchestrator dir/app/instructions -- see persistGroups). Overridable for
 // tests, which must never touch the real repo-root state file.
 const GROUPS_PATH = process.env.CCSERVER_GROUPS_PATH || join(__dirname, '..', '..', '.saved-groups.json');
+
+// Orchestrator CLAUDE.md/AGENTS.md source: a repo-tracked template, read
+// fresh on every (re)spawn (never cached at module load) so an edit to the
+// file lands the next time an orchestrator launches -- no ccserver restart
+// needed. See generateOrchestratorClaudeMdSrc.
+const ORCHESTRATOR_TEMPLATE_PATH = join(__dirname, 'orchestrator-template.md');
+// Merged (template + saved per-project instructions) output lives entirely
+// outside orchestratorDir, which is bind-mounted rw into the sandbox -- if
+// the generated file lived inside it, the orchestrator could see (and get
+// confused by, or attempt to reference) its own overlay source. This dir is
+// never mounted into any sandbox. Overridable (same pattern as sandbox.js's
+// CCSERVER_SANDBOX_HOME_ROOT) so tests never write under the real home dir.
+const ORCHESTRATOR_GENERATED_ROOT = process.env.CCSERVER_ORCHESTRATOR_GENERATED_ROOT
+  || join(homedir(), '.local', 'share', 'ccserver-sandbox', 'orchestrator-generated');
 
 const groups = new Map(); // groupId -> group (see createGroup)
 
@@ -84,6 +99,43 @@ function normalizeMemberPrefs(memberPrefs, legacyOrchestratorApp = null, groupSa
   return out;
 }
 
+function readOrchestratorTemplate() {
+  return readFileSync(ORCHESTRATOR_TEMPLATE_PATH, 'utf-8');
+}
+
+// Template (always included) + the project's saved custom instructions (if
+// any), simply appended -- never substituted -- so a user's custom
+// instructions can never silently drop the template's handoff/notification
+// discipline.
+function mergeOrchestratorInstructions(customInstructions) {
+  const template = readOrchestratorTemplate();
+  if (!customInstructions) return template;
+  return `${template}\n\n---\n\n## プロジェクト固有の指示 (ユーザー設定)\n\n${customInstructions}\n`;
+}
+
+// orchestratorDir's basename is already the cwd hash (orchestratorDirForCwd
+// in routes/groups.js) -- no need to re-hash cwd here.
+function generatedClaudeMdPath(orchestratorDir) {
+  return join(ORCHESTRATOR_GENERATED_ROOT, `${basename(orchestratorDir)}.md`);
+}
+
+// Called right before every orchestrator (re)spawn (initial launch, restart,
+// scheduled-prompt auto-resume). Merges the template with the group's saved
+// instructions and writes the result to a host-only path outside
+// orchestratorDir; the caller ro-binds that path over CLAUDE.md/AGENTS.md in
+// the sandbox (see sandbox.js's buildBwrapArgs), so the running orchestrator
+// can never persist an edit to its own operating rules. Returns null when
+// the group or its orchestratorDir is unknown.
+export function generateOrchestratorClaudeMdSrc(groupId) {
+  const group = groups.get(groupId);
+  if (!group || !group.orchestratorDir) return null;
+  const content = mergeOrchestratorInstructions(group.instructions);
+  const dest = generatedClaudeMdPath(group.orchestratorDir);
+  mkdirSync(dirname(dest), { recursive: true, mode: 0o700 });
+  writeFileSync(dest, content);
+  return dest;
+}
+
 export async function createGroup({ groupId, cwd, orchestratorDir, sandboxOpts = null, orchestratorApp = null, orchestratorModel, orchestratorSandboxOpts, memberPrefs = null, instructions = null }) {
   const normalizedGroupSandboxOpts = normalizeSandboxOpts(sandboxOpts);
   const normalizedMemberPrefs = normalizeMemberPrefs(memberPrefs, orchestratorApp, normalizedGroupSandboxOpts);
@@ -110,9 +162,12 @@ export async function createGroup({ groupId, cwd, orchestratorDir, sandboxOpts =
     // restart endpoint (POST /api/groups/:id/orchestrator).
     orchestratorApp: isValidApp(orchestratorApp) ? orchestratorApp : normalizedMemberPrefs.orchestrator.app,
     orchestratorModel: normalizedMemberPrefs.orchestrator.model,
-    // Starting text for the orchestrator's CLAUDE.md/AGENTS.md; written at
-    // create time and (re)created at restore only when the files are missing,
-    // so the orchestrator's own edits survive server restarts.
+    // Project-specific custom instructions (launcher UI's "オーケストレーター
+    // への指示" field), appended to the template on every (re)spawn --
+    // see generateOrchestratorClaudeMdSrc. Tied to this group record's own
+    // lifetime: destroyGroup drops it along with everything else (see
+    // routes/groups.js's threat-model comment for why the orchestrator no
+    // longer gets a writable copy of its own operating rules).
     instructions,
     // Per-launch sandbox flags (gpg/sshAgent) the group's workers launched
     // with; open_tab workers inherit them unless the tool overrides.
@@ -346,8 +401,9 @@ function persistGroups() {
 // member ptys are gone (a restart kills them all), so members are registered
 // from the persisted map and their resume info is matched from the graceful-
 // shutdown .saved-sessions.json (see peekSavedSessions). The orchestrator dir
-// is re-created (with its instruction files) so a scheduled auto-resume or an
-// orchestrator restart can use it as cwd again.
+// is re-created (empty -- CLAUDE.md/AGENTS.md are generated fresh at the next
+// actual spawn, see generateOrchestratorClaudeMdSrc) so a scheduled
+// auto-resume or an orchestrator restart can use it as cwd again.
 export function restoreGroups() {
   let arr;
   try {
@@ -409,15 +465,6 @@ export function restoreGroups() {
       try {
         mkdirSync(group.orchestratorDir, { recursive: true, mode: 0o700 });
       } catch { /* nothing to do */ }
-      // Only (re)create the instruction files when they're missing -- the
-      // orchestrator may have edited CLAUDE.md/AGENTS.md since launch, and a
-      // restart must not clobber those edits with the persisted originals.
-      if (group.instructions && !existsSync(join(group.orchestratorDir, 'CLAUDE.md'))) {
-        try {
-          writeFileSync(join(group.orchestratorDir, 'CLAUDE.md'), group.instructions);
-          writeFileSync(join(group.orchestratorDir, 'AGENTS.md'), group.instructions);
-        } catch { /* best effort */ }
-      }
     }
     groups.set(group.id, group);
     ids.push(group.id);
@@ -764,10 +811,11 @@ export function onOrchestratorExit(groupId) {
 }
 
 // Destroy the whole group: all member sessions + all brokers, then remove the
-// persisted entry. The orchestratorDir is intentionally left in place -- it is
-// a per-project resource (see routes/groups.js) whose CLAUDE.md/AGENTS.md hold
-// the orchestrator's accumulated knowledge, to be reused by the next group
-// launched for the same project.
+// persisted entry. The orchestratorDir is intentionally left in place -- it
+// is a per-project resource (see routes/groups.js), reused as the cwd for the
+// next group launched for the same project. Note this drops group.instructions
+// (the project's saved custom orchestrator instructions) along with the rest
+// of the group record -- see the `instructions` field comment in createGroup.
 export function destroyGroup(groupId) {
   const group = groups.get(groupId);
   if (!group) return;
@@ -904,3 +952,4 @@ export function setSessionApiForTests(api) {
 setSessionExitListener(onSessionExit);
 setSessionCreateListener(onSessionCreate);
 setMcpSocketResolver(resolveGroupMcpSocket);
+setOrchestratorClaudeMdResolver(generateOrchestratorClaudeMdSrc);
