@@ -26,8 +26,14 @@ const GROUPS_PATH = process.env.CCSERVER_GROUPS_PATH || join(__dirname, '..', '.
 // Orchestrator CLAUDE.md/AGENTS.md source: a repo-tracked template, read
 // fresh on every (re)spawn (never cached at module load) so an edit to the
 // file lands the next time an orchestrator launches -- no ccserver restart
-// needed. See generateOrchestratorClaudeMdSrc.
-const ORCHESTRATOR_TEMPLATE_PATH = join(__dirname, 'orchestrator-template.md');
+// needed. See generateOrchestratorClaudeMdSrc. Overridable (same pattern as
+// ORCHESTRATOR_GENERATED_ROOT below) so a test can exercise "template edit
+// lands on the next generation" against a throwaway copy instead of
+// mutating this real, repo-tracked file in place -- other test files read
+// it concurrently as their content oracle (node --test runs files in
+// parallel by default).
+const ORCHESTRATOR_TEMPLATE_PATH = process.env.CCSERVER_ORCHESTRATOR_TEMPLATE_PATH
+  || join(__dirname, 'orchestrator-template.md');
 // Merged (template + saved per-project instructions) output lives entirely
 // outside orchestratorDir, which is bind-mounted rw into the sandbox -- if
 // the generated file lived inside it, the orchestrator could see (and get

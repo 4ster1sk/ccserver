@@ -205,6 +205,16 @@ export async function groupsRoute(fastify, opts) {
     } catch (err) {
       return fail(`failed to generate orchestrator instructions: ${err.message}`);
     }
+    // A null return (group/orchestratorDir unexpectedly missing) is just as
+    // fatal as a thrown error here: launching with orchestratorClaudeMdSrc
+    // unset means createSession skips the ro-bind entirely and the
+    // orchestrator gets a plain writable CLAUDE.md/AGENTS.md -- silently
+    // reopening the self-modification hole this whole mechanism exists to
+    // close. Fail closed, matching the auto-resume resolver in
+    // sessionManager.js's fireSchedule.
+    if (!orchestratorClaudeMdSrc) {
+      return fail('failed to generate orchestrator instructions: no CLAUDE.md overlay was produced');
+    }
 
     // Workers reuse addMember (the open_tab path) so validation, channel
     // creation, session spawn and registration can't drift between the
@@ -327,6 +337,11 @@ export async function groupsRoute(fastify, opts) {
       orchestratorClaudeMdSrc = groupManager.generateOrchestratorClaudeMdSrc(group.id);
     } catch (err) {
       return reply.code(500).send({ error: `failed to generate orchestrator instructions: ${err.message}` });
+    }
+    // See the same guard in POST /groups: a null return must not fall
+    // through to a restart without the ro-bind overlay.
+    if (!orchestratorClaudeMdSrc) {
+      return reply.code(500).send({ error: 'failed to generate orchestrator instructions: no CLAUDE.md overlay was produced' });
     }
 
     const res = createSession(orchestratorRestartSessionOpts({ group, app, model, sandboxOpts, mcpSocketPath, orchestratorClaudeMdSrc }));

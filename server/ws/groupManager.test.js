@@ -20,7 +20,7 @@
 
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, rmSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync, existsSync, readFileSync, writeFileSync, cpSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -28,6 +28,13 @@ import { randomUUID } from 'node:crypto';
 let runtimeDir;
 let groupManager;
 let groupsToDestroy = [];
+// A throwaway copy of the real template, seeded from it once up front. The
+// "template edit lands on the next generation" test below mutates this copy
+// (never the real, repo-tracked server/ws/orchestrator-template.md): other
+// test files (e.g. sessionManager.test.js) read that real file concurrently
+// as their content oracle, and node --test runs files in parallel by
+// default, so mutating it in place would be a cross-file race.
+let templateCopyPath;
 
 before(async () => {
   runtimeDir = mkdtempSync(join(tmpdir(), 'ccserver-gm-test-'));
@@ -37,6 +44,9 @@ before(async () => {
   // generateOrchestratorClaudeMdSrc's output dir must never land under the
   // real home directory during tests -- see the env override in groupManager.js.
   process.env.CCSERVER_ORCHESTRATOR_GENERATED_ROOT = join(runtimeDir, 'orchestrator-generated');
+  templateCopyPath = join(runtimeDir, 'orchestrator-template.md');
+  cpSync(join(import.meta.dirname, 'orchestrator-template.md'), templateCopyPath);
+  process.env.CCSERVER_ORCHESTRATOR_TEMPLATE_PATH = templateCopyPath;
   groupManager = await import('./groupManager.js');
 });
 
@@ -973,16 +983,18 @@ test('addMember stores the effective launch data as the role preference (atomic 
 
 // generateOrchestratorClaudeMdSrc: merges server/ws/orchestrator-template.md
 // with the group's saved custom instructions and writes the result to a
-// host-only path (see sandbox.js's ro-bind overlay). Real template file --
-// no env override for its path, so the "template edit lands on the next
-// generation" case below edits it in place and restores it afterward.
-const TEMPLATE_PATH = join(import.meta.dirname, 'orchestrator-template.md');
+// host-only path (see sandbox.js's ro-bind overlay). templateCopyPath (set
+// in before()) is a throwaway copy seeded from the real template via
+// CCSERVER_ORCHESTRATOR_TEMPLATE_PATH -- the "template edit lands on the
+// next generation" case below edits it in place, which would race with
+// other test files reading the real, repo-tracked template concurrently if
+// it targeted that file directly.
 
 test('generateOrchestratorClaudeMdSrc: no custom instructions -> content is exactly the template', async () => {
   const gid = await makeGroup();
   const dest = groupManager.generateOrchestratorClaudeMdSrc(gid);
   assert.ok(dest, 'a destination path is returned');
-  const template = readFileSync(TEMPLATE_PATH, 'utf-8');
+  const template = readFileSync(templateCopyPath, 'utf-8');
   assert.equal(readFileSync(dest, 'utf-8'), template);
 });
 
@@ -997,7 +1009,7 @@ test('generateOrchestratorClaudeMdSrc: custom instructions are appended under a 
   groupsToDestroy.push(gid);
   const dest = groupManager.generateOrchestratorClaudeMdSrc(gid);
   const content = readFileSync(dest, 'utf-8');
-  const template = readFileSync(TEMPLATE_PATH, 'utf-8');
+  const template = readFileSync(templateCopyPath, 'utf-8');
   assert.ok(content.startsWith(template), 'template is included verbatim (never substituted)');
   assert.match(content, /## プロジェクト固有の指示 \(ユーザー設定\)/);
   assert.match(content, /# My custom project notes/);
@@ -1009,9 +1021,9 @@ test('generateOrchestratorClaudeMdSrc: same orchestratorDir -> same path, regene
   const destB = groupManager.generateOrchestratorClaudeMdSrc(gid);
   assert.equal(destA, destB, 'the generated path is stable for a given orchestratorDir');
 
-  const original = readFileSync(TEMPLATE_PATH, 'utf-8');
+  const original = readFileSync(templateCopyPath, 'utf-8');
   try {
-    writeFileSync(TEMPLATE_PATH, '# Edited Orchestrator Template\n');
+    writeFileSync(templateCopyPath, '# Edited Orchestrator Template\n');
     const destC = groupManager.generateOrchestratorClaudeMdSrc(gid);
     assert.equal(destC, destA, 'still the same path');
     assert.equal(
@@ -1020,7 +1032,7 @@ test('generateOrchestratorClaudeMdSrc: same orchestratorDir -> same path, regene
       'a template edit lands on the very next generation, no caching',
     );
   } finally {
-    writeFileSync(TEMPLATE_PATH, original);
+    writeFileSync(templateCopyPath, original);
   }
 });
 
