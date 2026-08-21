@@ -28,6 +28,7 @@ import { hostname } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadSandboxConfig } from './sandbox.js';
+import { vikunjaEnabled, createOrUpdateTask } from './vikunjaClient.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -77,12 +78,15 @@ export function getNotifySockPath() {
   return join(base, NOTIFY_SOCKET_NAME);
 }
 
-// Whether the notify feature is on at all: a Discord webhook configured, or a
-// non-empty subscription registry (seed + runtime). When false, no MCP server
-// is injected into sessions (see shouldInjectNotify).
+// Whether the notify feature is on at all: a Discord webhook configured, a
+// non-empty subscription registry (seed + runtime), or Vikunja configured
+// (baseUrl + apiToken -- see vikunjaClient.js). This lets a Vikunja-only setup
+// (no Discord webhook, no subscriptions) still get the MCP server injected --
+// confirmed with the user rather than left as the plan's open question.
+// When false, no MCP server is injected into sessions (see shouldInjectNotify).
 export function notifyEnabled() {
   const cfg = loadNotifyConfig();
-  return !!(cfg.discordWebhook || subscriptions.length > 0);
+  return !!(cfg.discordWebhook || subscriptions.length > 0 || vikunjaEnabled());
 }
 
 // Pure injection decision for createSession:
@@ -225,13 +229,13 @@ async function deliver(url, content) {
 }
 
 // Dispatch to every configured channel (Discord webhook + each subscribed
-// webhook), all non-blocking. Returns the delivery tally for the MCP tool's
-// result payload; never throws. `identity` is the optional per-connection
-// attribution ({ sessionId, groupId, groupRole, cwd, projectName, app }, see
-// mcpBroker.js): when present -- and notify.attribution is not disabled -- the
-// payload's content gets an "_from: host · project · group · session" footer
-// appended. Without identity the payload is delivered as before (host-only
-// footer). The notify tool's own args are unchanged.
+// webhook + Vikunja), all non-blocking. Returns the delivery tally for the MCP
+// tool's result payload; never throws. `identity` is the optional
+// per-connection attribution ({ sessionId, groupId, groupRole, cwd,
+// projectName, app }, see mcpBroker.js): when present -- and notify.attribution
+// is not disabled -- the payload's content gets an "_from: host · project ·
+// group · session" footer appended. Without identity the payload is delivered
+// as before (host-only footer). The notify tool's own args are unchanged.
 export async function sendNotification({ title, body, level } = {}, identity) {
   const cfg = loadNotifyConfig();
   let content = buildContent({ title, body, level });
@@ -244,17 +248,26 @@ export async function sendNotification({ title, body, level } = {}, identity) {
   const targets = [];
   if (cfg.discordWebhook) targets.push(cfg.discordWebhook);
   for (const s of subscriptions) targets.push(s.url);
-  const results = await Promise.all(targets.map((url) => deliver(url, content)));
+  // Vikunja tracks one task per notification key (groupId, falling back to
+  // sessionId) rather than per-URL like the webhook targets above, so it is
+  // dispatched alongside the Promise.all instead of folded into `targets`.
+  const vikunjaKey = identity?.groupId ?? identity?.sessionId ?? null;
+  const wantVikunja = vikunjaEnabled() && vikunjaKey != null;
+  const [results, vikunjaResult] = await Promise.all([
+    Promise.all(targets.map((url) => deliver(url, content))),
+    wantVikunja ? createOrUpdateTask({ key: vikunjaKey, title, body, level, identity }) : Promise.resolve(null),
+  ]);
   const discord = cfg.discordWebhook ? results[0] : false;
   const webhookResults = cfg.discordWebhook ? results.slice(1) : results;
-  return {
-    ok: true,
-    delivered: {
-      discord,
-      webhooks: webhookResults.filter(Boolean).length,
-      failed: webhookResults.filter((r) => !r).length,
-    },
+  const delivered = {
+    discord,
+    webhooks: webhookResults.filter(Boolean).length,
+    failed: webhookResults.filter((r) => !r).length,
   };
+  if (vikunjaResult) {
+    delivered.vikunja = { ok: vikunjaResult.ok, action: vikunjaResult.action, taskId: vikunjaResult.taskId ?? null };
+  }
+  return { ok: true, delivered };
 }
 
 // The notifyApi facade handed to buildNotifyMcpServer (see mcpServer.js).

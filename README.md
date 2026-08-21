@@ -126,9 +126,10 @@ OpenAI Codexについて:
 
 エージェントが**自分で呼べる**通知ツール `notify` を提供する MCP サーバーです。旧来の「一定時間アイドル → ブラウザに `input_needed` 通知」というヒューリスティックは実質機能していなかった (アイドル判定が主観的・非フォーカス時のみ等) ため**廃止**され、この MCP に置き換わりました。
 
-- 配信先は 2 種類で、**両方**に同時配信されます:
+- 配信先は最大 3 種類で、設定されているものすべてに**並行**配信されます:
   1. **Discord webhook** — `sandbox.config.json` の `notify.discordWebhook` (https のみ) または環境変数 `CCSERVER_DISCORD_WEBHOOK` (こちらが優先)。webhook URL は `.gitignore` 済みの `sandbox.config.json` に入れるため、リポジトリに混入しません。
   2. **ランタイム購読 (webhook URL)** — MCP ツール `subscribe` で登録した任意の webhook (`unsubscribe` で解除、`list_subscriptions` で一覧)。購読は `.saved-notifications.json` に永続化され、サーバー再起動後も生き残ります。
+  3. **Vikunja タスク** — `notify.vikunja` (`baseUrl` + `apiToken`) を設定すると、`notify` 呼び出しごとに Vikunja タスクを作成/更新します。Discord は見逃されがちですが、Vikunja はタスクとして残るため「人間の対応待ち」を TODO として拾えます。詳細は次項。
 - **設定例** (`server/sandbox.config.json` に追記):
 
   ```json
@@ -137,12 +138,17 @@ OpenAI Codexについて:
       "discordWebhook": "https://discord.com/api/webhooks/...",
       "subscriptions": [
         { "url": "https://hooks.example.com/slack", "name": "slack" }
-      ]
+      ],
+      "vikunja": {
+        "baseUrl": "https://vikunja.example.com",
+        "apiToken": "",
+        "projectId": 3
+      }
     }
   }
   ```
 
-  `subscriptions` は**初期購読のシード**です。購読ゼロ + Discord 未設定だと MCP 自体が注入されないため、購読だけから始めたい場合はここで seed します (MCP が無いと `subscribe` を呼べないため)。
+  `subscriptions` は**初期購読のシード**です。購読ゼロ + Discord 未設定 + Vikunja 未設定だと MCP 自体が注入されないため、購読だけから始めたい場合はここで seed します (MCP が無いと `subscribe` を呼べないため)。Vikunja だけ設定した場合 (Discord 未設定・購読ゼロ) も MCP は注入されます。
 - **発信元属性 (自動付与)**: 各通知のペイロード末尾に、どのセッションから送られたかを示すフッターが自動で付与されます (`notify.hostname` 未設定なら OS の hostname、`CCSERVER_HOSTNAME` 環境変数が最優先):
 
   ```
@@ -159,12 +165,32 @@ OpenAI Codexについて:
 - **ツール**:
   | ツール | 引数 | 説明 |
   |--------|------|------|
-  | `notify` | `title`, `body`, `level?` (`info`/`success`/`warning`/`error`) | 全チャネルへ配送。`{ ok, delivered: { discord, webhooks, failed } }` |
+  | `notify` | `title`, `body`, `level?` (`info`/`success`/`warning`/`error`) | 全チャネルへ配送。`{ ok, delivered: { discord, webhooks, failed, vikunja? } }` (`vikunja` は Vikunja 未設定時は省略) |
   | `subscribe` | `url` (https のみ), `name?` | webhook 購読を追加・永続化。`{ ok, subscription }` |
   | `unsubscribe` | `subscriptionId` | 購読を削除・永続化。`{ ok }` / `{ error: 'not-found' }` |
   | `list_subscriptions` | – | `{ subscriptions: [...] }` |
 - 配送は Discord 互換 JSON `{ content, username: 'ccserver' }` を global `fetch` で POST します (10 秒 timeout)。失敗してもエージェント側にはエラーを返さず、ログのみ (非ブロッキング)。
 - 予約プロンプト発火 (`schedule_fired`) のブラウザ Notification とヘッダの通知トグルは**独立した稼働機能**のため温存しています。`input_needed` に関するブラウザ側の `onAttention` / attention タブ表示も削除されました。
+
+#### Vikunja 連携
+
+`notify.vikunja` (`baseUrl` https のみ + `apiToken`、両方必須) を設定すると、`notify` 呼び出し1回ごとに Vikunja タスクを作成/更新します (`server/ws/vikunjaClient.js`)。
+
+- **追跡単位**: `groupId` (無ければ `sessionId`) をキーに、進行中のタスク ID を `.saved-vikunja-tasks.json` (`.gitignore` 済み) に永続化します。identity が無い呼び出し (`groupId`/`sessionId` どちらも無し) は Vikunja 連携をスキップし、Discord/webhook のみ配送します。
+- **初回**: 新規タスクを作成 (`title` = notify の `title`、`description` = `body` + 送信元フッター)。**2回目以降 (同じキー)**: タスクへコメントを1件追記 (`title` を先頭行、`body` を本文)。タスクの説明欄そのものは書き換えません。
+- **状態はラベルで表現** (`notify.vikunja.statusLabelPrefix`、既定 `status-`)。タスク自体の完了 (`done: true`) やタスクの削除は行いません:
+
+  | `level` | ラベル | 意味 | 追跡終了? |
+  |---|---|---|---|
+  | `info` (既定) | `status-running` | 進行中の経過報告 | いいえ |
+  | `success` | `status-completed` | 完了 | **はい** (次の `notify` は新規タスクとして扱う) |
+  | `warning` | `status-blocked` | 詰まっている、判断待ち | いいえ |
+  | `error` | `status-needs-input` | 人間の判断が必要 | いいえ (人間が Vikunja 上で手動対応する運用。この MCP からの明示的な resolve 操作はありません) |
+
+- ラベルが存在しなければ自動作成します (色付き)。ラベルは Vikunja アカウント単位 (プロジェクト単位ではない) です。
+- **リトライ**: 4xx は即座に諦め、5xx / 接続エラー / タイムアウト (`notify.vikunja.timeoutSeconds`、既定15秒) のみ指数バックオフで最大3回試行。失敗してもエージェント側にはエラーを返さず `console.warn` にログを残すのみ (URL やトークンはログに出さず、失敗種別とステータスコードのみ)。
+- **notify 自体の有効化条件にも算入**: `discordWebhook` 未設定・購読ゼロでも `notify.vikunja` (baseUrl + apiToken) だけで notify MCP が注入されます。
+- `apiToken` は秘匿値なので `sandbox.config.json` への直書きより環境変数 `CCSERVER_VIKUNJA_API_TOKEN` を推奨します (`baseUrl`/`projectId` も `CCSERVER_VIKUNJA_BASE_URL`/`CCSERVER_VIKUNJA_PROJECT_ID` で上書き可)。`projectId` が未設定のままだとタスク作成はできません (warning ログのみ、エラーにはしません)。
 
 ### 使用量 (Usage) ボタン
 
@@ -338,7 +364,7 @@ cp server/sandbox.config.example.json server/sandbox.config.json
 | `binds` | `[]` | 追加で見せるホストパス。各要素 `{ src, mode?, dest? }`。`mode` は `ro` (既定) か `rw`。存在しないパスはスキップ。`~` はホームに展開。`~/.ssh` と `~/.config/gh` は `gitBroker` の設定に関わらず常にブロックされます。 |
 | `env` | `{}` | サンドボックス内の追加環境変数 (適用順は最後 = 既定値を上書き)。例: `sshAgent: true` のときに `SSH_AUTH_SOCK` を明示指定して自動検出を上書き。 |
 | `claudeBin` | 自動検出 | claude/opencode/copilot の起動方法。`claude` を PATH から解決し、ラッパー (例: `/usr/bin/claude` → `/opt/claude-code/bin/claude`) の場合は実体のインストール先を辿ってサンドボックスへ自動的に公開します。opencode は PATH に加えて `~/.opencode/bin` も自動探索。copilot は PATH (SANDBOX_PATH) で自動解決されます (通常 `~/.local/bin/copilot`)。自動検出で外れる場所にある場合や特定ビルドに固定したい場合のみ絶対パスで指定 (環境変数 `CCSERVER_CLAUDE_BIN` が優先。copilot に個別の bin 設定はありません)。 |
-| `notify` | `{}` | 通知用 MCP (ccserver-notify) の設定 (上記「ccserver-notify (通知用 MCP)」参照)。`discordWebhook` は https のみ (非 https は無視)、`subscriptions` は初期購読 (https のみ)。`CCSERVER_DISCORD_WEBHOOK` 環境変数で discordWebhook を上書き可。 |
+| `notify` | `{}` | 通知用 MCP (ccserver-notify) の設定 (上記「ccserver-notify (通知用 MCP)」参照)。`discordWebhook` は https のみ (非 https は無視)、`subscriptions` は初期購読 (https のみ)。`CCSERVER_DISCORD_WEBHOOK` 環境変数で discordWebhook を上書き可。`vikunja` は Vikunja タスク連携の設定 (上記「Vikunja 連携」参照、`baseUrl`+`apiToken` で有効化)。 |
 
 サンドボックスは Linux 限定です。同じプロジェクトを 2 つのサンドボックスで同時に開いた場合、docker の data-root 競合を避けるため 2 つ目は docker 無しで起動します。
 
@@ -378,7 +404,8 @@ ccserver/
 │       ├── terminal.js             # WebSocket + node-pty ブリッジ (/ws/terminal)
 │       ├── sessionManager.js       # セッション・予約プロンプトの状態管理/永続化
 │       ├── appLaunch.js            # アプリ非依存の起動ロジック (resume引数・permission検出等)
-│       ├── notify.js               # ccserver-notify: 購読レジストリ + Discord/webhook 配送 + MCP ソケット
+│       ├── notify.js               # ccserver-notify: 購読レジストリ + Discord/webhook/Vikunja 配送 + MCP ソケット
+│       ├── vikunjaClient.js        # notify.js から呼ばれる Vikunja タスク作成/更新クライアント
 │       ├── usageMcp.js             # ccserver-usage: get_usage MCP ツール (server/usage.js の getUsage を直接呼ぶ)
 │       ├── mcpConfig.js            # MCP 設定の生成 (ccserver / ccserver-notify / ccserver-usage、sandbox/host 両モード)
 │       ├── mcpServer.js            # control / handoff / notify / usage 各 MCP サーバー (SocketTransport 含む)
@@ -393,7 +420,7 @@ ccserver/
 │       ├── sandbox-mcp-wrapper.cjs        # MCP stdio ↔ Unix socket の中継 (argv 'notify'/'usage' でそれぞれのソケットへ)
 │       ├── sandbox-gitconfig / sandbox-known-hosts / sandbox-ssh-config
 │       ├── git-broker.js           # サンドボックス外で動く、リポジトリスコープの認証情報ブローカー
-│       └── ghAllowlist.js / gitAllowlist.js  (+ 各 *.test.js, appLaunch.test.js, sandbox-resolve.test.js, notify.test.js)
+│       └── ghAllowlist.js / gitAllowlist.js  (+ 各 *.test.js, appLaunch.test.js, sandbox-resolve.test.js, notify.test.js, vikunjaClient.test.js)
 └── client/
     ├── package.json
     ├── index.html

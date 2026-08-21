@@ -385,6 +385,35 @@ export function loadSandboxConfig() {
   // entirely (default on).
   const notifyHostname = typeof rawNotify.hostname === 'string' && rawNotify.hostname.length > 0 ? rawNotify.hostname : null;
   const notifyAttribution = rawNotify.attribution !== false;
+  // Vikunja task tracking (see vikunjaClient.js): a `notify` call also
+  // creates/updates a Vikunja task so a missed Discord ping still leaves a
+  // TODO behind. Same env > config > default priority as discordWebhook
+  // above; the API token is secret, so CCSERVER_VIKUNJA_API_TOKEN is the
+  // recommended way to set it (README).
+  const rawVikunja = (rawNotify.vikunja && typeof rawNotify.vikunja === 'object') ? rawNotify.vikunja : {};
+  let vikunjaBaseUrl = null;
+  for (const candidate of [process.env.CCSERVER_VIKUNJA_BASE_URL, rawVikunja.baseUrl]) {
+    if (typeof candidate === 'string' && candidate.startsWith('https://')) {
+      vikunjaBaseUrl = candidate.replace(/\/+$/, '');
+      break;
+    }
+  }
+  let vikunjaApiToken = null;
+  for (const candidate of [process.env.CCSERVER_VIKUNJA_API_TOKEN, rawVikunja.apiToken]) {
+    if (typeof candidate === 'string' && candidate.length > 0) {
+      vikunjaApiToken = candidate;
+      break;
+    }
+  }
+  const vikunjaProjectId = process.env.CCSERVER_VIKUNJA_PROJECT_ID || rawVikunja.projectId || null;
+  const vikunjaTimeoutSecondsRaw = process.env.CCSERVER_VIKUNJA_TIMEOUT_SECONDS || rawVikunja.timeoutSeconds;
+  const vikunjaTimeoutSeconds = Number.isFinite(Number(vikunjaTimeoutSecondsRaw)) && Number(vikunjaTimeoutSecondsRaw) > 0
+    ? Number(vikunjaTimeoutSecondsRaw)
+    : 15;
+  const vikunjaVerifyTlsRaw = process.env.CCSERVER_VIKUNJA_VERIFY_TLS ?? rawVikunja.verifyTls;
+  const vikunjaVerifyTls = !(vikunjaVerifyTlsRaw === false || vikunjaVerifyTlsRaw === 'false');
+  const vikunjaStatusLabelPrefix = process.env.CCSERVER_VIKUNJA_STATUS_LABEL_PREFIX
+    || (typeof rawVikunja.statusLabelPrefix === 'string' && rawVikunja.statusLabelPrefix ? rawVikunja.statusLabelPrefix : 'status-');
   const binds = Array.isArray(raw.binds) ? raw.binds : [];
   const env = (raw.env && typeof raw.env === 'object') ? raw.env : {};
   // How to launch claude. Overridable because the install location is
@@ -401,7 +430,21 @@ export function loadSandboxConfig() {
   // The Usage MCP is exposed to every Claude session, so keep it opt-in
   // independently of the UI's showUsage setting.
   const usageMcp = raw.usageMcp === true;
-  return { docker, persistentHome, gpg, sshAgent, gitBroker, forceSandbox, binds, env, claudeBin, defaultApp, showUsage, usageMcp, notify: { discordWebhook, subscriptions, hostname: notifyHostname, attribution: notifyAttribution }, configPath };
+  return {
+    docker, persistentHome, gpg, sshAgent, gitBroker, forceSandbox, binds, env, claudeBin, defaultApp, showUsage, usageMcp,
+    notify: {
+      discordWebhook, subscriptions, hostname: notifyHostname, attribution: notifyAttribution,
+      vikunja: {
+        baseUrl: vikunjaBaseUrl,
+        apiToken: vikunjaApiToken,
+        projectId: vikunjaProjectId,
+        timeoutSeconds: vikunjaTimeoutSeconds,
+        verifyTls: vikunjaVerifyTls,
+        statusLabelPrefix: vikunjaStatusLabelPrefix,
+      },
+    },
+    configPath,
+  };
 }
 
 // Locate an executable named `cmd` on the given PATH (or return it as-is if
