@@ -4,7 +4,7 @@ import { execFileSync } from 'node:child_process';
 import { writeFileSync, readFileSync, unlinkSync, rmSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { buildSandboxSpawn, resolveApp, sandboxAvailable, loadSandboxConfig, persistentHomeDir, dockerSandboxAvailable, dockerdStatus } from './sandbox.js';
+import { buildSandboxSpawn, resolveApp, sandboxAvailable, loadSandboxConfig, persistentHomeDir, dockerSandboxAvailable, dockerdStatus, dockerdLockHeld } from './sandbox.js';
 import { buildMcpConfigArgsAndEnv } from './mcpConfig.js';
 import { shouldInjectNotify, notifyEnabled, getNotifySockPath, notifyBrokerRunning } from './notify.js';
 import { shouldInjectUsage, usageEnabled, getUsageSockPath, usageBrokerRunning } from './usageMcp.js';
@@ -839,6 +839,14 @@ export function sandboxHomeConflict(targetPath, liveSessions) {
 //   true             'available'                           this session's own dockerd holds the data-root lock
 //   false            'data-root-locked-by-another-session'  a different session's dockerd holds it
 //
+// A tag mismatch alone doesn't prove "another session has it": the status
+// file is never cleared on exit, so it can just as well be leftover from a
+// session that has since fully exited (see DOCKERD_STATUS_NAME in
+// sandbox.js). dockerdLockHeld() disambiguates by checking whether the flock
+// is actually held right now -- if not, this is still just an unresolved
+// "starting" (this session's own dockerd hasn't raced for the flock yet),
+// not a hard conflict worth diverting the task elsewhere.
+//
 // Exported for unit testing -- pure over a session-shaped object (only
 // .sandbox/.docker/.dockerTag/.cwd are read).
 export function dockerAvailability(session) {
@@ -848,7 +856,7 @@ export function dockerAvailability(session) {
   }
   const status = dockerdStatus(session.cwd);
   if (status === session.dockerTag) return { dockerAvailable: true, dockerReason: 'available' };
-  if (status) return { dockerAvailable: false, dockerReason: 'data-root-locked-by-another-session' };
+  if (status && dockerdLockHeld(session.cwd)) return { dockerAvailable: false, dockerReason: 'data-root-locked-by-another-session' };
   return { dockerAvailable: null, dockerReason: 'starting' };
 }
 

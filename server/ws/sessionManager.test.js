@@ -18,6 +18,7 @@ import { mkdtempSync, mkdirSync, rmSync, readFileSync, writeFileSync, unlinkSync
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { spawn as spawnProcess } from 'node:child_process';
 import { persistentHomeDir } from './sandbox.js';
 import { findSessionLimitReset } from './sessionLimitDetect.js';
 
@@ -852,10 +853,18 @@ test('sandboxHomeInUse counts only live sandboxed sessions', () => {
 // The exact data-root path (dindRoot + slugify(cwd)) mirrors sandbox.js's
 // private slugify(); the round-trip against the REAL production path is
 // covered separately in sandbox-docker-status.test.js via buildSandboxSpawn.
-test('dockerAvailability: not-sandboxed / tooling-or-config / starting / available / locked-by-another', () => {
+// A mismatched tag alone must NOT read as "locked by another live session":
+// the status file is never cleared on exit, so a tag mismatch is equally
+// consistent with harmless leftover history from an already-exited session.
+// dockerAvailability disambiguates via dockerdLockHeld() (a real flock
+// probe), so this test holds a genuine flock (via the real flock(1) binary,
+// same as sandbox-entrypoint.sh) to exercise that branch for real rather than
+// just asserting against the file content.
+test('dockerAvailability: not-sandboxed / tooling-or-config / starting / available / locked-by-another', async () => {
   const prevDind = process.env.CCSERVER_SANDBOX_DIND_ROOT;
   const dindDir = join(runtimeDir, 'dind-availability');
   process.env.CCSERVER_SANDBOX_DIND_ROOT = dindDir;
+  let lockHolder = null;
   try {
     assert.deepEqual(
       sessionManager.dockerAvailability({ sandbox: false, docker: false, cwd: '/srv/proj' }),
@@ -888,10 +897,27 @@ test('dockerAvailability: not-sandboxed / tooling-or-config / starting / availab
     );
     assert.deepEqual(
       sessionManager.dockerAvailability({ sandbox: true, docker: true, dockerTag: 'someone-elses-tag', cwd }),
+      { dockerAvailable: null, dockerReason: 'starting' },
+      'tag mismatch but nobody currently holds the flock -- stale leftover history, not a live conflict',
+    );
+
+    // Now actually hold the flock, so the mismatch reflects a genuinely live
+    // competitor rather than history.
+    const lockPath = join(dataRoot, '.ccserver-dockerd.lock');
+    lockHolder = spawnProcess('flock', [lockPath, 'sleep', '5']);
+    let result;
+    for (let i = 0; i < 40; i++) {
+      result = sessionManager.dockerAvailability({ sandbox: true, docker: true, dockerTag: 'someone-elses-tag', cwd });
+      if (result.dockerReason === 'data-root-locked-by-another-session') break;
+      await sleep(50);
+    }
+    assert.deepEqual(
+      result,
       { dockerAvailable: false, dockerReason: 'data-root-locked-by-another-session' },
-      'the status file tag belongs to a different session',
+      'tag mismatch AND the flock is genuinely held -- a live conflict',
     );
   } finally {
+    if (lockHolder) lockHolder.kill();
     if (prevDind === undefined) delete process.env.CCSERVER_SANDBOX_DIND_ROOT;
     else process.env.CCSERVER_SANDBOX_DIND_ROOT = prevDind;
   }

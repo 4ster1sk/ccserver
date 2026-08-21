@@ -104,12 +104,15 @@ const DOCKERD_LOCK_NAME = '.ccserver-dockerd.lock';
 // the DOCKERD_LOCK_NAME flock, containing that launch's CCSANDBOX_DOCKERD_TAG
 // (see buildBwrapArgs). Lets dockerdStatus() below identify WHICH session
 // currently holds a project's data-root -- flock itself only exposes
-// held/free, not the holder's identity (see sessionManager.dockerAvailability,
-// the only consumer). Stale (not cleared) once written; a later launch that
-// wins the lock overwrites it, so a crashed-but-never-superseded dockerd
-// still reports its old tag as "available" -- acceptable since this answers
-// "is the data-root free for a session with this tag", not "is dockerd
-// currently healthy" (dindLockHeld already covers liveness).
+// held/free, not the holder's identity. Stale (not cleared) once written: a
+// session that exits never erases its tag, so after it's gone the file still
+// names it until some *future* launch wins the flock and overwrites it. A
+// mismatched tag therefore does NOT by itself mean "held by another live
+// session" -- it can equally mean "held by nobody, this is just leftover
+// history" (a session mid-startup, before it has raced for the flock, would
+// otherwise misread that as a hard, non-retriable conflict). Callers must
+// pair this with dindLockHeld() to tell the two apart (see
+// sessionManager.dockerAvailability, the only consumer).
 const DOCKERD_STATUS_NAME = '.ccserver-dockerd.status';
 
 // True when a (live or leaked) dockerd currently holds the data-root lock for
@@ -128,6 +131,12 @@ function dindLockHeld(name) {
   } catch (err) {
     return err.code !== 'ENOENT';
   }
+}
+
+// cwd-keyed wrapper around dindLockHeld(), for callers outside this module
+// that only ever address data-roots by cwd (mirrors dockerdStatus() below).
+export function dockerdLockHeld(cwd) {
+  return dindLockHeld(slugify(cwd));
 }
 
 // The CCSANDBOX_DOCKERD_TAG of whichever launch most recently won this
