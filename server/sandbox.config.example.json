@@ -41,14 +41,13 @@
     "subscriptions": [],
     "hostname": "",
     "attribution": true,
-    "//vikunja": "notify 呼び出しごとに Vikunja タスクを作成/更新する (Discord/webhook と並行配信、失敗してもエージェント側にはエラーを返さない)。baseUrl (https:// のみ) と apiToken の両方が設定されていれば有効になり、Discord/購読が空でも notify MCP 自体が注入される。apiToken は秘匿値なので、ここに書く代わりに環境変数 CCSERVER_VIKUNJA_API_TOKEN 経由を強く推奨 (sandbox.config.json は .gitignore 済みだが、それでも平文保存はできるだけ避ける)。baseUrl は CCSERVER_VIKUNJA_BASE_URL、projectId は CCSERVER_VIKUNJA_PROJECT_ID で上書き可。projectId 未設定だとタスク作成は行われない (warning ログのみ)。timeoutSeconds (既定15秒) はリクエストごとのタイムアウト。verifyTls: false で自己署名証明書のインスタンスを許容 (既定 true、無闇に false にしない)。agentLabelPrefix/statusLabelPrefix はラベル名の prefix (既定 'agent-'/'status-')。",
+    "//vikunja": "notify 呼び出しごとに Vikunja タスクを作成/更新する (Discord/webhook と並行配信、失敗してもエージェント側にはエラーを返さない)。baseUrl (https:// のみ) と apiToken の両方が設定されていれば有効になり、Discord/購読が空でも notify MCP 自体が注入される。apiToken は秘匿値なので、ここに書く代わりに環境変数 CCSERVER_VIKUNJA_API_TOKEN 経由を強く推奨 (sandbox.config.json は .gitignore 済みだが、それでも平文保存はできるだけ避ける)。baseUrl は CCSERVER_VIKUNJA_BASE_URL、projectId は CCSERVER_VIKUNJA_PROJECT_ID で上書き可。projectId 未設定だとタスク作成は行われない (warning ログのみ)。timeoutSeconds (既定15秒) はリクエストごとのタイムアウト。verifyTls: false で自己署名証明書のインスタンスを許容 (既定 true、無闇に false にしない)。statusLabelPrefix はラベル名の prefix (既定 'status-')。",
     "vikunja": {
       "baseUrl": "",
       "apiToken": "",
       "projectId": null,
       "timeoutSeconds": 15,
       "verifyTls": true,
-      "agentLabelPrefix": "agent-",
       "statusLabelPrefix": "status-"
     }
   }

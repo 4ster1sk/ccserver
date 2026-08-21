@@ -213,12 +213,11 @@ test('notify.vikunja.apiToken/projectId are read from config, env overrides both
   });
 });
 
-test('notify.vikunja defaults: timeoutSeconds=15, verifyTls=true, label prefixes agent-/status-', () => {
+test('notify.vikunja defaults: timeoutSeconds=15, verifyTls=true, statusLabelPrefix=status-', () => {
   withConfig({}, () => {
     const v = loadSandboxConfig().notify.vikunja;
     assert.equal(v.timeoutSeconds, 15);
     assert.equal(v.verifyTls, true);
-    assert.equal(v.agentLabelPrefix, 'agent-');
     assert.equal(v.statusLabelPrefix, 'status-');
   });
   withConfig({ notify: { vikunja: { timeoutSeconds: 30, verifyTls: false, statusLabelPrefix: 'state-' } } }, () => {
@@ -226,6 +225,5 @@ test('notify.vikunja defaults: timeoutSeconds=15, verifyTls=true, label prefixes
     assert.equal(v.timeoutSeconds, 30);
     assert.equal(v.verifyTls, false);
     assert.equal(v.statusLabelPrefix, 'state-');
-    assert.equal(v.agentLabelPrefix, 'agent-', 'unset prefix keeps its default');
   });
 });

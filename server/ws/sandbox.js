@@ -412,8 +412,6 @@ export function loadSandboxConfig() {
     : 15;
   const vikunjaVerifyTlsRaw = process.env.CCSERVER_VIKUNJA_VERIFY_TLS ?? rawVikunja.verifyTls;
   const vikunjaVerifyTls = !(vikunjaVerifyTlsRaw === false || vikunjaVerifyTlsRaw === 'false');
-  const vikunjaAgentLabelPrefix = process.env.CCSERVER_VIKUNJA_AGENT_LABEL_PREFIX
-    || (typeof rawVikunja.agentLabelPrefix === 'string' && rawVikunja.agentLabelPrefix ? rawVikunja.agentLabelPrefix : 'agent-');
   const vikunjaStatusLabelPrefix = process.env.CCSERVER_VIKUNJA_STATUS_LABEL_PREFIX
     || (typeof rawVikunja.statusLabelPrefix === 'string' && rawVikunja.statusLabelPrefix ? rawVikunja.statusLabelPrefix : 'status-');
   const binds = Array.isArray(raw.binds) ? raw.binds : [];
@@ -442,7 +440,6 @@ export function loadSandboxConfig() {
         projectId: vikunjaProjectId,
         timeoutSeconds: vikunjaTimeoutSeconds,
         verifyTls: vikunjaVerifyTls,
-        agentLabelPrefix: vikunjaAgentLabelPrefix,
         statusLabelPrefix: vikunjaStatusLabelPrefix,
       },
     },
