@@ -292,6 +292,11 @@ export function getTabStatus(deps, { sessionId }) {
     // (bytes-based), a spinner that keeps redrawing keeps this small -- a
     // large value means the screen is genuinely static.
     screenIdleMs: session.screenLastChangeAt != null ? Date.now() - session.screenLastChangeAt : null,
+    // Whether THIS session can use docker right now (a live rootless dockerd
+    // holds at most one project's data-root at a time -- see
+    // sessionManager.dockerAvailability). Check before handing this session a
+    // docker task.
+    ...deps.sessionManager.dockerAvailability(session),
   };
 }
 

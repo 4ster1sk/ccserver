@@ -4,7 +4,7 @@ import { execFileSync } from 'node:child_process';
 import { writeFileSync, readFileSync, unlinkSync, rmSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { buildSandboxSpawn, resolveApp, sandboxAvailable, loadSandboxConfig, persistentHomeDir } from './sandbox.js';
+import { buildSandboxSpawn, resolveApp, sandboxAvailable, loadSandboxConfig, persistentHomeDir, dockerSandboxAvailable, dockerdStatus } from './sandbox.js';
 import { buildMcpConfigArgsAndEnv } from './mcpConfig.js';
 import { shouldInjectNotify, notifyEnabled, getNotifySockPath, notifyBrokerRunning } from './notify.js';
 import { shouldInjectUsage, usageEnabled, getUsageSockPath, usageBrokerRunning } from './usageMcp.js';
@@ -282,6 +282,7 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox
   // only see the project directory plus configured paths, with an isolated
   // rootless docker inside. See sandbox.js.
   let useSandbox = false;
+  let sandboxDocker = false;
   let sandboxStateDir = null;
   let sandboxGitBrokerProc = null;
   let sandboxGitBrokerDir = null;
@@ -305,6 +306,7 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox
       const spawn = buildSandboxSpawn({ cwd, targetCommand: [command, ...args], app: sessionApp, sandboxOpts, mcpSocketPath, notifySocketPath, usageSocketPath, reuseSandboxHome, orchestratorClaudeMdSrc });
       command = spawn.command;
       args = spawn.args;
+      sandboxDocker = !!spawn.docker;
       sandboxStateDir = spawn.stateDir || null;
       sandboxGitBrokerProc = spawn.gitBrokerProc || null;
       sandboxGitBrokerDir = spawn.gitBrokerDir || null;
@@ -375,6 +377,8 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox
     groupRole,
     sandbox: useSandbox,
     sandboxOpts: useSandbox ? (sandboxOpts || null) : null, // per-launch gpg/sshAgent override, for schedule/resume replay
+    docker: sandboxDocker, // whether THIS session's sandbox launched with docker (see dockerAvailability)
+    dockerTag: sandboxDocker && sandboxStateDir ? basename(sandboxStateDir) : null, // matches CCSANDBOX_DOCKERD_TAG (sandbox.js), identifies this session's dockerd in the status file
     sandboxStateDir, // rootlesskit state dir to remove on teardown (docker only)
     sandboxGitBrokerProc, // host-side git-broker child process, killed on teardown
     sandboxGitBrokerDir, // its runtime dir (socket + allow-list), removed on teardown
@@ -815,6 +819,37 @@ export function sandboxHomeConflict(targetPath, liveSessions) {
     if (persistentHomeDir(s.cwd) === targetPath) return true;
   }
   return false;
+}
+
+// Whether THIS session can actually use docker right now -- surfaced by
+// get_tab_status/list_group_sessions so the orchestrator can check before
+// handing a worker a docker task, instead of finding out from a failure (see
+// tmp/docker-availability-visibility-plan.md). A live rootless dockerd is
+// only ever able to hold ONE project's data-root at a time (see
+// sandbox-entrypoint.sh's flock); a second sandbox of the same project
+// launches with docker: false internally rather than corrupting that
+// data-root, and Node never previously tracked whether the flock was
+// actually won.
+//
+//   dockerAvailable  dockerReason                          meaning
+//   null             'not-sandboxed'                       no sandbox, docker N/A
+//   false            'tooling-missing'                     bwrap/rootlesskit/etc not installed
+//   false            'disabled-by-config'                  sandbox.config.json docker:false
+//   null             'starting'                            docker enabled, dockerd hasn't won/lost the flock yet -- retry shortly
+//   true             'available'                           this session's own dockerd holds the data-root lock
+//   false            'data-root-locked-by-another-session'  a different session's dockerd holds it
+//
+// Exported for unit testing -- pure over a session-shaped object (only
+// .sandbox/.docker/.dockerTag/.cwd are read).
+export function dockerAvailability(session) {
+  if (!session?.sandbox) return { dockerAvailable: null, dockerReason: 'not-sandboxed' };
+  if (!session.docker) {
+    return { dockerAvailable: false, dockerReason: dockerSandboxAvailable() ? 'disabled-by-config' : 'tooling-missing' };
+  }
+  const status = dockerdStatus(session.cwd);
+  if (status === session.dockerTag) return { dockerAvailable: true, dockerReason: 'available' };
+  if (status) return { dockerAvailable: false, dockerReason: 'data-root-locked-by-another-session' };
+  return { dockerAvailable: null, dockerReason: 'starting' };
 }
 
 // Count of live sandboxed sessions sharing cwd's persistent HOME. Surfaced by

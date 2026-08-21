@@ -376,7 +376,7 @@ test('getTabStatus: reports lastOutputAt and the derived idleForMs', async () =>
   const deps = {
     groupId: g,
     groupManager: groupManager.getGroupManagerApi(),
-    sessionManager: { getSession: (id) => (id === 'sess-a1' ? fakeSession : null), writeToSession: () => false },
+    sessionManager: { getSession: (id) => (id === 'sess-a1' ? fakeSession : null), writeToSession: () => false, dockerAvailability: () => ({ dockerAvailable: null, dockerReason: null }) },
   };
   const r = tools.getTabStatus(deps, { sessionId: 'sess-a1' });
   assert.equal(r.error, undefined);
@@ -392,12 +392,47 @@ test('getTabStatus: no output yet (lastOutputAt null) yields idleForMs null', as
   const deps = {
     groupId: g,
     groupManager: groupManager.getGroupManagerApi(),
-    sessionManager: { getSession: (id) => (id === 'sess-a1' ? fakeSession : null), writeToSession: () => false },
+    sessionManager: { getSession: (id) => (id === 'sess-a1' ? fakeSession : null), writeToSession: () => false, dockerAvailability: () => ({ dockerAvailable: null, dockerReason: null }) },
   };
   const r = tools.getTabStatus(deps, { sessionId: 'sess-a1' });
   assert.equal(r.lastOutputAt, null);
   assert.equal(r.idleForMs, null);
   assert.equal(r.autoYes, false);
+});
+
+// End-to-end contract check (see tmp/docker-availability-visibility-plan.md):
+// unlike the tests above, this exercises the REAL production
+// sessionManager.dockerAvailability through a REAL (unsandboxed, so no
+// bwrap/docker needed) session, not a hand-written stub -- proving
+// get_tab_status/list_group_sessions actually spread its result into their
+// output rather than just asserting against a stub that happens to match.
+test('getTabStatus / listGroupSessions: dockerAvailable/dockerReason come from the real dockerAvailability, not a stub', async () => {
+  const g = await makeGroupAsync();
+  const sm = await import('./sessionManager.js');
+  const res = sm.createSession({ cwd: '/tmp', cols: 80, rows: 24, shell: true, sandbox: false });
+  assert.ok(res.session, 'shell session should spawn');
+  try {
+    groupManager.registerMember(g, 'workerA', res.sessionId);
+    const deps = {
+      groupId: g,
+      groupManager: groupManager.getGroupManagerApi(),
+      sessionManager: { getSession: sm.getSession, writeToSession: sm.writeToSession, dockerAvailability: sm.dockerAvailability },
+    };
+    const status = tools.getTabStatus(deps, { sessionId: res.sessionId });
+    assert.deepEqual(
+      { dockerAvailable: status.dockerAvailable, dockerReason: status.dockerReason },
+      { dockerAvailable: null, dockerReason: 'not-sandboxed' },
+    );
+
+    const { members } = tools.listGroupSessions(deps);
+    const workerA = members.find((m) => m.role === 'workerA');
+    assert.deepEqual(
+      { dockerAvailable: workerA.dockerAvailable, dockerReason: workerA.dockerReason },
+      { dockerAvailable: null, dockerReason: 'not-sandboxed' },
+    );
+  } finally {
+    sm.destroySession(res.sessionId, { keepSchedule: false });
+  }
 });
 
 test('listGroupSessions: autoYes reflects each live session state', async () => {
@@ -413,6 +448,7 @@ test('listGroupSessions: autoYes reflects each live session state', async () => 
     createSession: () => { throw new Error('unused'); },
     destroySession: () => {},
     writeToSession: () => false,
+    dockerAvailability: () => ({ dockerAvailable: null, dockerReason: null }),
   };
   groupManager.setSessionApiForTests(fake);
   try {
@@ -900,7 +936,7 @@ test('getTabStatus: reports screenIdleMs from the screen model', async () => {
   const deps = {
     groupId: g,
     groupManager: groupManager.getGroupManagerApi(),
-    sessionManager: { getSession: (id) => (id === 'sess-a1' ? fakeSession : null), writeToSession: () => false },
+    sessionManager: { getSession: (id) => (id === 'sess-a1' ? fakeSession : null), writeToSession: () => false, dockerAvailability: () => ({ dockerAvailable: null, dockerReason: null }) },
   };
   const r = tools.getTabStatus(deps, { sessionId: 'sess-a1' });
   assert.equal(r.error, undefined);

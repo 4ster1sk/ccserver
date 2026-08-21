@@ -14,7 +14,7 @@
 
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, readFileSync, writeFileSync, unlinkSync, existsSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync, readFileSync, writeFileSync, unlinkSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -837,6 +837,63 @@ test('sandboxHomeInUse counts only live sandboxed sessions', () => {
   } finally {
     if (prevHome === undefined) delete process.env.CCSERVER_SANDBOX_HOME_ROOT;
     else process.env.CCSERVER_SANDBOX_HOME_ROOT = prevHome;
+  }
+});
+
+// dockerAvailability(session): surfaced by get_tab_status/list_group_sessions
+// so the orchestrator can check per-session docker usability up front instead
+// of discovering the data-root race (a rootless dockerd can serve only ONE
+// session per project at a time -- see sandbox-entrypoint.sh's flock) from a
+// failed task (see tmp/docker-availability-visibility-plan.md). Pure function
+// over a session-shaped object, same style as sandboxHomeConflict above;
+// dockerdStatus's file read is isolated via CCSERVER_SANDBOX_DIND_ROOT, and
+// the status file is written by hand here to stand in for
+// sandbox-entrypoint.sh's write -- no real dockerd/bwrap/rootlesskit runs.
+// The exact data-root path (dindRoot + slugify(cwd)) mirrors sandbox.js's
+// private slugify(); the round-trip against the REAL production path is
+// covered separately in sandbox-docker-status.test.js via buildSandboxSpawn.
+test('dockerAvailability: not-sandboxed / tooling-or-config / starting / available / locked-by-another', () => {
+  const prevDind = process.env.CCSERVER_SANDBOX_DIND_ROOT;
+  const dindDir = join(runtimeDir, 'dind-availability');
+  process.env.CCSERVER_SANDBOX_DIND_ROOT = dindDir;
+  try {
+    assert.deepEqual(
+      sessionManager.dockerAvailability({ sandbox: false, docker: false, cwd: '/srv/proj' }),
+      { dockerAvailable: null, dockerReason: 'not-sandboxed' },
+      'no sandbox at all -- docker is simply not applicable',
+    );
+
+    const sandboxedNoDocker = sessionManager.dockerAvailability({ sandbox: true, docker: false, cwd: '/srv/proj' });
+    assert.equal(sandboxedNoDocker.dockerAvailable, false);
+    assert.ok(
+      ['tooling-missing', 'disabled-by-config'].includes(sandboxedNoDocker.dockerReason),
+      `expected a tooling/config reason, got ${sandboxedNoDocker.dockerReason}`,
+    );
+
+    const cwd = '/srv/docker-avail-proj';
+    assert.deepEqual(
+      sessionManager.dockerAvailability({ sandbox: true, docker: true, dockerTag: 'tag-mine', cwd }),
+      { dockerAvailable: null, dockerReason: 'starting' },
+      'docker was requested but the entrypoint has not won/lost the flock yet (no status file)',
+    );
+
+    const slug = cwd.replace(/[^a-zA-Z0-9]+/g, '_').replace(/^_+|_+$/g, '') || 'root';
+    const dataRoot = join(dindDir, slug);
+    mkdirSync(dataRoot, { recursive: true });
+    writeFileSync(join(dataRoot, '.ccserver-dockerd.status'), 'tag-mine');
+    assert.deepEqual(
+      sessionManager.dockerAvailability({ sandbox: true, docker: true, dockerTag: 'tag-mine', cwd }),
+      { dockerAvailable: true, dockerReason: 'available' },
+      'the status file tag matches this session\'s own dockerTag',
+    );
+    assert.deepEqual(
+      sessionManager.dockerAvailability({ sandbox: true, docker: true, dockerTag: 'someone-elses-tag', cwd }),
+      { dockerAvailable: false, dockerReason: 'data-root-locked-by-another-session' },
+      'the status file tag belongs to a different session',
+    );
+  } finally {
+    if (prevDind === undefined) delete process.env.CCSERVER_SANDBOX_DIND_ROOT;
+    else process.env.CCSERVER_SANDBOX_DIND_ROOT = prevDind;
   }
 });
 
