@@ -445,6 +445,7 @@ test('listGroupMembers: live sessions report lastOutputAt/idleForMs; session-les
     createSession: () => { throw new Error('unused'); },
     destroySession: () => {},
     writeToSession: () => false,
+    dockerAvailability: () => ({ dockerAvailable: null, dockerReason: null }),
   };
   groupManager.setSessionApiForTests(fake);
   try {

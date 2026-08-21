@@ -9,6 +9,9 @@
 # Environment (set via bwrap --setenv):
 #   CCSANDBOX_DOCKER          "1" to start dockerd, else skip
 #   CCSANDBOX_DOCKER_DATAROOT persistent data-root for images/layers
+#   CCSANDBOX_DOCKERD_TAG     this launch's tag, recorded in the status file
+#                             below iff it wins the flock (see sandbox.js's
+#                             dockerdStatus/dockerAvailability)
 #   HOME, XDG_RUNTIME_DIR, PATH, DOCKER_HOST
 set -u
 
@@ -21,6 +24,7 @@ if [ "${CCSANDBOX_DOCKER:-0}" = "1" ]; then
   DATA_ROOT="${CCSANDBOX_DOCKER_DATAROOT:-$HOME/.local/share/docker}"
   LOG="$XDG_RUNTIME_DIR/dockerd.log"
   LOCK="$DATA_ROOT/.ccserver-dockerd.lock"
+  STATUS="$DATA_ROOT/.ccserver-dockerd.status"
   mkdir -p "$DATA_ROOT" 2>/dev/null || true
 
   # RootlessKit's copy-up leaves stale symlinks for these in the child; remove
@@ -34,6 +38,12 @@ if [ "${CCSANDBOX_DOCKER:-0}" = "1" ]; then
   (
     exec 9>"$LOCK" || exit 0
     if flock -n 9; then
+      # Record which launch won the lock, so the host side (dockerdStatus in
+      # sandbox.js) can tell "docker is available to ME" apart from "docker
+      # is in use by another session of this project" without guessing from
+      # startup order. Written just before exec (nothing after this
+      # subshell's exec runs) and never blocks/affects the flock itself.
+      echo "${CCSANDBOX_DOCKERD_TAG:-}" > "$STATUS" 2>/dev/null || true
       exec dockerd \
         --host="$DOCKER_HOST" \
         --data-root="$DATA_ROOT" \

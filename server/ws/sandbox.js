@@ -19,7 +19,7 @@ import { homedir } from 'node:os';
 import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { dirname, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { startGitBroker } from './git-broker.js';
 
@@ -100,6 +100,21 @@ export function sandboxHomeRoot() {
 // old session -- is still using a data-root.
 const DOCKERD_LOCK_NAME = '.ccserver-dockerd.lock';
 
+// Written by sandbox-entrypoint.sh the instant its background dockerd wins
+// the DOCKERD_LOCK_NAME flock, containing that launch's CCSANDBOX_DOCKERD_TAG
+// (see buildBwrapArgs). Lets dockerdStatus() below identify WHICH session
+// currently holds a project's data-root -- flock itself only exposes
+// held/free, not the holder's identity. Stale (not cleared) once written: a
+// session that exits never erases its tag, so after it's gone the file still
+// names it until some *future* launch wins the flock and overwrites it. A
+// mismatched tag therefore does NOT by itself mean "held by another live
+// session" -- it can equally mean "held by nobody, this is just leftover
+// history" (a session mid-startup, before it has raced for the flock, would
+// otherwise misread that as a hard, non-retriable conflict). Callers must
+// pair this with dindLockHeld() to tell the two apart (see
+// sessionManager.dockerAvailability, the only consumer).
+const DOCKERD_STATUS_NAME = '.ccserver-dockerd.status';
+
 // True when a (live or leaked) dockerd currently holds the data-root lock for
 // this sandbox slug. Deletion must be refused then: the daemon's live overlay
 // mounts defeat every removal strategy (EBUSY) and deleting under a running
@@ -115,6 +130,28 @@ function dindLockHeld(name) {
     return false;
   } catch (err) {
     return err.code !== 'ENOENT';
+  }
+}
+
+// cwd-keyed wrapper around dindLockHeld(), for callers outside this module
+// that only ever address data-roots by cwd (mirrors dockerdStatus() below).
+export function dockerdLockHeld(cwd) {
+  return dindLockHeld(slugify(cwd));
+}
+
+// The CCSANDBOX_DOCKERD_TAG of whichever launch most recently won this
+// project's dockerd flock (see DOCKERD_STATUS_NAME), or null before any
+// session has ever started dockerd for this cwd. `cwd` must be the exact
+// same string a session was launched with -- this mirrors buildBwrapArgs'
+// `slugify(cwd)` (no resolve()) exactly, so the read path always matches
+// that session's own write path (see sessionManager.dockerAvailability, the
+// only consumer).
+export function dockerdStatus(cwd) {
+  const path = join(dindRoot(), slugify(cwd), DOCKERD_STATUS_NAME);
+  try {
+    return readFileSync(path, 'utf-8').trim() || null;
+  } catch {
+    return null;
   }
 }
 
@@ -1034,6 +1071,13 @@ function buildBwrapArgs({ cwd, docker, gpg, extraBinds, extraEnv, authSock, stat
     args.push(
       '--setenv', 'DOCKER_HOST', `unix://${XDG_RUNTIME_DIR}/docker.sock`,
       '--setenv', 'CCSANDBOX_DOCKER_DATAROOT', join(HOME, '.local', 'share', 'docker'),
+      // The unique per-launch stateDir basename, reused as-is (see
+      // newStateDir()) rather than minting a second UUID. The entrypoint
+      // writes this into the data-root's status file iff it wins the dockerd
+      // flock, so the host side can later tell "docker is available to ME"
+      // apart from "in use by another session" (dockerdStatus/
+      // dockerAvailability).
+      '--setenv', 'CCSANDBOX_DOCKERD_TAG', basename(stateDir),
     );
   }
 

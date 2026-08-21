@@ -222,6 +222,7 @@ OpenAI Codexについて:
 - 送信後は必ず `read_output` で、`command not found` / `許可がありません` / `unexpected token` / `eval` のようなシェルエラーが出ていないか確認してください。
 - シェルエラーが出てしまった場合、それを収拾しようとして空入力や Ctrl+C 相当の入力を送ってはいけません。継続入力待ちのシェルに対しては EOF のように作用し、**シェルプロセスごと終了させてしまうことがあります** (実際に一度そうなりました)。`get_tab_status` で `exited: true` を確認したら、そのタブは諦めて `close_tab` → `open_tab` で作り直してください。
 - 新規に開いたタブに何かを送る前には、`read_output` で実際にアプリの TUI が描画されていることを確認してから送ってください。
+- docker を使うタスクをワーカーに振る前には、`list_group_sessions` / `get_tab_status` の `dockerAvailable` を確認してください。同一プロジェクトの rootless dockerd は1つの data-root を1セッションでしか同時に使えず (下記「サンドボックス」参照)、`dockerAvailable: false` のメンバーに docker タスクを振ると失敗します。**「workerA だけが docker を使える」という決め打ちはできません** — 実際には起動順のレースで、逆転することもあります。
 
 #### control MCP ツールの信頼性保証 (handoff と read_output)
 
@@ -366,7 +367,20 @@ cp server/sandbox.config.example.json server/sandbox.config.json
 | `claudeBin` | 自動検出 | claude/opencode/copilot の起動方法。`claude` を PATH から解決し、ラッパー (例: `/usr/bin/claude` → `/opt/claude-code/bin/claude`) の場合は実体のインストール先を辿ってサンドボックスへ自動的に公開します。opencode は PATH に加えて `~/.opencode/bin` も自動探索。copilot は PATH (SANDBOX_PATH) で自動解決されます (通常 `~/.local/bin/copilot`)。自動検出で外れる場所にある場合や特定ビルドに固定したい場合のみ絶対パスで指定 (環境変数 `CCSERVER_CLAUDE_BIN` が優先。copilot に個別の bin 設定はありません)。 |
 | `notify` | `{}` | 通知用 MCP (ccserver-notify) の設定 (上記「ccserver-notify (通知用 MCP)」参照)。`discordWebhook` は https のみ (非 https は無視)、`subscriptions` は初期購読 (https のみ)。`CCSERVER_DISCORD_WEBHOOK` 環境変数で discordWebhook を上書き可。`vikunja` は Vikunja タスク連携の設定 (上記「Vikunja 連携」参照、`baseUrl`+`apiToken` で有効化)。 |
 
-サンドボックスは Linux 限定です。同じプロジェクトを 2 つのサンドボックスで同時に開いた場合、docker の data-root 競合を避けるため 2 つ目は docker 無しで起動します。
+サンドボックスは Linux 限定です。同じプロジェクトを 2 つのサンドボックスで同時に開いた場合、docker の data-root は1つしかないため、rootless dockerd が実際に起動できる (`sandbox-entrypoint.sh` の `flock` を取れる) のはどちらか一方だけです。**先に取れた方が勝つだけで、workerA/workerB のような役割やコンボの登録順とは無関係** — 起動順が入れ替われば逆転しえます。負けた方は docker 無しで (エラーにはならず) 起動します。
+
+コンボのオーケストレーターは、`list_group_sessions` / `get_tab_status` が返す `dockerAvailable` (`true`/`false`/`null`) と `dockerReason` でメンバーごとの実際の状態を確認できます:
+
+| `dockerReason` | 意味 |
+|---|---|
+| `available` | このセッション自身の dockerd がロックを保持しており、docker タスクを振ってよい |
+| `data-root-locked-by-another-session` | 同じプロジェクトの別セッションが保持中。このセッションに docker タスクを振っても失敗する |
+| `starting` | サンドボックス起動直後で、`flock` の勝敗がまだ確定していない。数秒待って再確認する |
+| `disabled-by-config` | `docker` ツール自体は使えるが、`sandbox.config.json` の `docker` 設定で無効化されている |
+| `tooling-missing` | ホストに `bwrap`/`rootlesskit`/`slirp4netns`/`newuidmap` が揃っていない |
+| `not-sandboxed`（`dockerAvailable: null`） | サンドボックス自体を使っていないセッション。docker は無関係 |
+
+これにより、「workerA にしか docker タスクを振れない」という誤った思い込みで一悶着起きるのを避けられます — 実際には起動順のレースであり、確認すべきは `dockerAvailable` そのものです。
 
 ### 内部の仕組み (docker と gpg の両立)
 

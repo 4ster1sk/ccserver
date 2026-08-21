@@ -12,7 +12,7 @@ import { mkdirSync, writeFileSync, readFileSync, unlinkSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
-import { getSession, destroySession, createSession, writeToSession, waitUntilSettled, setSessionExitListener, setSessionCreateListener, setMcpSocketResolver, setOrchestratorClaudeMdResolver, peekSavedSessions } from './sessionManager.js';
+import { getSession, destroySession, createSession, writeToSession, waitUntilSettled, setSessionExitListener, setSessionCreateListener, setMcpSocketResolver, setOrchestratorClaudeMdResolver, peekSavedSessions, dockerAvailability } from './sessionManager.js';
 import { startControlBroker, startHandoffChannel, stopBroker } from './mcpBroker.js';
 import { isValidApp } from './appLaunch.js';
 import { loadSandboxConfig } from './sandbox.js';
@@ -287,6 +287,10 @@ export function listGroupMembers(groupId) {
       // true when the member only exists via the restart restore, i.e. its
       // pty is gone and a re-launch (resume) is the only way back.
       restored: !session && !!saved,
+      // Whether this member can use docker right now (see
+      // sessionManager.dockerAvailability). A restored member has no live
+      // dockerd/state to judge -- null/null (unknown), not a guess.
+      ...(session ? sessionApi.dockerAvailability(session) : { dockerAvailable: null, dockerReason: null }),
     });
   }
   // The orchestrator is always the first tab (UI default-active) and the first
@@ -946,6 +950,7 @@ const defaultSessionApi = {
   createSession,
   writeToSession,
   waitUntilSettled,
+  dockerAvailability,
 };
 let sessionApi = defaultSessionApi;
 
