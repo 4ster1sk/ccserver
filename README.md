@@ -350,7 +350,7 @@ cp server/sandbox.config.example.json server/sandbox.config.json
 | `available` | このセッション自身の dockerd がロックを保持しており、docker タスクを振ってよい |
 | `data-root-locked-by-another-session` | 同じプロジェクトの別セッションが保持中。このセッションに docker タスクを振っても失敗する |
 | `starting` | サンドボックス起動直後で、`flock` の勝敗がまだ確定していない。数秒待って再確認する |
-| `disabled-by-config` | `docker` ツール自体は使えるが、この呼び出し (config/sandboxOpts) では無効 |
+| `disabled-by-config` | `docker` ツール自体は使えるが、`sandbox.config.json` の `docker` 設定で無効化されている |
 | `tooling-missing` | ホストに `bwrap`/`rootlesskit`/`slirp4netns`/`newuidmap` が揃っていない |
 | `not-sandboxed`（`dockerAvailable: null`） | サンドボックス自体を使っていないセッション。docker は無関係 |
 
