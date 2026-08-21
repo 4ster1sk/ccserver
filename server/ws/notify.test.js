@@ -61,6 +61,28 @@ test('notifyEnabled: discord-only, subscriptions-only, and neither', async () =>
   });
 });
 
+// Confirmed with the user (see tmp/notify-vikunja-integration-plan.md section
+// 5, point 2): a Vikunja-only setup -- no Discord webhook, no subscriptions --
+// still counts as "notify is on" so the MCP server gets injected. This is the
+// one point the plan left open that was explicitly resolved before
+// implementation.
+test('notifyEnabled: vikunja-only (no discord, no subscriptions) also enables it', async () => {
+  await withNotifyConfig(
+    { notify: { subscriptions: [], vikunja: { baseUrl: 'https://vikunja.example', apiToken: 'tok' } } },
+    async () => {
+      restoreNotify();
+      assert.equal(notifyEnabled(), true, 'vikunja baseUrl+apiToken alone enables notify');
+    },
+  );
+  await withNotifyConfig(
+    { notify: { subscriptions: [], vikunja: { baseUrl: 'https://vikunja.example' } } },
+    async () => {
+      restoreNotify();
+      assert.equal(notifyEnabled(), false, 'vikunja baseUrl alone (no apiToken) is not enough');
+    },
+  );
+});
+
 test('shouldInjectNotify: standalone agents and combo orchestrators only', () => {
   const base = { shell: false, app: 'claude', groupId: null, groupRole: null, notifyEnabled: true };
   assert.equal(shouldInjectNotify(base), true, 'standalone agent session');
@@ -332,4 +354,123 @@ test('resolvedHostname precedence: env > notify.hostname > os.hostname()', async
     if (prevHost === undefined) delete process.env.CCSERVER_HOSTNAME;
     else process.env.CCSERVER_HOSTNAME = prevHost;
   }
+});
+
+// Vikunja channel (see vikunjaClient.js): sendNotification dispatches to it
+// in parallel with Discord/webhooks and merges the result into
+// delivered.vikunja, never letting a Vikunja failure affect the overall
+// ok:true / non-blocking contract (plan section 2.5 / 6).
+async function withVikunjaTasksPath(fn) {
+  const dir = mkdtempSync(join(tmpdir(), 'ccserver-notify-vikunja-'));
+  const tasksPath = join(dir, 'vikunja-tasks.json');
+  const prev = process.env.CCSERVER_VIKUNJA_TASKS_PATH;
+  process.env.CCSERVER_VIKUNJA_TASKS_PATH = tasksPath;
+  try {
+    await fn(tasksPath);
+  } finally {
+    if (prev === undefined) delete process.env.CCSERVER_VIKUNJA_TASKS_PATH;
+    else process.env.CCSERVER_VIKUNJA_TASKS_PATH = prev;
+    try { rmSync(dir, { recursive: true, force: true }); } catch { /* ignore */ }
+  }
+}
+
+test('sendNotification includes delivered.vikunja when Vikunja is configured and a tracking key is present', async () => {
+  await withNotifyConfig(
+    {
+      notify: {
+        discordWebhook: 'https://discord.example/hook',
+        vikunja: { baseUrl: 'https://vikunja.example', apiToken: 'tok', projectId: 3 },
+      },
+    },
+    async () => {
+      restoreNotify();
+      await withVikunjaTasksPath(async () => {
+        const realFetch = global.fetch;
+        global.fetch = async (url, opts) => {
+          const u = String(url);
+          if (u.includes('discord.example')) return { ok: true };
+          const path = new URL(u).pathname;
+          const method = opts.method;
+          if (method === 'GET' && path === '/api/v1/labels') return { ok: true, status: 200, text: async () => '[]' };
+          if (method === 'PUT' && path === '/api/v1/labels') return { ok: true, status: 201, text: async () => JSON.stringify({ id: 1 }) };
+          if (method === 'PUT' && /^\/api\/v1\/projects\/\d+\/tasks$/.test(path)) return { ok: true, status: 201, text: async () => JSON.stringify({ id: 42 }) };
+          if (method === 'PUT' && /^\/api\/v1\/tasks\/\d+\/labels$/.test(path)) return { ok: true, status: 201, text: async () => '{}' };
+          throw new Error(`unexpected fetch: ${method} ${path}`);
+        };
+        try {
+          const res = await sendNotification(
+            { title: 'Build failed', body: 'details', level: 'error' },
+            { sessionId: 'sess-abc', groupId: null, cwd: '/srv/proj', projectName: 'proj' },
+          );
+          assert.equal(res.ok, true);
+          assert.equal(res.delivered.discord, true);
+          assert.deepEqual(res.delivered.vikunja, { ok: true, action: 'created', taskId: 42 });
+        } finally {
+          global.fetch = realFetch;
+        }
+      });
+    },
+  );
+});
+
+test('sendNotification omits delivered.vikunja when there is no tracking key (no identity)', async () => {
+  await withNotifyConfig(
+    {
+      notify: {
+        discordWebhook: 'https://discord.example/hook',
+        vikunja: { baseUrl: 'https://vikunja.example', apiToken: 'tok', projectId: 3 },
+      },
+    },
+    async () => {
+      restoreNotify();
+      const realFetch = global.fetch;
+      let vikunjaCalled = false;
+      global.fetch = async (url) => {
+        const u = String(url);
+        if (u.includes('discord.example')) return { ok: true };
+        vikunjaCalled = true;
+        return { ok: true, status: 200, text: async () => '{}' };
+      };
+      try {
+        const res = await sendNotification({ title: 'x', body: 'y', level: 'info' });
+        assert.equal(res.delivered.vikunja, undefined, 'no identity -> no tracking key -> vikunja is skipped entirely');
+        assert.equal(vikunjaCalled, false);
+      } finally {
+        global.fetch = realFetch;
+      }
+    },
+  );
+});
+
+test('sendNotification stays ok:true even when the Vikunja call fails (non-blocking, like Discord)', async () => {
+  await withNotifyConfig(
+    {
+      notify: {
+        discordWebhook: 'https://discord.example/hook',
+        vikunja: { baseUrl: 'https://vikunja.example', apiToken: 'tok', projectId: 3 },
+      },
+    },
+    async () => {
+      restoreNotify();
+      await withVikunjaTasksPath(async () => {
+        const realFetch = global.fetch;
+        global.fetch = async (url) => {
+          const u = String(url);
+          if (u.includes('discord.example')) return { ok: true };
+          return { ok: false, status: 500, text: async () => '{}' };
+        };
+        try {
+          const res = await sendNotification(
+            { title: 'x', body: 'y', level: 'error' },
+            { sessionId: 'sess-fail' },
+          );
+          assert.equal(res.ok, true, 'a failing Vikunja call does not fail sendNotification');
+          assert.equal(res.delivered.discord, true);
+          assert.equal(res.delivered.vikunja.ok, false);
+        } finally {
+          global.fetch = realFetch;
+        }
+      });
+    },
+  );
 });

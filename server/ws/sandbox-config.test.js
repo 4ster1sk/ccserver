@@ -168,3 +168,64 @@ test('notify.subscriptions seeds only https webhook urls, keeping names', () => 
     ]);
   });
 });
+
+// notify.vikunja (see vikunjaClient.js): baseUrl/apiToken follow the same
+// https-only / env-override-wins pattern as discordWebhook above; the rest
+// (projectId, timeoutSeconds, verifyTls, the label prefixes) just need
+// sensible defaults when absent.
+test('notify.vikunja.baseUrl parses https URLs, rejects others, env override wins', () => {
+  withConfig({ notify: { vikunja: { baseUrl: 'https://vikunja.example/' } } }, () => {
+    assert.equal(loadSandboxConfig().notify.vikunja.baseUrl, 'https://vikunja.example', 'trailing slash is stripped');
+  });
+  withConfig({ notify: { vikunja: { baseUrl: 'http://insecure.example' } } }, () => {
+    assert.equal(loadSandboxConfig().notify.vikunja.baseUrl, null, 'non-https baseUrl is rejected');
+  });
+  withConfig({}, () => {
+    assert.equal(loadSandboxConfig().notify.vikunja.baseUrl, null, 'absent key -> null');
+    assert.equal(loadSandboxConfig().notify.vikunja.apiToken, null);
+    assert.equal(loadSandboxConfig().notify.vikunja.projectId, null);
+  });
+  withConfig({ notify: { vikunja: { baseUrl: 'https://file.example' } } }, () => {
+    process.env.CCSERVER_VIKUNJA_BASE_URL = 'https://env.example';
+    try {
+      assert.equal(loadSandboxConfig().notify.vikunja.baseUrl, 'https://env.example', 'env override wins');
+    } finally {
+      delete process.env.CCSERVER_VIKUNJA_BASE_URL;
+    }
+  });
+});
+
+test('notify.vikunja.apiToken/projectId are read from config, env overrides both', () => {
+  withConfig({ notify: { vikunja: { apiToken: 'file-tok', projectId: 5 } } }, () => {
+    assert.equal(loadSandboxConfig().notify.vikunja.apiToken, 'file-tok');
+    assert.equal(loadSandboxConfig().notify.vikunja.projectId, 5);
+  });
+  withConfig({ notify: { vikunja: { apiToken: 'file-tok', projectId: 5 } } }, () => {
+    process.env.CCSERVER_VIKUNJA_API_TOKEN = 'env-tok';
+    process.env.CCSERVER_VIKUNJA_PROJECT_ID = '9';
+    try {
+      assert.equal(loadSandboxConfig().notify.vikunja.apiToken, 'env-tok', 'env override wins for apiToken');
+      assert.equal(loadSandboxConfig().notify.vikunja.projectId, '9', 'env override wins for projectId');
+    } finally {
+      delete process.env.CCSERVER_VIKUNJA_API_TOKEN;
+      delete process.env.CCSERVER_VIKUNJA_PROJECT_ID;
+    }
+  });
+});
+
+test('notify.vikunja defaults: timeoutSeconds=15, verifyTls=true, label prefixes agent-/status-', () => {
+  withConfig({}, () => {
+    const v = loadSandboxConfig().notify.vikunja;
+    assert.equal(v.timeoutSeconds, 15);
+    assert.equal(v.verifyTls, true);
+    assert.equal(v.agentLabelPrefix, 'agent-');
+    assert.equal(v.statusLabelPrefix, 'status-');
+  });
+  withConfig({ notify: { vikunja: { timeoutSeconds: 30, verifyTls: false, statusLabelPrefix: 'state-' } } }, () => {
+    const v = loadSandboxConfig().notify.vikunja;
+    assert.equal(v.timeoutSeconds, 30);
+    assert.equal(v.verifyTls, false);
+    assert.equal(v.statusLabelPrefix, 'state-');
+    assert.equal(v.agentLabelPrefix, 'agent-', 'unset prefix keeps its default');
+  });
+});
