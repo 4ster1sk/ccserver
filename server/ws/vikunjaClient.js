@@ -147,8 +147,16 @@ async function vikunjaFetch(config, method, path, body, label) {
       });
       clearTimeout(timer);
       if (res.ok) {
-        const text = await res.text();
-        return { ok: true, status: res.status, body: text ? JSON.parse(text) : null };
+        // The HTTP request itself already succeeded -- never fall through to
+        // the retry path below over a body we failed to read/parse, since
+        // that would resend a non-idempotent PUT/DELETE (e.g. a duplicate
+        // task or comment) for a request Vikunja already applied.
+        let responseBody = null;
+        try {
+          const text = await res.text();
+          responseBody = text ? JSON.parse(text) : null;
+        } catch { /* treat as no body -- still a success */ }
+        return { ok: true, status: res.status, body: responseBody };
       }
       if (res.status < 500) {
         console.warn(`[vikunja] ${label} failed: HTTP ${res.status}`);

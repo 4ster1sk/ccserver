@@ -218,6 +218,28 @@ test('a 4xx response is not retried', async () => {
   });
 });
 
+test('a 2xx response with an unparseable body is treated as success, not retried', async () => {
+  await withVikunjaConfig({ baseUrl: 'https://vikunja.example', apiToken: 'tok', projectId: 1 }, async () => {
+    const { fn, calls } = makeMock({
+      onRequest: (record) => (
+        record.method === 'PUT' && /\/projects\/\d+\/tasks$/.test(record.path)
+          ? { ok: true, status: 200, text: async () => 'not json' }
+          : null
+      ),
+    });
+    const realFetch = global.fetch;
+    global.fetch = fn;
+    try {
+      const r = await createOrUpdateTask({ key: 'k-badjson', title: 't', body: 'b', level: 'info', identity: {} });
+      const taskCreateCalls = calls.filter((c) => c.method === 'PUT' && /\/projects\/\d+\/tasks$/.test(c.path));
+      assert.equal(taskCreateCalls.length, 1, 'a successful HTTP response is never retried, even if its body fails to parse');
+      assert.equal(r.action, 'error', 'without a parsed body.id the task is untracked, but no duplicate was created');
+    } finally {
+      global.fetch = realFetch;
+    }
+  });
+});
+
 test('a 5xx response retries up to 3 attempts total, then fails without throwing', async () => {
   await withVikunjaConfig({ baseUrl: 'https://vikunja.example', apiToken: 'tok', projectId: 1 }, async () => {
     const { fn, calls } = makeMock({
