@@ -130,6 +130,23 @@ function dispatcherFor(config) {
   return insecureDispatcher;
 }
 
+const BODY_LOG_MAX_CHARS = 500;
+
+// Best-effort: read the response body for a failure log line only. Never
+// throws -- a read failure just means the log line omits the body, it must
+// not affect the { ok: false, ... } result the caller already gets. Safe to
+// log (unlike the URL/token, see below): it's Vikunja's response, not the
+// request's secrets.
+async function readBodyForLog(res) {
+  try {
+    const text = await res.text();
+    if (!text) return null;
+    return text.length > BODY_LOG_MAX_CHARS ? `${text.slice(0, BODY_LOG_MAX_CHARS)}…` : text;
+  } catch {
+    return null;
+  }
+}
+
 // Low-level request: 4xx fails immediately (no retry), 5xx and network/
 // timeout errors retry up to MAX_ATTEMPTS with exponential backoff (plan 3).
 // `label` is a short static tag for logging -- never the URL or headers,
@@ -163,11 +180,13 @@ async function vikunjaFetch(config, method, path, body, label) {
         return { ok: true, status: res.status, body: responseBody };
       }
       if (res.status < 500) {
-        console.warn(`[vikunja] ${label} failed: HTTP ${res.status}`);
+        const bodyText = await readBodyForLog(res);
+        console.warn(`[vikunja] ${label} failed: HTTP ${res.status}${bodyText ? ` -- ${bodyText}` : ''}`);
         return { ok: false, status: res.status, body: null };
       }
       if (attempt === MAX_ATTEMPTS) {
-        console.warn(`[vikunja] ${label} failed after ${MAX_ATTEMPTS} attempts: HTTP ${res.status}`);
+        const bodyText = await readBodyForLog(res);
+        console.warn(`[vikunja] ${label} failed after ${MAX_ATTEMPTS} attempts: HTTP ${res.status}${bodyText ? ` -- ${bodyText}` : ''}`);
         return { ok: false, status: res.status, body: null };
       }
     } catch (err) {
