@@ -16,12 +16,16 @@
 //   PUT    /labels                     create a label { title, hex_color }
 //   PUT    /tasks/{id}/labels          attach a label { label_id }
 //   DELETE /tasks/{id}/labels/{label}  detach a label
+//   POST   /tasks/{id}                 mark done      { done: true } (v1
+//                                      updates use POST, not PUT -- see
+//                                      markDone())
 //
-// Deliberately not implemented (see plan 2.3 / section 5): marking a task
-// done, deleting it, or re-checking its live labels before updating it --
-// tracking state lives purely in .saved-vikunja-tasks.json, so a task a human
-// completed by hand in Vikunja can still get a stray comment on the next
-// notify (an accepted tradeoff, not a bug).
+// Deliberately not implemented (see plan 2.3 / section 5): deleting a task,
+// or re-checking its live labels before updating it -- tracking state lives
+// purely in .saved-vikunja-tasks.json, so a task a human completed by hand in
+// Vikunja can still get a stray comment on the next notify (an accepted
+// tradeoff, not a bug). Marking a task done on level 'success' *is*
+// implemented -- see markDone() / tmp/vikunja-mark-done-plan.md.
 
 import { readFileSync, writeFileSync } from 'node:fs';
 import { hostname as osHostname } from 'node:os';
@@ -232,6 +236,16 @@ async function swapStatusLabel(config, taskId, prevLevel, nextLevel) {
   }
 }
 
+// Mark the Vikunja task done via a task-update POST (v1 API updates use
+// POST, not PUT -- see the header comment / vikunja.io's v1-vs-v2 verb
+// docs). Partial update: only `done` is sent, so title/description/etc are
+// left untouched by Vikunja. Best-effort like swapStatusLabel -- a failure
+// here must not affect the overall createOrUpdateTask result (the
+// status-completed label already reflects completion either way).
+async function markDone(config, taskId) {
+  await vikunjaFetch(config, 'POST', `/tasks/${taskId}`, { done: true }, 'mark-done');
+}
+
 function commentText(title, body, level) {
   const emoji = level && LEVEL_EMOJI[level] ? `${LEVEL_EMOJI[level]} ` : '';
   const t = typeof title === 'string' ? title : '';
@@ -265,8 +279,15 @@ export async function createOrUpdateTask({ key, title, body, level, identity }) 
     if (!created.ok || !created.body?.id) return { ok: false, action: 'error', taskId: null };
     const taskId = created.body.id;
     await swapStatusLabel(config, taskId, null, lvl);
-    tasks[key] = { taskId, lastLevel: lvl, createdAt: Date.now() };
-    writeTasks(tasks);
+    if (TERMINAL_LEVELS.has(lvl)) {
+      // success on the very first notify for this key -- no tracking entry
+      // to write, so the next notify for this key is treated as a fresh
+      // task rather than reopening this (already done) one.
+      await markDone(config, taskId);
+    } else {
+      tasks[key] = { taskId, lastLevel: lvl, createdAt: Date.now() };
+      writeTasks(tasks);
+    }
     return { ok: true, action: 'created', taskId };
   }
 
@@ -278,6 +299,7 @@ export async function createOrUpdateTask({ key, title, body, level, identity }) 
   );
   await swapStatusLabel(config, taskId, existing.lastLevel, lvl);
   if (TERMINAL_LEVELS.has(lvl)) {
+    await markDone(config, taskId);
     delete tasks[key];
   } else {
     tasks[key] = { ...existing, lastLevel: lvl };
