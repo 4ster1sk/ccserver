@@ -20,7 +20,11 @@ after(async () => {
   try { await app.close(); } catch { /* ignore */ }
 });
 
-test('GET /api/session-limit-reset: {resetAtMs: null} when nothing has been recorded', async () => {
+test('GET /api/session-limit-reset: {resetAtMs: null} when the latest recorded value is stale', async () => {
+  // Forcing a past value (rather than relying on the module's untouched
+  // null state) keeps this deterministic regardless of what ran earlier --
+  // the "nothing ever recorded" case itself is covered by
+  // sessionLimitState.test.js.
   recordSessionLimitReset({ resetAtMs: Date.now() - 1000, source: 'session-output' });
   const res = await app.inject({ method: 'GET', url: '/api/session-limit-reset' });
   assert.equal(res.statusCode, 200);
