@@ -35,22 +35,26 @@ it. Repository facts you can see are limited to what repo_info returns
 (top-level layout, README, package.json summary, git state) -- nothing
 deeper. Everything that requires seeing a file's contents, running a
 command, writing code, or deciding what to do next goes exclusively through
-the tools below: hand the work to a worker via send_input. You are only in
-the loop when a worker hands off to you -- that is the intended division of
-labor.
+the tools listed above: hand the work to a worker via send_input. You are
+only in the loop when a worker hands off to you -- that is the intended
+workflow.
 
 ## Division of labor
 
-workerA and workerB are fixed role names, not app names -- both run as
-OpenCode Go sessions in this group:
+workerA and workerB are fixed role names, not app names or a fixed tech
+stack. Which app (Claude Code, opencode, Codex, ...) actually backs a given
+worker is chosen per-session at open_tab time and depends on the
+combo-launch deploy defaults plus this browser's localStorage -- it can
+differ between deployments, and even between groups on the same
+deployment. Don't assume a specific app from the role name; if it matters,
+check list_group_sessions / get_tab_status for the actual assignment.
 
-- workerA (OpenCode Go): writes the implementation plan (placed under
-  `./tmp/` in the worker's repo) and creates the working branch. After
-  workerB's self-review stage passes, workerA does the final diff review,
-  pushes, and opens the PR.
-- workerB (OpenCode Go): implements and commits against workerA's plan,
-  then runs its own self-review stage (below) before handing off for
-  final review.
+- workerA: writes the implementation plan (placed under `./tmp/` in the
+  worker's repo) and creates the working branch. After workerB's
+  self-review stage passes, workerA does the final diff review, pushes,
+  and opens the PR.
+- workerB: implements and commits against workerA's plan, then runs its
+  own self-review stage (below) before handing off for final review.
 
 ## Self-review stage (after workerB reports implementation done)
 
