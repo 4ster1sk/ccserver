@@ -21,6 +21,7 @@ import { randomUUID } from 'node:crypto';
 import { spawn as spawnProcess } from 'node:child_process';
 import { persistentHomeDir } from './sandbox.js';
 import { findSessionLimitReset } from './sessionLimitDetect.js';
+import { getLatestSessionLimitReset } from '../sessionLimitState.js';
 
 let runtimeDir;
 let groupManager;
@@ -1053,6 +1054,56 @@ test('onData session-limit detection: no schedule_state push when a manual sched
       .map((m) => { try { return JSON.parse(m); } catch { return null; } })
       .filter((m) => m?.type === 'schedule_state');
     assert.equal(stateMsgs.length, 0, 'the schedule is unchanged, so no push should fire');
+  } finally {
+    sessionManager.destroySession(sessionId, { keepSchedule: false });
+  }
+});
+
+test('onData session-limit detection: records the reset into sessionLimitState (scheduler-panel hint source)', async () => {
+  const res = sessionManager.createSession({ cwd: '/tmp', cols: 80, rows: 24, shell: true, sandbox: false });
+  const { sessionId, session } = res;
+  assert.ok(session, 'shell session should spawn');
+  try {
+    await sleep(400);
+    const resetAt = Date.now() + 60 * 60 * 1000;
+    const line = sessionLimitLine(resetAt);
+    const expected = findSessionLimitReset(line, resetAt - 60000);
+    assert.ok(expected, 'sanity: the constructed line must itself be parseable');
+
+    sessionManager.writeToSession(sessionId, `echo ${shellQuote(line)}`, { submit: true });
+    await sleep(1200);
+
+    const latest = getLatestSessionLimitReset();
+    assert.ok(latest, 'the detection must be recorded regardless of the auto-arm outcome');
+    assert.equal(latest.resetAtMs, expected.resetAtMs);
+    assert.equal(latest.timeZone, expected.timeZone);
+    assert.equal(latest.source, 'session-output');
+  } finally {
+    sessionManager.destroySession(sessionId, { keepSchedule: false });
+  }
+});
+
+test('onData session-limit detection: still records into sessionLimitState even when a manual schedule blocks the auto-arm', async () => {
+  const res = sessionManager.createSession({ cwd: '/tmp', cols: 80, rows: 24, shell: true, sandbox: false });
+  const { sessionId, session } = res;
+  assert.ok(session, 'shell session should spawn');
+  try {
+    await sleep(400);
+    assert.ok(sessionManager.setScheduledPrompt(sessionId, Date.now() + 30000, 'MANUAL_MARKER'));
+
+    const resetAt = Date.now() + 60 * 60 * 1000;
+    const line = sessionLimitLine(resetAt);
+    const expected = findSessionLimitReset(line, resetAt - 60000);
+
+    sessionManager.writeToSession(sessionId, `echo ${shellQuote(line)}`, { submit: true });
+    await sleep(1200);
+
+    const latest = getLatestSessionLimitReset();
+    assert.ok(latest, 'the hint store is independent of the auto-arm skip path');
+    assert.equal(latest.resetAtMs, expected.resetAtMs);
+
+    const scheduled = sessionManager.scheduledPromptPublic(session);
+    assert.equal(scheduled.text, 'MANUAL_MARKER', 'sanity: the manual schedule itself is untouched');
   } finally {
     sessionManager.destroySession(sessionId, { keepSchedule: false });
   }
