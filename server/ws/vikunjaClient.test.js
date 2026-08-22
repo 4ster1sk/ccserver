@@ -77,6 +77,7 @@ function makeMock({ onRequest } = {}) {
     if (method === 'PUT' && /^\/api\/v1\/tasks\/\d+\/comments$/.test(path)) return fakeRes(201, { id: 1 });
     if (method === 'PUT' && /^\/api\/v1\/tasks\/\d+\/labels$/.test(path)) return fakeRes(201, {});
     if (method === 'DELETE' && /^\/api\/v1\/tasks\/\d+\/labels\/\d+$/.test(path)) return fakeRes(200, {});
+    if (method === 'POST' && /^\/api\/v1\/tasks\/\d+$/.test(path)) return fakeRes(200, { id: Number(path.split('/').pop()), done: true });
     throw new Error(`unexpected fetch: ${method} ${path}`);
   };
   return { fn, calls };
@@ -152,6 +153,10 @@ test('createOrUpdateTask: create -> comment update -> success terminates trackin
       assert.equal(r3.ok, true);
       assert.equal(r3.action, 'updated');
       assert.equal(r3.taskId, firstTaskId);
+
+      const markDoneCall = calls.find((c) => c.method === 'POST' && c.path === `/api/v1/tasks/${firstTaskId}`);
+      assert.ok(markDoneCall, 'a terminal (success) level marks the underlying task done');
+      assert.equal(markDoneCall.body.done, true);
 
       const saved3 = JSON.parse(readFileSync(tasksPath, 'utf-8'));
       assert.equal(saved3['sess-1'], undefined, 'a terminal (success) level clears the tracked entry');
@@ -305,6 +310,91 @@ test('failures never log the API token or the base URL', async () => {
       }
     } finally {
       console.warn = realWarn;
+      global.fetch = realFetch;
+    }
+  });
+});
+
+test('createOrUpdateTask: a first notify that is already "success" marks the task done and leaves no tracking entry, so the next notify for the same key starts fresh', async () => {
+  await withVikunjaConfig({ baseUrl: 'https://vikunja.example', apiToken: 'tok', projectId: 1 }, async (tasksPath) => {
+    const { fn, calls } = makeMock();
+    const realFetch = global.fetch;
+    global.fetch = fn;
+    try {
+      const r1 = await createOrUpdateTask({ key: 'k-fresh-success', title: 't', body: 'b', level: 'success', identity: {} });
+      assert.equal(r1.ok, true);
+      assert.equal(r1.action, 'created');
+
+      const markDoneCall = calls.find((c) => c.method === 'POST' && c.path === `/api/v1/tasks/${r1.taskId}`);
+      assert.ok(markDoneCall, 'a "success" level on the very first notify still marks the task done');
+      assert.equal(markDoneCall.body.done, true);
+
+      let saved;
+      try { saved = JSON.parse(readFileSync(tasksPath, 'utf-8')); } catch { saved = {}; }
+      assert.equal(saved['k-fresh-success'], undefined, 'no tracking entry is left for an immediately-successful key');
+
+      const r2 = await createOrUpdateTask({ key: 'k-fresh-success', title: 't2', body: 'b2', level: 'info', identity: {} });
+      assert.equal(r2.action, 'created', 'no tracking entry -> treated as a brand new task, not reopening the done one');
+      assert.notEqual(r2.taskId, r1.taskId);
+    } finally {
+      global.fetch = realFetch;
+    }
+  });
+});
+
+test('createOrUpdateTask: info/warning/error levels never mark the task done', async () => {
+  await withVikunjaConfig({ baseUrl: 'https://vikunja.example', apiToken: 'tok', projectId: 1 }, async () => {
+    const { fn, calls } = makeMock();
+    const realFetch = global.fetch;
+    global.fetch = fn;
+    try {
+      await createOrUpdateTask({ key: 'k-non-terminal', title: 't', body: 'b', level: 'info', identity: {} });
+      await createOrUpdateTask({ key: 'k-non-terminal', title: 't', body: 'b', level: 'warning', identity: {} });
+      await createOrUpdateTask({ key: 'k-non-terminal', title: 't', body: 'b', level: 'error', identity: {} });
+      const markDoneCalls = calls.filter((c) => c.method === 'POST');
+      assert.equal(markDoneCalls.length, 0, 'only a terminal (success) level should ever POST to mark a task done');
+    } finally {
+      global.fetch = realFetch;
+    }
+  });
+});
+
+test('createOrUpdateTask: a failed mark-done does not affect the overall result (existing-task path)', async () => {
+  await withVikunjaConfig({ baseUrl: 'https://vikunja.example', apiToken: 'tok', projectId: 1 }, async (tasksPath) => {
+    const { fn } = makeMock({
+      onRequest: (record) => (record.method === 'POST' ? fakeRes(400, { message: 'cannot mark done' }) : null),
+    });
+    const realFetch = global.fetch;
+    global.fetch = fn;
+    try {
+      const r1 = await createOrUpdateTask({ key: 'k-markdone-fails', title: 't', body: 'b', level: 'info', identity: {} });
+      assert.equal(r1.action, 'created');
+
+      const r2 = await createOrUpdateTask({ key: 'k-markdone-fails', title: 't2', body: 'b2', level: 'success', identity: {} });
+      assert.equal(r2.ok, true, 'the add-comment succeeded, so ok is true regardless of the mark-done failure');
+      assert.equal(r2.action, 'updated');
+
+      let saved;
+      try { saved = JSON.parse(readFileSync(tasksPath, 'utf-8')); } catch { saved = {}; }
+      assert.equal(saved['k-markdone-fails'], undefined, 'tracking is still cleared even though mark-done failed');
+    } finally {
+      global.fetch = realFetch;
+    }
+  });
+});
+
+test('createOrUpdateTask: a failed mark-done does not affect the overall result (new-task path)', async () => {
+  await withVikunjaConfig({ baseUrl: 'https://vikunja.example', apiToken: 'tok', projectId: 1 }, async () => {
+    const { fn } = makeMock({
+      onRequest: (record) => (record.method === 'POST' ? fakeRes(400, { message: 'cannot mark done' }) : null),
+    });
+    const realFetch = global.fetch;
+    global.fetch = fn;
+    try {
+      const r = await createOrUpdateTask({ key: 'k-markdone-fails-fresh', title: 't', body: 'b', level: 'success', identity: {} });
+      assert.equal(r.ok, true, 'task creation succeeded, so ok is true regardless of the mark-done failure');
+      assert.equal(r.action, 'created');
+    } finally {
       global.fetch = realFetch;
     }
   });
