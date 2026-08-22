@@ -309,3 +309,112 @@ test('failures never log the API token or the base URL', async () => {
     }
   });
 });
+
+test('a 4xx failure log includes the response body', async () => {
+  await withVikunjaConfig({ baseUrl: 'https://vikunja.example', apiToken: 'tok', projectId: 1 }, async () => {
+    const { fn } = makeMock({
+      onRequest: (record) => (
+        record.method === 'PUT' && /\/projects\/\d+\/tasks$/.test(record.path)
+          ? fakeRes(401, { message: 'invalid token' })
+          : null
+      ),
+    });
+    const realFetch = global.fetch;
+    global.fetch = fn;
+    const warnings = [];
+    const realWarn = console.warn;
+    console.warn = (...args) => warnings.push(args.join(' '));
+    try {
+      await createOrUpdateTask({ key: 'k-4xx-body', title: 't', body: 'b', level: 'info', identity: {} });
+      assert.ok(warnings.some((w) => w.includes('invalid token')), `expected a warning to include the body: ${warnings}`);
+    } finally {
+      console.warn = realWarn;
+      global.fetch = realFetch;
+    }
+  });
+});
+
+test('a 5xx failure log after max attempts includes the response body, but intermediate retries do not log', async () => {
+  await withVikunjaConfig({ baseUrl: 'https://vikunja.example', apiToken: 'tok', projectId: 1 }, async () => {
+    const { fn } = makeMock({
+      onRequest: (record) => (
+        record.method === 'PUT' && /\/projects\/\d+\/tasks$/.test(record.path)
+          ? fakeRes(503, { message: 'db unavailable' })
+          : null
+      ),
+    });
+    const realFetch = global.fetch;
+    global.fetch = fn;
+    const warnings = [];
+    const realWarn = console.warn;
+    console.warn = (...args) => warnings.push(args.join(' '));
+    try {
+      await createOrUpdateTask({ key: 'k-5xx-body', title: 't', body: 'b', level: 'info', identity: {} });
+      const taskCreateWarnings = warnings.filter((w) => w.includes('create-task'));
+      assert.equal(taskCreateWarnings.length, 1, 'only the final failure (not the intermediate retries) logs at all');
+      assert.ok(
+        taskCreateWarnings[0].includes('db unavailable'),
+        `expected the final-failure warning to include the body: ${taskCreateWarnings[0]}`,
+      );
+    } finally {
+      console.warn = realWarn;
+      global.fetch = realFetch;
+    }
+  });
+});
+
+test('a response body longer than the log cap is truncated', async () => {
+  await withVikunjaConfig({ baseUrl: 'https://vikunja.example', apiToken: 'tok', projectId: 1 }, async () => {
+    const longMessage = 'x'.repeat(600);
+    const { fn } = makeMock({
+      onRequest: (record) => (
+        record.method === 'PUT' && /\/projects\/\d+\/tasks$/.test(record.path)
+          ? { ok: false, status: 400, text: async () => longMessage }
+          : null
+      ),
+    });
+    const realFetch = global.fetch;
+    global.fetch = fn;
+    const warnings = [];
+    const realWarn = console.warn;
+    console.warn = (...args) => warnings.push(args.join(' '));
+    try {
+      await createOrUpdateTask({ key: 'k-long-body', title: 't', body: 'b', level: 'info', identity: {} });
+      const w = warnings.find((x) => x.includes('create-task'));
+      assert.ok(w, 'expected a create-task warning to be logged');
+      assert.ok(!w.includes(longMessage), 'the full 600-char body must not appear verbatim');
+      assert.ok(w.includes('x'.repeat(500)), 'the first 500 chars must still be present');
+      assert.ok(w.includes('…'), 'a truncation marker must be appended');
+    } finally {
+      console.warn = realWarn;
+      global.fetch = realFetch;
+    }
+  });
+});
+
+test('a body-read failure does not crash: the log falls back to status only, and the result is unchanged', async () => {
+  await withVikunjaConfig({ baseUrl: 'https://vikunja.example', apiToken: 'tok', projectId: 1 }, async () => {
+    const { fn } = makeMock({
+      onRequest: (record) => (
+        record.method === 'PUT' && /\/projects\/\d+\/tasks$/.test(record.path)
+          ? { ok: false, status: 400, text: async () => { throw new Error('stream already consumed'); } }
+          : null
+      ),
+    });
+    const realFetch = global.fetch;
+    global.fetch = fn;
+    const warnings = [];
+    const realWarn = console.warn;
+    console.warn = (...args) => warnings.push(args.join(' '));
+    try {
+      const r = await createOrUpdateTask({ key: 'k-unreadable-body', title: 't', body: 'b', level: 'info', identity: {} });
+      assert.deepEqual(r, { ok: false, action: 'error', taskId: null });
+      const w = warnings.find((x) => x.includes('create-task'));
+      assert.ok(w, 'expected a create-task warning to be logged despite the unreadable body');
+      assert.ok(w.includes('HTTP 400'), `expected the status-only fallback: ${w}`);
+    } finally {
+      console.warn = realWarn;
+      global.fetch = realFetch;
+    }
+  });
+});
