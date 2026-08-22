@@ -178,14 +178,14 @@ OpenAI Codexについて:
 
 - **追跡単位**: `groupId` (無ければ `sessionId`) をキーに、進行中のタスク ID を `.saved-vikunja-tasks.json` (`.gitignore` 済み) に永続化します。identity が無い呼び出し (`groupId`/`sessionId` どちらも無し) は Vikunja 連携をスキップし、Discord/webhook のみ配送します。
 - **初回**: 新規タスクを作成 (`title` = notify の `title`、`description` = `body` + 送信元フッター)。**2回目以降 (同じキー)**: タスクへコメントを1件追記 (`title` を先頭行、`body` を本文)。タスクの説明欄そのものは書き換えません。
-- **状態はラベルで表現** (`notify.vikunja.statusLabelPrefix`、既定 `status-`)。タスク自体の完了 (`done: true`) やタスクの削除は行いません:
+- **状態はラベルで表現** (`notify.vikunja.statusLabelPrefix`、既定 `status-`)。`success` の場合のみ Vikunja タスクを実際に `done: true` にします (`POST /tasks/{id}` の部分更新、title/description 等の他フィールドは変更しません)。それ以外のレベルでは done にせず、タスクの削除も行いません:
 
   | `level` | ラベル | 意味 | 追跡終了? |
   |---|---|---|---|
   | `info` (既定) | `status-running` | 進行中の経過報告 | いいえ |
-  | `success` | `status-completed` | 完了 | **はい** (次の `notify` は新規タスクとして扱う) |
-  | `warning` | `status-blocked` | 詰まっている、判断待ち | いいえ |
-  | `error` | `status-needs-input` | 人間の判断が必要 | いいえ (人間が Vikunja 上で手動対応する運用。この MCP からの明示的な resolve 操作はありません) |
+  | `success` | `status-completed` | 完了 | **はい** (次の `notify` は新規タスクとして扱う)。Vikunja タスクも `done: true` にします |
+  | `warning` | `status-blocked` | 詰まっている、判断待ち | いいえ (done にはしません) |
+  | `error` | `status-needs-input` | 人間の判断が必要 | いいえ (done にはしません。人間が Vikunja 上で手動対応する運用です) |
 
 - ラベルが存在しなければ自動作成します (色付き)。ラベルは Vikunja アカウント単位 (プロジェクト単位ではない) です。
 - **リトライ**: 4xx は即座に諦め、5xx / 接続エラー / タイムアウト (`notify.vikunja.timeoutSeconds`、既定15秒) のみ指数バックオフで最大3回試行。失敗してもエージェント側にはエラーを返さず `console.warn` にログを残すのみ (URL やトークンはログに出さず、失敗種別とステータスコードのみ)。
