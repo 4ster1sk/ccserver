@@ -176,6 +176,21 @@ function appLabel(app) {
   return app === 'claude' ? 'Claude Code' : app === 'copilot' ? 'GitHub Copilot' : app === 'codex' ? 'OpenAI Codex' : 'opencode';
 }
 
+// Format an absolute epoch as the zero-padded 24h "HH:MM" the scheduler
+// panel's <input type="time"> requires, in `timeZone` (server-local if
+// omitted). Unlike fmtServer(), this must not go through toLocaleString --
+// its output is locale-dependent, while the <input> value format is not.
+function toServerHHMM(epochMs, timeZone) {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: timeZone || undefined,
+    hourCycle: 'h23',
+    hour: '2-digit',
+    minute: '2-digit',
+  }).formatToParts(new Date(epochMs));
+  const map = Object.fromEntries(parts.map((p) => [p.type, p.value]));
+  return `${map.hour}:${map.minute}`;
+}
+
 // OSC 52 clipboard writes (sent by apps like opencode): update the browser
 // clipboard, falling back to a hidden-textarea copy when the async Clipboard
 // API is unavailable (non-secure context, denied permission, ...).
@@ -1189,6 +1204,26 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
     const t = setInterval(() => setNowTick(Date.now()), 1000);
     return () => clearInterval(t);
   }, [showScheduler]);
+
+  // On opening a fresh (no active schedule, untouched time field) scheduler
+  // panel, prefill the time with the last-known session-limit reset time --
+  // a passive lookup, it never triggers a new /usage capture. Only "claude"
+  // sessions have a session limit to speak of. Requiring serverTz first
+  // (rather than falling back to the browser's zone) avoids a wrong initial
+  // value on a server in a different timezone; schedule_state normally
+  // delivers it well before a user could open this panel.
+  useEffect(() => {
+    if (!showScheduler || schedule || scheduleTime || !serverTz || app !== 'claude') return;
+    let cancelled = false;
+    authFetch('/api/session-limit-reset')
+      .then((res) => res.json())
+      .then((data) => {
+        if (cancelled || !data?.resetAtMs) return;
+        setScheduleTime((prev) => (prev ? prev : toServerHHMM(data.resetAtMs, data.timeZone || serverTz)));
+      })
+      .catch(() => { /* best effort */ });
+    return () => { cancelled = true; };
+  }, [showScheduler, schedule, scheduleTime, serverTz, app]);
 
   return (
     <div className={`terminal-view${keyboardOpen ? ' keyboard-open' : ''}${selectionMode ? ' selection-mode' : ''}`} ref={terminalViewRef}>

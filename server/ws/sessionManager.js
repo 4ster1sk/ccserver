@@ -19,6 +19,7 @@ import {
 } from './appLaunch.js';
 import { stripAnsi } from './mcpTools.js';
 import { findSessionLimitReset } from './sessionLimitDetect.js';
+import { recordSessionLimitReset } from '../sessionLimitState.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const SAVED_SESSIONS_PATH = process.env.CCSERVER_SAVED_SESSIONS_PATH || join(__dirname, '..', '..', '.saved-sessions.json');
@@ -451,6 +452,14 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox
       // same status line (which keeps re-matching every chunk) doesn't
       // re-arm the schedule on every redraw.
       session.lastAutoLimitResetAt = limitMatch.resetAtMs;
+      // Independent of the auto-schedule lifecycle below (which can be
+      // skipped when a manual schedule already exists) -- the scheduler
+      // panel's default-time hint should still learn about this detection.
+      recordSessionLimitReset({
+        resetAtMs: limitMatch.resetAtMs,
+        timeZone: limitMatch.timeZone,
+        source: 'session-output',
+      });
       const existingSid = scheduleForSession(session.id);
       const existing = existingSid ? schedules.get(existingSid) : null;
       // A manual schedule (set via the browser's clock panel) is never

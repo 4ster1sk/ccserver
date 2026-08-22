@@ -16,6 +16,7 @@ import { homedir } from 'node:os';
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { buildMinimalSandboxSpawn, resolveClaude, sandboxAvailable, loadSandboxConfig } from './ws/sandbox.js';
+import { recordSessionLimitReset } from './sessionLimitState.js';
 
 const CACHE_TTL_MS = 60 * 1000;       // serve cache without re-capturing
 // The first capture can include Claude startup, the project trust prompt, and
@@ -301,6 +302,14 @@ export async function getUsage({ force = false } = {}) {
         inflight = null;
         if (res.usage && res.usage.limits && res.usage.limits.length) {
           cache = { usage: res.usage, updatedAt: Date.now() };
+          // parseResetTime() already resolved this as the server's local
+          // time (see its comment), so no timeZone is recorded here --
+          // callers of getLatestSessionLimitReset() treat a null timeZone
+          // as "server time".
+          const sessionLimit = res.usage.limits.find((l) => /session/i.test(l.label));
+          if (sessionLimit?.resetAt) {
+            recordSessionLimitReset({ resetAtMs: sessionLimit.resetAt, source: 'usage' });
+          }
         }
         return res;
       })
