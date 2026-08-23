@@ -9,6 +9,7 @@ import { getGroupFilesDir, ensureGroupFilesDir } from './groupFiles.js';
 import { buildMcpConfigArgsAndEnv } from './mcpConfig.js';
 import { shouldInjectNotify, notifyEnabled, getNotifySockPath, notifyBrokerRunning } from './notify.js';
 import { shouldInjectUsage, usageEnabled, getUsageSockPath, usageBrokerRunning } from './usageMcp.js';
+import { shouldInjectMetaAgent, metaAgentEnabled, getMetaSockPath, metaBrokerRunning } from './metaAgent.js';
 import { createScreenModel, SCREEN_ROWS } from './screenModel.js';
 import { bunTmpdirEnv } from './bunTmpdir.js';
 import {
@@ -162,7 +163,7 @@ function normalizeModel(model) {
   return typeof model === 'string' && model.length > 0 ? model : null;
 }
 
-export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox, sandboxOpts, app, model, resumeLast, groupId = null, groupRole = null, mcpSocketPath = null, projectName = null, reuseSandboxHome = true, orchestratorClaudeMdSrc = null, gitCommonDir = null, groupFilesDir = null }) {
+export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox, sandboxOpts, app, model, resumeLast, groupId = null, groupRole = null, mcpSocketPath = null, projectName = null, reuseSandboxHome = true, orchestratorClaudeMdSrc = null, gitCommonDir = null, groupFilesDir = null, isMetaAgent = false, sandboxHomeCreatedBy = null }) {
   const id = randomUUID();
 
   // claude (and likely opencode) aborts immediately (SIGABRT, exit 134, no
@@ -257,6 +258,21 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox
   });
   const usageSocketPath = useUsage ? getUsageSockPath() : null;
 
+  // ccserver-meta injection (see metaAgent.js): ONLY for sessions explicitly
+  // launched with isMetaAgent:true (the single privileged self-management
+  // agent -- never auto-injected into group members, shells, or anything
+  // else), when the feature is enabled in the config AND the broker is
+  // actually listening. The per-connection identity rides to the bridge as
+  // CCSERVER_META_IDENTITY and becomes this connection's identity frame
+  // (self-target guards / attribution inside the meta tools).
+  const useMeta = !groupId && metaBrokerRunning() && shouldInjectMetaAgent({
+    shell: !!shell,
+    app: sessionApp,
+    isMetaAgent: !!isMetaAgent,
+    metaAgentEnabled: metaAgentEnabled(),
+  });
+  const metaSocketPath = useMeta ? getMetaSockPath() : null;
+
   const { SSH_AUTH_SOCK, SSH_AGENT_PID, ...cleanEnv } = process.env;
 
   let command, args;
@@ -289,7 +305,7 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox
   // host node+bridge). The args must be in the target command before
   // buildSandboxSpawn runs, so the mode is derived from sandboxRequested.
   let mcpEnv = {};
-  if (sessionApp && (mcpSocketPath || useNotify || useUsage)) {
+  if (sessionApp && (mcpSocketPath || useNotify || useUsage || useMeta)) {
     const injected = buildMcpConfigArgsAndEnv(sessionApp, {
       // ccserver (the group broker) only when the session has a group socket:
       // standalone notify sessions must not get a broken ccserver entry (its
@@ -303,6 +319,18 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox
       usage: useUsage ? {
         mode: sandboxRequested ? 'sandbox' : 'host',
         sockPath: usageSocketPath,
+      } : undefined,
+      meta: useMeta ? {
+        mode: sandboxRequested ? 'sandbox' : 'host',
+        sockPath: metaSocketPath,
+        identity: {
+          sessionId: id,
+          groupId,
+          groupRole,
+          cwd,
+          projectName: projectName ?? basename(cwd),
+          app: sessionApp,
+        },
       } : undefined,
     });
     mcpEnv = injected.env;
@@ -343,7 +371,7 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox
       } catch { resolvedGroupFilesDir = null; }
     }
     try {
-      const spawn = buildSandboxSpawn({ cwd, targetCommand: [command, ...args], app: sessionApp, sandboxOpts, mcpSocketPath, notifySocketPath, usageSocketPath, reuseSandboxHome, orchestratorClaudeMdSrc, gitCommonDir, groupFilesDir: resolvedGroupFilesDir });
+      const spawn = buildSandboxSpawn({ cwd, targetCommand: [command, ...args], app: sessionApp, sandboxOpts, mcpSocketPath, notifySocketPath, usageSocketPath, metaSocketPath, reuseSandboxHome, orchestratorClaudeMdSrc, gitCommonDir, groupFilesDir: resolvedGroupFilesDir, sandboxHomeCreatedBy });
       command = spawn.command;
       args = spawn.args;
       sandboxDocker = !!spawn.docker;
@@ -415,6 +443,10 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox
     model: sessionModel,
     groupId,
     groupRole,
+    // True only for sessions launched with the explicit isMetaAgent flag (the
+    // privileged self-management agent). Display/debug bookkeeping -- the
+    // authorization boundary is the meta broker socket, not this flag.
+    isMetaAgent: !!isMetaAgent,
     sandbox: useSandbox,
     sandboxOpts: useSandbox ? (sandboxOpts || null) : null, // per-launch gpg/sshAgent override, for schedule/resume replay
     docker: sandboxDocker, // whether THIS session's sandbox launched with docker (see dockerAvailability)
@@ -1270,9 +1302,26 @@ export function listSessions() {
       model: session.model || null,
       groupId: session.groupId || null,
       groupRole: session.groupRole || null,
+      isMetaAgent: !!session.isMetaAgent,
     });
   }
   return result;
+}
+
+// Privileged-consumer facade (see ws/metaAgent.js): the meta agent's tools
+// legitimately read/destroy ANY session, so this facade spans all of them --
+// unlike groupManager's per-group sessionApi. Kept to the minimum surface the
+// meta tools need; createSession goes through routes/sessions.js's shared
+// launch function instead, so REST and MCP launches can never drift.
+const sessionManagerApi = {
+  listSessions,
+  getSession,
+  destroySession,
+  sandboxHomeInUsePath,
+};
+
+export function getSessionManagerApi() {
+  return sessionManagerApi;
 }
 
 export function attachSocket(id, socket) {

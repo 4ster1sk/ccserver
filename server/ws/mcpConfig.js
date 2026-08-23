@@ -49,6 +49,13 @@
 // attribution). Only ever passed for claude sessions (sessionManager gates
 // it on shouldInjectUsage), but the assembly here doesn't need to know that.
 //
+// The optional `{ meta }` descriptor adds the ccserver-meta MCP server
+// (see metaAgent.js): `{ mode, sockPath, identity? }`, same shape as notify.
+// Only ever passed for the single isMetaAgent session; the identity becomes
+// CCSERVER_META_IDENTITY, which the bridge wrapper attaches to its first
+// socket frame so the meta tools can run their self-target guards and stamp
+// approval attribution.
+//
 // Returns { args, env } for sessionManager to splice into the pty spawn.
 
 import { dirname, join } from 'node:path';
@@ -59,6 +66,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const MCP_BRIDGE_COMMAND = '/ccserver-sandbox-mcp-bridge';
 const NOTIFY_BRIDGE_SCRIPT = join(__dirname, 'sandbox-mcp-wrapper.cjs');
 const USAGE_BRIDGE_ARG = ['usage'];
+const META_BRIDGE_ARG = ['meta'];
 
 // The { base, args } invocation for the notify server: the in-sandbox bridge
 // when the session is sandboxed, else the host node binary running the bridge
@@ -80,10 +88,20 @@ function usageInvocation(usage) {
   return { command: MCP_BRIDGE_COMMAND, args: USAGE_BRIDGE_ARG };
 }
 
-export function buildMcpConfigArgsAndEnv(app, { groupMcp = true, notify, usage } = {}) {
+// Same shape again, for the ccserver-meta bridge (wrapper arg 'meta').
+function metaInvocation(meta) {
+  if (meta.mode === 'host') {
+    return { command: process.execPath, args: [NOTIFY_BRIDGE_SCRIPT, ...META_BRIDGE_ARG] };
+  }
+  return { command: MCP_BRIDGE_COMMAND, args: META_BRIDGE_ARG };
+}
+
+export function buildMcpConfigArgsAndEnv(app, { groupMcp = true, notify, usage, meta } = {}) {
   const notifySockEnv = notify ? { CCSANDBOX_NOTIFY_MCP_SOCK: notify.sockPath } : {};
   const notifyIdentityEnv = notify?.identity ? { CCSERVER_NOTIFY_IDENTITY: JSON.stringify(notify.identity) } : {};
   const usageSockEnv = usage ? { CCSANDBOX_USAGE_MCP_SOCK: usage.sockPath } : {};
+  const metaSockEnv = meta ? { CCSANDBOX_META_MCP_SOCK: meta.sockPath } : {};
+  const metaIdentityEnv = meta?.identity ? { CCSERVER_META_IDENTITY: JSON.stringify(meta.identity) } : {};
 
   if (app === 'copilot') {
     return { args: [], env: {} };
@@ -119,6 +137,14 @@ export function buildMcpConfigArgsAndEnv(app, { groupMcp = true, notify, usage }
         env_vars: ['CCSANDBOX_USAGE_MCP_SOCK'],
       };
     }
+    if (meta) {
+      const inv = metaInvocation(meta);
+      servers['ccserver-meta'] = {
+        command: inv.command,
+        args: inv.args,
+        env_vars: ['CCSANDBOX_META_MCP_SOCK', 'CCSERVER_META_IDENTITY'],
+      };
+    }
     const args = [];
     for (const [name, server] of Object.entries(servers)) {
       // JSON strings/arrays are valid TOML basic strings/arrays, which keeps
@@ -134,6 +160,8 @@ export function buildMcpConfigArgsAndEnv(app, { groupMcp = true, notify, usage }
         ...notifySockEnv,
         ...notifyIdentityEnv,
         ...usageSockEnv,
+        ...metaSockEnv,
+        ...metaIdentityEnv,
       },
     };
   }
@@ -145,6 +173,14 @@ export function buildMcpConfigArgsAndEnv(app, { groupMcp = true, notify, usage }
       const inv = notifyInvocation(notify);
       mcp['ccserver-notify'] = { type: 'local', command: [inv.command, ...inv.args] };
     }
+    if (usage) {
+      const inv = usageInvocation(usage);
+      mcp['ccserver-usage'] = { type: 'local', command: [inv.command, ...inv.args] };
+    }
+    if (meta) {
+      const inv = metaInvocation(meta);
+      mcp['ccserver-meta'] = { type: 'local', command: [inv.command, ...inv.args] };
+    }
     return {
       args: [],
       env: {
@@ -154,6 +190,9 @@ export function buildMcpConfigArgsAndEnv(app, { groupMcp = true, notify, usage }
         }),
         ...notifySockEnv,
         ...notifyIdentityEnv,
+        ...usageSockEnv,
+        ...metaSockEnv,
+        ...metaIdentityEnv,
       },
     };
   }
@@ -168,6 +207,10 @@ export function buildMcpConfigArgsAndEnv(app, { groupMcp = true, notify, usage }
     const inv = usageInvocation(usage);
     mcpServers['ccserver-usage'] = { type: 'stdio', command: inv.command, args: inv.args };
   }
+  if (meta) {
+    const inv = metaInvocation(meta);
+    mcpServers['ccserver-meta'] = { type: 'stdio', command: inv.command, args: inv.args };
+  }
   return {
     args: [
       '--mcp-config',
@@ -177,6 +220,8 @@ export function buildMcpConfigArgsAndEnv(app, { groupMcp = true, notify, usage }
       ...notifySockEnv,
       ...notifyIdentityEnv,
       ...usageSockEnv,
+      ...metaSockEnv,
+      ...metaIdentityEnv,
     },
   };
 }

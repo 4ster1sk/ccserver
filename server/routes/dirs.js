@@ -8,6 +8,115 @@ import { resolvedHostname } from '../ws/notify.js';
 
 const execFileAsync = promisify(execFile);
 
+// Directory listing shared by GET /api/dirs and the meta agent's
+// browse_directory tool (plan section 4.3): one implementation so the HTTP
+// surface and the MCP surface can never disagree. Returns
+// { ok:true, data } or { ok:false, code:'not-found'|'forbidden', message }.
+export async function browseDirectory(requestedPath = '/', showHidden = false) {
+  const absPath = resolve('/', requestedPath || '/');
+  try {
+    const entries = await readdir(absPath, { withFileTypes: true });
+
+    const dirs = entries
+      .filter((entry) => {
+        if (!entry.isDirectory()) return false;
+        if (!showHidden && entry.name.startsWith('.')) return false;
+        return true;
+      })
+      .map((entry) => ({
+        name: entry.name,
+        path: join(absPath, entry.name),
+      }))
+      .sort((a, b) => a.name.localeCompare(b.name));
+
+    const fileEntries = entries.filter((entry) => {
+      if (!entry.isFile()) return false;
+      if (!showHidden && entry.name.startsWith('.')) return false;
+      return true;
+    });
+
+    const files = await Promise.all(
+      fileEntries.map(async (entry) => {
+        const filePath = join(absPath, entry.name);
+        try {
+          const st = await stat(filePath);
+          return { name: entry.name, path: filePath, size: st.size, mtime: st.mtimeMs };
+        } catch {
+          return { name: entry.name, path: filePath, size: 0, mtime: 0 };
+        }
+      })
+    );
+    files.sort((a, b) => a.name.localeCompare(b.name));
+
+    return {
+      ok: true,
+      data: {
+        current: absPath,
+        parent: absPath === '/' ? null : resolve(absPath, '..'),
+        dirs,
+        files,
+      },
+    };
+  } catch (err) {
+    if (err.code === 'ENOENT') {
+      return { ok: false, code: 'not-found', message: 'Directory not found' };
+    }
+    if (err.code === 'EACCES') {
+      return { ok: false, code: 'forbidden', message: 'Permission denied' };
+    }
+    throw err;
+  }
+}
+
+// Directory creation shared by POST /api/dirs and the meta agent's
+// create_directory tool. Returns { ok:true, data } or
+// { ok:false, code, message } with codes 'validation' | 'conflict' |
+// 'forbidden' | 'not-found' | 'git-init-failed' | 'internal'.
+export async function createDirectory({ parent, name, gitInit }) {
+  if (!parent || !name) {
+    return { ok: false, code: 'validation', message: 'parent and name are required' };
+  }
+
+  if (name.includes('/') || name.includes('\\') || name === '.' || name === '..') {
+    return { ok: false, code: 'validation', message: 'Invalid folder name' };
+  }
+
+  const absParent = resolve('/', parent);
+  const newPath = join(absParent, name);
+
+  try {
+    await mkdir(newPath);
+  } catch (err) {
+    if (err.code === 'EEXIST') {
+      return { ok: false, code: 'conflict', message: 'Directory already exists' };
+    }
+    if (err.code === 'EACCES') {
+      return { ok: false, code: 'forbidden', message: 'Permission denied' };
+    }
+    if (err.code === 'ENOENT') {
+      return { ok: false, code: 'not-found', message: 'Parent directory not found' };
+    }
+    return { ok: false, code: 'internal', message: err.message };
+  }
+
+  // Optional git init (opt-in): the directory itself was created above and
+  // is kept even when this fails -- only the error is surfaced, so the user
+  // can retry `git init` manually. Fixed argv (no shell, no user-controlled
+  // arguments), cwd pinned to the freshly created directory.
+  if (gitInit === true) {
+    try {
+      await execFileAsync('git', ['init'], { cwd: newPath, timeout: 10000 });
+    } catch (err) {
+      const detail = err.code === 'ENOENT'
+        ? 'git is not installed on this server'
+        : (err.stderr && err.stderr.trim()) || err.message;
+      return { ok: false, code: 'git-init-failed', message: `Directory created but git init failed: ${detail}`, data: { path: newPath } };
+    }
+  }
+
+  return { ok: true, data: { path: newPath } };
+}
+
 export async function dirsRoute(fastify, opts) {
   fastify.get('/dirs/home', async () => {
     const { defaultApp, forceSandbox, showUsage } = loadSandboxConfig();
@@ -22,105 +131,27 @@ export async function dirsRoute(fastify, opts) {
   });
 
   fastify.get('/dirs', async (request, reply) => {
-    const requestedPath = request.query.path || '/';
-    const absPath = resolve('/', requestedPath);
-
-    try {
-      const entries = await readdir(absPath, { withFileTypes: true });
-      const showHidden = !!request.query.showHidden;
-
-      const dirs = entries
-        .filter((entry) => {
-          if (!entry.isDirectory()) return false;
-          if (!showHidden && entry.name.startsWith('.')) return false;
-          return true;
-        })
-        .map((entry) => ({
-          name: entry.name,
-          path: join(absPath, entry.name),
-        }))
-        .sort((a, b) => a.name.localeCompare(b.name));
-
-      const fileEntries = entries.filter((entry) => {
-        if (!entry.isFile()) return false;
-        if (!showHidden && entry.name.startsWith('.')) return false;
-        return true;
-      });
-
-      const files = await Promise.all(
-        fileEntries.map(async (entry) => {
-          const filePath = join(absPath, entry.name);
-          try {
-            const st = await stat(filePath);
-            return { name: entry.name, path: filePath, size: st.size, mtime: st.mtimeMs };
-          } catch {
-            return { name: entry.name, path: filePath, size: 0, mtime: 0 };
-          }
-        })
-      );
-      files.sort((a, b) => a.name.localeCompare(b.name));
-
-      return {
-        current: absPath,
-        parent: absPath === '/' ? null : resolve(absPath, '..'),
-        dirs,
-        files,
-      };
-    } catch (err) {
-      if (err.code === 'ENOENT') {
-        return reply.code(404).send({ error: 'Directory not found' });
-      }
-      if (err.code === 'EACCES') {
-        return reply.code(403).send({ error: 'Permission denied' });
-      }
-      throw err;
+    const res = await browseDirectory(request.query.path || '/', !!request.query.showHidden);
+    if (!res.ok) {
+      const status = res.code === 'not-found' ? 404 : res.code === 'forbidden' ? 403 : 500;
+      return reply.code(status).send({ error: res.message });
     }
+    return res.data;
   });
 
   fastify.post('/dirs', async (request, reply) => {
-    const { parent, name, gitInit } = request.body || {};
-
-    if (!parent || !name) {
-      return reply.code(400).send({ error: 'parent and name are required' });
+    const res = await createDirectory(request.body || {});
+    if (!res.ok) {
+      const status = res.code === 'validation' ? 400
+        : res.code === 'conflict' ? 409
+        : res.code === 'forbidden' ? 403
+        : res.code === 'not-found' ? 404
+        : res.code === 'git-init-failed' ? 500
+        : 500;
+      const payload = { error: res.message };
+      if (res.data?.path) payload.path = res.data.path;
+      return reply.code(status).send(payload);
     }
-
-    if (name.includes('/') || name.includes('\\') || name === '.' || name === '..') {
-      return reply.code(400).send({ error: 'Invalid folder name' });
-    }
-
-    const absParent = resolve('/', parent);
-    const newPath = join(absParent, name);
-
-    try {
-      await mkdir(newPath);
-    } catch (err) {
-      if (err.code === 'EEXIST') {
-        return reply.code(409).send({ error: 'Directory already exists' });
-      }
-      if (err.code === 'EACCES') {
-        return reply.code(403).send({ error: 'Permission denied' });
-      }
-      if (err.code === 'ENOENT') {
-        return reply.code(404).send({ error: 'Parent directory not found' });
-      }
-      throw err;
-    }
-
-    // Optional git init (opt-in): the directory itself was created above and
-    // is kept even when this fails -- only the error is surfaced, so the user
-    // can retry `git init` manually. Fixed argv (no shell, no user-controlled
-    // arguments), cwd pinned to the freshly created directory.
-    if (gitInit === true) {
-      try {
-        await execFileAsync('git', ['init'], { cwd: newPath, timeout: 10000 });
-      } catch (err) {
-        const detail = err.code === 'ENOENT'
-          ? 'git is not installed on this server'
-          : (err.stderr && err.stderr.trim()) || err.message;
-        return reply.code(500).send({ error: `Directory created but git init failed: ${detail}`, path: newPath });
-      }
-    }
-
-    return { path: newPath };
+    return res.data;
   });
 }

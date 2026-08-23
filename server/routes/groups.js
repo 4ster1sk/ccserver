@@ -171,181 +171,205 @@ export function orchestratorRestartSessionOpts({ group, app, model = null, sandb
   };
 }
 
-export async function groupsRoute(fastify, opts) {
-  fastify.post('/groups', async (request, reply) => {
-    const body = request.body || {};
-    const { cwd } = body;
+// Shared combo-launch implementation for POST /groups and the meta agent's
+// launch_group tool (plan section 4.3): one body so the HTTP surface and the
+// MCP surface can never drift. Takes the SAME canonical payload as the route
+// (cwd/workers/orchestrator/instructions/sandboxOpts -- legacy workerA/
+// workerB shapes included via normalizeWorkers) and returns result objects:
+//   { ok: true, body }   -> the exact JSON the route used to send
+//   { ok: false, code, message } with codes 'validation' | 'conflict' |
+//   'internal' (the route maps them to 400/409/500).
+export async function launchGroupFromSpec(body) {
+  const input = body || {};
+  const { cwd } = input;
 
-    if (!validCwd(cwd)) {
-      return reply.code(400).send({ error: 'cwd must be an existing directory (not /)' });
-    }
-    // The orchestrator dir is derived from cwd, so a second group for the same
-    // project would share it (cross-talk through resumeLast, CLAUDE.md fights).
-    // Refuse up front -- live or closed -- and point at the existing group.
-    const existingGroup = groupExistsForCwd(cwd, groupManager.listGroups());
-    if (existingGroup) {
-      return reply.code(409).send({
-        error: existingGroup.liveCount > 0
-          ? `a group is already running for this project (${existingGroup.groupId}); use it instead of creating a new one`
-          : `a group already exists for this project (${existingGroup.groupId}, currently closed); reopen it instead of creating a new one`,
-      });
-    }
-    if (!sandboxAvailable()) {
-      return reply.code(400).send({ error: 'combo launch requires the sandbox (bwrap not found on this host)' });
-    }
-
-    // Canonical workers[] snapshot or the legacy workerA/workerB adapter --
-    // see normalizeWorkers above.
-    const workersNorm = normalizeWorkers(body);
-    if (workersNorm.error) {
-      return reply.code(400).send({ error: workersNorm.error });
-    }
-    const { workers } = workersNorm;
-    const orchestrator = memberSpecFromBody(body.orchestrator);
-    // copilot has no CLI-arg/env MCP injection (config-file only), so combo
-    // members can never use the group's broker tools -- refuse it explicitly
-    // here. Codex supports process-scoped -c MCP overrides. (The canonical
-    // path's whitelist already refused copilot inside normalizeWorkers; this
-    // also covers the legacy specs' "present but not a known app" shape.)
-    const invalidApp = (spec) => Object.prototype.hasOwnProperty.call(spec || {}, 'app')
-      && (!spec.app || spec.app === 'copilot');
-    if (workers.some(({ spec }) => invalidApp(spec)) || invalidApp(orchestrator)) {
-      return reply.code(400).send({ error: 'worker app must be claude, opencode, or codex (copilot is not supported in groups)' });
-    }
-    const badModel = (spec) => Object.prototype.hasOwnProperty.call(spec || {}, 'model') && spec.model === undefined;
-    if (workers.some(({ spec }) => badModel(spec)) || badModel(orchestrator)) {
-      return reply.code(400).send({ error: 'member model must be a string or null' });
-    }
-    const sandboxOpts = (body.sandboxOpts && typeof body.sandboxOpts === 'object')
-      ? { gpg: !!body.sandboxOpts.gpg, sshAgent: !!body.sandboxOpts.sshAgent }
-      : null;
-
-    const groupId = randomUUID();
-    const orchestratorDir = orchestratorDirForCwd(cwd);
-    // Only a dir this request created is cleaned up on failure: a reused dir
-    // is a per-project resource (see the header comment) that must survive a
-    // failed launch.
-    const dirAlreadyExisted = existsSync(orchestratorDir);
-    try {
-      mkdirSync(orchestratorDir, { recursive: true, mode: 0o700 });
-    } catch (err) {
-      return reply.code(500).send({ error: `Failed to create orchestrator dir: ${err.message}` });
-    }
-
-    const instructions = (body.orchestrator && typeof body.orchestrator.instructions === 'string'
-      && body.orchestrator.instructions.trim())
-      ? body.orchestrator.instructions
-      : null;
-
-    // Broker start failures (socket path collision, permission errors, ...)
-    // must surface as a launch error, not a silent "success".
-    // memberPrefs are seeded from the launch snapshot itself (role -> name/
-    // app/model/sandboxOpts), keyed by the workers' actual roles -- the
-    // fixed workerA/workerB pair is just the legacy adapter's two roles.
-    try {
-      await groupManager.createGroup({
-        groupId,
-        cwd,
-        orchestratorDir,
-        sandboxOpts,
-        orchestratorApp: orchestrator.app,
-        orchestratorModel: orchestrator.model,
-        orchestratorSandboxOpts: orchestrator.sandboxOpts ?? null,
-        memberPrefs: {
-          ...Object.fromEntries(workers.map(({ role, spec }) => [role, spec])),
-          orchestrator,
-        },
-        instructions,
-      });
-    } catch (err) {
-      if (!dirAlreadyExisted) { try { rmSync(orchestratorDir, { recursive: true, force: true }); } catch { /* best effort */ } }
-      return reply.code(500).send({ error: `Failed to start control broker: ${err.message}` });
-    }
-    const controlBroker = groupManager.getGroup(groupId).controlBroker;
-
-    // Roll back cleanly if any of the three spawns fails.
-    const fail = (message) => {
-      groupManager.destroyGroup(groupId);
-      if (!dirAlreadyExisted) { try { rmSync(orchestratorDir, { recursive: true, force: true }); } catch { /* best effort */ } }
-      return reply.code(400).send({ error: message });
-    };
-
-    // Merge the template with `instructions` and write the result to the
-    // host-only overlay path; sandbox.js ro-binds it over CLAUDE.md/AGENTS.md
-    // (see the header comment). Generated only now that the group record
-    // exists (group.instructions is what the merge reads).
-    let orchestratorClaudeMdSrc;
-    try {
-      orchestratorClaudeMdSrc = groupManager.generateOrchestratorClaudeMdSrc(groupId);
-    } catch (err) {
-      return fail(`failed to generate orchestrator instructions: ${err.message}`);
-    }
-    // A null return (group/orchestratorDir unexpectedly missing) is just as
-    // fatal as a thrown error here: launching with orchestratorClaudeMdSrc
-    // unset means createSession skips the ro-bind entirely and the
-    // orchestrator gets a plain writable CLAUDE.md/AGENTS.md -- silently
-    // reopening the self-modification hole this whole mechanism exists to
-    // close. Fail closed, matching the auto-resume resolver in
-    // sessionManager.js's fireSchedule.
-    if (!orchestratorClaudeMdSrc) {
-      return fail('failed to generate orchestrator instructions: no CLAUDE.md overlay was produced');
-    }
-
-    // Workers reuse addMember (the open_tab path) so validation, channel
-    // creation, session spawn and registration can't drift between the
-    // initial members and later open_tab additions. All workers in parallel.
-    const workerResults = await Promise.all(
-      workers.map(async ({ role, spec }) => ({
-        role,
-        res: await groupManager.addMember(groupId, role, { ...spec, cwd }),
-      })),
-    );
-    for (const { role, res } of workerResults) {
-      if (res.error) return fail(`worker ${role} failed to launch: ${res.message || res.error}`);
-    }
-
-    const orchRes = createSession({
-      cwd: orchestratorDir,
-      cols: 80,
-      rows: 24,
-      sandbox: true,
-      sandboxOpts: orchestrator.sandboxOpts ?? null,
-      // An absent orchestrator app must not fall through to createSession's
-      // defaultApp(): a config defaulting to copilot would launch a group
-      // member copilot can't run (no MCP injection). claude is the group
-      // default.
-      app: orchestrator.app || 'claude',
-      model: orchestrator.model ?? null,
-      groupId,
-      groupRole: 'orchestrator',
-      // The session's cwd is the hashed orchestratorDir; the notify footer
-      // must attribute the orchestrator to the real project instead.
-      projectName: basename(cwd),
-      mcpSocketPath: controlBroker ? controlBroker.sockPath : null,
-      orchestratorClaudeMdSrc,
-    });
-    if (orchRes.error || !orchRes.session) {
-      return fail(`orchestrator failed to launch: ${orchRes.error || 'unknown error'}`);
-    }
-    groupManager.registerMember(groupId, 'orchestrator', orchRes.sessionId);
-    groupManager.setMemberPrefs(groupId, 'orchestrator', {
-      app: orchRes.session.app,
-      model: orchRes.session.model,
-      sandboxOpts: orchestrator.sandboxOpts ?? null,
-    });
-    // Assembly is complete: the group is now subject to the "no live members"
-    // auto-destroy in onSessionExit. Before this point a member crash must
-    // not tear the half-built group (and its control broker) down.
-    groupManager.markGroupAssembled(groupId);
-
-    fastify.log.info(`[groups] ${groupId} launched at ${cwd} (workers ${workers.map(({ role, spec }) => `${role}:${spec.app || 'default'}`).join(', ')}, orchestrator ${orchRes.session.app})`);
+  if (!validCwd(cwd)) {
+    return { ok: false, code: 'validation', message: 'cwd must be an existing directory (not /)' };
+  }
+  // The orchestrator dir is derived from cwd, so a second group for the same
+  // project would share it (cross-talk through resumeLast, CLAUDE.md fights).
+  // Refuse up front -- live or closed -- and point at the existing group.
+  const existingGroup = groupExistsForCwd(cwd, groupManager.listGroups());
+  if (existingGroup) {
     return {
+      ok: false,
+      code: 'conflict',
+      message: existingGroup.liveCount > 0
+        ? `a group is already running for this project (${existingGroup.groupId}); use it instead of creating a new one`
+        : `a group already exists for this project (${existingGroup.groupId}, currently closed); reopen it instead of creating a new one`,
+    };
+  }
+  if (!sandboxAvailable()) {
+    return { ok: false, code: 'validation', message: 'combo launch requires the sandbox (bwrap not found on this host)' };
+  }
+
+  // Canonical workers[] snapshot or the legacy workerA/workerB adapter --
+  // see normalizeWorkers above.
+  const workersNorm = normalizeWorkers(input);
+  if (workersNorm.error) {
+    return { ok: false, code: 'validation', message: workersNorm.error };
+  }
+  const { workers } = workersNorm;
+  const orchestrator = memberSpecFromBody(input.orchestrator);
+  // copilot has no CLI-arg/env MCP injection (config-file only), so combo
+  // members can never use the group's broker tools -- refuse it explicitly
+  // here. Codex supports process-scoped -c MCP overrides. (The canonical
+  // path's whitelist already refused copilot inside normalizeWorkers; this
+  // also covers the legacy specs' "present but not a known app" shape.)
+  const invalidApp = (spec) => Object.prototype.hasOwnProperty.call(spec || {}, 'app')
+    && (!spec.app || spec.app === 'copilot');
+  if (workers.some(({ spec }) => invalidApp(spec)) || invalidApp(orchestrator)) {
+    return { ok: false, code: 'validation', message: 'worker app must be claude, opencode, or codex (copilot is not supported in groups)' };
+  }
+  const badModel = (spec) => Object.prototype.hasOwnProperty.call(spec || {}, 'model') && spec.model === undefined;
+  if (workers.some(({ spec }) => badModel(spec)) || badModel(orchestrator)) {
+    return { ok: false, code: 'validation', message: 'member model must be a string or null' };
+  }
+  const sandboxOpts = (input.sandboxOpts && typeof input.sandboxOpts === 'object')
+    ? { gpg: !!input.sandboxOpts.gpg, sshAgent: !!input.sandboxOpts.sshAgent }
+    : null;
+
+  const groupId = randomUUID();
+  const orchestratorDir = orchestratorDirForCwd(cwd);
+  // Only a dir this request created is cleaned up on failure: a reused dir
+  // is a per-project resource (see the header comment) that must survive a
+  // failed launch.
+  const dirAlreadyExisted = existsSync(orchestratorDir);
+  try {
+    mkdirSync(orchestratorDir, { recursive: true, mode: 0o700 });
+  } catch (err) {
+    return { ok: false, code: 'internal', message: `Failed to create orchestrator dir: ${err.message}` };
+  }
+
+  const instructions = (input.orchestrator && typeof input.orchestrator.instructions === 'string'
+    && input.orchestrator.instructions.trim())
+    ? input.orchestrator.instructions
+    : null;
+
+  // Broker start failures (socket path collision, permission errors, ...)
+  // must surface as a launch error, not a silent "success".
+  // memberPrefs are seeded from the launch snapshot itself (role -> name/
+  // app/model/sandboxOpts), keyed by the workers' actual roles -- the
+  // fixed workerA/workerB pair is just the legacy adapter's two roles.
+  try {
+    await groupManager.createGroup({
+      groupId,
+      cwd,
+      orchestratorDir,
+      sandboxOpts,
+      orchestratorApp: orchestrator.app,
+      orchestratorModel: orchestrator.model,
+      orchestratorSandboxOpts: orchestrator.sandboxOpts ?? null,
+      memberPrefs: {
+        ...Object.fromEntries(workers.map(({ role, spec }) => [role, spec])),
+        orchestrator,
+      },
+      instructions,
+    });
+  } catch (err) {
+    if (!dirAlreadyExisted) { try { rmSync(orchestratorDir, { recursive: true, force: true }); } catch { /* best effort */ } }
+    return { ok: false, code: 'internal', message: `Failed to start control broker: ${err.message}` };
+  }
+  const controlBroker = groupManager.getGroup(groupId).controlBroker;
+
+  // Roll back cleanly if any of the three spawns fails.
+  const fail = (message) => {
+    groupManager.destroyGroup(groupId);
+    if (!dirAlreadyExisted) { try { rmSync(orchestratorDir, { recursive: true, force: true }); } catch { /* best effort */ } }
+    return { ok: false, code: 'validation', message };
+  };
+
+  // Merge the template with `instructions` and write the result to the
+  // host-only overlay path; sandbox.js ro-binds it over CLAUDE.md/AGENTS.md
+  // (see the header comment). Generated only now that the group record
+  // exists (group.instructions is what the merge reads).
+  let orchestratorClaudeMdSrc;
+  try {
+    orchestratorClaudeMdSrc = groupManager.generateOrchestratorClaudeMdSrc(groupId);
+  } catch (err) {
+    return fail(`failed to generate orchestrator instructions: ${err.message}`);
+  }
+  // A null return (group/orchestratorDir unexpectedly missing) is just as
+  // fatal as a thrown error here: launching with orchestratorClaudeMdSrc
+  // unset means createSession skips the ro-bind entirely and the
+  // orchestrator gets a plain writable CLAUDE.md/AGENTS.md -- silently
+  // reopening the self-modification hole this whole mechanism exists to
+  // close. Fail closed, matching the auto-resume resolver in
+  // sessionManager.js's fireSchedule.
+  if (!orchestratorClaudeMdSrc) {
+    return fail('failed to generate orchestrator instructions: no CLAUDE.md overlay was produced');
+  }
+
+  // Workers reuse addMember (the open_tab path) so validation, channel
+  // creation, session spawn and registration can't drift between the
+  // initial members and later open_tab additions. All workers in parallel.
+  const workerResults = await Promise.all(
+    workers.map(async ({ role, spec }) => ({
+      role,
+      res: await groupManager.addMember(groupId, role, { ...spec, cwd }),
+    })),
+  );
+  for (const { role, res } of workerResults) {
+    if (res.error) return fail(`worker ${role} failed to launch: ${res.message || res.error}`);
+  }
+
+  const orchRes = createSession({
+    cwd: orchestratorDir,
+    cols: 80,
+    rows: 24,
+    sandbox: true,
+    sandboxOpts: orchestrator.sandboxOpts ?? null,
+    // An absent orchestrator app must not fall through to createSession's
+    // defaultApp(): a config defaulting to copilot would launch a group
+    // member copilot can't run (no MCP injection). claude is the group
+    // default.
+    app: orchestrator.app || 'claude',
+    model: orchestrator.model ?? null,
+    groupId,
+    groupRole: 'orchestrator',
+    // The session's cwd is the hashed orchestratorDir; the notify footer
+    // must attribute the orchestrator to the real project instead.
+    projectName: basename(cwd),
+    mcpSocketPath: controlBroker ? controlBroker.sockPath : null,
+    orchestratorClaudeMdSrc,
+  });
+  if (orchRes.error || !orchRes.session) {
+    return fail(`orchestrator failed to launch: ${orchRes.error || 'unknown error'}`);
+  }
+  groupManager.registerMember(groupId, 'orchestrator', orchRes.sessionId);
+  groupManager.setMemberPrefs(groupId, 'orchestrator', {
+    app: orchRes.session.app,
+    model: orchRes.session.model,
+    sandboxOpts: orchestrator.sandboxOpts ?? null,
+  });
+  // Assembly is complete: the group is now subject to the "no live members"
+  // auto-destroy in onSessionExit. Before this point a member crash must
+  // not tear the half-built group (and its control broker) down.
+  groupManager.markGroupAssembled(groupId);
+
+  return {
+    ok: true,
+    log: `[groups] ${groupId} launched at ${cwd} (workers ${workers.map(({ role, spec }) => `${role}:${spec.app || 'default'}`).join(', ')}, orchestrator ${orchRes.session.app})`,
+    body: {
       groupId,
       cwd,
       members: groupManager.listGroupMembers(groupId),
       currentTurn: groupManager.getGroup(groupId)?.currentTurn ?? null,
       lastHandoffAt: groupManager.getGroup(groupId)?.lastHandoffAt ?? null,
-    };
+    },
+  };
+}
+
+const STATUS_FOR_CODE = { validation: 400, conflict: 409, internal: 500 };
+
+export async function groupsRoute(fastify, opts) {
+  fastify.post('/groups', async (request, reply) => {
+    const res = await launchGroupFromSpec(request.body);
+    if (!res.ok) {
+      return reply.code(STATUS_FOR_CODE[res.code] || 500).send({ error: res.message });
+    }
+    if (res.log) fastify.log.info(res.log);
+    return res.body;
   });
 
   fastify.get('/groups', async (request, reply) => {

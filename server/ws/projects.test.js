@@ -19,7 +19,7 @@ import {
   forgetSandboxHome,
 } from './projects.js';
 // Lockstep guards: the v2 migration and slugForCwd must agree with sandbox.js.
-import { legacyHomeIndexFile, getDb } from '../db.js';
+import { legacyHomeIndexFile, getDb, MIGRATIONS } from '../db.js';
 import { sandboxHomeRoot } from './sandbox.js';
 import { projectHashForCwd } from './projectHash.js';
 import { closeDb } from '../db.js';
@@ -59,7 +59,8 @@ test('v2 migration imports the legacy home index and retires the file', () => {
     JSON.stringify({ [slugA]: cwdA, [slugB]: cwdB, bad: 42 }));
 
   const db = getDb(); // first open: runs up() + importLegacy + postApply
-  assert.equal(Number(db.prepare('PRAGMA user_version').get().user_version), 2);
+  assert.equal(Number(db.prepare('PRAGMA user_version').get().user_version), MIGRATIONS[MIGRATIONS.length - 1].version,
+    'all migrations applied (this file predates v3/v4; the version is whatever the array ends at)');
 
   const rows = listSandboxRowsBySlug();
   const a = rows.get(slugA);

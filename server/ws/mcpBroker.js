@@ -17,7 +17,7 @@
 import { createServer } from 'node:net';
 import { rmSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { SocketTransport, buildControlMcpServer, buildHandoffMcpServer, buildNotifyMcpServer, buildUsageMcpServer, MAX_TRANSPORT_BUFFER_CHARS } from './mcpServer.js';
+import { SocketTransport, buildControlMcpServer, buildHandoffMcpServer, buildNotifyMcpServer, buildUsageMcpServer, buildMetaMcpServer, MAX_TRANSPORT_BUFFER_CHARS } from './mcpServer.js';
 
 const UID = typeof process.getuid === 'function' ? process.getuid() : 0;
 const RUNTIME_BASE = process.env.XDG_RUNTIME_DIR || `/run/user/${UID}`;
@@ -241,6 +241,24 @@ export async function startUsageBroker({ usageApi, sockPath }) {
     sockPath,
     tag: 'usage',
     buildServer: () => buildUsageMcpServer({ usageApi }),
+  });
+}
+
+// The process-global meta-agent broker (ccserver-meta, see metaAgent.js). One
+// per server process, NOT group-scoped -- this is the single PRIVILEGED
+// socket through which the meta agent manages every group/session/sandbox.
+// The per-connection identity frame (CCSERVER_META_IDENTITY via the bridge,
+// same mechanism as notify) carries the caller's own sessionId/groupId for
+// the tools' self-target guards; the trust boundary itself is that exactly
+// one sandbox ever binds this socket.
+export async function startMetaBroker({ metaDeps, sockPath }) {
+  return listenMcp({
+    sockPath,
+    tag: 'meta',
+    // Per-connection deps: the identity frame differs per accepted socket, so
+    // the server is built with a connection-specific deps object (the shared
+    // metaDeps carry only process-global managers).
+    buildServer: (identity, connectionIsAlive) => buildMetaMcpServer({ ...metaDeps, identity, connectionIsAlive }),
   });
 }
 

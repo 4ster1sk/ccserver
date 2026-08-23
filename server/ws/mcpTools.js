@@ -204,11 +204,13 @@ export async function sendInput(deps, { sessionId, text, submit = true }) {
     : { error: 'not-found', message: 'session not found or exited' };
 }
 
-// Cap a requested sandboxOpts against the orchestrator's own (see
-// groupManager.getOrchestratorSandboxOpts): a flag can never be granted to a
-// genuinely new member that the orchestrator does not itself currently
-// hold. Missing requested / cap flags resolve to false (deny by default).
-function capSandboxOpts(requested, cap) {
+// Cap a requested sandboxOpts against a grant-holder's own (see
+// groupManager.getOrchestratorSandboxCoords for the orchestrator case):
+// a flag can never be granted to someone who does not already hold it.
+// Missing requested / cap flags resolve to false (deny by default).
+// Exported for the meta agent's launch tools, which apply the SAME rule with
+// the meta agent's own current sandboxOpts as the cap (plan section 4.1).
+export function capSandboxOpts(requested, cap) {
   if (!requested) return requested;
   return {
     gpg: !!requested.gpg && !!cap?.gpg,

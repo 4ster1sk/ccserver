@@ -1,9 +1,31 @@
-import { listSessions, getSession, destroySession } from '../ws/sessionManager.js';
+// Session REST surface: list, terminate, and (new with the meta-agent work)
+// CREATE a standalone session over HTTP.
+//
+// POST /api/sessions exists because the meta agent needs a stateless
+// "launch exactly one session" primitive: until now standalone sessions could
+// only be created through the browser's WS `init` message, which no headless
+// caller can use. The handler body lives in createSessionViaApi() so the meta
+// agent's launch_session tool calls the SAME function instead of duplicating
+// the validation (REST and MCP launches can never drift).
+
+import { homedir } from 'node:os';
+import { statSync } from 'node:fs';
+import { createSession, getSession, destroySession, listSessions } from '../ws/sessionManager.js';
+import { isValidApp } from '../ws/appLaunch.js';
 
 export async function sessionsRoute(fastify, opts) {
   fastify.get('/sessions', async (request, reply) => {
     const activeSessions = listSessions();
     return { sessions: activeSessions };
+  });
+
+  fastify.post('/sessions', async (request, reply) => {
+    const res = await createSessionViaApi(request.body || {});
+    if (!res.ok) {
+      const status = res.code === 'validation' ? 400 : 500;
+      return reply.code(status).send({ error: res.message });
+    }
+    return res.body;
   });
 
   fastify.delete('/sessions/:id', async (request, reply) => {
@@ -29,4 +51,69 @@ export async function sessionsRoute(fastify, opts) {
       return { raw: raw.slice(-5000), stripped: stripAnsi(raw).slice(-5000) };
     });
   }
+}
+
+// Shared implementation for POST /api/sessions and the meta agent's
+// launch_session tool. body:
+//   { cwd, app?, model?, shell?, sandbox?, sandboxOpts?, resume?,
+//     reuseSandboxHome?, isMetaAgent?, requestedBy? }
+// Returns { ok:true, body } or { ok:false, code:'validation'|'internal',
+// message }. Spawning happens synchronously inside createSession; a failed
+// spawn surfaces as validation-shaped 400 (the client-visible contract of
+// every other launch path).
+export async function createSessionViaApi(body) {
+  const cwd = typeof body.cwd === 'string' && body.cwd ? body.cwd : null;
+  // The WS init path never needed this (the browser only offers real
+  // directories), but a headless caller can pass anything: verify the
+  // directory exists BEFORE spawning, or node-pty's post-chdir failure would
+  // leave a session that dies with an opaque exit code.
+  let cwdIsDir = false;
+  try { cwdIsDir = statSync(cwd).isDirectory(); } catch { /* missing */ }
+  if (!cwd || !cwdIsDir) {
+    return { ok: false, code: 'validation', message: 'cwd must be an existing directory' };
+  }
+  if (body.app !== undefined && body.app !== null && !isValidApp(body.app)) {
+    return { ok: false, code: 'validation', message: 'app must be one of claude, opencode, copilot, codex' };
+  }
+  if (body.sandboxOpts !== undefined && body.sandboxOpts !== null
+    && (typeof body.sandboxOpts !== 'object' || Array.isArray(body.sandboxOpts))) {
+    return { ok: false, code: 'validation', message: 'sandboxOpts must be an object ({ gpg, sshAgent })' };
+  }
+  // isMetaAgent is only meaningful through this REST boundary's meta callers;
+  // a plain HTTP client may set it, but it has no effect unless the config
+  // enables the feature AND the broker is listening (see shouldInjectMetaAgent).
+  const result = createSession({
+    cwd,
+    cols: 80,
+    rows: 24,
+    claudeSessionId: null,
+    shell: !!body.shell,
+    sandbox: !!body.sandbox,
+    sandboxOpts: body.sandboxOpts || null,
+    app: body.app || null,
+    model: typeof body.model === 'string' ? body.model : null,
+    resumeLast: !!body.resume,
+    reuseSandboxHome: body.reuseSandboxHome !== false,
+    isMetaAgent: !!body.isMetaAgent,
+    // Attribution for the sandbox HOME bookkeeping row ('user' |
+    // 'meta-agent:<sessionId>' | ...). Display only.
+    sandboxHomeCreatedBy: typeof body.requestedBy === 'string' && body.requestedBy ? body.requestedBy : 'user',
+  });
+  if (result.error || !result.session) {
+    return { ok: false, code: 'validation', message: result.error || 'failed to create session' };
+  }
+  return {
+    ok: true,
+    body: {
+      sessionId: result.sessionId,
+      cwd: result.session.cwd,
+      app: result.session.app,
+      model: result.session.model,
+      shell: result.session.shell,
+      sandbox: result.session.sandbox,
+      sandboxOpts: result.session.sandboxOpts,
+      isMetaAgent: result.session.isMetaAgent,
+      home: homedir(), // convenience for clients that resolve ~ in cwds
+    },
+  };
 }
