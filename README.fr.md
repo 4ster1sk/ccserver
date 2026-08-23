@@ -66,7 +66,7 @@ Ouvrez <http://localhost:3001>. Le port peut être modifié avec `PORT`.
 2. Utilisez le terminal intégré au navigateur.
 3. Le menu de lancement permet de choisir Claude Code, opencode, GitHub Copilot ou OpenAI Codex, et d'activer si nécessaire le bac à sable, la signature GPG ou le transfert de l'agent SSH.
 
-L'application et les options de lancement sont mémorisées dans le `localStorage` du navigateur. Les sessions combo peuvent utiliser deux workers et un orchestrateur. Elles ne prennent en charge que Claude Code et opencode, car Copilot CLI ne peut pas recevoir les outils MCP de ccserver via les arguments CLI ou les variables d'environnement.
+L'application et les options de lancement sont mémorisées dans le `localStorage` du navigateur. Les sessions combo peuvent utiliser deux workers et un orchestrateur. Elles prennent en charge Claude Code, opencode et OpenAI Codex. Copilot CLI ne peut pas être utilisé en combo car il ne peut pas recevoir les outils MCP de ccserver via les arguments CLI ou les variables d'environnement (configuration par fichier uniquement). Codex est injecté par processus via `-c mcp_servers...` sans modifier `~/.codex/config.toml`.
 
 Le bouton représentant une horloge permet de programmer des prompts. Ceux-ci sont conservés dans `.scheduled-prompts.json` et peuvent être exécutés après la fermeture du navigateur ou un redémarrage du serveur. L'heure est interprétée dans le fuseau horaire du serveur.
 
