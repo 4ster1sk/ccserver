@@ -235,6 +235,15 @@ OpenAI Codexについて:
 
 1 文書あたり 256KB、グループあたり最大 50 件の上限があります。オーケストレーターに `publish_doc` は生えていません (ワーカー間の直接のやり取りが主目的で、ワーカー→オーケストレーターは既存の `handoff_to_orchestrator` を使います)。
 
+コンボのブラウザ<->エージェント間でファイルをやり取りしたい場合 (例: スマホ画像をエージェントに渡す、エージェントが生成したファイルをブラウザでダウンロード) は、グループファイル交換を使ってください — 既存の汎用 `/api/files` とは別経路で、グループIDで完全に隔離されます。
+
+- **ブラウザ -> エージェント**: グループタブの **Files** パネルでドラッグ&ドロップまたはファイル選択でアップロード。エージェントは `list_files` → `fetch_file({ fileId })` で `sandboxPath: /ccserver-group-files/<generated>` を受け取り、サンドボックス内のそのパスを読み取ります (本文バイト列は返しません)。
+- **エージェント -> ブラウザ**: エージェントは自分の worktree 内の相対パスで `publish_file({ path })` を呼び出してグループに公開。ブラウザの Files パネルで一覧・ダウンロードできます。絶対パス、`..`、シンボリックリンクによる worktree 外への脱出は拒否されます。
+- **HTTP API**: `GET /api/groups/:id/files` (一覧), `POST /api/groups/:id/files` (multipart アップロード), `GET /api/groups/:id/files/:fileId` (ダウンロード), `DELETE /api/groups/:id/files/:fileId` (削除)。ディスクパスは一切受け付けません。
+- **MCP**: ワーカーは `list_files` / `fetch_file` / `publish_file`、オーケストレーターは `list_files` / `fetch_file` のみ (publish なし)。すべて `groupId`/role/sessionId を引数に取らず、クロージャに束縛されたグループで隔離されます。
+- **制限**: 1 ファイル 50 MiB、1 グループ 20 ファイル、合計 200 MiB。超過時は `too-large` / `too-many-files` / `quota-exceeded` を返します。`mimeType` は表示名から推測、サイズ・公開者・時刻とともに一覧に表示されます。
+- **ライフサイクル**: すべての記録/Blob はグループIDで隔離され、グループ破棄時に削除されます。サンドボックス内では各メンバーのグループファイルは読み取り専用で `/ccserver-group-files` にマウントされます。
+
 ### コンボ起動: オーケストレーターが `send_input` でワーカーに指示するときの注意
 
 > **copilot はコンボ起動 (グループ) では選択できません** — copilot は MCP を CLI 引数/環境変数で注入する仕組みが無く (設定ファイル経由のため)、グループメンバーにしても ccserver の MCP broker ツール (`send_input` / `wait_for_handoff` 等) が使えないためです。起動モーダルのコンボ UI には選択肢が表示されず、`POST /api/groups` に `app: "copilot"` を渡しても 400 で拒否されます。

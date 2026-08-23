@@ -320,6 +320,108 @@ body {
   font-size: 12px;
 }
 
+/* Group file exchange panel */
+.group-files-panel {
+  position: relative;
+  background: var(--bg-surface);
+  border-bottom: 1px solid var(--border);
+  padding: 6px 12px;
+  flex-shrink: 0;
+  font-size: 12px;
+}
+.group-files-panel.drag-over {
+  background: var(--bg-secondary);
+  outline: 2px dashed var(--accent);
+}
+.group-files-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.group-files-title {
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.group-files-count {
+  color: var(--text-muted);
+}
+.group-files-upload-btn {
+  margin-left: auto;
+  padding: 3px 10px;
+  font-size: 12px;
+}
+.group-files-progress {
+  margin-top: 6px;
+  color: var(--accent);
+}
+.group-files-error {
+  margin-top: 6px;
+  color: var(--error);
+}
+.group-files-empty {
+  margin-top: 6px;
+  color: var(--text-muted);
+  font-size: 11px;
+}
+.group-files-list {
+  margin-top: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 120px;
+  overflow-y: auto;
+}
+.group-files-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 6px;
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  min-width: 0;
+}
+.group-files-name {
+  font-weight: 500;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.group-files-meta {
+  color: var(--text-muted);
+  font-size: 10px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 220px;
+}
+@media (max-width: 600px) {
+  .group-files-meta {
+    max-width: 120px;
+  }
+}
+.group-files-download-btn,
+.group-files-delete-btn {
+  padding: 2px 6px;
+  font-size: 11px;
+  flex-shrink: 0;
+}
+.group-files-drag-overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0,0,0,0.4);
+  color: var(--text-primary);
+  font-weight: 600;
+  pointer-events: none;
+}
+
 .theme-picker {
   position: relative;
   flex-shrink: 0;

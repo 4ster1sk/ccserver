@@ -140,6 +140,20 @@ export function buildControlMcpServer(deps) {
   );
 
   server.tool(
+    'list_files',
+    'List files shared in this group (id, name, size, mimeType, direction, publishedBy, publishedAt) without their content -- fetch_file the ones you need. Files are isolated by group and removed when the group is destroyed.',
+    {},
+    async () => ({ content: [{ type: 'text', text: JSON.stringify(tools.listFiles(deps)) }] }),
+  );
+
+  server.tool(
+    'fetch_file',
+    'Fetch metadata for a file shared in this group and get its read-only sandbox path. Returns id, name, size, mimeType, direction, publishedBy, publishedAt, and sandboxPath (/ccserver-group-files/<generated>). The file is readable at that path inside your sandbox; no blob bytes are returned in the tool response.',
+    { fileId: z.string() },
+    async (args) => ({ content: [{ type: 'text', text: JSON.stringify(tools.fetchFile(deps, args)) }] }),
+  );
+
+  server.tool(
     'close_tab',
     'Terminate a group member session (worker or orchestrator) and clean up its channel.',
     { sessionId: z.string() },
@@ -203,6 +217,27 @@ export function buildHandoffMcpServer(deps) {
     'List documents published in this group (key, publishedBy role, publishedAt, size) without their content -- fetch_doc the ones you need.',
     {},
     async () => ({ content: [{ type: 'text', text: JSON.stringify(tools.listDocs(deps)) }] }),
+  );
+
+  server.tool(
+    'list_files',
+    'List files shared in this group (id, name, size, mimeType, direction, publishedBy, publishedAt) without their content -- fetch_file the ones you need. Files are isolated by group and removed when the group is destroyed.',
+    {},
+    async () => ({ content: [{ type: 'text', text: JSON.stringify(tools.listFiles(deps)) }] }),
+  );
+
+  server.tool(
+    'fetch_file',
+    'Fetch metadata for a file shared in this group and get its read-only sandbox path. Returns id, name, size, mimeType, direction, publishedBy, publishedAt, and sandboxPath (/ccserver-group-files/<generated>). The file is readable at that path inside your sandbox; no blob bytes are returned in the tool response.',
+    { fileId: z.string() },
+    async (args) => ({ content: [{ type: 'text', text: JSON.stringify(tools.fetchFile(deps, args)) }] }),
+  );
+
+  server.tool(
+    'publish_file',
+    'Publish a file from your own worktree to this group so the browser user can download it and other members can fetch it via fetch_file. The path must be relative to your current worktree (never absolute or traversing outside it) and must point to a regular file. The file is copied into group storage; your original is untouched. Returns the generated file id and metadata.',
+    { path: z.string() },
+    async (args) => ({ content: [{ type: 'text', text: JSON.stringify(tools.publishFile(deps, args)) }] }),
   );
 
   return server;

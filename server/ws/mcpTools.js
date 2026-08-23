@@ -371,6 +371,42 @@ export function listDocs(deps) {
   return { docs: deps.groupManager.listGroupDocs(deps.groupId) };
 }
 
+// --- group file exchange (browser <-> agent, agent <-> browser) ------------
+export function listFiles(deps) {
+  const res = deps.groupManager.listGroupFiles(deps.groupId);
+  if (res && res.error) return res;
+  return { files: res.files || [] };
+}
+
+export function fetchFile(deps, { fileId }) {
+  if (!fileId || typeof fileId !== 'string') {
+    return { error: 'bad-request', message: 'fileId must be a non-empty string' };
+  }
+  const res = deps.groupManager.fetchGroupFile(deps.groupId, fileId);
+  if (res && res.error) return res;
+  // Metadata + read-only sandbox path, never blob bytes.
+  return {
+    id: res.id,
+    name: res.name,
+    size: res.size,
+    mimeType: res.mimeType,
+    direction: res.direction,
+    publishedBy: res.publishedBy,
+    publishedAt: res.publishedAt,
+    sandboxPath: res.sandboxPath,
+  };
+}
+
+export function publishFile(deps, { path }) {
+  if (!deps.role) {
+    return { error: 'bad-request', message: 'only workers can publish files' };
+  }
+  if (!path || typeof path !== 'string') {
+    return { error: 'bad-request', message: 'path must be a non-empty string' };
+  }
+  return deps.groupManager.publishGroupFileFromAgent(deps.groupId, deps.role, path);
+}
+
 // --- repo_info -------------------------------------------------------------
 // Shallow repository facts for the orchestrator (control server only).
 // Security/cost posture, mirroring read_output:
