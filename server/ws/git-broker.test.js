@@ -168,3 +168,50 @@ test('gh-exec: malformed argv fails closed', async () => {
   assert.equal(r.ok, false);
   assert.equal(r.reason, 'bad-request');
 });
+
+test('startGitBroker returns null for non-git cwd (no dead wrapper)', () => {
+  const dir = join(root, 'not-a-repo2');
+  mkdirSync(dir, { recursive: true });
+  const b = startGitBroker({ cwd: dir });
+  assert.equal(b, null);
+});
+
+test('linked worktree broker allowlist matches main checkout', async () => {
+  const main = join(root, 'main-for-broker');
+  mkdirSync(main, { recursive: true });
+  git(main, ['init', '-q']);
+  git(main, ['config', 'user.email', 'test@example.com']);
+  git(main, ['config', 'user.name', 'test']);
+  git(main, ['remote', 'add', 'origin', 'https://github.com/nananek/ccserver.git']);
+  writeFileSync(join(main, 'README.md'), '# hi\n');
+  git(main, ['add', 'README.md']);
+  git(main, ['commit', '-qm', 'init']);
+  const worker = join(root, 'worker-for-broker');
+  execFileSync('git', ['worktree', 'add', '--detach', worker], { cwd: main });
+  const wb = startGitBroker({ cwd: worker });
+  try {
+    assert.ok(wb, 'broker should start for linked worktree');
+    assert.deepEqual(wb.allowlist, ['github.com/nananek/ccserver']);
+    // implicit origin request should succeed
+    const r1 = await request(wb.sockPath, { op: 'gh-exec', argv: ['pr', 'view', '1'] });
+    assert.equal(r1.ok, true);
+    // explicit allowed repo succeeds
+    const r2 = await request(wb.sockPath, { op: 'gh-exec', argv: ['pr', 'view', '1', '--repo', 'nananek/ccserver'] });
+    assert.equal(r2.ok, true);
+    // unrelated repo denied
+    const r3 = await request(wb.sockPath, { op: 'gh-exec', argv: ['pr', 'view', '1', '--repo', 'someoneelse/unrelated'] });
+    assert.equal(r3.ok, false);
+    assert.equal(r3.reason, 'not-allowlisted');
+  } finally {
+    if (wb) { wb.proc.kill('SIGTERM'); await new Promise((r) => setTimeout(r, 200)); rmSync(wb.dir, { recursive: true, force: true }); }
+    rmSync(main, { recursive: true, force: true });
+    rmSync(worker, { recursive: true, force: true });
+  }
+});
+
+test('broker readiness probe: socket responds to probe op', async () => {
+  const r = await request(broker.sockPath, { op: 'probe' });
+  // any JSON response means broker is speaking; probe op is not a real op so bad-request is expected
+  assert.equal(typeof r.ok, 'boolean');
+  assert.ok('reason' in r || 'ok' in r);
+});

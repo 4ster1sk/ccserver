@@ -138,6 +138,19 @@ function resolveGitDir(dir) {
   }
 }
 
+function resolveGitCommonDir(dir) {
+  try {
+    let commonDir = execFileSync('git', ['-C', dir, 'rev-parse', '--git-common-dir'], {
+      encoding: 'utf-8', timeout: 2000, stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim();
+    if (!commonDir) return null;
+    if (!isAbsolute(commonDir)) commonDir = join(dir, commonDir);
+    return commonDir;
+  } catch {
+    return null;
+  }
+}
+
 // Recursively collect canonical "host/path" allow-list entries starting at
 // repoRoot. A submodule's URL is trusted (added to the allow-list) and
 // recursed into ONLY when it's actually checked out (its working dir
@@ -157,9 +170,11 @@ function walk(dir, depth, entries, visited) {
   visited.add(real);
 
   let parentUrl = null;
-  const gitDir = resolveGitDir(dir);
-  if (gitDir) {
-    const remotes = gitConfigGetAll(join(gitDir, 'config'), '^remote\\..*\\.url$');
+  // Use the common dir (repository config base) rather than the per-worktree
+  // git-dir: linked worktrees keep their config in the common dir.
+  const gitCommonDir = resolveGitCommonDir(dir);
+  if (gitCommonDir) {
+    const remotes = gitConfigGetAll(join(gitCommonDir, 'config'), '^remote\\..*\\.url$');
     for (const [, url] of remotes) {
       const norm = normalizeGitUrl(url);
       if (norm) entries.add(norm);
@@ -205,9 +220,9 @@ function walk(dir, depth, entries, visited) {
 // already does for the top-level repo, exposed standalone since gh-exec
 // requests need it independent of allow-list computation.
 export function resolveOriginUrl(dir) {
-  const gitDir = resolveGitDir(dir);
-  if (!gitDir) return null;
-  const remotes = gitConfigGetAll(join(gitDir, 'config'), '^remote\\..*\\.url$');
+  const gitCommonDir = resolveGitCommonDir(dir);
+  if (!gitCommonDir) return null;
+  const remotes = gitConfigGetAll(join(gitCommonDir, 'config'), '^remote\\..*\\.url$');
   const origin = remotes.find(([key]) => key === 'remote.origin.url');
   return origin ? origin[1] : (remotes[0] ? remotes[0][1] : null);
 }
