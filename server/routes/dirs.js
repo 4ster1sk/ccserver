@@ -1,8 +1,12 @@
 import { readdir, mkdir, stat } from 'node:fs/promises';
 import { join, resolve, basename } from 'node:path';
 import { homedir } from 'node:os';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { loadSandboxConfig, installedApps } from '../ws/sandbox.js';
 import { resolvedHostname } from '../ws/notify.js';
+
+const execFileAsync = promisify(execFile);
 
 export async function dirsRoute(fastify, opts) {
   fastify.get('/dirs/home', async () => {
@@ -74,7 +78,7 @@ export async function dirsRoute(fastify, opts) {
   });
 
   fastify.post('/dirs', async (request, reply) => {
-    const { parent, name } = request.body || {};
+    const { parent, name, gitInit } = request.body || {};
 
     if (!parent || !name) {
       return reply.code(400).send({ error: 'parent and name are required' });
@@ -89,7 +93,6 @@ export async function dirsRoute(fastify, opts) {
 
     try {
       await mkdir(newPath);
-      return { path: newPath };
     } catch (err) {
       if (err.code === 'EEXIST') {
         return reply.code(409).send({ error: 'Directory already exists' });
@@ -102,5 +105,22 @@ export async function dirsRoute(fastify, opts) {
       }
       throw err;
     }
+
+    // Optional git init (opt-in): the directory itself was created above and
+    // is kept even when this fails -- only the error is surfaced, so the user
+    // can retry `git init` manually. Fixed argv (no shell, no user-controlled
+    // arguments), cwd pinned to the freshly created directory.
+    if (gitInit === true) {
+      try {
+        await execFileAsync('git', ['init'], { cwd: newPath, timeout: 10000 });
+      } catch (err) {
+        const detail = err.code === 'ENOENT'
+          ? 'git is not installed on this server'
+          : (err.stderr && err.stderr.trim()) || err.message;
+        return reply.code(500).send({ error: `Directory created but git init failed: ${detail}`, path: newPath });
+      }
+    }
+
+    return { path: newPath };
   });
 }

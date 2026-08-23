@@ -233,7 +233,7 @@ function osc52Response(text) {
 
 const themeIds = getThemeIds();
 
-export default function TerminalView({ cwd, onClose, claudeSessionId, shell, sandbox, sandboxOpts, reuseSandboxHome = true, app = 'claude', model = null, resume = false, notify, notifyEnabled, notifyPermission, onToggleNotify, visible, onSessionId, onExited, attachSessionId, xtermTheme, themeId, onThemeChange, tabId, onFocusTab, groupId, groupRole }) {
+export default function TerminalView({ cwd, onClose, claudeSessionId, shell, sandbox, sandboxOpts, reuseSandboxHome = true, app = 'claude', model = null, resume = false, notify, notifyEnabled, notifyPermission, onToggleNotify, visible, onSessionId, onExited, attachSessionId, xtermTheme, themeId, onThemeChange, tabId, onFocusTab, groupId, groupRole, projectCwd = null }) {
   const isMobile = useMemo(() => 'ontouchstart' in window, []);
   const terminalRef = useRef(null);
   const terminalViewRef = useRef(null);
@@ -1228,7 +1228,10 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
   return (
     <div className={`terminal-view${keyboardOpen ? ' keyboard-open' : ''}${selectionMode ? ' selection-mode' : ''}`} ref={terminalViewRef}>
       <div className={`terminal-header${!sandbox && !shell ? ' no-sandbox' : ''}`}>
-        <span className="terminal-title">{sandbox ? '🔒 ' : (!shell ? '⚠️ ' : '')}{shell ? 'Terminal' : appLabel(app)}{!shell && model ? ` · ${model}` : ''} &mdash; {displayPath(cwd, homeDir)}</span>
+        <span
+          className="terminal-title"
+          title={projectCwd && projectCwd !== cwd ? `Project: ${projectCwd}\nWorktree: ${cwd}` : cwd}
+        >{sandbox ? '🔒 ' : (!shell ? '⚠️ ' : '')}{shell ? 'Terminal' : appLabel(app)}{!shell && model ? ` · ${model}` : ''} &mdash; {displayPath(cwd, homeDir)}</span>
         <div className="header-actions">
           <div className="theme-picker" ref={themeMenuRef}>
             <button

@@ -413,6 +413,7 @@ export default function App() {
           <div
             key={tab.id}
             className={`tab-item${tab.id === activeTabId ? ' active' : ''}${tab.type === 'terminal' && !tab.shell && !tab.sandbox ? ' no-sandbox' : ''}`}
+            title={tab.type === 'group' && tab.cwd ? tab.cwd : undefined}
             onClick={() => handleTabClick(tab.id)}
           >
             <span className="tab-label">
@@ -500,6 +501,7 @@ export default function App() {
               <GroupTabView
                 groupId={tab.groupId}
                 initialMembers={tab.members}
+                projectCwd={tab.cwd}
                 visible={activeTabId === tab.id}
                 xtermTheme={getTheme(themeId).xterm}
                 themeId={themeId}
