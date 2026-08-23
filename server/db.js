@@ -154,6 +154,63 @@ export const MIGRATIONS = [
       renameSync(legacyHomeIndexFile(), `${legacyHomeIndexFile()}.migrated`);
     },
   },
+  {
+    // v3: combo launch presets -- a named bundle of N workers (+ orchestrator
+    // app/model/instructions preferences) that expands into a POST /groups
+    // workers[] snapshot at launch time. A separate table from
+    // worker_presets: that one's role is globally UNIQUE, which would forbid
+    // reusing the same role across different combos.
+    version: 3,
+    up(db) {
+      db.exec(`
+        CREATE TABLE launch_presets (
+          id                 TEXT PRIMARY KEY,
+          name               TEXT NOT NULL UNIQUE,
+          orchestrator_app   TEXT,
+          orchestrator_model TEXT,
+          instructions       TEXT,
+          created_at         INTEGER NOT NULL,
+          updated_at         INTEGER NOT NULL
+        );
+        CREATE TABLE launch_preset_workers (
+          id                TEXT PRIMARY KEY,
+          preset_id         TEXT NOT NULL REFERENCES launch_presets(id) ON DELETE CASCADE,
+          position          INTEGER NOT NULL,
+          name              TEXT,
+          role              TEXT NOT NULL,
+          app               TEXT NOT NULL,
+          model             TEXT,
+          sandbox_gpg       INTEGER NOT NULL DEFAULT 0,
+          sandbox_ssh_agent INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE UNIQUE INDEX idx_launch_preset_workers_role ON launch_preset_workers(preset_id, role);
+      `);
+    },
+  },
+  {
+    // v4: server-initiated destructive-action approvals (see ws/approvals.js).
+    // A meta-agent MCP tool that wants to close a session / destroy a group /
+    // delete a sandbox inserts a 'pending' row and blocks on an in-memory
+    // waiter until the browser decides via POST /api/approvals/:id/decision
+    // or the fixed 5-minute timeout expires it (timeout == rejected, fail-safe).
+    version: 4,
+    up(db) {
+      db.exec(`
+        CREATE TABLE pending_approvals (
+          id           TEXT PRIMARY KEY,
+          kind         TEXT NOT NULL,
+          summary      TEXT NOT NULL,
+          payload      TEXT NOT NULL,
+          requested_by TEXT,
+          status       TEXT NOT NULL DEFAULT 'pending',
+          created_at   INTEGER NOT NULL,
+          resolved_at  INTEGER,
+          resolved_by  TEXT
+        );
+        CREATE INDEX idx_pending_approvals_status ON pending_approvals(status, created_at);
+      `);
+    },
+  },
 ];
 
 // Runs pending migrations in order. Each one executes inside BEGIN IMMEDIATE
