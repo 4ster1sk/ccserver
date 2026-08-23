@@ -121,6 +121,26 @@ describe('computeGitAllowlist / resolveOriginUrl', () => {
     assert.ok(!list.includes('github.com/victimorg/private-secrets'));
   });
 
+  test('linked worktree resolves remotes via git-common-dir (regression for per-role worktrees)', () => {
+    const main = initRepo(join(root, 'main-worktree'), 'https://github.com/nananek/ccserver.git');
+    // Need at least one commit so worktree add works
+    writeFileSync(join(main, 'README.md'), '# test\n');
+    git(main, ['add', 'README.md']);
+    git(main, ['commit', '-qm', 'initial']);
+    const worker = join(root, 'linked-worker');
+    execFileSync('git', ['worktree', 'add', '--detach', worker], { cwd: main, stdio: ['ignore', 'pipe', 'ignore'] });
+    // Both should see same allowlist and origin via common dir
+    assert.deepEqual(computeGitAllowlist(worker), ['github.com/nananek/ccserver']);
+    assert.equal(resolveOriginUrl(worker), 'https://github.com/nananek/ccserver.git');
+    assert.deepEqual(computeGitAllowlist(main), ['github.com/nananek/ccserver']);
+    assert.equal(resolveOriginUrl(main), 'https://github.com/nananek/ccserver.git');
+    // Also verify git rev-parse shows different git-dir but same common-dir
+    const gitDirWorker = execFileSync('git', ['-C', worker, 'rev-parse', '--git-dir'], { encoding: 'utf-8' }).trim();
+    const commonDirWorker = execFileSync('git', ['-C', worker, 'rev-parse', '--git-common-dir'], { encoding: 'utf-8' }).trim();
+    assert.ok(gitDirWorker.includes('worktrees'), 'linked worktree git-dir is per-worktree');
+    assert.ok(!commonDirWorker.includes('worktrees'), 'common dir is shared');
+  });
+
   test('teardown', () => {
     rmSync(root, { recursive: true, force: true });
   });

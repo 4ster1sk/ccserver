@@ -35,7 +35,7 @@
 // only breaks HTTPS credential vending and gh (fail closed — nothing is
 // printed / gh appears unavailable), not SSH access to already-allowed repos.
 
-import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync, rmSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { execFileSync, spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
@@ -50,7 +50,9 @@ const GH_EXEC_MAX_BYTES = 10 * 1024 * 1024;
 const __filename = fileURLToPath(import.meta.url);
 
 const UID = typeof process.getuid === 'function' ? process.getuid() : 0;
-const RUNTIME_BASE = process.env.XDG_RUNTIME_DIR || `/run/user/${UID}`;
+function runtimeBase() {
+  return process.env.XDG_RUNTIME_DIR || `/run/user/${UID}`;
+}
 
 function fetchToken() {
   // Runs on the host, where the real gh config lives (never bound into the
@@ -231,18 +233,61 @@ function runServer({ sock, allowlist, cwd }) {
   process.on('SIGINT', shutdown);
 }
 
+// Synchronous readiness probe: spawn a short-lived helper that connects and expects a JSON line.
+// Uses execFileSync with timeout so the current thread can block without starving the event loop.
+function probeBrokerSync(sockPath, timeoutMs = 700) {
+  const probeScript = `
+    const net=require('net');
+    const sock=process.argv[1];
+    const c=net.createConnection(sock);
+    let buf='';
+    const t=setTimeout(()=>process.exit(2), ${timeoutMs});
+    c.on('connect',()=>{ try{c.write('{\"op\":\"probe\"}\\n');}catch{} });
+    c.on('data',d=>{ buf+=d; if(buf.includes('\\n')){ clearTimeout(t); process.stdout.write(buf); c.end(); }});
+    c.on('error',()=>{ clearTimeout(t); process.exit(1); });
+    c.on('close',()=>{ if(buf) process.exit(0); });
+    c.on('end',()=>{ clearTimeout(t); process.exit(buf.includes('\\n')?0:1); });
+  `;
+  try {
+    const out = execFileSync(process.execPath, ['-e', probeScript, sockPath], {
+      encoding: 'utf-8',
+      timeout: timeoutMs + 500,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    return typeof out === 'string' && out.includes('\n');
+  } catch {
+    return false;
+  }
+}
+
 // Compute the allow-list once and launch a fresh broker instance for a
 // sandbox session. Returns null (no broker) if the allow-list ends up
 // empty for a non-git cwd — callers should treat that the same as
-// "gitBroker disabled" for that launch.
+// "gitBroker disabled" for that launch. For a git repo, startup is a
+// required dependency: socket existence, child liveness and a readiness
+// probe are all verified. On failure the child is terminated, the runtime
+// dir removed and a descriptive error is thrown so buildSandboxSpawn can
+// propagate it to createSession (launch fails clearly instead of leaving a
+// sandboxed session with an unmounted broker socket showing
+// "gh broker unreachable").
 export function startGitBroker({ cwd }) {
   const allowlist = computeGitAllowlist(cwd);
+  if (!allowlist || allowlist.length === 0) return null;
 
-  const dir = join(RUNTIME_BASE, `ccserver-git-broker-${randomUUID()}`);
-  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const dir = join(runtimeBase(), `ccserver-git-broker-${randomUUID()}`);
+  try {
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+  } catch (e) {
+    throw new Error(`git broker failed to start for ${cwd}: ${e.message}`);
+  }
   const allowlistPath = join(dir, 'allowlist.json');
   const sockPath = join(dir, 'broker.sock');
-  writeFileSync(allowlistPath, JSON.stringify(allowlist));
+  try {
+    writeFileSync(allowlistPath, JSON.stringify(allowlist));
+  } catch (e) {
+    try { rmSync(dir, { recursive: true, force: true }); } catch {}
+    throw new Error(`git broker failed to start for ${cwd}: ${e.message}`);
+  }
 
   const proc = spawn(process.execPath, [
     __filename, '--serve', '--sock', sockPath, '--allowlist', allowlistPath, '--cwd', cwd,
@@ -251,6 +296,18 @@ export function startGitBroker({ cwd }) {
   proc.stdout.on('data', (d) => process.stdout.write(`[git-broker] ${d}`));
   proc.stderr.on('data', (d) => process.stderr.write(`[git-broker] ${d}`));
 
+  let spawnError = null;
+  proc.on('error', (err) => { spawnError = err; });
+  // Lifecycle observability: log unexpected exit after readiness
+  proc.on('exit', (code, signal) => {
+    // Only log unexpected exits; normal teardown kills with SIGTERM
+    if (code !== 0 && code !== null) {
+      process.stderr.write(`[git-broker] broker for ${cwd} (pid ${proc.pid}) exited code=${code} signal=${signal}\n`);
+    } else if (signal) {
+      process.stderr.write(`[git-broker] broker for ${cwd} (pid ${proc.pid}) terminated signal=${signal}\n`);
+    }
+  });
+
   // buildSandboxSpawn (sandbox.js) is synchronous and bwrap's --bind-try only
   // sees the socket if it already exists at mount-namespace setup time — a
   // moment after this function returns. Without waiting here, the broker
@@ -258,12 +315,27 @@ export function startGitBroker({ cwd }) {
   // launch before the socket file exists, and the sandbox would never see
   // it (bind is a one-time snapshot, not a live mount). Block briefly
   // (busy-wait via Atomics.wait, not a callback) until the broker is
-  // actually listening, or give up after 2s (the sandbox launch then
-  // proceeds without a working HTTPS credential helper — same fail-closed
-  // behavior as a broker that crashes later).
+  // actually listening, verify liveness and probe readiness.
   const deadline = Date.now() + 2000;
   while (!existsSync(sockPath) && Date.now() < deadline) {
+    if (spawnError) break;
+    if (proc.exitCode !== null || proc.signalCode !== null) break;
     Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
+  }
+
+  if (spawnError || proc.exitCode !== null || proc.signalCode !== null || !existsSync(sockPath)) {
+    const reason = spawnError ? spawnError.message : proc.exitCode !== null ? `exited code=${proc.exitCode}` : proc.signalCode ? `signal=${proc.signalCode}` : 'socket not ready within 2s';
+    try { proc.kill('SIGKILL'); } catch {}
+    try { rmSync(dir, { recursive: true, force: true }); } catch {}
+    throw new Error(`git broker failed to start for ${cwd}: ${reason}`);
+  }
+
+  // Readiness probe: ensure the broker actually speaks the protocol
+  const probed = probeBrokerSync(sockPath, 500);
+  if (!probed) {
+    try { proc.kill('SIGKILL'); } catch {}
+    try { rmSync(dir, { recursive: true, force: true }); } catch {}
+    throw new Error(`git broker readiness probe failed for ${cwd}: no response on ${sockPath}`);
   }
 
   return { proc, dir, sockPath, allowlistPath, allowlist };

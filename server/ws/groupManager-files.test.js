@@ -166,7 +166,16 @@ test('commitStagedUploads promotes temp files and validates quotas', async () =>
 
 test('manifest persistence across restoreGroups and stale/corrupt handling', async () => {
   const gid = await makeGroup('/srv/proj-persist');
-  const originalBroker = groupManager.getGroup(gid).controlBroker;
+  // restoreGroups() models a fresh process start: nothing live may survive
+  // into it. Stop the group's live control broker BEFORE restoring --
+  // restoring replaces the map entry with a broker-less copy, which would
+  // orphan the original server handle and keep the test runner alive forever.
+  const live = groupManager.getGroup(gid);
+  const originalBroker = live?.controlBroker || null;
+  if (originalBroker) {
+    stopBroker(originalBroker);
+    live.controlBroker = null;
+  }
   try {
     groupManager.publishGroupFilesFromUpload(gid, [{ name: 'keep.txt', mimeType: 'text/plain', data: Buffer.from('keep') }]);
     const raw = JSON.parse(readFileSync(process.env.CCSERVER_GROUP_FILES_PATH, 'utf-8'));
@@ -190,7 +199,7 @@ test('manifest persistence across restoreGroups and stale/corrupt handling', asy
     // may be 0 if stale, or if our earlier corrupt test cleared it; just ensure no crash
     assert.ok(Array.isArray(listed.files));
   } finally {
-    if (originalBroker) stopBroker(originalBroker);
+    if (originalBroker) stopBroker(originalBroker); // defensive: already stopped above
     groupManager.destroyGroup(gid);
   }
 });
@@ -222,4 +231,157 @@ test('sanitized generated blob name never uses upload filename as path', async (
     assert.ok(!fetched.blobPath.includes('evil'));
     assert.ok(fetched.blobPath.endsWith(res.files[0].id));
   } finally { groupManager.destroyGroup(gid); }
+});
+
+test('commitStagedUploads is atomic: failure on second rename rolls back promoted blobs and temps', async () => {
+  const gid = await makeGroup();
+  const { renameSync } = await import('node:fs');
+  const dir = groupManager.getGroupFilesDirForGroup(gid);
+  const beforeManifest = (() => {
+    try { return readFileSync(process.env.CCSERVER_GROUP_FILES_PATH, 'utf-8'); } catch { return null; }
+  })();
+  try {
+    // prepare two staged temps
+    const tmp1 = join(dir, '.tmp-upload-test1');
+    const tmp2 = join(dir, '.tmp-upload-test2');
+    writeFileSync(tmp1, Buffer.from('one'));
+    writeFileSync(tmp2, Buffer.from('two'));
+    const staged = [
+      { name: 'a.txt', mimeType: 'text/plain', tempPath: tmp1, size: 3 },
+      { name: 'b.txt', mimeType: 'text/plain', tempPath: tmp2, size: 3 },
+    ];
+    // Inject failure on second rename
+    let callCount = 0;
+    groupManager.setCommitRenameSyncForTests((src, dest) => {
+      callCount++;
+      if (callCount === 2) throw new Error('injected rename failure');
+      return renameSync(src, dest);
+    });
+    const res = groupManager.commitStagedUploads(gid, staged);
+    assert.equal(res.error, 'internal');
+    assert.match(res.message, /injected rename failure/);
+    // No mutation: group.files still empty
+    assert.equal(groupManager.listGroupFiles(gid).files.length, 0, 'group.files must remain empty after failure');
+    // No temp or final blobs remain
+    assert.equal(existsSync(tmp1), false, 'first temp must be cleaned up');
+    assert.equal(existsSync(tmp2), false, 'second temp must be cleaned up');
+    // No final blobs under dir
+    const blobs = (() => {
+      try { return groupManager.getGroupFilesDirForGroup(gid); } catch { return dir; }
+    })();
+    // Check that directory contains no regular files (only possibly empty dir)
+    const { readdirSync } = await import('node:fs');
+    let entries = [];
+    try { entries = readdirSync(dir); } catch { entries = []; }
+    assert.equal(entries.length, 0, `no orphan blobs should remain, got ${entries}`);
+    // Manifest unchanged on disk: a failed batch must never be persisted.
+    const afterManifest = (() => {
+      try { return readFileSync(process.env.CCSERVER_GROUP_FILES_PATH, 'utf-8'); } catch { return null; }
+    })();
+    // If manifest existed before, it should be unchanged; if none, still none or empty
+    if (beforeManifest === null) {
+      // before had no file, after should also have no file or not contain this group
+      if (afterManifest) {
+        const parsed = JSON.parse(afterManifest);
+        assert.ok(!parsed[gid], 'manifest must not contain failed group files');
+      }
+    } else {
+      // Compare raw content when possible; at minimum ensure group not persisted
+      if (afterManifest) {
+        const parsed = JSON.parse(afterManifest);
+        assert.ok(!parsed[gid] || parsed[gid].length === 0, 'manifest must not persist rolled-back files');
+      }
+    }
+    // NOTE: no restoreGroups() here. This test's group is still live (its
+    // control broker running), and restore would overwrite the map entry
+    // with a broker-less copy -- orphaning the live broker handle and
+    // hanging the test runner. The direct manifest read above already proves
+    // the failure was not persisted; successful-restore behavior is covered
+    // by the manifest-persistence test (which stops the live broker first).
+  } finally {
+    groupManager.setCommitRenameSyncForTests(null);
+    groupManager.destroyGroup(gid);
+  }
+});
+
+test('agent publish TOCTOU: symlink swap before open is rejected and leaves no blob', async () => {
+  const tmp = mkdtempSync(join(tmpdir(), 'cc-gm-agent-toctou-'));
+  const cwd = join(tmp, 'wt');
+  mkdirSync(cwd, { recursive: true });
+  writeFileSync(join(cwd, 'ok.txt'), 'hello');
+  const outside = join(tmp, 'outside.txt');
+  writeFileSync(outside, 'secret-outside');
+  const gid = await makeGroup(cwd);
+  groupManager.registerMember(gid, 'workerA', 'sess-a');
+  groupManager.setSessionApiForTests({ getSession: (id) => id === 'sess-a' ? { cwd } : null, destroySession: () => {}, createSession: () => ({ error: 'unused' }), writeToSession: () => false, waitUntilSettled: async () => ({ settled: true }), dockerAvailability: () => ({ dockerAvailable: null }) });
+  try {
+    // Hook swaps the file to a symlink pointing outside between validation and open
+    groupManager.setAgentPublishHookForTests(() => {
+      try { rmSync(join(cwd, 'ok.txt'), { force: true }); } catch {}
+      symlinkSync(outside, join(cwd, 'ok.txt'));
+    });
+    const r = groupManager.publishGroupFileFromAgent(gid, 'workerA', 'ok.txt');
+    assert.equal(r.error, 'bad-request');
+    assert.match(r.message, /symlink/);
+    // No blob created
+    assert.equal(groupManager.listGroupFiles(gid).files.length, 0);
+    const dir = groupManager.getGroupFilesDirForGroup(gid);
+    const { readdirSync } = await import('node:fs');
+    let entries = [];
+    try { entries = readdirSync(dir); } catch { entries = []; }
+    assert.equal(entries.length, 0, 'no blob should remain after symlink rejection');
+    // Verify outside content was not copied
+    for (const e of entries) {
+      const content = readFileSync(join(dir, e), 'utf-8');
+      assert.ok(!content.includes('secret-outside'));
+    }
+  } finally {
+    groupManager.setAgentPublishHookForTests(null);
+    groupManager.setSessionApiForTests(null);
+    groupManager.destroyGroup(gid);
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('agent publish TOCTOU: file growth between check and copy uses actual size and is quota-consistent', async () => {
+  const tmp = mkdtempSync(join(tmpdir(), 'cc-gm-agent-growth-'));
+  const cwd = join(tmp, 'wt');
+  mkdirSync(cwd, { recursive: true });
+  writeFileSync(join(cwd, 'grow.txt'), 'hi'); // 2 bytes initially
+  const gid = await makeGroup(cwd);
+  groupManager.registerMember(gid, 'workerA', 'sess-a');
+  groupManager.setSessionApiForTests({ getSession: (id) => id === 'sess-a' ? { cwd } : null, destroySession: () => {}, createSession: () => ({ error: 'unused' }), writeToSession: () => false, waitUntilSettled: async () => ({ settled: true }), dockerAvailability: () => ({ dockerAvailable: null }) });
+  try {
+    // Grow file to 100 bytes between validation and open
+    const grownContent = 'x'.repeat(100);
+    groupManager.setAgentPublishHookForTests(() => {
+      writeFileSync(join(cwd, 'grow.txt'), grownContent);
+    });
+    const r = groupManager.publishGroupFileFromAgent(gid, 'workerA', 'grow.txt');
+    assert.equal(r.ok, true, `publish should succeed with grown size, got ${JSON.stringify(r)}`);
+    assert.equal(r.size, 100, 'metadata size must reflect actual fd size, not pre-check size');
+    const fetched = groupManager.fetchGroupFile(gid, r.id);
+    assert.equal(fetched.size, 100);
+    const blobContent = readFileSync(fetched.blobPath, 'utf-8');
+    assert.equal(blobContent, grownContent);
+    assert.equal(blobContent.length, 100);
+    // Second growth that would exceed quota must be rejected
+    // Fill group near quota using small files, then grow beyond quota
+    // Use the same hook to grow to a size that exceeds remaining quota if possible
+    // Simpler: verify that a grow beyond MAX_FILE_BYTES is rejected
+    writeFileSync(join(cwd, 'big.txt'), 'a'.repeat(10));
+    groupManager.setAgentPublishHookForTests(() => {
+      // Grow to > MAX_FILE_BYTES
+      writeFileSync(join(cwd, 'big.txt'), Buffer.alloc(MAX_FILE_BYTES + 1, 'b'));
+    });
+    const r2 = groupManager.publishGroupFileFromAgent(gid, 'workerA', 'big.txt');
+    assert.equal(r2.error, 'too-large');
+    // Ensure no blob for rejected large growth
+    assert.equal(groupManager.listGroupFiles(gid).files.length, 1, 'only first grown file should persist');
+  } finally {
+    groupManager.setAgentPublishHookForTests(null);
+    groupManager.setSessionApiForTests(null);
+    groupManager.destroyGroup(gid);
+    rmSync(tmp, { recursive: true, force: true });
+  }
 });

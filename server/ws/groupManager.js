@@ -8,7 +8,18 @@
 // here, by this process, never declared by clients.
 
 import { EventEmitter } from 'node:events';
-import { mkdirSync, writeFileSync, readFileSync, unlinkSync, copyFileSync, statSync, rmSync, renameSync } from 'node:fs';
+import { mkdirSync, writeFileSync, readFileSync, unlinkSync, copyFileSync, statSync, rmSync, renameSync, openSync, closeSync, readSync, writeSync, readlinkSync, fstatSync, realpathSync } from 'node:fs';
+import { constants as fsConstants } from 'node:fs';
+
+// Test seams for deterministic failure injection
+let commitRenameSyncImpl = renameSync;
+export function setCommitRenameSyncForTests(fn) {
+  commitRenameSyncImpl = fn || renameSync;
+}
+let agentPublishHook = null;
+export function setAgentPublishHookForTests(fn) {
+  agentPublishHook = fn || null;
+}
 import { basename, dirname, join, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -1365,72 +1376,223 @@ export function commitStagedUploads(groupId, staged) {
     }
   }
   const dir = ensureGroupFilesDir(groupId);
-  const metas = [];
-  for (const f of staged) {
+  // Prepare all metadata first; do not mutate group.files until every rename succeeds.
+  const entries = staged.map((f) => {
     const name = sanitizeDisplayName(f.name);
     const mimeType = f.mimeType || mimeForName(name);
     const size = f.size;
     const id = generateFileId();
     const storedName = storedNameForId(id);
     const blobPath = join(dir, storedName);
-    try {
-      // Promote staged temp file to final blob path (same filesystem, atomic).
-      renameSync(f.tempPath, blobPath);
-    } catch (err) {
-      // Best effort: try to keep already-promoted files; caller will cleanup remaining staged.
-      return { error: 'internal', message: `failed to store file ${name}: ${err.message}` };
+    return { f, name, mimeType, size, id, storedName, blobPath };
+  });
+  const promoted = [];
+  try {
+    for (const e of entries) {
+      commitRenameSyncImpl(e.f.tempPath, e.blobPath);
+      promoted.push(e);
     }
+  } catch (err) {
+    // Roll back any blobs already promoted and clean up all staged temps.
+    for (const e of promoted) {
+      try { unlinkSync(e.blobPath); } catch { /* ignore */ }
+    }
+    for (const e of entries) {
+      try { unlinkSync(e.f.tempPath); } catch { /* already moved or already cleaned */ }
+    }
+    const failed = entries[promoted.length];
+    const failedName = failed ? failed.name : 'file';
+    return { error: 'internal', message: `failed to store file ${failedName}: ${err.message}` };
+  }
+  // All renames succeeded — now mutate in-memory map and persist atomically.
+  const metas = [];
+  for (const e of entries) {
     const meta = {
-      id,
-      name,
-      size,
-      mimeType,
+      id: e.id,
+      name: e.name,
+      size: e.size,
+      mimeType: e.mimeType,
       direction: 'user',
       publishedBy: null,
       publishedAt: Date.now(),
-      storedName,
+      storedName: e.storedName,
     };
-    group.files.set(id, meta);
-    metas.push({ id, name, size, mimeType, direction: 'user', publishedBy: null, publishedAt: meta.publishedAt });
+    group.files.set(e.id, meta);
+    metas.push({ id: e.id, name: e.name, size: e.size, mimeType: e.mimeType, direction: 'user', publishedBy: null, publishedAt: meta.publishedAt });
   }
   persistGroupFiles();
   return { ok: true, files: metas };
 }
 
 // Agent publish: relative path inside the agent's own worktree.
+// Uses O_NOFOLLOW + fstat + descriptor-based copy to avoid TOCTOU where a
+// validated pathname is reopened after a symlink/size swap.
 export function publishGroupFileFromAgent(groupId, role, relativePath) {
   const group = groups.get(groupId);
   if (!group) return { error: 'group-not-found', message: 'group not found' };
-  // Resolve the agent's live session cwd.
   const sessionId = group.members.get(role);
   const session = sessionId ? sessionApi.getSession(sessionId) : null;
   const cwd = session?.cwd || group.memberSaved.get(role)?.cwd || null;
   if (!cwd) return { error: 'bad-request', message: 'agent worktree not found' };
-  const resolved = resolveAgentSourcePath(cwd, relativePath);
-  if (resolved.error) return resolved;
-  const quotaErr = checkQuotaBeforeAdd(group.files, resolved.size);
-  if (quotaErr) return quotaErr;
-  const dir = ensureGroupFilesDir(groupId);
-  const name = sanitizeDisplayName(basename(relativePath));
-  const mimeType = mimeForName(name);
-  const id = generateFileId();
-  const storedName = storedNameForId(id);
-  const blobPath = join(dir, storedName);
-  const tmpPath = join(dir, `.tmp-${storedName}`);
+
+  // Basic syntax checks (mirrors resolveAgentSourcePath early gates).
+  if (typeof relativePath !== 'string' || !relativePath || relativePath.startsWith('/') || relativePath.includes('\0')) {
+    return { error: 'bad-request', message: 'path must be relative and not absolute' };
+  }
+  const joined = join(cwd, relativePath);
+  const resolved = resolve(joined);
+  const cwdResolved = resolve(cwd);
+  if (resolved !== cwdResolved && !resolved.startsWith(cwdResolved + '/')) {
+    return { error: 'bad-request', message: 'path escapes the worktree' };
+  }
+  let realCwd;
   try {
-    copyFileSync(resolved.realPath, tmpPath);
-    // Verify size after copy matches (and still under limit) and is regular file.
-    const st = statSync(tmpPath);
-    if (!st.isFile()) throw new Error('not a regular file');
-    renameSync(tmpPath, blobPath);
+    realCwd = realpathSync(cwdResolved);
+  } catch {
+    return { error: 'bad-request', message: 'worktree not found' };
+  }
+  // Pre-check: ensure the target exists and is not an obvious symlink escape.
+  // This is not authoritative for TOCTOU; the descriptor open below is.
+  let preReal;
+  try {
+    preReal = realpathSync(resolved);
   } catch (err) {
-    try { unlinkSync(tmpPath); } catch { /* ignore */ }
+    if (err.code === 'ENOENT') return { error: 'not-found', message: 'file not found' };
+    return { error: 'bad-request', message: `cannot resolve path: ${err.message}` };
+  }
+  if (preReal !== realCwd && !preReal.startsWith(realCwd + '/')) {
+    return { error: 'bad-request', message: 'path escapes the worktree (symlink)' };
+  }
+  let preStat;
+  try {
+    preStat = statSync(preReal);
+  } catch {
+    return { error: 'not-found', message: 'file not found' };
+  }
+  if (!preStat.isFile()) {
+    return { error: 'bad-request', message: 'not a regular file' };
+  }
+
+  // Test hook for TOCTOU regression: allows a test to swap the final component
+  // to a symlink or mutate the file between validation and open.
+  if (agentPublishHook) {
+    try { agentPublishHook({ cwd, relativePath, resolved, realCwd, preReal }); } catch { /* ignore hook errors */ }
+  }
+
+  const O_RDONLY = fsConstants.O_RDONLY;
+  const O_NOFOLLOW = fsConstants.O_NOFOLLOW || 0;
+  const O_WRONLY = fsConstants.O_WRONLY;
+  const O_CREAT = fsConstants.O_CREAT;
+  const O_EXCL = fsConstants.O_EXCL;
+
+  let srcFd = null;
+  let tmpFd = null;
+  let tmpPath = null;
+  let blobPath = null;
+  let dir = null;
+  let name = null;
+  let mimeType = null;
+  let id = null;
+  let storedName = null;
+  let actualSize = null;
+
+  try {
+    // Open with O_NOFOLLOW so a swapped-in symlink fails with ELOOP.
+    srcFd = openSync(resolved, O_RDONLY | O_NOFOLLOW);
+    const st = fstatSync(srcFd);
+    if (!st.isFile()) {
+      throw Object.assign(new Error('not a regular file'), { code: 'EBADFD' });
+    }
+    actualSize = st.size;
+    if (actualSize > MAX_FILE_BYTES) {
+      try { closeSync(srcFd); } catch {}
+      srcFd = null;
+      return { error: 'too-large', message: `file exceeds the ${MAX_FILE_BYTES} byte limit (got ${actualSize} bytes)` };
+    }
+
+    // Containment check via /proc/self/fd symlink (Linux). If unavailable, fall back to pre-check.
+    try {
+      const link = readlinkSync(`/proc/self/fd/${srcFd}`);
+      let p = link;
+      if (p.endsWith(' (deleted)')) p = p.slice(0, -10);
+      if (p.startsWith('/')) {
+        let fdReal;
+        try { fdReal = realpathSync(p); } catch { fdReal = p; }
+        if (fdReal !== realCwd && !fdReal.startsWith(realCwd + '/')) {
+          throw Object.assign(new Error('path escapes the worktree (symlink)'), { code: 'ESYMLNK' });
+        }
+      }
+    } catch (e) {
+      if (e && (e.code === 'ESYMLNK' || e.message.includes('escapes'))) throw e;
+      // ignore readlink failures (non-Linux, etc.) — pre-check already covered
+    }
+
+    const quotaErr = checkQuotaBeforeAdd(group.files, actualSize);
+    if (quotaErr) {
+      try { closeSync(srcFd); } catch {}
+      srcFd = null;
+      return quotaErr;
+    }
+
+    dir = ensureGroupFilesDir(groupId);
+    name = sanitizeDisplayName(basename(relativePath));
+    mimeType = mimeForName(name);
+    id = generateFileId();
+    storedName = storedNameForId(id);
+    blobPath = join(dir, storedName);
+    tmpPath = join(dir, `.tmp-${storedName}`);
+
+    tmpFd = openSync(tmpPath, O_WRONLY | O_CREAT | O_EXCL, 0o600);
+
+    // Copy from descriptor, not pathname, so a swapped symlink cannot be followed.
+    const buf = Buffer.alloc(64 * 1024);
+    let bytesRead;
+    while ((bytesRead = readSync(srcFd, buf, 0, buf.length, null)) !== 0) {
+      let written = 0;
+      while (written < bytesRead) {
+        written += writeSync(tmpFd, buf, written, bytesRead - written);
+      }
+    }
+
+    // Close src early; keep tmpFd open until we validate size.
+    try { closeSync(srcFd); } catch {}
+    srcFd = null;
+
+    try { closeSync(tmpFd); } catch {}
+    tmpFd = null;
+
+    // Validate completed temp blob size before promotion.
+    const tmpSt = statSync(tmpPath);
+    if (!tmpSt.isFile()) throw new Error('not a regular file');
+    if (tmpSt.size !== actualSize) throw new Error(`size mismatch after copy (expected ${actualSize}, got ${tmpSt.size})`);
+    if (tmpSt.size > MAX_FILE_BYTES) throw new Error(`file exceeds the ${MAX_FILE_BYTES} byte limit`);
+
+    renameSync(tmpPath, blobPath);
+    tmpPath = null; // promoted
+  } catch (err) {
+    if (srcFd !== null) { try { closeSync(srcFd); } catch {} }
+    if (tmpFd !== null) { try { closeSync(tmpFd); } catch {} }
+    if (tmpPath) { try { unlinkSync(tmpPath); } catch {} }
+    if (err && err.code === 'ELOOP') {
+      return { error: 'bad-request', message: 'path escapes the worktree (symlink)' };
+    }
+    if (err && err.code === 'ESYMLNK') {
+      return { error: 'bad-request', message: 'path escapes the worktree (symlink)' };
+    }
+    if (err && err.code === 'EBADFD') {
+      return { error: 'bad-request', message: 'not a regular file' };
+    }
+    // Preserve quota/too-large already returned above; other errors are internal.
+    if (err && err.message && err.message.includes('escapes')) {
+      return { error: 'bad-request', message: err.message };
+    }
     return { error: 'internal', message: `failed to publish file: ${err.message}` };
   }
+
   const meta = {
     id,
     name,
-    size: resolved.size,
+    size: actualSize,
     mimeType,
     direction: 'agent',
     publishedBy: role,
