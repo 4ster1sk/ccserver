@@ -34,8 +34,18 @@ export default function SettingsView() {
     refresh();
   }, [refresh]);
 
+  // Deletion runs server-side in the background; keep polling until every
+  // "削除中" row either disappears or reports a deleteError.
+  const anyDeleting = sandboxes.some((sb) => sb.deleting);
+
+  useEffect(() => {
+    if (!anyDeleting) return undefined;
+    const timer = setInterval(refresh, 1500);
+    return () => clearInterval(timer);
+  }, [anyDeleting, refresh]);
+
   const handleDelete = async (sb) => {
-    if (sb.inUse > 0) return;
+    if (sb.inUse > 0 || sb.deleting) return;
     const label = sb.cwd || sb.name;
     if (!window.confirm(`サンドボックス "${label}" を削除しますか？\n永続環境と docker キャッシュを削除します（取り消せません）。`)) return;
     setDeleting(sb.name);
@@ -46,7 +56,9 @@ export default function SettingsView() {
         window.alert(body.error || `削除に失敗しました (HTTP ${res.status})`);
         return;
       }
-      setSandboxes((prev) => prev.filter((s) => s.name !== sb.name));
+      // The removal itself continues in the background; the refreshed list
+      // marks the row as 削除中 until it is gone.
+      await refresh();
     } catch (err) {
       window.alert(`削除に失敗しました: ${err.message}`);
     } finally {
@@ -75,18 +87,20 @@ export default function SettingsView() {
               <li key={sb.name} className="sandbox-row">
                 <div className="sandbox-body">
                   <div className="sandbox-item-top">
-                    {sb.inUse > 0 && <span className="sandbox-inuse-badge">利用中</span>}
+                    {sb.deleting && <span className="sandbox-deleting-badge">削除中…</span>}
+                    {!sb.deleting && sb.inUse > 0 && <span className="sandbox-inuse-badge">利用中</span>}
                     <span className="sandbox-size">{formatSize(sb.size)}</span>
                   </div>
                   <span className="sandbox-name" title={sb.cwd || sb.path}>
                     {sb.cwd || sb.name}
                   </span>
+                  {sb.deleteError && <p className="sandbox-delete-error">{sb.deleteError}</p>}
                 </div>
                 <button
                   className="sandbox-delete-btn"
                   onClick={() => handleDelete(sb)}
-                  disabled={sb.inUse > 0 || deleting === sb.name}
-                  title={sb.inUse > 0 ? '利用中のため削除できません' : 'サンドボックスを削除'}
+                  disabled={sb.inUse > 0 || sb.deleting || deleting === sb.name}
+                  title={sb.deleting ? '削除中のため操作できません' : sb.inUse > 0 ? '利用中のため削除できません' : 'サンドボックスを削除'}
                   aria-label={`${sb.cwd || sb.name} を削除`}
                 >
                   &#10005;

@@ -126,8 +126,9 @@ const DOCKERD_STATUS_NAME = '.ccserver-dockerd.status';
 // the entrypoint uses; -n makes it exit non-zero immediately when the lock is
 // held. A missing flock (ENOENT) must NOT hard-block deletion, so only a
 // non-ENOENT failure counts as "held". Stays synchronous on purpose: flock -n
-// exits instantly, dockerAvailability() consumes it as a plain boolean.
-function dindLockHeld(name) {
+// exits instantly, dockerAvailability() consumes it as a plain boolean, and
+// the settings-page DELETE route imports it for its immediate 409 pre-check.
+export function dindLockHeld(name) {
   const lock = join(dindRoot(), name, DOCKERD_LOCK_NAME);
   if (!existsSync(lock)) return false;
   try {

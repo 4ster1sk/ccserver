@@ -557,6 +557,21 @@ body {
   padding: 1px 8px;
 }
 
+.sandbox-deleting-badge {
+  flex: 0 0 auto;
+  font-size: 11px;
+  color: #89b4fa;
+  border: 1px solid #89b4fa;
+  border-radius: 999px;
+  padding: 1px 8px;
+}
+
+.sandbox-delete-error {
+  margin: 2px 0 0;
+  font-size: 11px;
+  color: #f38ba8;
+}
+
 .sandbox-delete-btn {
   flex: 0 0 auto;
   width: 26px;

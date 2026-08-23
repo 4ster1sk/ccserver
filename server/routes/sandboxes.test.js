@@ -1,8 +1,10 @@
 // Settings page sandbox management: GET /api/sandboxes lists created
-// persistent sandboxes (name/real-path/size/inUse); DELETE /api/sandboxes/:name
-// removes the HOME + matching docker data-root and clears the index entry.
-// The in-use (409) branch depends on live sessions (covered by the pure
-// sandboxHomeConflict tests); here we exercise the filesystem-backed paths.
+// persistent sandboxes (name/real-path/size/inUse, plus `deleting` /
+// `deleteError` while a removal is in flight or just failed); DELETE
+// /api/sandboxes/:name answers 204 immediately and removes the HOME +
+// matching docker data-root in the background. The in-use (409) and
+// dockerd-lock (409) branches are checked synchronously; here we exercise
+// the filesystem-backed paths.
 
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
@@ -29,6 +31,16 @@ async function list() {
 
 async function del(name) {
   return app.inject({ method: 'DELETE', url: `/api/sandboxes/${name}` });
+}
+
+async function waitFor(fn, timeoutMs = 5000) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const value = await fn();
+    if (value) return value;
+    if (Date.now() > deadline) throw new Error('waitFor: timed out');
+    await new Promise((r) => setTimeout(r, 25));
+  }
 }
 
 before(async () => {
@@ -110,10 +122,9 @@ test('DELETE /api/sandboxes/:name removes the HOME, matching dind root and index
   writeFileSync(index, JSON.stringify({ [slug]: cwd }));
 
   const res = await del(slug);
-  assert.equal(res.statusCode, 200);
-  assert.equal(res.json().success, true);
-  assert.equal(existsSync(join(sandboxHomeRoot(), slug)), false, 'HOME removed');
-  assert.equal(existsSync(join(process.env.CCSERVER_SANDBOX_DIND_ROOT, slug)), false, 'docker data-root removed');
+  assert.equal(res.statusCode, 204, 'the request returns immediately');
+  await waitFor(() => !existsSync(join(sandboxHomeRoot(), slug))
+    && !existsSync(join(process.env.CCSERVER_SANDBOX_DIND_ROOT, slug)));
   const afterIndex = JSON.parse(readFileSync(index, 'utf-8'));
   assert.equal(afterIndex[slug], undefined, 'index entry cleared');
 });
@@ -147,16 +158,17 @@ test('DELETE /api/sandboxes/:name refuses while a dockerd holds the data-root lo
   }
 });
 
-test('DELETE /api/sandboxes/:name returns a clean error when the dind root cannot be removed', async (t) => {
+test('DELETE /api/sandboxes/:name surfaces a clean error through the list when the dind root cannot be removed', async (t) => {
   const cwd = '/srv/stuck';
   const slug = slugFromCwd(cwd);
   const dind = join(process.env.CCSERVER_SANDBOX_DIND_ROOT, slug);
   const snap = join(dind, 'snap');
   mkdirSync(snap, { recursive: true });
   writeFileSync(join(snap, 'layer'), 'x');
-  // A bind mount on an entry makes rmSync fail with EBUSY, like a live
+  // A bind mount on an entry makes the removal fail with EBUSY, like a live
   // container's overlayfs mountpoint -- every removal strategy must give up
-  // and surface a clean message instead of an opaque 500.
+  // and surface a clean message via GET's deleteError instead of an opaque
+  // Fastify 500 (the DELETE itself answers 204 immediately).
   let mounted = false;
   try {
     execFileSync('mount', ['--bind', snap, snap], { stdio: 'ignore' });
@@ -170,10 +182,15 @@ test('DELETE /api/sandboxes/:name returns a clean error when the dind root canno
       return;
     }
     const res = await del(slug);
-    assert.notEqual(res.statusCode, 200, 'deletion must not succeed while the root is stuck');
-    const body = res.json();
-    assert.ok(typeof body.error === 'string' && body.error.length > 0, 'a clean error message is present');
-    assert.notEqual(body.error, 'Internal Server Error', 'must not be the opaque Fastify 500');
+    assert.equal(res.statusCode, 204, 'the request returns immediately even though removal will fail');
+    const entry = await waitFor(async () => {
+      const found = (await list()).find((s) => s.name === slug);
+      return found && !found.deleting && found.deleteError ? found : null;
+    });
+    assert.ok(typeof entry.deleteError === 'string' && entry.deleteError.length > 0,
+      'a clean error message is exposed on the list');
+    assert.notEqual(entry.deleteError, 'Internal Server Error', 'must not be the opaque Fastify 500');
+    assert.equal(existsSync(dind), true, 'the stuck data-root is left in place for a retry');
   } finally {
     if (mounted) {
       try { execFileSync('umount', [snap], { stdio: 'ignore' }); } catch { /* ignore */ }
