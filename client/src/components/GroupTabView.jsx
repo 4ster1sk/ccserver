@@ -58,8 +58,19 @@ export default function GroupTabView({
   const [uploadProgress, setUploadProgress] = useState('');
   const [uploading, setUploading] = useState(false);
   const [dragOver, setDragOver] = useState(false);
+  const [isFilesOpen, setIsFilesOpen] = useState(false);
   const fileInputRef = useRef(null);
   const dragCountRef = useRef(0);
+
+  const openFiles = useCallback(() => setIsFilesOpen(true), []);
+  const closeFiles = useCallback(() => setIsFilesOpen(false), []);
+
+  useEffect(() => {
+    if (!isFilesOpen) return;
+    const onKey = (e) => { if (e.key === 'Escape') setIsFilesOpen(false); };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [isFilesOpen]);
 
   useEffect(() => { membersRef.current = members; }, [members]);
 
@@ -130,9 +141,10 @@ export default function GroupTabView({
   useEffect(() => {
     if (!visible) return;
     fetchFiles();
-    const timer = setInterval(fetchFiles, 3000);
+    const interval = isFilesOpen ? 3000 : 10000;
+    const timer = setInterval(fetchFiles, interval);
     return () => clearInterval(timer);
-  }, [visible, fetchFiles]);
+  }, [visible, fetchFiles, isFilesOpen]);
 
   const uploadFiles = useCallback(async (fileList) => {
     if (!fileList || fileList.length === 0) return;
@@ -282,9 +294,20 @@ export default function GroupTabView({
             </span>
           </div>
         ))}
+        <button
+          className="group-files-trigger-btn"
+          onClick={openFiles}
+          aria-label="Files"
+          aria-haspopup="dialog"
+          aria-expanded={isFilesOpen}
+          title="Files"
+        >
+          <span aria-hidden="true">📎</span> Files
+          {files.length > 0 && <span className="group-files-badge">{files.length}</span>}
+        </button>
         {orchestrator?.exited && (
           <button
-            className="btn btn-secondary group-restart-orch-btn"
+            className="btn btn-secondary group-restart-orch-btn group-restart-orch-btn--with-files"
             onClick={restartOrchestrator}
             disabled={restartingOrch}
             title="オーケストレーターが終了しています。再起動しますか?"
@@ -298,40 +321,6 @@ export default function GroupTabView({
           このグループはサーバー上で削除されています。このタブを閉じてください。
         </div>
       )}
-      {/* Group file exchange panel (browser <-> agent) */}
-      <div
-        className={`group-files-panel${dragOver ? ' drag-over' : ''}`}
-        onDragEnter={handleDragEnter}
-        onDragLeave={handleDragLeave}
-        onDragOver={handleDragOver}
-        onDrop={handleDrop}
-      >
-        <div className="group-files-header">
-          <span className="group-files-title">Files</span>
-          <span className="group-files-count">{files.length} file(s)</span>
-          <button className="btn btn-secondary group-files-upload-btn" onClick={() => fileInputRef.current?.click()} disabled={uploading} title="Upload files to this group">
-            {uploading ? 'Uploading...' : 'Upload'}
-          </button>
-          <input ref={fileInputRef} type="file" multiple onChange={handleFileInputChange} style={{ display: 'none' }} />
-        </div>
-        {uploadProgress && <div className="group-files-progress">{uploadProgress}</div>}
-        {filesError && <div className="group-files-error">Error: {filesError}</div>}
-        {files.length === 0 ? (
-          <div className="group-files-empty">No files yet. Drag & drop or click Upload. Max 50 MiB/file, 20 files / 200 MiB per group.</div>
-        ) : (
-          <div className="group-files-list">
-            {files.map((f) => (
-              <div key={f.id} className="group-files-item">
-                <span className="group-files-name" title={f.name}>{f.name}</span>
-                <span className="group-files-meta">{formatSize(f.size)} · {f.mimeType} · {f.direction === 'agent' ? `agent:${f.publishedBy || ''}` : 'browser'} · {formatTime(f.publishedAt)}</span>
-                <button className="btn btn-secondary group-files-download-btn" onClick={() => handleDownload(f)} title="Download">↓</button>
-                <button className="btn btn-secondary group-files-delete-btn" onClick={() => handleDelete(f)} title="Delete">✕</button>
-              </div>
-            ))}
-          </div>
-        )}
-        {dragOver && <div className="group-files-drag-overlay">Drop files to upload</div>}
-      </div>
       <div className="group-subtab-body">
         {members.map((m) => (
           <div
@@ -375,6 +364,53 @@ export default function GroupTabView({
           </div>
         ))}
       </div>
+      {isFilesOpen && (
+        <div className="resume-overlay group-files-overlay" onClick={closeFiles}>
+          <div
+            className={`resume-dialog group-files-dialog${dragOver ? ' drag-over' : ''}`}
+            onClick={(e) => e.stopPropagation()}
+            onDragEnter={handleDragEnter}
+            onDragLeave={handleDragLeave}
+            onDragOver={handleDragOver}
+            onDrop={handleDrop}
+            role="dialog"
+            aria-modal="true"
+            aria-label="Files"
+          >
+            <div className="group-files-dialog-header">
+              <h3>Files</h3>
+              <button className="btn btn-secondary" onClick={closeFiles} aria-label="Close">✕</button>
+            </div>
+            <div className="group-files-header">
+              <span className="group-files-count">{files.length} file(s)</span>
+              <button className="btn btn-secondary group-files-upload-btn" onClick={() => fileInputRef.current?.click()} disabled={uploading} title="Upload files to this group">
+                {uploading ? 'Uploading...' : 'Upload'}
+              </button>
+              <input ref={fileInputRef} type="file" multiple onChange={handleFileInputChange} style={{ display: 'none' }} />
+            </div>
+            {uploadProgress && <div className="group-files-progress">{uploadProgress}</div>}
+            {filesError && <div className="group-files-error">Error: {filesError}</div>}
+            {files.length === 0 ? (
+              <div className="group-files-empty">No files yet. Drag &amp; drop or click Upload. Max 50 MiB/file, 20 files / 200 MiB per group.</div>
+            ) : (
+              <div className="group-files-list">
+                {files.map((f) => (
+                  <div key={f.id} className="group-files-item">
+                    <span className="group-files-name" title={f.name}>{f.name}</span>
+                    <span className="group-files-meta">{formatSize(f.size)} · {f.mimeType} · {f.direction === 'agent' ? `agent:${f.publishedBy || ''}` : 'browser'} · {formatTime(f.publishedAt)}</span>
+                    <button className="btn btn-secondary group-files-download-btn" onClick={() => handleDownload(f)} title="Download">↓</button>
+                    <button className="btn btn-secondary group-files-delete-btn" onClick={() => handleDelete(f)} title="Delete">✕</button>
+                  </div>
+                ))}
+              </div>
+            )}
+            {dragOver && <div className="group-files-drag-overlay">Drop files to upload</div>}
+            <div className="resume-actions" style={{ marginTop: '12px' }}>
+              <button className="btn btn-secondary" onClick={closeFiles}>閉じる</button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

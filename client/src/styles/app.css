@@ -304,6 +304,45 @@ body {
   align-self: center;
 }
 
+.group-restart-orch-btn--with-files {
+  margin-left: 6px;
+}
+
+.group-files-trigger-btn {
+  margin: 3px 0 3px auto;
+  padding: 3px 10px;
+  font-size: 12px;
+  flex-shrink: 0;
+  align-self: center;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--bg-surface);
+  color: var(--text-primary);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.group-files-trigger-btn:hover {
+  background: var(--border);
+}
+
+.group-files-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: var(--bg-primary);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1;
+}
+
 .group-subtab-body {
   flex: 1 1 auto;
   min-height: 0;
@@ -320,18 +359,41 @@ body {
   font-size: 12px;
 }
 
-/* Group file exchange panel */
-.group-files-panel {
+/* Group file exchange: trigger + modal (replaces always-mounted panel) */
+.group-files-overlay {
+  z-index: 100;
+}
+
+.group-files-dialog {
   position: relative;
-  background: var(--bg-surface);
-  border-bottom: 1px solid var(--border);
-  padding: 6px 12px;
-  flex-shrink: 0;
+  max-width: 560px;
+  max-height: 75vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
   font-size: 12px;
 }
-.group-files-panel.drag-over {
-  background: var(--bg-secondary);
+
+.group-files-dialog.drag-over {
   outline: 2px dashed var(--accent);
+  outline-offset: -2px;
+}
+
+.group-files-dialog-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.group-files-dialog-header h3 {
+  margin: 0;
+  font-size: 16px;
+}
+
+.group-files-dialog .group-files-list {
+  max-height: 50vh;
 }
 .group-files-header {
   display: flex;
