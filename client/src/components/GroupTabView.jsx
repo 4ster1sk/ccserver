@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback, lazy, Suspense } from 'react';
 import { authFetch, getToken } from '../auth.js';
+import { displayPath } from '../displayPath.js';
 import TabIcon from './TabIcon.jsx';
 
 const TerminalView = lazy(() => import('./TerminalView.jsx'));
@@ -30,6 +31,7 @@ function formatTime(ts) {
 export default function GroupTabView({
   groupId,
   initialMembers,
+  projectCwd,
   visible,
   xtermTheme,
   themeId,
@@ -48,6 +50,11 @@ export default function GroupTabView({
   const [currentTurn, setCurrentTurn] = useState(null);
   const [restartingOrch, setRestartingOrch] = useState(false);
   const [groupGone, setGroupGone] = useState(false);
+  // The group's original project directory (group.cwd): shown in the project
+  // bar so users can tell which repository this combo runs in. Seeded from
+  // the App-side tab.cwd and kept fresh via the poll.
+  const [groupCwd, setGroupCwd] = useState(projectCwd || null);
+  const [homeDir, setHomeDir] = useState(null);
   const membersRef = useRef(members);
   const wasVisibleRef = useRef(visible);
   const currentTurnRef = useRef(null);
@@ -84,6 +91,15 @@ export default function GroupTabView({
 
   useEffect(() => { membersRef.current = members; }, [members]);
 
+  // $HOME from /api/dirs/home, only for display: displayPath turns the prefix
+  // into `~` in the project bar (same pattern as TerminalView).
+  useEffect(() => {
+    authFetch('/api/dirs/home')
+      .then((r) => r.json())
+      .then((data) => { if (data.home) setHomeDir(data.home); })
+      .catch(() => {});
+  }, []);
+
   useEffect(() => {
     if (initialMembers && (!activeRole || !initialMembers.some((m) => m.role === activeRole))) {
       setActiveRole(initialMembers[0]?.role || null);
@@ -108,6 +124,7 @@ export default function GroupTabView({
         setGroupGone(false);
         const data = await res.json();
         if (cancelled) return;
+        setGroupCwd(data.cwd ?? null);
         setCurrentTurn(data.currentTurn ?? null);
         if (currentTurnRef.current !== (data.currentTurn ?? null)) {
           currentTurnRef.current = data.currentTurn ?? null;
@@ -275,6 +292,13 @@ export default function GroupTabView({
 
   const orchestrator = members.find((m) => m.role === 'orchestrator');
 
+  // Workers share the raw project directory itself when the project is NOT a
+  // git repository (worktree isolation is skipped server-side). The
+  // orchestrator always runs in its own orchestratorDir either way, so it
+  // must not count towards "shared".
+  const workers = members.filter((m) => m.role !== 'orchestrator');
+  const isShared = groupCwd != null && workers.length > 0 && workers.every((m) => m.cwd === groupCwd);
+
   const roleLabel = (role) => {
     if (role === 'orchestrator') return 'Orchestrator';
     if (role === 'workerA') return 'Worker A';
@@ -292,6 +316,7 @@ export default function GroupTabView({
             onClick={() => setActiveRole(m.role)}
             role="button"
             tabIndex={0}
+            title={m.cwd ? `${roleLabel(m.role)} — ${m.cwd}` : roleLabel(m.role)}
             onKeyDown={(e) => {
               if (e.key === 'Enter') setActiveRole(m.role);
             }}
@@ -326,6 +351,24 @@ export default function GroupTabView({
           </button>
         )}
       </div>
+      {groupCwd && (
+        <div className="group-project-bar" title={groupCwd}>
+          <span className="group-project-label">Project</span>
+          <span className="group-project-path">{displayPath(groupCwd, homeDir)}</span>
+          {/* Badge only when at least one worker exists: with every worker
+              removed the isolation claim would be about nobody. */}
+          {workers.length > 0 && (
+            <span
+              className={`group-project-badge${isShared ? ' shared' : ''}`}
+              title={isShared
+                ? 'このディレクトリはgitリポジトリではないため、ワーカーは同一ディレクトリを共有します'
+                : '各ワーカーは独立したgit worktreeで動作します'}
+            >
+              {isShared ? 'shared · non-git' : 'worktree'}
+            </span>
+          )}
+        </div>
+      )}
       {groupGone && (
         <div className="group-gone-banner">
           このグループはサーバー上で削除されています。このタブを閉じてください。
@@ -340,6 +383,7 @@ export default function GroupTabView({
             <Suspense fallback={null}>
               <TerminalView
                 cwd={m.cwd}
+                projectCwd={groupCwd}
                 app={m.app === 'codex' ? 'codex' : m.app === 'opencode' ? 'opencode' : 'claude'}
                 model={m.model || null}
                 attachSessionId={m.sessionId}

@@ -71,6 +71,9 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
   const [showHidden, setShowHidden] = useState(false);
   const [creatingFolder, setCreatingFolder] = useState(false);
   const [newFolderName, setNewFolderName] = useState('');
+  // git init opt-in for folder creation (off by default, like the other
+  // launch flags): avoids surprising nested repositories under existing ones.
+  const [initGit, setInitGit] = useState(false);
   const [sessions, setSessions] = useState([]);
   const [groups, setGroups] = useState([]);
   const [dragOver, setDragOver] = useState(false);
@@ -247,26 +250,40 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
     if (parentPath) setCurrentPath(parentPath);
   }, [parentPath]);
 
+  const closeFolderForm = useCallback(() => {
+    setCreatingFolder(false);
+    setNewFolderName('');
+    setInitGit(false);
+  }, []);
+
   const handleCreateFolder = useCallback(async () => {
     if (!newFolderName.trim()) return;
     try {
       const res = await authFetch('/api/dirs', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ parent: currentPath, name: newFolderName.trim() }),
+        body: JSON.stringify({ parent: currentPath, name: newFolderName.trim(), gitInit: initGit }),
       });
       if (!res.ok) {
         const body = await res.json().catch(() => ({}));
+        // git-init failure keeps the directory server-side ({error, path}):
+        // navigate there so the user can run `git init` manually, but keep
+        // the error visible instead of silently pretending nothing happened.
+        if (body.path) {
+          closeFolderForm();
+          setCurrentPath(body.path);
+          setError(body.error || `HTTP ${res.status}`);
+          return;
+        }
         throw new Error(body.error || `HTTP ${res.status}`);
       }
       const data = await res.json();
-      setCreatingFolder(false);
-      setNewFolderName('');
+      closeFolderForm();
       setCurrentPath(data.path);
     } catch (err) {
       setError(err.message);
     }
-  }, [currentPath, newFolderName]);
+  }, [currentPath, newFolderName, initGit, closeFolderForm]);
 
   const fetchSessions = useCallback(async () => {
     try {
@@ -463,7 +480,9 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
           onClick={() => {
             setCreatingFolder(true);
             setNewFolderName('');
+            setInitGit(false);
           }}
+          title="Make a directory (optionally as a git repository)"
         >
           New Folder
         </button>
@@ -879,14 +898,18 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
             onChange={(e) => setNewFolderName(e.target.value)}
             onKeyDown={(e) => {
               if (e.key === 'Enter') handleCreateFolder();
-              if (e.key === 'Escape') setCreatingFolder(false);
+              if (e.key === 'Escape') closeFolderForm();
             }}
             autoFocus
           />
+          <label className="new-folder-git-check" title="Create a git repository in the new folder (needed for combo worktree isolation)">
+            <input type="checkbox" checked={initGit} onChange={(e) => setInitGit(e.target.checked)} />
+            git init
+          </label>
           <button className="btn btn-primary" onClick={handleCreateFolder}>
             Create
           </button>
-          <button className="btn btn-secondary" onClick={() => setCreatingFolder(false)}>
+          <button className="btn btn-secondary" onClick={closeFolderForm}>
             Cancel
           </button>
         </div>
