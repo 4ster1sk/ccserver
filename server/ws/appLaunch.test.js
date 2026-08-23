@@ -269,12 +269,30 @@ test('detectPermissionPrompt: Codex local-command approval menu', () => {
   assert.ok(accumulateDetect('codex', [prompt.slice(0, cut), prompt.slice(cut)]));
 });
 
+test('detectPermissionPrompt: Codex MCP-tool approval menu', () => {
+  const buf = (s) => noSpace(s);
+  // MCP permissions use "Allow" rather than the local-command menu's
+  // "Yes, proceed". Enter accepts the initially selected one-time Allow.
+  const prompt = `
+    Allow the ccserver MCP server to run tool "list_group_sessions"?
+    › 1. Allow                   Run the tool and continue.
+      2. Allow for this session  Run the tool and remember this choice for this session.
+      3. Always allow            Run the tool and remember this choice for future tool calls.
+      4. Cancel                  Cancel this tool call
+    enter to submit | esc to cancel
+  `;
+  assert.ok(detectPermissionPrompt('codex', buf(prompt)));
+  const cut = prompt.indexOf('run tool') + 'run tool'.length;
+  assert.ok(accumulateDetect('codex', [prompt.slice(0, cut), prompt.slice(cut)]));
+});
+
 test('detectPermissionPrompt: Codex model prose is not a prompt', () => {
   const buf = (s) => noSpace(s);
   const prose = [
     'Would you like to run the following command? This is an example in the documentation.',
     '1. Yes, proceed (y) 2. No',
     'The command will run locally after you proceed.',
+    'Allow the example MCP server to run tool "list_group_sessions" in this document.',
   ];
   for (const p of prose) {
     assert.ok(!detectPermissionPrompt('codex', buf(p)), p);
