@@ -9,6 +9,16 @@ function formatSize(bytes) {
   return `${i === 0 ? val : val.toFixed(1)} ${units[i]}`;
 }
 
+// sandboxes.lastUsedAt (INTEGER ms, plan §2 v2) -> "YYYY/MM/DD HH:MM" in the
+// browser's local timezone. Returns null when absent/unparseable so older
+// servers without the field render nothing instead of "Invalid Date".
+function formatLastUsed(ms) {
+  if (!Number.isFinite(ms) || ms <= 0) return null;
+  const d = new Date(ms);
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}/${pad(d.getMonth() + 1)}/${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
 export default function SettingsView() {
   const [sandboxes, setSandboxes] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -91,30 +101,53 @@ export default function SettingsView() {
         )}
         {!loading && sandboxes.length > 0 && (
           <ul className="sandbox-list">
-            {sandboxes.map((sb) => (
-              <li key={sb.name} className="sandbox-row">
-                <div className="sandbox-body">
-                  <div className="sandbox-item-top">
-                    {sb.deleting && <span className="sandbox-deleting-badge">削除中…</span>}
-                    {!sb.deleting && sb.inUse > 0 && <span className="sandbox-inuse-badge">利用中</span>}
-                    <span className="sandbox-size">{formatSize(sb.size)}</span>
+            {sandboxes.map((sb) => {
+              const lastUsed = formatLastUsed(sb.lastUsedAt);
+              return (
+                <li key={sb.name} className="sandbox-row">
+                  <div className="sandbox-body">
+                    <div className="sandbox-item-top">
+                      {sb.deleting && <span className="sandbox-deleting-badge">削除中…</span>}
+                      {!sb.deleting && sb.inUse > 0 && <span className="sandbox-inuse-badge">利用中</span>}
+                      <span className="sandbox-size">{formatSize(sb.size)}</span>
+                      {lastUsed && (
+                        <span className="sandbox-last-used" title={`最終使用: ${lastUsed}`}>
+                          最終使用 {lastUsed}
+                        </span>
+                      )}
+                    </div>
+                    {/* projectLabel / gitRemote come from the sandboxes x
+                        projects JOIN (plan §2 v2); both are optional -- rows
+                        from an older server simply omit the extra lines. */}
+                    <div className="sandbox-info">
+                      {sb.projectLabel && (
+                        <span className="sandbox-project-label" title={sb.projectLabel}>
+                          {sb.projectLabel}
+                        </span>
+                      )}
+                      <span className="sandbox-name" title={sb.cwd || sb.path}>
+                        {sb.cwd || sb.name}
+                      </span>
+                      {sb.gitRemote && (
+                        <span className="sandbox-git-remote" title={sb.gitRemote}>
+                          {sb.gitRemote}
+                        </span>
+                      )}
+                    </div>
+                    {sb.deleteError && <p className="sandbox-delete-error">{sb.deleteError}</p>}
                   </div>
-                  <span className="sandbox-name" title={sb.cwd || sb.path}>
-                    {sb.cwd || sb.name}
-                  </span>
-                  {sb.deleteError && <p className="sandbox-delete-error">{sb.deleteError}</p>}
-                </div>
-                <button
-                  className="sandbox-delete-btn"
-                  onClick={() => handleDelete(sb)}
-                  disabled={sb.inUse > 0 || sb.deleting || deleting === sb.name}
-                  title={sb.deleting ? '削除中のため操作できません' : sb.inUse > 0 ? '利用中のため削除できません' : 'サンドボックスを削除'}
-                  aria-label={`${sb.cwd || sb.name} を削除`}
-                >
-                  &#10005;
-                </button>
-              </li>
-            ))}
+                  <button
+                    className="sandbox-delete-btn"
+                    onClick={() => handleDelete(sb)}
+                    disabled={sb.inUse > 0 || sb.deleting || deleting === sb.name}
+                    title={sb.deleting ? '削除中のため操作できません' : sb.inUse > 0 ? '利用中のため削除できません' : 'サンドボックスを削除'}
+                    aria-label={`${sb.cwd || sb.name} を削除`}
+                  >
+                    &#10005;
+                  </button>
+                </li>
+              );
+            })}
           </ul>
         )}
       </section>

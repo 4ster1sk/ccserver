@@ -2,6 +2,7 @@ import { useState, useCallback, useRef, useEffect, lazy, Suspense } from 'react'
 import DirectoryBrowser from './components/DirectoryBrowser.jsx';
 import SystemMonitor from './components/SystemMonitor.jsx';
 import SettingsView from './components/SettingsView.jsx';
+import ApprovalBanner from './components/ApprovalBanner.jsx';
 import UsageButton from './components/UsageButton.jsx';
 import TabIcon from './components/TabIcon.jsx';
 import GroupTabView from './components/GroupTabView.jsx';
@@ -408,6 +409,9 @@ export default function App() {
 
   return (
     <div className="app">
+      {/* Meta-agent approval requests (ccserver-meta): global banner above
+          the tab bar so it is visible no matter which tab is active. */}
+      <ApprovalBanner />
       <div className="tab-bar">
         <div className="tab-list">
         {tabs.map((tab) => (

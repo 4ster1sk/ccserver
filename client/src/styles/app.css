@@ -701,7 +701,9 @@ body {
    session-list-2line work): on narrow screens the path gets its own (bottom)
    line that truncates with an ellipsis instead of being squeezed, the badge /
    size sit right-aligned on line 1, and the ✕ delete button spans both lines
-   vertically centered. >= 800px reverts to the single-line layout. */
+   vertically centered. >= 800px reverts to the single-line layout.
+   .sandbox-info holds the project identity lines (label / cwd / git remote)
+   and takes over the flexible-width role .sandbox-name used to have. */
 .sandbox-body {
   display: flex;
   flex-direction: column;
@@ -717,10 +719,34 @@ body {
   gap: 8px;
 }
 
-.sandbox-name {
+.sandbox-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
   width: 100%;
+  min-width: 0;
+}
+
+.sandbox-project-label {
+  font-size: 13px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sandbox-name {
   font-family: 'JetBrains Mono', 'Fira Code', monospace;
   font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sandbox-git-remote {
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  font-size: 11px;
+  color: var(--text-secondary);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -739,7 +765,7 @@ body {
     flex-shrink: 0;
   }
 
-  .sandbox-name {
+  .sandbox-info {
     width: auto;
     flex: 1;
     min-width: 0;
@@ -752,6 +778,14 @@ body {
   font-size: 12px;
   color: var(--text-secondary);
   text-align: right;
+}
+
+.sandbox-last-used {
+  flex: 0 0 auto;
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  font-size: 11px;
+  color: var(--text-secondary);
+  white-space: nowrap;
 }
 
 .sandbox-inuse-badge {
@@ -776,6 +810,86 @@ body {
   margin: 2px 0 0;
   font-size: 11px;
   color: #f38ba8;
+}
+
+/* Meta-agent approval banners (ccserver-meta): a normal-flow stack rendered
+   by App.jsx above the tab bar, so it pushes content down instead of covering
+   anything and is visible from every tab. Yellow accents mark "waiting for a
+   human decision"; unanswered requests are auto-rejected after 5 minutes. */
+.approval-banner-stack {
+  flex-shrink: 0;
+  background: var(--bg-secondary);
+  border-bottom: 1px solid var(--border);
+}
+
+.approval-banner-title {
+  padding: 6px 16px 0;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.approval-banner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  padding: 8px 16px;
+  border-left: 3px solid #f9e2af;
+}
+
+.approval-banner-main {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 1;
+  min-width: 0;
+}
+
+.approval-banner-kind {
+  flex-shrink: 0;
+  font-size: 11px;
+  color: #f9e2af;
+  border: 1px solid #f9e2af;
+  border-radius: 999px;
+  padding: 1px 8px;
+  white-space: nowrap;
+}
+
+.approval-banner-summary {
+  flex: 1;
+  min-width: 0;
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.approval-banner-meta {
+  flex-shrink: 0;
+  display: flex;
+  gap: 10px;
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  font-size: 11px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+.approval-banner-actions {
+  display: flex;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.approval-reject-btn {
+  border-color: var(--error);
+  color: var(--error);
+}
+
+.approval-banner-error {
+  width: 100%;
+  margin: 0;
+  font-size: 11px;
+  color: var(--error);
 }
 
 .sandbox-delete-btn {
