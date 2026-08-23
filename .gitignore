@@ -13,3 +13,6 @@ playwright-report/
 server/sandbox.config.json
 /tmp/
 .claude/
+ccserver.sqlite3
+ccserver.sqlite3-wal
+ccserver.sqlite3-shm

@@ -110,3 +110,56 @@ test('POST /api/groups creates 3 members; GET lists them; DELETE destroys them',
     }
   }
 });
+
+test('canonical workers[] payload launches named preset-style workers (compat with the fixed trio)', async ({ page }) => {
+  const cwd = newCwd();
+  let groupId = null;
+  try {
+    await page.goto('/');
+    const group = await page.evaluate(async (cwd) => {
+      const res = await fetch('/api/groups', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          cwd,
+          workers: [
+            { name: '実装担当', role: 'workerImplement', app: 'claude', model: null },
+            { name: 'レビュー担当', role: 'workerReview', app: 'opencode', model: null },
+            { role: 'workerExtra', app: 'claude' },
+          ],
+          orchestrator: { app: 'claude' },
+          sandboxOpts: { gpg: false, sshAgent: false },
+        }),
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.error || `HTTP ${res.status}`);
+      }
+      return res.json();
+    }, cwd);
+    groupId = group.groupId;
+
+    // Three arbitrary workers + the orchestrator, names carried into
+    // memberPrefs and surfaced through the members listing.
+    expect(group.members).toHaveLength(4);
+    const byRole = Object.fromEntries(group.members.map((m) => [m.role, m]));
+    expect(byRole.workerImplement.name).toBe('実装担当');
+    expect(byRole.workerReview.name).toBe('レビュー担当');
+    expect(byRole.workerExtra.name).toBeNull(); // no name -> UI falls back to the role
+    expect(byRole.workerImplement.app).toBe('claude');
+    expect(byRole.workerReview.app).toBe('opencode');
+
+    const delStatus = await page.evaluate(async (gid) => {
+      const res = await fetch(`/api/groups/${gid}`, { method: 'DELETE' });
+      return res.status;
+    }, groupId);
+    expect(delStatus).toBe(200);
+    groupId = null;
+  } finally {
+    if (groupId) {
+      await page.evaluate(async (gid) => {
+        await fetch(`/api/groups/${gid}`, { method: 'DELETE' });
+      }, groupId);
+    }
+  }
+});

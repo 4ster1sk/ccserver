@@ -111,3 +111,79 @@ test('orchestratorRestartSessionOpts: orchestratorClaudeMdSrc passes through to 
   });
   assert.equal(withoutSrc.orchestratorClaudeMdSrc, null, 'defaults to null when omitted');
 });
+
+// --- normalizeWorkers: canonical workers[] payload + legacy adapter --------
+
+import { normalizeWorkers, MAX_WORKERS } from './groups.js';
+import * as groupManagerModule from '../ws/groupManager.js';
+
+test('MAX_WORKERS is the member cap minus the orchestrator', () => {
+  assert.equal(MAX_WORKERS, groupManagerModule.MAX_GROUP_MEMBERS - 1);
+  assert.equal(MAX_WORKERS, 7);
+});
+
+test('normalizeWorkers: legacy payloads without workers[] keep the workerA/workerB adapter', () => {
+  const legacy = normalizeWorkers({
+    workerA: { app: 'claude', model: 'm1' },
+    workerB: { sandboxOpts: { gpg: true, sshAgent: false } },
+    orchestrator: { app: 'opencode' },
+  });
+  assert.deepEqual(legacy.workers.map((w) => w.role), ['workerA', 'workerB']);
+  assert.deepEqual(legacy.workers[0].spec, { app: 'claude', model: 'm1' });
+  assert.deepEqual(legacy.workers[1].spec, { sandboxOpts: { gpg: true, sshAgent: false } });
+
+  // Fully empty legacy body still normalizes (all prefs fall back later).
+  const empty = normalizeWorkers({});
+  assert.deepEqual(empty.workers.map((w) => w.role), ['workerA', 'workerB']);
+  assert.deepEqual(empty.workers[0].spec, {});
+});
+
+test('normalizeWorkers: a valid workers[] snapshot passes through normalized', () => {
+  const res = normalizeWorkers({
+    workers: [
+      { name: '実装担当', role: 'workerImplement', app: 'codex', model: 'gpt-5.4' },
+      { role: 'workerReview', app: 'claude' },
+      { role: 'workerExtra' },
+    ],
+  });
+  assert.equal(res.error, undefined);
+  assert.equal(res.workers.length, 3);
+  assert.deepEqual(res.workers[0], { role: 'workerImplement', spec: { name: '実装担当', app: 'codex', model: 'gpt-5.4' } });
+  assert.deepEqual(res.workers[1].spec, { app: 'claude' });
+  assert.deepEqual(res.workers[2].spec, {});
+});
+
+test('normalizeWorkers: structural rejections', () => {
+  assert.match(normalizeWorkers({ workers: 'nope' }).error, /must be an array/);
+  assert.match(normalizeWorkers({ workers: [] }).error, /at least one/);
+  assert.match(
+    normalizeWorkers({ workers: Array.from({ length: 8 }, (_, i) => ({ role: `workerN${i}` })) }).error,
+    /too many workers/,
+  );
+  assert.ok(Array.from({ length: MAX_WORKERS }, (_, i) => ({ role: `workerN${i}` })));
+  assert.equal(normalizeWorkers({ workers: Array.from({ length: MAX_WORKERS }, (_, i) => ({ role: `workerN${i}` })) }).error, undefined,
+    'exactly MAX_WORKERS entries are accepted');
+});
+
+test('normalizeWorkers: duplicate roles and bad entries are refused with the index in the message', () => {
+  assert.match(normalizeWorkers({ workers: [{ role: 'workerA' }, { role: 'workerA' }] }).error, /duplicate worker role: workerA/);
+  assert.match(normalizeWorkers({ workers: [{ role: 'orchestrator' }] }).error, /workers\[0\]/);
+  assert.match(normalizeWorkers({ workers: [{ role: 'workerOk' }, { name: '' }] }).error, /workers\[1\]/);
+  assert.match(normalizeWorkers({ workers: [{ role: 'workerX', app: 'copilot' }] }).error, /copilot is not supported in groups/);
+  assert.match(normalizeWorkers({ workers: [{ role: 'workerX', model: 5 }] }).error, /model must be a string or null/);
+});
+
+test('normalizeWorkers: per-entry sandboxOpts mirror memberSpecFromBody semantics', () => {
+  const res = normalizeWorkers({ workers: [
+    { role: 'workerS', sandboxOpts: { gpg: 1, sshAgent: 'yes' } },
+    { role: 'workerT', sandboxOpts: 'bogus' },
+  ]});
+  assert.deepEqual(res.workers[0].spec.sandboxOpts, { gpg: true, sshAgent: true });
+  assert.deepEqual(res.workers[1].spec.sandboxOpts, null);
+});
+
+test('normalizeWorkers: workers explicitly null falls back to the legacy adapter', () => {
+  const res = normalizeWorkers({ workers: null, workerA: { app: 'claude' } });
+  assert.deepEqual(res.workers.map((w) => w.role), ['workerA', 'workerB']);
+  assert.deepEqual(res.workers[0].spec, { app: 'claude' });
+});

@@ -86,3 +86,39 @@ test('combo launch refuses copilot members', async ({ page }) => {
   expect(res.status).toBe(400);
   expect(res.body.error).toMatch(/copilot is not supported in groups/);
 });
+
+test('preset API and workers[] payload refuse copilot', async ({ page }) => {
+  await page.goto('/');
+
+  // The preset library can never contain a copilot app (no bwrap involved --
+  // this is a pure validation rejection).
+  const created = await page.evaluate(async () => {
+    const r = await fetch('/api/worker-presets', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: 'x', role: 'workerCopi', app: 'copilot' }),
+    });
+    return { status: r.status, body: await r.json().catch(() => ({})) };
+  });
+  expect(created.status).toBe(400);
+  expect(created.body.error).toMatch(/copilot is not supported in groups/);
+
+  // The canonical workers[] payload is refused the same way. Like the legacy
+  // refusal above, this needs bwrap to exist because POST /api/groups checks
+  // the sandbox before validating members.
+  test.skip(!sandboxAvailable, 'bwrap not available — sandbox cannot run');
+  const launched = await page.evaluate(async () => {
+    const r = await fetch('/api/groups', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        cwd: '/tmp',
+        workers: [{ role: 'workerCopi', app: 'copilot' }],
+        orchestrator: { app: 'claude' },
+      }),
+    });
+    return { status: r.status, body: await r.json().catch(() => ({})) };
+  });
+  expect(launched.status).toBe(400);
+  expect(launched.body.error).toMatch(/copilot/i);
+});
