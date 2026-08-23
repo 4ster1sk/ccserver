@@ -398,9 +398,10 @@ export default function App() {
   const claudeAvailable = !usagePrefs.availableApps || usagePrefs.availableApps.claude !== false;
   const codexAvailable = !usagePrefs.availableApps || usagePrefs.availableApps.codex !== false;
   const usageHidden = !usagePrefs.showUsage || (!claudeAvailable && !codexAvailable);
-  // Which app the popover opens on: follow the active tab's app when it's
-  // codex and codex is actually available, otherwise default to claude
-  // unless only codex is installed.
+  // First-run seed only: UsageButton remembers the app the user last picked
+  // (localStorage), so this active-tab-derived default is used just when
+  // nothing has been saved yet. codex wins over claude when the active tab is
+  // a codex terminal and codex is actually installed.
   const activeTabApp = activeTab?.type === 'group' ? groupActiveApp : activeTab?.app;
   const usageDefaultApp = (activeTabApp === 'codex' && codexAvailable) ? 'codex'
     : (claudeAvailable ? 'claude' : 'codex');

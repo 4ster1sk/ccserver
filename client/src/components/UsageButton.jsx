@@ -24,15 +24,42 @@ function fmtAge(updatedAt) {
   return `${Math.round(m / 60)}時間前`;
 }
 
+// Last app the user picked in the popover, remembered per browser so opening
+// or focusing an OpenCode (or any) terminal no longer resets the view back to
+// claude. Same per-browser convention as DirectoryBrowser's keys.
+const USAGE_APP_KEY = 'ccserver-usage-app';
+
+function loadSavedUsageApp() {
+  try {
+    const v = window.localStorage.getItem(USAGE_APP_KEY);
+    return v === 'claude' || v === 'codex' ? v : null;
+  } catch {
+    return null;
+  }
+}
+
+function saveUsageApp(app) {
+  try {
+    window.localStorage.setItem(USAGE_APP_KEY, app);
+  } catch {
+    // Storage unavailable (private mode etc.) -- selection just won't persist.
+  }
+}
+
 export default function UsageButton({ hidden = false, defaultApp = 'claude', availableApps = null }) {
   const [open, setOpen] = useState(false);
   const [data, setData] = useState(null);   // { usage, updatedAt, error, ... }
   const [loading, setLoading] = useState(false);
   const [, setTick] = useState(0);   // re-render so pace/age stay live while open
-  // Which app the popover is currently showing. Seeded from defaultApp (the
-  // active terminal tab's app) but switchable via the in-popover tabs below,
-  // independent of what's actually running in the terminal.
-  const [tab, setTab] = useState(defaultApp === 'codex' ? 'codex' : 'claude');
+  // Which app the popover is currently showing. The persisted choice wins:
+  // defaultApp (the active terminal tab's app) only seeds the very first view
+  // when nothing valid has been saved yet. Availability is still respected --
+  // a saved app that isn't installed falls back below.
+  const [tab, setTab] = useState(() => {
+    const saved = loadSavedUsageApp();
+    if (saved && (!availableApps || availableApps[saved] !== false)) return saved;
+    return defaultApp === 'codex' ? 'codex' : 'claude';
+  });
   const wrapRef = useRef(null);
 
   const claudeAvailable = !availableApps || availableApps.claude !== false;
@@ -51,9 +78,28 @@ export default function UsageButton({ hidden = false, defaultApp = 'claude', ava
     }
   }, [tab]);
 
-  // Follow the active terminal tab's app whenever it changes -- but this
-  // only reseeds `tab`; the user can still override it via the popover tabs.
-  useEffect(() => { setTab(defaultApp === 'codex' ? 'codex' : 'claude'); }, [defaultApp]);
+  // Do NOT follow defaultApp here anymore: switching to (or focusing) a
+  // terminal running another app used to reset the view and discard the
+  // user's pick. defaultApp is only the first-run seed above.
+  //
+  // Instead, reconcile against availability: when it becomes known (it starts
+  // as null while /api/dirs/home is in flight) or changes later, prefer the
+  // persisted choice if that app is still usable, and otherwise move to the
+  // other installed app -- persisting the fallback so it doesn't flap back.
+  useEffect(() => {
+    if (!availableApps) return;
+    const saved = loadSavedUsageApp();
+    setTab((cur) => {
+      if (saved && saved !== cur && availableApps[saved] !== false) return saved;
+      if (availableApps[cur] !== false) return cur;
+      const other = cur === 'codex' ? 'claude' : 'codex';
+      if (availableApps[other] !== false) {
+        saveUsageApp(other);
+        return other;
+      }
+      return cur;
+    });
+  }, [availableApps]);
 
   // Prime the button (session % badge) once on mount, using the cache, and
   // again whenever the viewed app changes -- reset first so a tab switch
@@ -121,12 +167,12 @@ export default function UsageButton({ hidden = false, defaultApp = 'claude', ava
               <button
                 type="button"
                 className={`usage-tab${tab === 'claude' ? ' active' : ''}`}
-                onClick={() => setTab('claude')}
+                onClick={() => { saveUsageApp('claude'); setTab('claude'); }}
               >Claude</button>
               <button
                 type="button"
                 className={`usage-tab${tab === 'codex' ? ' active' : ''}`}
-                onClick={() => setTab('codex')}
+                onClick={() => { saveUsageApp('codex'); setTab('codex'); }}
               >Codex</button>
             </div>
           )}
