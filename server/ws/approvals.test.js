@@ -125,12 +125,16 @@ test('listApprovals returns pending oldest-first and history newest-first', asyn
   const summaries = first.pending.filter((x) => ['one', 'two', 'three'].includes(x.summary)).map((x) => x.summary);
   assert.deepEqual(summaries, ['one', 'two', 'three'], 'pending ordered by created_at ASC');
 
-  decideApproval(ids[2], 'rejected'); // three -> rejected (newest resolution)
+  decideApproval(ids[2], 'rejected'); // three -> rejected
   const afterOne = await c;
   assert.equal(afterOne.status, 'rejected');
   assert.equal(afterOne.approval.id, ids[2]);
 
-  decideApproval(ids[0], 'approved'); // one -> approved
+  // resolved_at has ms resolution: without a real gap between the two
+  // decisions the history's ORDER BY resolved_at DESC tiebreaks on
+  // created_at and the expected order becomes machine-speed-dependent.
+  await new Promise((r) => setTimeout(r, 10));
+  decideApproval(ids[0], 'approved'); // one -> approved (now strictly newer)
   await a;
   const history = listApprovals().history;
   const histIds = history.map((x) => x.id).filter((x) => [ids[0], ids[2]].includes(x));
