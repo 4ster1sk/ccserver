@@ -123,11 +123,13 @@ export function detectPermissionPrompt(app, bufNoSpace) {
     return /1\.Yes/i.test(bufNoSpace) || /runningsession/i.test(bufNoSpace);
   }
   if (app === 'codex') {
-    // Codex 0.149.0 renders its local-command approval as a three-choice
-    // menu. Its initial focus is `1. Yes, proceed (y)`, so Enter accepts the
-    // one-time approval. Require both the question and the complete approve-
-    // once option rather than matching a generic "Yes" in model output.
-    return /Wouldyouliketorunthefollowingcommand.*1\.Yes,proceed\(y\)/i.test(bufNoSpace);
+    // Codex presents both local-command and MCP-tool approval menus. Enter
+    // accepts the initially highlighted one-time approval in either case.
+    // Require the question plus its corresponding option rather than matching
+    // generic permission prose that a model might emit.
+    const commandPrompt = /Wouldyouliketorunthefollowingcommand.*1\.Yes,proceed\(y\)/i;
+    const mcpToolPrompt = /Allowthe\S+MCPserver(?:torun)?tool["“][^"”]+["”].*1\.Allow/i;
+    return commandPrompt.test(bufNoSpace) || mcpToolPrompt.test(bufNoSpace);
   }
   return (
     /Doyouwantto(proceed|makethisedit|use)/i.test(bufNoSpace) ||
