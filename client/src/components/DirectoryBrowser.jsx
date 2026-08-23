@@ -12,7 +12,7 @@ const COMBO_DEFAULT_APPS = { workerA: 'claude', workerB: 'opencode', orchestrato
 
 // Combo-mode role app picks, remembered per browser like the single-launch
 // APP_KEY so the next combo launch reuses them instead of the claude/
-// opencode defaults. Only claude/opencode are valid choices; anything else
+// opencode defaults. Only claude/opencode/codex are valid choices; anything else
 // falls back to the per-role default.
 function loadComboApps() {
   try {
@@ -23,7 +23,7 @@ function loadComboApps() {
         const out = {};
         for (const role of COMBO_ROLES) {
           const v = parsed[role];
-          out[role] = v === 'claude' || v === 'opencode' ? v : COMBO_DEFAULT_APPS[role];
+          out[role] = v === 'claude' || v === 'opencode' || v === 'codex' ? v : COMBO_DEFAULT_APPS[role];
         }
         return out;
       }
@@ -216,8 +216,8 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
         // orchestrator start as claude, workerB as opencode -- a role whose
         // default points at a missing CLI must not stay selected-active (the
         // launch would be refused server-side). Combo only offers
-        // claude/opencode, so the fallback is restricted to those.
-        const comboAvail = ['claude', 'opencode'].filter((a) => data.availableApps[a]);
+        // claude/opencode/codex, so the fallback is restricted to those.
+        const comboAvail = ['claude', 'opencode', 'codex'].filter((a) => data.availableApps[a]);
         if (comboAvail.length > 0) {
           setComboApps((c) => {
             const next = {
@@ -635,14 +635,14 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
                 </p>
                 <div className="open-menu-label">ワーカーA</div>
                 <div className="open-menu-app-row">
-                  {['claude', 'opencode'].map((app) => (
+                  {['claude', 'opencode', 'codex'].map((app) => (
                     <button
                       key={app}
                       className={`open-menu-app-btn${comboApps.workerA === app ? ' active' : ''}${availableApps && !availableApps[app] ? ' open-menu-item-disabled' : ''}`}
                       onClick={() => chooseComboApp('workerA', app)}
                       title={availableApps && !availableApps[app] ? 'サーバーに未インストール' : ''}
                     >
-                      {app === 'claude' ? 'Claude Code' : 'opencode'}
+                      {app === 'claude' ? 'Claude Code' : app === 'opencode' ? 'opencode' : 'OpenAI Codex'}
                     </button>
                   ))}
                 </div>
@@ -660,14 +660,14 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
                 </div>
                 <div className="open-menu-label">ワーカーB</div>
                 <div className="open-menu-app-row">
-                  {['claude', 'opencode'].map((app) => (
+                  {['claude', 'opencode', 'codex'].map((app) => (
                     <button
                       key={app}
                       className={`open-menu-app-btn${comboApps.workerB === app ? ' active' : ''}${availableApps && !availableApps[app] ? ' open-menu-item-disabled' : ''}`}
                       onClick={() => chooseComboApp('workerB', app)}
                       title={availableApps && !availableApps[app] ? 'サーバーに未インストール' : ''}
                     >
-                      {app === 'claude' ? 'Claude Code' : 'opencode'}
+                      {app === 'claude' ? 'Claude Code' : app === 'opencode' ? 'opencode' : 'OpenAI Codex'}
                     </button>
                   ))}
                 </div>
@@ -744,14 +744,14 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
                 ))}
                 <div className="open-menu-label">オーケストレーター</div>
                 <div className="open-menu-app-row">
-                  {['claude', 'opencode'].map((app) => (
+                  {['claude', 'opencode', 'codex'].map((app) => (
                     <button
                       key={app}
                       className={`open-menu-app-btn${comboApps.orchestrator === app ? ' active' : ''}${availableApps && !availableApps[app] ? ' open-menu-item-disabled' : ''}`}
                       onClick={() => chooseComboApp('orchestrator', app)}
                       title={availableApps && !availableApps[app] ? 'サーバーに未インストール' : ''}
                     >
-                      {app === 'claude' ? 'Claude Code' : 'opencode'}
+                      {app === 'claude' ? 'Claude Code' : app === 'opencode' ? 'opencode' : 'OpenAI Codex'}
                     </button>
                   ))}
                 </div>

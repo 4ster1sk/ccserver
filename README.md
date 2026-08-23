@@ -85,7 +85,7 @@ NODE_ENV=production node server/index.js
 
 サンドボックス・GPG・ssh-agent の詳細は [サンドボックス (bwrap + rootless docker)](#サンドボックス-bwrap--rootless-docker) を参照。「アプリ」と「起動モード」のどちらの項目をクリックしても、選んだ内容で即座に起動します。
 
-コンボ起動のロール別アプリ選択 (ワーカーA / ワーカーB / オーケストレーター) もブラウザの `localStorage` に記憶され、次回のコンボ起動の既定になります (初期値: ワーカーA・オーケストレーターが Claude Code、ワーカーB が opencode)。単発起動の「アプリ」記憶とは独立しており、コンボ起動には `defaultApp` は適用されません。
+コンボ起動のロール別アプリ選択 (ワーカーA / ワーカーB / オーケストレーター) もブラウザの `localStorage` に記憶され、次回のコンボ起動の既定になります (初期値: ワーカーA・オーケストレーターが Claude Code、ワーカーB が opencode)。各ロールで Claude Code / opencode / OpenAI Codex を選択可能です（copilot のみ不可）。単発起動の「アプリ」記憶とは独立しており、コンボ起動には `defaultApp` は適用されません。
 
 新規セッションの既定アプリ・サンドボックス設定は `sandbox.config.json` (下記「設定ファイル」参照) でサーバー全体の初期値を決められますが、上記モーダルで一度でも明示的に選んだ後はブラウザ側の記憶が優先されます。
 
@@ -104,7 +104,7 @@ GitHub Copilot を選んだ場合:
 - **再開は `copilot --continue`** (最後のセッションへの再開) のみです。会話 ID を指定しての再開はできません (copilot の TUI は ID を出力しないため)。exit 後のセッション一覧からの再開や、予約プロンプト発火時の自動復帰も `--continue` で行われます。
 - モデル入力欄に入れたモデル名は `--model <model>` として渡されます。
 - Usage ボタンは Claude Code 専用のため非表示になります。
-- **コンボ起動 (下記) では選択できません**: copilot には MCP を CLI 引数/環境変数で注入する仕組みが無い (設定ファイル経由のため) ので、グループメンバーにしても ccserver の MCP broker ツールが使えません。コンボのメンバーには claude / opencode のみ選べます。
+- **コンボ起動 (下記) では選択できません**: copilot には MCP を CLI 引数/環境変数で注入する仕組みが無い (設定ファイル経由のため) ので、グループメンバーにしても ccserver の MCP broker ツールが使えません。コンボのメンバーには claude / opencode / OpenAI Codex が選べます（copilot のみ不可）。Codex は `-c mcp_servers...` でプロセススコープに注入されるため `~/.codex/config.toml` を変更せずに利用できます。
 
 OpenAI Codexについて:
 

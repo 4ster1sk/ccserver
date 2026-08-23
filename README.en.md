@@ -66,7 +66,7 @@ Open <http://localhost:3001>. Change the port with `PORT`, for example `PORT=808
 2. Use the terminal in the browser.
 3. Use the launch menu to choose Claude Code, opencode, GitHub Copilot, or OpenAI Codex, and optionally enable sandboxing, GPG signing, or SSH-agent forwarding.
 
-The selected application and launch options are remembered in the browser's `localStorage`. Combo sessions can run two workers and an orchestrator. Combo sessions support Claude Code and opencode only, because Copilot CLI cannot receive ccserver's MCP tools through CLI arguments or environment variables.
+The selected application and launch options are remembered in the browser's `localStorage`. Combo sessions can run two workers and an orchestrator. Combo sessions support Claude Code, opencode, and OpenAI Codex. Copilot CLI cannot be used in combos because it cannot receive ccserver's MCP tools through CLI arguments or environment variables (file-based config only). Codex is injected per-process via `-c mcp_servers...` without touching `~/.codex/config.toml`.
 
 Scheduled prompts can be created with the clock button in the terminal header. They are persisted on disk in `.scheduled-prompts.json` and can fire after the browser is closed or the server restarts. The time is interpreted in the server's timezone.
 
