@@ -7,10 +7,19 @@
 // takes minutes, and holding the request open froze clients behind the call.
 // Deletion progress/failures are polled back through GET.
 
-import { listSandboxHomes, sandboxHomeSize, deleteSandboxHome, dindLockHeld } from '../ws/sandbox.js';
+import {
+  listSandboxHomes,
+  sandboxHomeSize,
+  deleteSandboxHome,
+  dindLockHeld,
+  sandboxRemnantsExist,
+  isSandboxDeleteInFlight,
+  sandboxDeletesInFlight,
+  beginSandboxDelete,
+  endSandboxDelete,
+} from '../ws/sandbox.js';
 import { sandboxHomeInUsePath } from '../ws/sessionManager.js';
 
-const inFlight = new Set(); // slugs with a deletion currently running
 const lastErrors = new Map(); // slug -> why its last delete failed
 
 export async function sandboxesRoute(fastify) {
@@ -22,17 +31,33 @@ export async function sandboxesRoute(fastify) {
       cwd: h.cwd,
       size: await sandboxHomeSize(h.path),
       inUse: sandboxHomeInUsePath(h.path),
-      deleting: inFlight.has(h.name),
+      deleting: isSandboxDeleteInFlight(h.name),
       deleteError: lastErrors.get(h.name) || null,
     })));
-    // A half-finished deletion (HOME already gone, only the unlisted docker
-    // data-root left) would otherwise vanish from the page together with the
-    // reason it failed -- synthesize an entry so the error stays visible
-    // until the user retries or cleans up manually.
     const listed = new Set(sandboxes.map((s) => s.name));
     for (const [slug, message] of lastErrors) {
+      if (!sandboxRemnantsExist(slug)) {
+        // The leftovers are gone -- e.g. the user cleaned them up manually as
+        // the error message itself instructs. Stop showing a row for dirs
+        // that no longer exist.
+        lastErrors.delete(slug);
+        continue;
+      }
+      // A half-finished deletion (HOME already gone, only the unlisted docker
+      // data-root left) would otherwise vanish from the page together with the
+      // reason it failed -- synthesize an entry so the error stays visible
+      // until the user retries or cleans up manually.
       if (!listed.has(slug)) {
         sandboxes.push({ name: slug, path: null, cwd: null, size: null, inUse: 0, deleting: false, deleteError: message });
+        listed.add(slug);
+      }
+    }
+    // A retry (or any deletion whose HOME is already gone) has no homes entry;
+    // without this the row would vanish from the page mid-deletion and the
+    // client would stop polling.
+    for (const slug of sandboxDeletesInFlight()) {
+      if (!listed.has(slug)) {
+        sandboxes.push({ name: slug, path: null, cwd: null, size: null, inUse: 0, deleting: true, deleteError: null });
       }
     }
     return { sandboxes };
@@ -59,7 +84,16 @@ export async function sandboxesRoute(fastify) {
         error: 'このサンドボックスの docker デーモンがまだ起動中のため削除できません。しばらく待つか、サーバーを再起動してからもう一度お試しください。',
       });
     }
-    inFlight.add(name);
+    // Two concurrent background removals over the same trees would race
+    // (interleaved escalations, a late failure resurrecting an error row for
+    // an already-fully-removed slug). The client disables the button, but
+    // that only covers one tab.
+    if (isSandboxDeleteInFlight(name)) {
+      return reply.code(409).send({
+        error: 'このサンドボックスの削除はすでに進行中です。しばらく待ってから状態を更新してください。',
+      });
+    }
+    beginSandboxDelete(name);
     lastErrors.delete(name);
     void deleteSandboxHome(name)
       .then((res) => {
@@ -73,7 +107,7 @@ export async function sandboxesRoute(fastify) {
         lastErrors.set(name, '削除に失敗しました');
       })
       .finally(() => {
-        inFlight.delete(name);
+        endSandboxDelete(name);
         // lastErrors is deliberately kept: the failed dirs (and the reason)
         // must stay visible until a retry succeeds or the user cleans up.
       });

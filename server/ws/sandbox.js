@@ -98,6 +98,14 @@ export function sandboxHomeRoot() {
     || join(HOME, '.local', 'share', 'ccserver-sandbox', 'home');
 }
 
+// Whether any on-disk remnant of a failed deletion is still present for this
+// slug. Lets the settings page retire a synthesized error row once the user
+// has cleaned the leftovers up manually (the failure message itself tells
+// them to run `sudo rm -rf`), instead of showing it until restart.
+export function sandboxRemnantsExist(name) {
+  return existsSync(join(sandboxHomeRoot(), name)) || existsSync(join(dindRoot(), name));
+}
+
 // The lock file a rootless dockerd holds (flock, see sandbox-entrypoint.sh's
 // $DATA_ROOT/.ccserver-dockerd.lock) for the whole daemon lifetime. Its
 // presence on the host tells us whether a daemon -- possibly leaked from an
@@ -166,6 +174,8 @@ export function dockerdStatus(cwd) {
 // null on success, or an error message when every strategy failed (the caller
 // turns that into a clean HTTP error instead of an opaque EACCES 500).
 function removeTree(path) {
+  // NOTE: keep in lockstep with removeTreeAsync below until buildSandboxSpawn
+  // goes async and one of the two twins can be deleted.
   if (!existsSync(path)) return null;
   const tryRemove = (fn) => {
     try {
@@ -233,6 +243,7 @@ function removeTreeViaSudo(path) {
 // event loop (and with it every WS session and HTTP request) for that whole
 // time. Same escalation order and semantics as removeTree, just non-blocking.
 async function removeTreeAsync(path) {
+  // NOTE: keep in lockstep with the sync removeTree above.
   if (!existsSync(path)) return null;
   const tryRemove = async (fn) => {
     try {
@@ -384,6 +395,31 @@ export async function sandboxHomeSize(path) {
   const size = await measureSandboxHomeSize(path);
   sizeCache.set(path, { size, fetchedAt: Date.now() });
   return size;
+}
+
+// Slugs with a settings-page deletion currently running. Lives here rather
+// than in the route so both consumers can see it: the DELETE route guards
+// against duplicate kicks (two concurrent rm -rf escalations over the same
+// trees), and buildSandboxSpawn refuses to launch a session into a HOME that
+// is being removed underneath it.
+const deletionsInFlight = new Set();
+
+export function isSandboxDeleteInFlight(name) {
+  return deletionsInFlight.has(name);
+}
+
+export function beginSandboxDelete(name) {
+  deletionsInFlight.add(name);
+}
+
+export function endSandboxDelete(name) {
+  deletionsInFlight.delete(name);
+}
+
+// Snapshot of the slugs currently being deleted, for the settings page to
+// synthesize "削除中" rows whose HOME has already been removed.
+export function sandboxDeletesInFlight() {
+  return [...deletionsInFlight];
 }
 
 // Delete a sandbox: its persistent HOME plus the matching docker data-root
@@ -1274,6 +1310,13 @@ export function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, mcpSoc
   let homeDir = null;
   if (persistentHome) {
     homeDir = persistentHomeDir(cwd);
+    // A settings-page deletion may be mid-flight on this HOME (its rm -rf
+    // runs in the background for minutes). Booting a session here would
+    // re-create and bind-mount a HOME the deleter is still walking -- close
+    // the TOCTOU by refusing the launch.
+    if (isSandboxDeleteInFlight(basename(homeDir))) {
+      throw new Error(`a deletion of this sandbox HOME is in progress; retry the launch once it finishes (${homeDir})`);
+    }
     if (!reuseSandboxHome) {
       // "新規作成" must start from a clean HOME. A plain rmSync silently
       // fails on subuid-owned files (a nested dockerd wrote to the /tmp-bound

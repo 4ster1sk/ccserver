@@ -2,9 +2,9 @@
 // persistent sandboxes (name/real-path/size/inUse, plus `deleting` /
 // `deleteError` while a removal is in flight or just failed); DELETE
 // /api/sandboxes/:name answers 204 immediately and removes the HOME +
-// matching docker data-root in the background. The in-use (409) and
-// dockerd-lock (409) branches are checked synchronously; here we exercise
-// the filesystem-backed paths.
+// matching docker data-root in the background. The in-use (409),
+// dockerd-lock (409) and already-in-flight (409) branches are checked
+// synchronously; here we exercise the filesystem-backed paths.
 
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
@@ -14,7 +14,7 @@ import { spawn, spawnSync, execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { sandboxesRoute } from './sandboxes.js';
-import { sandboxHomeRoot, clearSandboxSizeCache } from '../ws/sandbox.js';
+import { sandboxHomeRoot, clearSandboxSizeCache, beginSandboxDelete, endSandboxDelete } from '../ws/sandbox.js';
 
 let tmpRoot;
 let app;
@@ -206,5 +206,76 @@ test('DELETE /api/sandboxes/:name refuses path-like names', async () => {
     const res = await del(bad);
     assert.ok(res.statusCode >= 400 && res.statusCode !== 200,
       `name ${JSON.stringify(bad)} must be rejected (got ${res.statusCode})`);
+  }
+});
+
+test('GET /api/sandboxes retires a synthesized error row once the leftovers are cleaned up manually', async (t) => {
+  const cwd = '/srv/manual-cleanup';
+  const slug = slugFromCwd(cwd);
+  const dind = join(process.env.CCSERVER_SANDBOX_DIND_ROOT, slug);
+  const snap = join(dind, 'snap');
+  mkdirSync(snap, { recursive: true });
+  writeFileSync(join(snap, 'layer'), 'x');
+  let mounted = false;
+  try {
+    try {
+      execFileSync('mount', ['--bind', snap, snap], { stdio: 'ignore' });
+      mounted = true;
+    } catch {
+      console.log('skipping: bind mounts unavailable');
+      return;
+    }
+    const res = await del(slug);
+    assert.equal(res.statusCode, 204);
+    await waitFor(async () => {
+      const found = (await list()).find((s) => s.name === slug);
+      return found && !found.deleting && found.deleteError ? found : null;
+    });
+    // Follow the error message's own instruction and remove the leftovers by
+    // hand: the phantom row must disappear from the list instead of lingering
+    // until restart.
+    execFileSync('umount', [snap], { stdio: 'ignore' });
+    mounted = false;
+    rmSync(dind, { recursive: true, force: true });
+    await waitFor(async () => !(await list()).some((s) => s.name === slug));
+  } finally {
+    if (mounted) {
+      try { execFileSync('umount', [snap], { stdio: 'ignore' }); } catch { /* ignore */ }
+    }
+    rmSync(dind, { recursive: true, force: true });
+  }
+});
+
+test('DELETE /api/sandboxes/:name refuses while a deletion of the same slug is already in flight', async () => {
+  const cwd = '/srv/inflight';
+  const slug = slugFromCwd(cwd);
+  const home = join(sandboxHomeRoot(), slug);
+  mkdirSync(join(home, 'data'), { recursive: true });
+  writeFileSync(join(home, 'data', 'keepme'), 'x');
+  beginSandboxDelete(slug); // simulate a background removal currently running
+  try {
+    const res = await del(slug);
+    assert.equal(res.statusCode, 409, 'a second kick must not race the running one');
+    assert.equal(existsSync(join(home, 'data', 'keepme')), true,
+      'the refused request must not have removed anything');
+  } finally {
+    endSandboxDelete(slug);
+  }
+});
+
+test('GET /api/sandboxes synthesizes a deleting row for an in-flight slug with no HOME left', async () => {
+  // Mid-deletion the HOME may already be gone (it is removed first): without
+  // synthesis the row would vanish and the client would stop polling.
+  const slug = slugFromCwd('/srv/ghost');
+  mkdirSync(join(sandboxHomeRoot(), slug), { recursive: true });
+  rmSync(join(sandboxHomeRoot(), slug), { recursive: true, force: true }); // ensure truly absent
+  beginSandboxDelete(slug);
+  try {
+    const entry = (await list()).find((s) => s.name === slug);
+    assert.ok(entry, 'the row stays visible while the deletion runs');
+    assert.equal(entry.deleting, true);
+    assert.equal(entry.deleteError, null);
+  } finally {
+    endSandboxDelete(slug);
   }
 });

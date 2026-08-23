@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { authFetch } from '../auth.js';
 
 function formatSize(bytes) {
@@ -14,9 +14,16 @@ export default function SettingsView() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [deleting, setDeleting] = useState(null);
+  // Guards against overlapping polls: setInterval starts a new fetch even if
+  // the previous one is still outstanding, and a slow stale response could
+  // then clobber a newer one.
+  const refreshingRef = useRef(false);
 
+  // loading only covers the very first load; later refreshes keep the list
+  // mounted (toggling it per poll made the whole list flash every 1.5s).
   const refresh = useCallback(async () => {
-    setLoading(true);
+    if (refreshingRef.current) return;
+    refreshingRef.current = true;
     try {
       const res = await authFetch('/api/sandboxes');
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -26,6 +33,7 @@ export default function SettingsView() {
     } catch (err) {
       setError(err.message || 'Failed to load sandboxes');
     } finally {
+      refreshingRef.current = false;
       setLoading(false);
     }
   }, []);
@@ -77,11 +85,11 @@ export default function SettingsView() {
       <section className="settings-section">
         <h3>作成済みサンドボックス</h3>
         {error && <p className="settings-error">読み込みに失敗しました: {error}</p>}
-        {!error && loading && <p className="settings-empty">読み込み中…</p>}
-        {!error && !loading && sandboxes.length === 0 && (
+        {loading && <p className="settings-empty">読み込み中…</p>}
+        {!loading && sandboxes.length === 0 && (
           <p className="settings-empty">作成済みサンドボックスはありません。</p>
         )}
-        {!error && !loading && sandboxes.length > 0 && (
+        {!loading && sandboxes.length > 0 && (
           <ul className="sandbox-list">
             {sandboxes.map((sb) => (
               <li key={sb.name} className="sandbox-row">
