@@ -91,20 +91,42 @@ export function buildMcpConfigArgsAndEnv(app, { groupMcp = true, notify, usage }
 
   if (app === 'codex') {
     const servers = {};
-    if (groupMcp) servers.ccserver = { command: MCP_BRIDGE_COMMAND, args: [] };
+    // Codex can start MCP commands with a restricted environment. Explicitly
+    // forward the bridge variables it needs instead of relying on implicit
+    // child-process inheritance. `env_vars` preserves the value set by bwrap
+    // in sandboxed sessions (the fixed in-sandbox socket path) and the host
+    // socket path in non-sandboxed sessions.
+    if (groupMcp) {
+      servers.ccserver = {
+        command: MCP_BRIDGE_COMMAND,
+        args: [],
+        env_vars: ['CCSANDBOX_MCP_SOCK'],
+      };
+    }
     if (notify) {
       const inv = notifyInvocation(notify);
-      servers['ccserver-notify'] = { command: inv.command, args: inv.args };
+      servers['ccserver-notify'] = {
+        command: inv.command,
+        args: inv.args,
+        env_vars: ['CCSANDBOX_NOTIFY_MCP_SOCK', 'CCSERVER_NOTIFY_IDENTITY'],
+      };
     }
     if (usage) {
       const inv = usageInvocation(usage);
-      servers['ccserver-usage'] = { command: inv.command, args: inv.args };
+      servers['ccserver-usage'] = {
+        command: inv.command,
+        args: inv.args,
+        env_vars: ['CCSANDBOX_USAGE_MCP_SOCK'],
+      };
     }
     const args = [];
     for (const [name, server] of Object.entries(servers)) {
       // JSON strings/arrays are valid TOML basic strings/arrays, which keeps
       // paths safely quoted while using Codex's per-process config override.
-      args.push('-c', `mcp_servers.${name}={command=${JSON.stringify(server.command)},args=${JSON.stringify(server.args)}}`);
+      args.push(
+        '-c',
+        `mcp_servers.${name}={command=${JSON.stringify(server.command)},args=${JSON.stringify(server.args)},env_vars=${JSON.stringify(server.env_vars)}}`,
+      );
     }
     return {
       args,
