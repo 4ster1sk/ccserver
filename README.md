@@ -195,14 +195,14 @@ OpenAI Codexについて:
 
 ### 使用量 (Usage) ボタン
 
-画面上部タブバー右端の **Usage** ボタンから、Claude Code の `/usage` または Codex の利用率 (セッション/週次相当の利用率・リセット時刻・プラン) をポップオーバーで確認できます。ボタンには現在セッションの使用率が常時表示されます (opencode / copilot セッションでは非表示)。表示内容は現在アクティブなタブのアプリ (claude / codex) に応じて自動的に切り替わります。
+画面上部タブバー右端の **Usage** ボタンから、Claude Code の `/usage` または Codex の利用率 (セッション/週次相当の利用率・リセット時刻・プラン) をポップオーバーで確認できます。ボタンには現在セッションの使用率が常時表示されます (opencode / copilot セッションでは非表示)。ポップオーバーは現在アクティブなタブのアプリ (claude / codex) の表示から開きますが、両方インストールされている場合はポップオーバー内の **Claude / Codex タブ** でいつでも切り替えられます (アクティブなタブとは独立)。
 
 - **Claude**: 裏側で `claude --ax-screen-reader` を短時間起動して `/usage` の描画をパースします (`/usage` の閲覧自体は API を消費しません)。
 - **Codex**: `codex app-server` を起動し、JSON-RPC (`account/rateLimits/read`) でレート制限のスナップショットを直接取得します。TUI 描画のスクレイピングではないため、起動待ちやプロジェクト信頼ダイアログのハンドリングは不要です。
 - どちらも結果を約 1 分キャッシュします。「更新」ボタンで即時に再取得できます。
 - bwrap がある環境では、**該当 CLI の設定だけを見せる最小サンドボックス** (docker/gpg/ssh なし) で起動します。無ければ CLI を直接起動します。
 - API: `GET /api/usage?app=claude|codex` (`&force=1` で強制再取得、`app` 省略時は `claude`)。サーバー起動時に両方のキャッシュを 1 度ウォームします。
-- ボタンは設定ファイルの `showUsage: false` で非表示にできます。さらに **アクティブなタブのアプリ (claude/codex) がサーバーにインストールされていない環境では、設定に関わらず自動的に非表示**になります (この場合 `GET /api/usage` は `claude is not installed on this server` / `codex is not installed on this server` を返します)。
+- ボタンは設定ファイルの `showUsage: false` で非表示にできます。さらに **claude/codex のどちらもサーバーにインストールされていない環境では、設定に関わらず自動的に非表示**になります (この場合 `GET /api/usage` は `claude is not installed on this server` / `codex is not installed on this server` を返します)。片方だけインストールされている場合はボタンは表示され、ポップオーバー内のタブ切替はそのインストール済みの 1 つだけになります。
 
 ### ccserver-usage (使用量参照用 MCP)
 
@@ -396,7 +396,7 @@ cp server/sandbox.config.example.json server/sandbox.config.json
 | `gitBroker` | `true` | git/gh の認証情報スコープ制限 (上記参照)。 |
 | `forceSandbox` | `false` | `true` でサンドボックス外の起動を全面禁止。エージェント・シェルを問わず全セッションがサンドボックス強制になり、UI のサンドボックス切替は無効化されます。bwrap が無い環境 (または Windows) では起動をエラーで拒否します (Claude の `/usage` / Codex のレート制限取得の直接起動フォールバックも同様に禁止)。ホストに bwrap (bubblewrap) のインストールが必須です。 |
 | `defaultApp` | `"claude"` | 新規セッションの既定エージェント (`"claude"`、`"opencode"`、`"copilot"`)。UI で一度明示的に選んだ後はブラウザの記憶が優先され、この値は初回表示時の見た目とサーバー側フォールバック (予約プロンプトの自動再開など、クライアントが `app` を指定しない経路) にのみ使われます。**コンボ起動のメンバーには適用されません** (コンボのロール別選択は別途ブラウザの `localStorage` に記憶され、copilot はそもそも選択不可)。 |
-| `showUsage` | `true` | タブバー右端の Usage ボタン (Claude Code の `/usage` / Codex のレート制限読み取り) を表示するか。`false` で非表示。**アクティブなタブのアプリ (claude/codex) がサーバーに無い場合は設定に関わらず自動的に非表示**になります。 |
+| `showUsage` | `true` | タブバー右端の Usage ボタン (Claude Code の `/usage` / Codex のレート制限読み取り) を表示するか。`false` で非表示。**claude/codex のどちらもサーバーに無い場合は設定に関わらず自動的に非表示**になります (片方だけあればボタンは表示され、ポップオーバーはそのアプリのみ表示)。 |
 | `usageMcp` | `false` | Claude セッションへ `ccserver-usage` MCP (`get_usage` ツール) を注入するか。安全のため既定はオフで、`true` の明示時だけ有効です。`showUsage` とは独立しています。 |
 | `binds` | `[]` | 追加で見せるホストパス。各要素 `{ src, mode?, dest? }`。`mode` は `ro` (既定) か `rw`。存在しないパスはスキップ。`~` はホームに展開。`~/.ssh` と `~/.config/gh` は `gitBroker` の設定に関わらず常にブロックされます。 |
 | `env` | `{}` | サンドボックス内の追加環境変数 (適用順は最後 = 既定値を上書き)。例: `sshAgent: true` のときに `SSH_AUTH_SOCK` を明示指定して自動検出を上書き。 |

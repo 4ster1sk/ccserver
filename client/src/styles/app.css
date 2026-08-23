@@ -2404,6 +2404,38 @@ body {
   color: var(--text-primary);
 }
 
+.usage-tabs {
+  display: flex;
+  gap: 4px;
+  padding: 3px;
+  margin-bottom: 10px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+.usage-tab {
+  flex: 1 1 0;
+  background: transparent;
+  border: none;
+  border-radius: 4px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  padding: 4px 0;
+  font-size: 12px;
+  line-height: 1.2;
+}
+
+.usage-tab:hover {
+  color: var(--text-primary);
+}
+
+.usage-tab.active {
+  background: var(--bg-primary);
+  color: var(--accent);
+  font-weight: 600;
+}
+
 .usage-plan {
   font-size: 11px;
   color: var(--text-muted);
