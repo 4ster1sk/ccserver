@@ -100,6 +100,7 @@ export default function UsageButton({ hidden = false, defaultApp = 'claude', ava
         </svg>
         <span className="usage-btn-label">Usage</span>
         {session && <span className={`usage-btn-pct${session.pct >= 80 ? ' high' : ''}`}>{session.pct}%</span>}
+        <span className="usage-btn-app">({tab})</span>
       </button>
       {open && (
         <div className="usage-menu">
