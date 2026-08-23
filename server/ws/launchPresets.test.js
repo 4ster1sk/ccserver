@@ -16,6 +16,7 @@ import { closeDb } from '../db.js';
 
 let tmpRoot;
 const MAX_WORKERS = 7; // mirrors routes/groups.js's MAX_WORKERS
+const savedHomeRoot = process.env.CCSERVER_SANDBOX_HOME_ROOT;
 
 const validBody = (name) => ({
   name,
@@ -36,11 +37,17 @@ function suffix() {
 before(() => {
   tmpRoot = mkdtempSync(join(tmpdir(), 'ccserver-launch-presets-'));
   process.env.CCSERVER_DB_PATH = join(tmpRoot, 'launch-presets.sqlite3');
+  // Keep the v2 migration's importLegacy away from the host's real
+  // .index.json (a fresh test DB would otherwise import -- and postApply
+  // RENAME -- it as a side effect).
+  process.env.CCSERVER_SANDBOX_HOME_ROOT = join(tmpRoot, 'home');
 });
 
 after(() => {
   closeDb();
   delete process.env.CCSERVER_DB_PATH;
+  if (savedHomeRoot === undefined) delete process.env.CCSERVER_SANDBOX_HOME_ROOT;
+  else process.env.CCSERVER_SANDBOX_HOME_ROOT = savedHomeRoot;
   rmSync(tmpRoot, { recursive: true, force: true });
 });
 

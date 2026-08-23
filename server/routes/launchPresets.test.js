@@ -10,6 +10,7 @@ import { closeDb } from '../db.js';
 let tmpRoot;
 let app;
 let counter = 0;
+const savedHomeRoot = process.env.CCSERVER_SANDBOX_HOME_ROOT;
 
 const validBody = () => ({
   name: `combo ${Date.now().toString(36)}${counter++}`,
@@ -22,6 +23,10 @@ const validBody = () => ({
 before(async () => {
   tmpRoot = mkdtempSync(join(tmpdir(), 'ccserver-launch-presets-route-'));
   process.env.CCSERVER_DB_PATH = join(tmpRoot, 'presets.sqlite3');
+  // Keep the v2 migration's importLegacy away from the host's real
+  // .index.json (a fresh test DB would otherwise import -- and postApply
+  // RENAME -- it as a side effect).
+  process.env.CCSERVER_SANDBOX_HOME_ROOT = join(tmpRoot, 'home');
   app = Fastify();
   await app.register(launchPresetsRoute, { prefix: '/api' });
 });
@@ -29,6 +34,8 @@ before(async () => {
 after(async () => {
   closeDb();
   delete process.env.CCSERVER_DB_PATH;
+  if (savedHomeRoot === undefined) delete process.env.CCSERVER_SANDBOX_HOME_ROOT;
+  else process.env.CCSERVER_SANDBOX_HOME_ROOT = savedHomeRoot;
   rmSync(tmpRoot, { recursive: true, force: true });
 });
 

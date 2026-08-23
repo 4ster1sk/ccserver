@@ -15,6 +15,7 @@ import {
 import { closeDb } from '../db.js';
 
 let tmpRoot;
+const savedHomeRoot = process.env.CCSERVER_SANDBOX_HOME_ROOT;
 
 const validInput = () => ({
   kind: 'close_session',
@@ -26,11 +27,17 @@ const validInput = () => ({
 before(() => {
   tmpRoot = mkdtempSync(join(tmpdir(), 'ccserver-approvals-'));
   process.env.CCSERVER_DB_PATH = join(tmpRoot, 'approvals.sqlite3');
+  // Keep the v2 migration's importLegacy away from the host's real
+  // .index.json (a fresh test DB would otherwise import -- and postApply
+  // RENAME -- it as a side effect).
+  process.env.CCSERVER_SANDBOX_HOME_ROOT = join(tmpRoot, 'home');
 });
 
 after(() => {
   closeDb();
   delete process.env.CCSERVER_DB_PATH;
+  if (savedHomeRoot === undefined) delete process.env.CCSERVER_SANDBOX_HOME_ROOT;
+  else process.env.CCSERVER_SANDBOX_HOME_ROOT = savedHomeRoot;
   rmSync(tmpRoot, { recursive: true, force: true });
 });
 

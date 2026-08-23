@@ -320,6 +320,18 @@ export function buildUsageMcpServer({ usageApi }) {
 // CCSERVER_META_IDENTITY via the bridge) arrives as deps.identity and powers
 // only the self-target guards / approval attribution -- attribution and
 // self-reference, never an authorization input (the socket binding is).
+// Shared worker-entry schema for create/update_launch_preset (apps REQUIRED
+// there -- a saved preset must reproduce its apps exactly). launch_group's
+// workers differ deliberately: app stays optional and resolves via the group
+// default at launch time.
+const launchPresetWorkersSchema = z.array(z.object({
+  role: z.string().regex(/^worker[A-Za-z0-9_-]+$/),
+  app: z.enum(['claude', 'opencode', 'codex']),
+  model: z.string().nullable().optional(),
+  name: z.string().nullable().optional(),
+  sandboxOpts: z.object({ gpg: z.boolean().optional(), sshAgent: z.boolean().optional() }).optional(),
+})).min(1).max(7);
+
 export function buildMetaMcpServer(deps) {
   const server = new McpServer({ name: 'ccserver-meta', version: '1.0.0' });
   const text = (result) => ({ content: [{ type: 'text', text: JSON.stringify(result) }] });
@@ -398,13 +410,7 @@ export function buildMetaMcpServer(deps) {
     'Create a combo launch preset: { name, workers: [1-7 x { role, app, model?, name?, sandboxOpts? }], orchestratorApp?, orchestratorModel?, instructions? }. Roles unique within the preset; apps required and copilot-free.',
     {
       name: z.string(),
-      workers: z.array(z.object({
-        role: z.string().regex(/^worker[A-Za-z0-9_-]+$/),
-        app: z.enum(['claude', 'opencode', 'codex']),
-        model: z.string().nullable().optional(),
-        name: z.string().nullable().optional(),
-        sandboxOpts: z.object({ gpg: z.boolean().optional(), sshAgent: z.boolean().optional() }).optional(),
-      })).min(1).max(7),
+      workers: launchPresetWorkersSchema,
       orchestratorApp: z.enum(['claude', 'opencode', 'codex']).optional(),
       orchestratorModel: z.string().nullable().optional(),
       instructions: z.string().nullable().optional(),
@@ -417,13 +423,7 @@ export function buildMetaMcpServer(deps) {
     {
       presetId: z.string(),
       name: z.string(),
-      workers: z.array(z.object({
-        role: z.string().regex(/^worker[A-Za-z0-9_-]+$/),
-        app: z.enum(['claude', 'opencode', 'codex']),
-        model: z.string().nullable().optional(),
-        name: z.string().nullable().optional(),
-        sandboxOpts: z.object({ gpg: z.boolean().optional(), sshAgent: z.boolean().optional() }).optional(),
-      })).min(1).max(7),
+      workers: launchPresetWorkersSchema,
       orchestratorApp: z.enum(['claude', 'opencode', 'codex']).optional(),
       orchestratorModel: z.string().nullable().optional(),
       instructions: z.string().nullable().optional(),

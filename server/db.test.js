@@ -8,16 +8,24 @@ import { dbPath, getDb, initDb, closeDb, migrate, safeDb, MIGRATIONS } from './d
 
 let tmpRoot;
 const savedEnv = process.env.CCSERVER_DB_PATH;
+const savedHomeRoot = process.env.CCSERVER_SANDBOX_HOME_ROOT;
 
 before(() => {
   tmpRoot = mkdtempSync(join(tmpdir(), 'ccserver-db-'));
   process.env.CCSERVER_DB_PATH = join(tmpRoot, 'test.sqlite3');
+  // The v2 importLegacy reads sandbox.js's legacy sidecar index under
+  // CCSERVER_SANDBOX_HOME_ROOT. Without this override a host that still has a
+  // real .index.json would leak its entries into every fresh test DB -- and
+  // postApply would RENAME the user's real index as a test side effect.
+  process.env.CCSERVER_SANDBOX_HOME_ROOT = join(tmpRoot, 'home');
 });
 
 after(() => {
   closeDb();
   if (savedEnv === undefined) delete process.env.CCSERVER_DB_PATH;
   else process.env.CCSERVER_DB_PATH = savedEnv;
+  if (savedHomeRoot === undefined) delete process.env.CCSERVER_SANDBOX_HOME_ROOT;
+  else process.env.CCSERVER_SANDBOX_HOME_ROOT = savedHomeRoot;
   rmSync(tmpRoot, { recursive: true, force: true });
 });
 
