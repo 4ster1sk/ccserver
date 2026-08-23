@@ -562,9 +562,10 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox
         }
       }, IDLE_TIMEOUT_MS);
 
-      // Auto-yes detection for agent permission prompts. claude uses Ink's
-      // Select UI; opencode renders a "Permission required" box — in both,
-      // Enter accepts the default (approve), so the response is the same.
+      // Auto-yes detection for agent permission prompts. Claude uses Ink's
+      // Select UI, opencode renders a "Permission required" box, and Codex
+      // uses a numbered approval menu. Each selects its one-time approval by
+      // default, so Enter is the shared response.
       if (session.autoYes) {
         // Strip all ANSI escape sequences
         const ansiRe = /\x1b(?:\[[0-9;?]*[a-zA-Z]|\][^\x07\x1b]*(?:\x07|\x1b\\)?|[()][A-Z0-9]|[>=<]|#[0-9])/g;

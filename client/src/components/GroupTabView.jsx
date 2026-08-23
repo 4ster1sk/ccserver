@@ -106,7 +106,7 @@ export default function GroupTabView({
     }
     wasVisibleRef.current = true;
     const active = members.find((m) => m.role === activeRole);
-    const app = active?.app === 'opencode' ? 'opencode' : active?.app === 'claude' ? 'claude' : null;
+    const app = ['claude', 'opencode', 'codex'].includes(active?.app) ? active.app : null;
     onActiveAppChange?.(app);
   }, [members, activeRole, visible, onActiveAppChange]);
 
@@ -153,7 +153,7 @@ export default function GroupTabView({
             }}
           >
             <span className="group-subtab-label">
-              <TabIcon type="terminal" app={m.app === 'opencode' ? 'opencode' : 'claude'} shell={false} />
+              <TabIcon type="terminal" app={m.app === 'codex' ? 'codex' : m.app === 'opencode' ? 'opencode' : 'claude'} shell={false} />
               {roleLabel(m.role)}
               {m.model && <span className="group-subtab-model" title={m.model}>{m.model}</span>}
               {m.exited && <span className="group-subtab-exited" title="exited">&#10005;</span>}
@@ -185,7 +185,7 @@ export default function GroupTabView({
             <Suspense fallback={null}>
               <TerminalView
                 cwd={m.cwd}
-                app={m.app === 'opencode' ? 'opencode' : 'claude'}
+                app={m.app === 'codex' ? 'codex' : m.app === 'opencode' ? 'opencode' : 'claude'}
                 model={m.model || null}
                 attachSessionId={m.sessionId}
                 visible={m.role === activeRole && visible}
@@ -197,7 +197,7 @@ export default function GroupTabView({
                 claudeSessionId={m.claudeSessionId}
                 sandbox={m.sandbox}
                 sandboxOpts={m.sandboxOpts}
-                resume={m.app === 'opencode'}
+                resume={m.app === 'opencode' || m.app === 'codex'}
                 groupId={groupId}
                 groupRole={m.role}
                 xtermTheme={xtermTheme}
