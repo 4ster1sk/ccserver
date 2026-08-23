@@ -166,7 +166,16 @@ test('commitStagedUploads promotes temp files and validates quotas', async () =>
 
 test('manifest persistence across restoreGroups and stale/corrupt handling', async () => {
   const gid = await makeGroup('/srv/proj-persist');
-  const originalBroker = groupManager.getGroup(gid).controlBroker;
+  // restoreGroups() models a fresh process start: nothing live may survive
+  // into it. Stop the group's live control broker BEFORE restoring --
+  // restoring replaces the map entry with a broker-less copy, which would
+  // orphan the original server handle and keep the test runner alive forever.
+  const live = groupManager.getGroup(gid);
+  const originalBroker = live?.controlBroker || null;
+  if (originalBroker) {
+    stopBroker(originalBroker);
+    live.controlBroker = null;
+  }
   try {
     groupManager.publishGroupFilesFromUpload(gid, [{ name: 'keep.txt', mimeType: 'text/plain', data: Buffer.from('keep') }]);
     const raw = JSON.parse(readFileSync(process.env.CCSERVER_GROUP_FILES_PATH, 'utf-8'));
@@ -190,7 +199,7 @@ test('manifest persistence across restoreGroups and stale/corrupt handling', asy
     // may be 0 if stale, or if our earlier corrupt test cleared it; just ensure no crash
     assert.ok(Array.isArray(listed.files));
   } finally {
-    if (originalBroker) stopBroker(originalBroker);
+    if (originalBroker) stopBroker(originalBroker); // defensive: already stopped above
     groupManager.destroyGroup(gid);
   }
 });
@@ -265,7 +274,7 @@ test('commitStagedUploads is atomic: failure on second rename rolls back promote
     let entries = [];
     try { entries = readdirSync(dir); } catch { entries = []; }
     assert.equal(entries.length, 0, `no orphan blobs should remain, got ${entries}`);
-    // Manifest unchanged: after restore, still empty
+    // Manifest unchanged on disk: a failed batch must never be persisted.
     const afterManifest = (() => {
       try { return readFileSync(process.env.CCSERVER_GROUP_FILES_PATH, 'utf-8'); } catch { return null; }
     })();
@@ -283,9 +292,12 @@ test('commitStagedUploads is atomic: failure on second rename rolls back promote
         assert.ok(!parsed[gid] || parsed[gid].length === 0, 'manifest must not persist rolled-back files');
       }
     }
-    // Restore should not resurrect orphan blobs
-    groupManager.restoreGroups();
-    assert.equal(groupManager.listGroupFiles(gid).files.length, 0);
+    // NOTE: no restoreGroups() here. This test's group is still live (its
+    // control broker running), and restore would overwrite the map entry
+    // with a broker-less copy -- orphaning the live broker handle and
+    // hanging the test runner. The direct manifest read above already proves
+    // the failure was not persisted; successful-restore behavior is covered
+    // by the manifest-persistence test (which stops the live broker first).
   } finally {
     groupManager.setCommitRenameSyncForTests(null);
     groupManager.destroyGroup(gid);
