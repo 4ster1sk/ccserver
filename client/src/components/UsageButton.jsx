@@ -24,17 +24,24 @@ function fmtAge(updatedAt) {
   return `${Math.round(m / 60)}時間前`;
 }
 
-export default function UsageButton({ hidden = false, app = 'claude' }) {
+export default function UsageButton({ hidden = false, defaultApp = 'claude', availableApps = null }) {
   const [open, setOpen] = useState(false);
   const [data, setData] = useState(null);   // { usage, updatedAt, error, ... }
   const [loading, setLoading] = useState(false);
   const [, setTick] = useState(0);   // re-render so pace/age stay live while open
+  // Which app the popover is currently showing. Seeded from defaultApp (the
+  // active terminal tab's app) but switchable via the in-popover tabs below,
+  // independent of what's actually running in the terminal.
+  const [tab, setTab] = useState(defaultApp === 'codex' ? 'codex' : 'claude');
   const wrapRef = useRef(null);
+
+  const claudeAvailable = !availableApps || availableApps.claude !== false;
+  const codexAvailable = !availableApps || availableApps.codex !== false;
 
   const load = useCallback(async (force = false) => {
     setLoading(true);
     try {
-      const res = await authFetch(`/api/usage?app=${app}${force ? '&force=1' : ''}`);
+      const res = await authFetch(`/api/usage?app=${tab}${force ? '&force=1' : ''}`);
       const json = await res.json();
       setData(json);
     } catch (err) {
@@ -42,12 +49,16 @@ export default function UsageButton({ hidden = false, app = 'claude' }) {
     } finally {
       setLoading(false);
     }
-  }, [app]);
+  }, [tab]);
+
+  // Follow the active terminal tab's app whenever it changes -- but this
+  // only reseeds `tab`; the user can still override it via the popover tabs.
+  useEffect(() => { setTab(defaultApp === 'codex' ? 'codex' : 'claude'); }, [defaultApp]);
 
   // Prime the button (session % badge) once on mount, using the cache, and
-  // again whenever the active app changes -- reset first so a tab switch
+  // again whenever the viewed app changes -- reset first so a tab switch
   // never flashes the other app's stale numbers under the new label.
-  useEffect(() => { setData(null); load(false); }, [app, load]);
+  useEffect(() => { setData(null); load(false); }, [tab, load]);
 
   // Fetch fresh-ish data whenever the popover opens.
   useEffect(() => {
@@ -72,10 +83,9 @@ export default function UsageButton({ hidden = false, app = 'claude' }) {
   const limits = data?.usage?.limits || [];
   const session = limits.find((l) => /session/i.test(l.label)) || limits[0];
   const now = Date.now();
-  const appLabel = app === 'codex' ? 'Codex 使用量' : 'Claude 使用量';
+  const appLabel = tab === 'codex' ? 'Codex 使用量' : 'Claude 使用量';
 
-  // The Usage popover reads Claude Code's /usage or Codex's rate-limit API;
-  // it carries no meaning for opencode/copilot sessions, so hide it there.
+  // `hidden` is decided by the caller (showUsage pref / neither app installed).
   if (hidden) return null;
 
   return (
@@ -104,6 +114,21 @@ export default function UsageButton({ hidden = false, app = 'claude' }) {
               {loading ? '取得中…' : '更新'}
             </button>
           </div>
+
+          {claudeAvailable && codexAvailable && (
+            <div className="usage-tabs">
+              <button
+                type="button"
+                className={`usage-tab${tab === 'claude' ? ' active' : ''}`}
+                onClick={() => setTab('claude')}
+              >Claude</button>
+              <button
+                type="button"
+                className={`usage-tab${tab === 'codex' ? ' active' : ''}`}
+                onClick={() => setTab('codex')}
+              >Codex</button>
+            </div>
+          )}
 
           {data?.usage?.plan && (
             <div className="usage-plan">{data.usage.plan}</div>

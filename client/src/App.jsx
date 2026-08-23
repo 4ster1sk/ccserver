@@ -386,19 +386,24 @@ export default function App() {
   }, []);
 
   const activeTab = tabs.find((t) => t.id === activeTabId);
-  // Usage is meaningful for claude (Claude Code's /usage) and codex (Codex's
-  // rate-limit read) sessions; hide it for opencode/copilot terminals and for
-  // a group tab whose active sub-tab is opencode (copilot never appears in
-  // groups). The server can also hide it: sandbox.config.json's
-  // "showUsage": false, or the active tab's app not being installed at all
-  // (the capture would never succeed).
+  // Usage covers claude (Claude Code's /usage) and codex (Codex's rate-limit
+  // read); the popover itself now has tabs to switch between them, so the
+  // button is no longer tied to whichever app the active terminal tab
+  // happens to be running -- it stays visible on opencode/copilot terminals
+  // too, as long as at least one of claude/codex is usable. It's hidden only
+  // via sandbox.config.json's "showUsage": false, or when the server reports
+  // neither CLI installed at all (the capture would never succeed for either).
   // `availableApps` null/absent (fetch pending or failed, older server) means
-  // "unknown" -- the button stays shown in that case and is only auto-hidden
-  // when the server actually reports the active app's CLI absent.
-  const usageApp = activeTab?.type === 'group' ? groupActiveApp : (activeTab?.app || 'claude');
-  const usageHidden = (usageApp !== 'claude' && usageApp !== 'codex')
-    || !usagePrefs.showUsage
-    || (usagePrefs.availableApps && usageApp && !usagePrefs.availableApps[usageApp]);
+  // "unknown" -- both apps are assumed available in that case.
+  const claudeAvailable = !usagePrefs.availableApps || usagePrefs.availableApps.claude !== false;
+  const codexAvailable = !usagePrefs.availableApps || usagePrefs.availableApps.codex !== false;
+  const usageHidden = !usagePrefs.showUsage || (!claudeAvailable && !codexAvailable);
+  // Which app the popover opens on: follow the active tab's app when it's
+  // codex and codex is actually available, otherwise default to claude
+  // unless only codex is installed.
+  const activeTabApp = activeTab?.type === 'group' ? groupActiveApp : activeTab?.app;
+  const usageDefaultApp = (activeTabApp === 'codex' && codexAvailable) ? 'codex'
+    : (claudeAvailable ? 'claude' : 'codex');
 
   return (
     <div className="app">
@@ -435,7 +440,7 @@ export default function App() {
         ))}
         <div className="tab-bar-spacer" />
         </div>
-        <UsageButton hidden={usageHidden} app={usageApp === 'codex' ? 'codex' : 'claude'} />
+        <UsageButton hidden={usageHidden} defaultApp={usageDefaultApp} availableApps={usagePrefs.availableApps} />
       </div>
       <div className="tab-content">
         <div style={{ display: activeTabId === 'browser' ? 'flex' : 'none', height: '100%', flexDirection: 'column' }}>
