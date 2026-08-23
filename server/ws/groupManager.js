@@ -670,7 +670,8 @@ export function resolveMemberLaunchCwd(groupId, role) {
   if (!group.cwd) return null;
   let resolution;
   try {
-    resolution = resolveMemberWorktree(group.cwd, role);
+    const hintBranch = group.memberWorktrees.get(role)?.branch || null;
+    resolution = resolveMemberWorktree(group.cwd, role, hintBranch);
   } catch (err) {
     console.warn(`[groupManager] worktree resolution failed for ${groupId}/${role}: ${err.message}`);
     return null;

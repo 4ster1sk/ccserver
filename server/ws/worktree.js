@@ -119,6 +119,14 @@ function commonDirOf(worktreePath) {
 // to call again for the same (projectCwd, role): an already-healthy worktree
 // is reused untouched, never recreated.
 //
+// `hintBranch` is the branch last known to be checked out in this role's
+// worktree, from groupManager's persisted memberWorktrees (plan section
+// 3.6.1, `memberWorktrees` hint). It is only consulted when the worktree
+// directory has been lost from disk AND `git worktree list` no longer
+// reports it (prunable entry already pruned, or external interference
+// removed the registration). Without the hint the resolver would treat that
+// as a fresh detached creation and never flag the branch loss.
+//
 // Returns either:
 //   { usedWorktree: false, cwd: projectCwd, gitCommonDir: null }
 //     projectCwd is not a git repo (or git itself is unavailable) -- caller
@@ -135,7 +143,7 @@ function commonDirOf(worktreePath) {
 //               a clean reuse of a still-detached worktree.
 //     branch:   the branch currently checked out in the resulting worktree,
 //               or null while it is still on detached HEAD.
-export function resolveMemberWorktree(projectCwd, role) {
+export function resolveMemberWorktree(projectCwd, role, hintBranch = null) {
   if (!isGitRepo(projectCwd)) {
     return { usedWorktree: false, cwd: projectCwd, gitCommonDir: null };
   }
@@ -161,7 +169,15 @@ export function resolveMemberWorktree(projectCwd, role) {
   // (prunable) -- prune the stale registration before adding again at the
   // same path, and remember whether a working branch was checked out there
   // (the prune drops that information from `git worktree list`).
-  const priorBranch = existing && !existing.detached ? branchShortName(existing.branch) : null;
+  const priorBranchFromGit = existing && !existing.detached ? branchShortName(existing.branch) : null;
+  // External interference may have already pruned the stale registration
+  // (rm -rf + `git worktree prune`), leaving `existing` null and
+  // `priorBranchFromGit` null even though the persisted memberWorktrees
+  // still knows which branch was checked out. The hint restores that
+  // knowledge so branch loss is still detected (plan 3.6.1, `memberWorktrees`
+  // hint). Prefer the live git state when available; fall back to the hint
+  // only when git no longer reports the branch.
+  const priorBranch = priorBranchFromGit || (typeof hintBranch === 'string' ? hintBranch : null);
   if (existing) {
     try { git(projectCwd, ['worktree', 'prune']); } catch { /* best effort */ }
   }
@@ -169,12 +185,15 @@ export function resolveMemberWorktree(projectCwd, role) {
   if (priorBranch && branchExists(projectCwd, priorBranch)) {
     // Case 2: the branch survives in the shared repo -- reattach the
     // worktree to it. Only the on-disk (uncommitted/untracked) changes are
-    // lost, not the branch's commits.
+    // lost, not the branch's commits. This also covers the external-
+    // interference case where the worktree was pruned away but the hint
+    // still knows the surviving branch name.
     git(projectCwd, ['worktree', 'add', path, priorBranch]);
     return { usedWorktree: true, cwd: path, gitCommonDir: commonDirOf(path), created: true, lostWork: true, branch: priorBranch };
   }
 
-  // Case 3 (a working branch existed but is gone too) or a genuine
+  // Case 3 (a working branch existed but is gone too, whether observed via
+  // `git worktree list` or via the memberWorktrees hint) or a genuine
   // first-time creation (priorBranch is null either way -- never true here
   // for a worktree that was cleanly detached, so lostWork below is only set
   // when a working branch is actually being lost).
