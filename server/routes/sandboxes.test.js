@@ -1,20 +1,22 @@
 // Settings page sandbox management: GET /api/sandboxes lists created
-// persistent sandboxes (name/real-path/size/inUse, plus `deleting` /
-// `deleteError` while a removal is in flight or just failed); DELETE
-// /api/sandboxes/:name answers 204 immediately and removes the HOME +
-// matching docker data-root in the background. The in-use (409),
-// dockerd-lock (409) and already-in-flight (409) branches are checked
-// synchronously; here we exercise the filesystem-backed paths.
+// persistent sandboxes (name/real-path/label/gitRemote/size/inUse, plus
+// `deleting` / `deleteError` while a removal is in flight or just failed);
+// DELETE /api/sandboxes/:name answers 204 immediately and removes the HOME +
+// matching docker data-root in the background. The in-use (409), dockerd-lock
+// (409) and already-in-flight (409) branches are checked synchronously; here
+// we exercise the filesystem-backed paths with the SQLite bookkeeping rows.
 
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import Fastify from 'fastify';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync } from 'node:fs';
 import { spawn, spawnSync, execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { sandboxesRoute } from './sandboxes.js';
 import { sandboxHomeRoot, clearSandboxSizeCache, beginSandboxDelete, endSandboxDelete } from '../ws/sandbox.js';
+import { recordSandboxHome, listSandboxRowsBySlug } from '../ws/projects.js';
+import { closeDb } from '../db.js';
 
 let tmpRoot;
 let app;
@@ -47,6 +49,8 @@ before(async () => {
   tmpRoot = mkdtempSync(join(tmpdir(), 'ccserver-sandboxes-'));
   process.env.CCSERVER_SANDBOX_HOME_ROOT = join(tmpRoot, 'home');
   process.env.CCSERVER_SANDBOX_DIND_ROOT = join(tmpRoot, 'dind');
+  // The bookkeeping rows live in SQLite now; point the store at a temp DB.
+  process.env.CCSERVER_DB_PATH = join(tmpRoot, 'test.sqlite3');
   mkdirSync(join(tmpRoot, 'home'), { recursive: true });
   mkdirSync(join(tmpRoot, 'dind'), { recursive: true });
   clearSandboxSizeCache();
@@ -55,8 +59,10 @@ before(async () => {
 });
 
 after(async () => {
+  closeDb();
   delete process.env.CCSERVER_SANDBOX_HOME_ROOT;
   delete process.env.CCSERVER_SANDBOX_DIND_ROOT;
+  delete process.env.CCSERVER_DB_PATH;
   clearSandboxSizeCache();
   try { await app.close(); } catch { /* ignore */ }
   try { rmSync(tmpRoot, { recursive: true, force: true }); } catch { /* ignore */ }
@@ -92,41 +98,39 @@ test('GET /api/sandboxes: lists created sandboxes with real path, size and inUse
   const cwdB = '/srv/beta';
   const slugA = slugFromCwd(cwdA);
   const slugB = slugFromCwd(cwdB);
-  // Two sandbox homes with different content sizes, one index entry.
+  // Two sandbox homes with different content sizes, one bookkeeping row.
   mkdirSync(join(sandboxHomeRoot(), slugA, '.config'), { recursive: true });
   writeFileSync(join(sandboxHomeRoot(), slugA, '.config', 'tool'), 'x'.repeat(4096));
   mkdirSync(join(sandboxHomeRoot(), slugB), { recursive: true });
   writeFileSync(join(sandboxHomeRoot(), slugB, 'cache'), 'y'.repeat(2048));
-  writeFileSync(join(sandboxHomeRoot(), '.index.json'), JSON.stringify({ [slugA]: cwdA }));
+  assert.equal(recordSandboxHome(cwdA), true, 'bookkeeping row recorded for sandbox A');
 
   const sandboxes = await list();
   assert.equal(sandboxes.length, 2, 'both sandboxes are listed');
   const a = sandboxes.find((s) => s.name === slugA);
   const b = sandboxes.find((s) => s.name === slugB);
   assert.ok(a, 'sandbox A present');
-  assert.equal(a.cwd, cwdA, 'index maps the slug back to the real project path');
+  assert.equal(a.cwd, cwdA, 'the store maps the slug back to the real project path');
   assert.ok(a.size >= 4096, 'size counts nested files');
   assert.equal(a.inUse, 0, 'no live sessions');
   assert.ok(b, 'sandbox B present');
-  assert.equal(b.cwd, null, 'a sandbox without an index entry falls back to slug-only');
+  assert.equal(b.cwd, null, 'a sandbox without a bookkeeping row falls back to slug-only');
   assert.ok(b.size >= 2048);
 });
 
-test('DELETE /api/sandboxes/:name removes the HOME, matching dind root and index entry', async () => {
+test('DELETE /api/sandboxes/:name removes the HOME, matching dind root and store row', async () => {
   const cwd = '/srv/gamma';
   const slug = slugFromCwd(cwd);
   mkdirSync(join(sandboxHomeRoot(), slug), { recursive: true });
   writeFileSync(join(sandboxHomeRoot(), slug, 'state'), 'z');
   mkdirSync(join(process.env.CCSERVER_SANDBOX_DIND_ROOT, slug), { recursive: true });
-  const index = join(sandboxHomeRoot(), '.index.json');
-  writeFileSync(index, JSON.stringify({ [slug]: cwd }));
+  recordSandboxHome(cwd);
 
   const res = await del(slug);
   assert.equal(res.statusCode, 204, 'the request returns immediately');
   await waitFor(() => !existsSync(join(sandboxHomeRoot(), slug))
     && !existsSync(join(process.env.CCSERVER_SANDBOX_DIND_ROOT, slug)));
-  const afterIndex = JSON.parse(readFileSync(index, 'utf-8'));
-  assert.equal(afterIndex[slug], undefined, 'index entry cleared');
+  assert.equal(listSandboxRowsBySlug().has(slug), false, 'store row cleared');
 });
 
 test('DELETE /api/sandboxes/:name refuses while a dockerd holds the data-root lock', async () => {

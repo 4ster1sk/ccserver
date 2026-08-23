@@ -1,11 +1,12 @@
 // Settings page: list created (persistent) sandboxes with their disk usage
 // and delete them. GET /api/sandboxes returns each sandbox's slug, real
-// project path (when known), size, whether a live session is currently using
-// it, and -- while a deletion is in flight or has just failed -- `deleting`
-// and `deleteError`. DELETE /api/sandboxes/:name kicks the removal off in the
-// background and answers 204 right away: deleting a multi-GB docker data-root
-// takes minutes, and holding the request open froze clients behind the call.
-// Deletion progress/failures are polled back through GET.
+// project path + user label + git remote (from the projects/sandboxes SQLite
+// tables), size, whether a live session is currently using it, and -- while a
+// deletion is in flight or has just failed -- `deleting` and `deleteError`.
+// DELETE /api/sandboxes/:name kicks the removal off in the background and
+// answers 204 right away: deleting a multi-GB docker data-root takes minutes,
+// and holding the request open froze clients behind the call. Deletion
+// progress/failures are polled back through GET.
 
 import {
   listSandboxHomes,
@@ -29,6 +30,9 @@ export async function sandboxesRoute(fastify) {
       name: h.name,
       path: h.path,
       cwd: h.cwd,
+      projectLabel: h.projectLabel ?? null,
+      gitRemote: h.gitRemote ?? null,
+      lastUsedAt: h.lastUsedAt ?? null,
       size: await sandboxHomeSize(h.path),
       inUse: sandboxHomeInUsePath(h.path),
       deleting: isSandboxDeleteInFlight(h.name),

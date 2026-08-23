@@ -16,7 +16,7 @@
 // outer layer. See memory: sandbox-dind-recipe.
 
 import { homedir } from 'node:os';
-import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, statSync } from 'node:fs';
 import { chmod as chmodP, readdir as readdirP, rm as rmP, stat as statP } from 'node:fs/promises';
 import { execFile, execFileSync } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -24,6 +24,7 @@ import { randomUUID } from 'node:crypto';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { startGitBroker } from './git-broker.js';
+import { recordSandboxHome as recordSandboxHomeDb, listSandboxRowsBySlug, forgetSandboxHome } from './projects.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -309,38 +310,27 @@ export function sandboxHomeStatus(cwd) {
 }
 
 // Sidecar index mapping a home dir's slug back to the project path it was
-// created for (the settings page shows real paths instead of opaque slugs).
-// Lives in the home root itself -- OUTSIDE every sandbox's HOME -- so a
-// sandboxed process never sees it. Best-effort: a missing/corrupt index just
-// falls back to displaying the slug.
-function homeIndexPath() {
-  return join(sandboxHomeRoot(), '.index.json');
-}
+// created for has moved into SQLite (DB v2, see ws/projects.js) -- the old
+// homeIndex.json is imported once by the v2 migration and retired to
+// `.index.json.migrated`. The disk walk below stays the source of truth for
+// what actually exists; the sandboxes table enriches each row with the real
+// project path, label, git remote and usage timestamps.
 
-function readHomeIndex() {
-  try {
-    const raw = JSON.parse(readFileSync(homeIndexPath(), 'utf-8'));
-    return raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
-  } catch {
-    return {};
-  }
-}
-
-// Remember the project path a persistent HOME was created for. Called from
-// buildSandboxSpawn; sync (single-threaded) so concurrent launches can't race.
-function recordSandboxHome(cwd) {
-  const slug = slugify(resolve(cwd));
-  const index = readHomeIndex();
-  if (index[slug] === resolve(cwd)) return;
-  index[slug] = resolve(cwd);
-  try { writeFileSync(homeIndexPath(), JSON.stringify(index)); } catch { /* best effort */ }
+// Remember which project a persistent HOME belongs to (settings-page labels).
+// Best-effort by contract (a bookkeeping failure must never fail a launch);
+// the SQLite details live in ws/projects.js. Sync (single-threaded) so
+// concurrent launches can't race.
+function recordSandboxHome(cwd, createdBy = null) {
+  recordSandboxHomeDb(cwd, { createdBy });
 }
 
 // Enumerate the persistent sandbox homes for the settings page:
-//   { name (slug), path, cwd (real project path when the index knows it) }
+//   { name (slug), path, cwd (real project path when known), projectId,
+//     projectLabel (user-editable display name; null falls back to
+//     basename(cwd) client-side), gitRemote, lastUsedAt, createdBy }
 export function listSandboxHomes() {
   const root = sandboxHomeRoot();
-  const index = readHomeIndex();
+  const rows = listSandboxRowsBySlug();
   const entries = [];
   let names = [];
   try { names = readdirSync(root); } catch { return []; }
@@ -349,7 +339,17 @@ export function listSandboxHomes() {
     let isDir = false;
     try { isDir = statSync(path).isDirectory(); } catch { /* not a dir */ }
     if (!isDir) continue;
-    entries.push({ name, path, cwd: typeof index[name] === 'string' ? index[name] : null });
+    const row = rows.get(name);
+    entries.push({
+      name,
+      path,
+      cwd: typeof row?.cwd === 'string' ? row.cwd : null,
+      projectId: row?.project_id ?? null,
+      projectLabel: row?.project_label ?? null,
+      gitRemote: row?.git_remote ?? null,
+      lastUsedAt: typeof row?.last_used_at === 'number' ? row.last_used_at : null,
+      createdBy: row?.created_by ?? null,
+    });
   }
   return entries;
 }
@@ -443,11 +443,7 @@ export async function deleteSandboxHome(name) {
     // shows the sandbox and the user can retry.
     return { ok: false, error: homeErr || dindErr };
   }
-  const index = readHomeIndex();
-  if (Object.prototype.hasOwnProperty.call(index, name)) {
-    delete index[name];
-    try { writeFileSync(homeIndexPath(), JSON.stringify(index)); } catch { /* best effort */ }
-  }
+  forgetSandboxHome(name);
   sizeCache.delete(join(sandboxHomeRoot(), name));
   return { ok: true };
 }
@@ -1300,7 +1296,10 @@ export function buildMinimalSandboxSpawn({ cwd, targetCommand, app = 'claude' })
 //                 resolveMemberWorktree), bound into the sandbox alongside
 //                 cwd when cwd is a git worktree whose real .git lives
 //                 elsewhere. null for regular sessions and non-worktree cwds.
-export function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, mcpSocketPath = null, notifySocketPath = null, usageSocketPath = null, reuseSandboxHome = true, orchestratorClaudeMdSrc = null, gitCommonDir = null, groupFilesDir = null }) {
+//   sandboxHomeCreatedBy - optional attribution stored on the sandbox HOME's
+//                 bookkeeping row ('user' | 'meta-agent:<sessionId>' | ...).
+//                 Display only; never an authorization input.
+export function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, mcpSocketPath = null, notifySocketPath = null, usageSocketPath = null, reuseSandboxHome = true, orchestratorClaudeMdSrc = null, gitCommonDir = null, groupFilesDir = null, sandboxHomeCreatedBy = null }) {
   const { docker: cfgDocker, persistentHome, gpg: cfgGpg, sshAgent: cfgSshAgent, gitBroker: gitBrokerEnabled, binds, env, claudeBin } = loadSandboxConfig();
   const docker = cfgDocker && dockerSandboxAvailable();
   const gpg = sandboxOpts?.gpg ?? cfgGpg;
@@ -1342,7 +1341,7 @@ export function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, mcpSoc
     }
     mkdirSync(homeDir, { recursive: true });
     // Remember which project this HOME belongs to (settings-page labels).
-    recordSandboxHome(cwd);
+    recordSandboxHome(cwd, sandboxHomeCreatedBy);
   }
 
   // Computes the repo/submodule allow-list once and spawns the host-side

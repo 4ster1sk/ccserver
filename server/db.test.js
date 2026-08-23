@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import { dbPath, getDb, initDb, closeDb, migrate, safeDb } from './db.js';
+import { dbPath, getDb, initDb, closeDb, migrate, safeDb, MIGRATIONS } from './db.js';
 
 let tmpRoot;
 const savedEnv = process.env.CCSERVER_DB_PATH;
@@ -24,11 +24,17 @@ after(() => {
 test('fresh open runs migrations to the latest version', () => {
   closeDb();
   const db = getDb();
-  assert.equal(db.prepare('PRAGMA user_version').get().user_version, 1);
+  assert.equal(db.prepare('PRAGMA user_version').get().user_version, MIGRATIONS[MIGRATIONS.length - 1].version);
   // The v1 table exists and is usable.
   db.prepare('INSERT INTO worker_presets (id, name, role, app, model, created_at, updated_at) VALUES (?,?,?,?,?,?,?)')
     .run('x', 'n', 'workerX', 'claude', null, 1, 1);
   assert.equal(db.prepare('SELECT COUNT(*) AS c FROM worker_presets').get().c, 1);
+  // v2 tables exist and are usable.
+  db.prepare('INSERT INTO projects (id, cwd, path_hash, label, git_remote, created_at, last_seen_at) VALUES (?,?,?,NULL,NULL,1,1)')
+    .run('p1', '/srv/proj', 'h'.repeat(24));
+  db.prepare('INSERT INTO sandboxes (slug, project_id, cwd, created_at, last_used_at, created_by) VALUES (?,?,?,?,?,NULL)')
+    .run('srv_proj', 'p1', '/srv/proj', 1, 1);
+  assert.equal(db.prepare('SELECT COUNT(*) AS c FROM sandboxes').get().c, 1);
 });
 
 test('reopening is idempotent (migrations do not re-apply) and data survives', () => {
@@ -36,11 +42,11 @@ test('reopening is idempotent (migrations do not re-apply) and data survives', (
   getDb(); // first open creates + migrates
   closeDb();
   const db = getDb(); // second open
-  assert.equal(db.prepare('PRAGMA user_version').get().user_version, 1);
+  assert.equal(db.prepare('PRAGMA user_version').get().user_version, MIGRATIONS[MIGRATIONS.length - 1].version);
   assert.equal(db.prepare('SELECT COUNT(*) AS c FROM worker_presets').get().c, 1, 'row from the previous handle is still there');
   // Re-running migrate() directly is a no-op once user_version matches.
   assert.doesNotThrow(() => migrate(db));
-  assert.equal(db.prepare('PRAGMA user_version').get().user_version, 1);
+  assert.equal(db.prepare('PRAGMA user_version').get().user_version, MIGRATIONS[MIGRATIONS.length - 1].version);
 });
 
 test('pragmas are applied on open', () => {
@@ -102,6 +108,6 @@ test('a failing importLegacy hook aborts its migration transaction too', () => {
 
 test('safeDb returns the fn result on success and the fallback on failure', () => {
   closeDb();
-  assert.equal(safeDb((db) => db.prepare('PRAGMA user_version').get().user_version, -1), 1, 'first call initializes the DB');
+  assert.equal(safeDb((db) => db.prepare('PRAGMA user_version').get().user_version, -1), MIGRATIONS[MIGRATIONS.length - 1].version, 'first call initializes the DB');
   assert.equal(safeDb(() => { throw new Error('boom'); }, 'fb'), 'fb');
 });

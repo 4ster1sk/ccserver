@@ -12,9 +12,16 @@
 //     phases' best-effort operational-state writes, never for user-facing CRUD.
 
 import { DatabaseSync } from 'node:sqlite';
-import { mkdirSync } from 'node:fs';
+import { mkdirSync, readFileSync, renameSync } from 'node:fs';
 import { dirname, join } from 'node:path';
+import { homedir } from 'node:os';
+import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
+// Leaf modules only (node builtins below them): importing anything that
+// reaches back into the stores here would create an evaluation-order cycle
+// (stores import getDb from this file).
+import { projectHashForCwd } from './ws/projectHash.js';
+import { resolveOriginUrl } from './ws/gitAllowlist.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -36,9 +43,22 @@ function applyPragmas(db) {
   db.exec('PRAGMA busy_timeout = 5000');
 }
 
-// v1: worker presets only. Later phases move more JSON stores onto this
-// mechanism -- one table per store, INTEGER ms timestamps, UUID TEXT ids,
-// FKs added by new migrations when both sides exist.
+// The pre-v2 sidecar index sandbox.js kept under the sandbox home root
+// (slug -> resolved project cwd), imported once by the v2 migration. Mirrors
+// sandbox.js's sandboxHomeRoot() -- kept in lockstep deliberately; a test
+// asserts the two agree so a future edit to either cannot silently split the
+// path.
+export function legacyHomeIndexFile() {
+  const root = process.env.CCSERVER_SANDBOX_HOME_ROOT
+    || join(homedir(), '.local', 'share', 'ccserver-sandbox', 'home');
+  return join(root, '.index.json');
+}
+
+// v1: worker presets. v2: projects + sandboxes (the formal successor of
+// sandbox.js's old homeIndex.json sidecar -- one row per real project
+// directory, plus per-project persistent HOME bookkeeping). Later phases move
+// more JSON stores onto this mechanism -- one table per store, INTEGER ms
+// timestamps, UUID TEXT ids, FKs added by new migrations when both sides exist.
 export const MIGRATIONS = [
   {
     version: 1,
@@ -63,12 +83,87 @@ export const MIGRATIONS = [
     // and moves on -- the "don't import into a non-empty table" idempotence
     // guard is what protects the next boot, not the rename.
   },
+  {
+    version: 2,
+    up(db) {
+      db.exec(`
+        CREATE TABLE projects (
+          id           TEXT PRIMARY KEY,
+          cwd          TEXT NOT NULL UNIQUE,
+          path_hash    TEXT NOT NULL UNIQUE,
+          label        TEXT,
+          git_remote   TEXT,
+          created_at   INTEGER NOT NULL,
+          last_seen_at INTEGER NOT NULL
+        );
+        CREATE TABLE sandboxes (
+          slug         TEXT PRIMARY KEY,
+          project_id   TEXT REFERENCES projects(id) ON DELETE SET NULL,
+          cwd          TEXT NOT NULL,
+          created_at   INTEGER NOT NULL,
+          last_used_at INTEGER NOT NULL,
+          created_by   TEXT
+        );
+        CREATE INDEX idx_sandboxes_project_id ON sandboxes(project_id);
+      `);
+    },
+    // One-time import of sandbox.js's legacy sidecar index (slug -> resolved
+    // project cwd). The original creation timestamps were never tracked, so
+    // both timestamps fall back to "now"; git_remote is filled best-effort
+    // (non-git / unreadable repos stay NULL). Runs inside this migration's
+    // transaction: any failure rolls the whole v2 back and refuses boot.
+    importLegacy(db) {
+      let raw;
+      try {
+        raw = readFileSync(legacyHomeIndexFile(), 'utf-8');
+      } catch {
+        return; // no legacy index (fresh install, or already migrated)
+      }
+      let index;
+      try {
+        index = JSON.parse(raw);
+      } catch {
+        console.warn('[db] homeIndex.json exists but is not valid JSON; skipping its import');
+        return;
+      }
+      if (!index || typeof index !== 'object' || Array.isArray(index)) return;
+      const now = Date.now();
+      const findProject = db.prepare('SELECT id FROM projects WHERE cwd = ?');
+      const insertProject = db.prepare(
+        'INSERT INTO projects (id, cwd, path_hash, label, git_remote, created_at, last_seen_at) VALUES (?, ?, ?, NULL, ?, ?, ?)',
+      );
+      const insertSandbox = db.prepare(
+        'INSERT INTO sandboxes (slug, project_id, cwd, created_at, last_used_at, created_by) VALUES (?, ?, ?, ?, ?, NULL)',
+      );
+      for (const [slug, cwd] of Object.entries(index)) {
+        if (typeof slug !== 'string' || !slug || typeof cwd !== 'string' || !cwd) continue;
+        let projectId = findProject.get(cwd)?.id;
+        if (!projectId) {
+          projectId = randomUUID();
+          let origin = null;
+          try { origin = resolveOriginUrl(cwd); } catch { /* non-git / unreadable */ }
+          insertProject.run(projectId, cwd, projectHashForCwd(cwd), origin, now, now);
+        }
+        insertSandbox.run(slug, projectId, cwd, now, now);
+      }
+    },
+    // Post-COMMIT retirement of the imported file (see the v1 comment block:
+    // file renames cannot join the transaction). The runner wraps every
+    // postApply in its own best-effort try/catch.
+    postApply() {
+      renameSync(legacyHomeIndexFile(), `${legacyHomeIndexFile()}.migrated`);
+    },
+  },
 ];
 
 // Runs pending migrations in order. Each one executes inside BEGIN IMMEDIATE
 // with its user_version bump in the same transaction (SQLite DDL is
 // transactional; user_version lives atomically in the DB header), so a failed
 // migration leaves the DB exactly as before -- then we fail fast.
+// postApply(db?) runs AFTER its migration's COMMIT, outside any transaction:
+// best-effort side effects that must not influence correctness (retiring an
+// imported legacy file). Its failure is logged and skipped -- the importLegacy
+// idempotence guard is what protects the next boot, not postApply.
 export function migrate(db, migrations = MIGRATIONS) {
   const current = Number(db.prepare('PRAGMA user_version').get().user_version);
   for (const m of migrations) {
@@ -82,6 +177,13 @@ export function migrate(db, migrations = MIGRATIONS) {
     } catch (err) {
       try { db.exec('ROLLBACK'); } catch { /* transaction already unwound */ }
       throw new Error(`db migration v${m.version} failed: ${err.message}`);
+    }
+    if (typeof m.postApply === 'function') {
+      try {
+        m.postApply(db);
+      } catch (err) {
+        console.warn(`[db] v${m.version} postApply failed (continuing): ${err.message}`);
+      }
     }
   }
 }
