@@ -227,8 +227,8 @@ test('codex gets per-process MCP config overrides without writing config.toml', 
     notify: { mode: 'sandbox', sockPath: '/run/user/1000/ccserver-notify.sock' },
   });
   assert.deepEqual(args, [
-    '-c', 'mcp_servers.ccserver={command="/ccserver-sandbox-mcp-bridge",args=[]}',
-    '-c', 'mcp_servers.ccserver-notify={command="/ccserver-sandbox-mcp-bridge",args=["notify"]}',
+    '-c', 'mcp_servers.ccserver={command="/ccserver-sandbox-mcp-bridge",args=[],env_vars=["CCSANDBOX_MCP_SOCK"]}',
+    '-c', 'mcp_servers.ccserver-notify={command="/ccserver-sandbox-mcp-bridge",args=["notify"],env_vars=["CCSANDBOX_NOTIFY_MCP_SOCK","CCSERVER_NOTIFY_IDENTITY"]}',
   ]);
   assert.deepEqual(env, { CCSANDBOX_NOTIFY_MCP_SOCK: '/run/user/1000/ccserver-notify.sock' });
 });
