@@ -1339,6 +1339,64 @@ export function publishGroupFilesFromUpload(groupId, files, publishedBy = null) 
   return { ok: true, files: metas };
 }
 
+// Browser upload via staged temp files (streamed route): staged = [{ name, mimeType, tempPath, size }]
+// The caller has already streamed each part to tempPath with per-file size cap.
+// This function re-validates quotas atomically against current group state,
+// then atomically promotes each temp file to its final blob path.
+export function commitStagedUploads(groupId, staged) {
+  const group = groups.get(groupId);
+  if (!group) return { error: 'group-not-found', message: 'group not found' };
+  if (!Array.isArray(staged) || staged.length === 0) {
+    return { error: 'bad-request', message: 'no files provided' };
+  }
+  // Atomic quota validation (re-check against live state to handle races).
+  let batchBytes = 0;
+  for (const f of staged) batchBytes += f.size || 0;
+  if (staged.length > MAX_FILES_PER_GROUP || group.files.size + staged.length > MAX_FILES_PER_GROUP) {
+    return { error: 'too-many-files', message: `group already has the maximum of ${MAX_FILES_PER_GROUP} files` };
+  }
+  const total = [...group.files.values()].reduce((s, m) => s + m.size, 0);
+  if (total + batchBytes > MAX_GROUP_BYTES) {
+    return { error: 'quota-exceeded', message: `group storage quota exceeded (${MAX_GROUP_BYTES} bytes)` };
+  }
+  for (const f of staged) {
+    if ((f.size || 0) > MAX_FILE_BYTES) {
+      return { error: 'too-large', message: `file ${f.name} exceeds the ${MAX_FILE_BYTES} byte limit (got ${f.size} bytes)` };
+    }
+  }
+  const dir = ensureGroupFilesDir(groupId);
+  const metas = [];
+  for (const f of staged) {
+    const name = sanitizeDisplayName(f.name);
+    const mimeType = f.mimeType || mimeForName(name);
+    const size = f.size;
+    const id = generateFileId();
+    const storedName = storedNameForId(id);
+    const blobPath = join(dir, storedName);
+    try {
+      // Promote staged temp file to final blob path (same filesystem, atomic).
+      renameSync(f.tempPath, blobPath);
+    } catch (err) {
+      // Best effort: try to keep already-promoted files; caller will cleanup remaining staged.
+      return { error: 'internal', message: `failed to store file ${name}: ${err.message}` };
+    }
+    const meta = {
+      id,
+      name,
+      size,
+      mimeType,
+      direction: 'user',
+      publishedBy: null,
+      publishedAt: Date.now(),
+      storedName,
+    };
+    group.files.set(id, meta);
+    metas.push({ id, name, size, mimeType, direction: 'user', publishedBy: null, publishedAt: meta.publishedAt });
+  }
+  persistGroupFiles();
+  return { ok: true, files: metas };
+}
+
 // Agent publish: relative path inside the agent's own worktree.
 export function publishGroupFileFromAgent(groupId, role, relativePath) {
   const group = groups.get(groupId);
@@ -1493,6 +1551,7 @@ const groupManagerApi = {
   deleteGroupFile,
   publishGroupFileFromAgent,
   publishGroupFilesFromUpload,
+  commitStagedUploads,
   getGroupFilesDirForGroup,
 };
 
