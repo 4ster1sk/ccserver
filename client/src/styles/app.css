@@ -387,7 +387,10 @@ body {
   margin-bottom: 12px;
 }
 
-.group-files-dialog-header h3 {
+/* Two-class selector: `.group-files-dialog-header h3` alone would tie with
+   `.resume-dialog h3` (margin-bottom/font-size further down this file) and
+   lose by source order, resurrecting the resume-dialog heading styles. */
+.group-files-dialog .group-files-dialog-header h3 {
   margin: 0;
   font-size: 16px;
 }
@@ -400,10 +403,6 @@ body {
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
-}
-.group-files-title {
-  font-weight: 600;
-  color: var(--text-primary);
 }
 .group-files-count {
   color: var(--text-muted);

@@ -70,25 +70,17 @@ export default function GroupTabView({
   }, []);
 
   useEffect(() => {
-    if (!visible && isFilesOpen) {
-      dragCountRef.current = 0;
-      setDragOver(false);
-      setIsFilesOpen(false);
-    }
-  }, [visible, isFilesOpen]);
+    if (!visible && isFilesOpen) closeFiles();
+  }, [visible, isFilesOpen, closeFiles]);
 
   useEffect(() => {
     if (!isFilesOpen || !visible) return;
     const onKey = (e) => {
-      if (e.key === 'Escape') {
-        dragCountRef.current = 0;
-        setDragOver(false);
-        setIsFilesOpen(false);
-      }
+      if (e.key === 'Escape') closeFiles();
     };
     document.addEventListener('keydown', onKey);
     return () => document.removeEventListener('keydown', onKey);
-  }, [isFilesOpen, visible]);
+  }, [isFilesOpen, visible, closeFiles]);
 
   useEffect(() => { membersRef.current = members; }, [members]);
 
