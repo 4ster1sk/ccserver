@@ -181,3 +181,9 @@ test('normalizeWorkers: per-entry sandboxOpts mirror memberSpecFromBody semantic
   assert.deepEqual(res.workers[0].spec.sandboxOpts, { gpg: true, sshAgent: true });
   assert.deepEqual(res.workers[1].spec.sandboxOpts, null);
 });
+
+test('normalizeWorkers: workers explicitly null falls back to the legacy adapter', () => {
+  const res = normalizeWorkers({ workers: null, workerA: { app: 'claude' } });
+  assert.deepEqual(res.workers.map((w) => w.role), ['workerA', 'workerB']);
+  assert.deepEqual(res.workers[0].spec, { app: 'claude' });
+});

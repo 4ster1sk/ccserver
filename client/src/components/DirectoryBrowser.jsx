@@ -149,6 +149,9 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
     setManageOpen(false);
     setEditingPresetId(null);
     setPresetFormError(null);
+    // Back to 'idle' so the next combo open refetches the library -- retries a
+    // failed fetch and picks up presets saved elsewhere since this modal opened.
+    setPresetsState('idle');
     setOpenMenuOpen(false);
   }, []);
 
@@ -831,7 +834,10 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
                                   key={app}
                                   type="button"
                                   className={`open-menu-app-btn${r.app === app ? ' active' : ''}${availableApps && !availableApps[app] ? ' open-menu-item-disabled' : ''}`}
-                                  onClick={() => updateSelectedWorker(r.uid, { app })}
+                                  onClick={() => {
+                                    if (availableApps && !availableApps[app]) return; // server lacks this CLI
+                                    updateSelectedWorker(r.uid, { app });
+                                  }}
                                   title={availableApps && !availableApps[app] ? 'サーバーに未インストール' : ''}
                                 >
                                   {app === 'claude' ? 'Claude Code' : app === 'opencode' ? 'opencode' : 'OpenAI Codex'}
@@ -1175,7 +1181,10 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
                       key={app}
                       type="button"
                       className={`open-menu-app-btn${presetForm.app === app ? ' active' : ''}${availableApps && !availableApps[app] ? ' open-menu-item-disabled' : ''}`}
-                      onClick={() => setPresetForm((f) => ({ ...f, app }))}
+                      onClick={() => {
+                        if (availableApps && !availableApps[app]) return; // server lacks this CLI
+                        setPresetForm((f) => ({ ...f, app }));
+                      }}
                       title={availableApps && !availableApps[app] ? 'サーバーに未インストール' : ''}
                     >
                       {app === 'claude' ? 'Claude Code' : app === 'opencode' ? 'opencode' : 'OpenAI Codex'}

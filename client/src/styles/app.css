@@ -273,6 +273,11 @@ body {
   display: flex;
   align-items: center;
   gap: 5px;
+  /* Worker preset display names can be up to 80 chars -- cap the label so a
+     long name cannot blow out the subtab bar (full label stays on hover via
+     the item's title attribute). */
+  max-width: 240px;
+  overflow: hidden;
 }
 
 .group-subtab-exited {
