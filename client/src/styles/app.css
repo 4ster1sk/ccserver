@@ -297,15 +297,12 @@ body {
 }
 
 .group-restart-orch-btn {
-  margin: 3px 8px 3px auto;
+  /* Sits right of the Files trigger at the bar's right end */
+  margin: 3px 8px 3px 6px;
   padding: 3px 10px;
   font-size: 12px;
   flex-shrink: 0;
   align-self: center;
-}
-
-.group-restart-orch-btn--with-files {
-  margin-left: 6px;
 }
 
 .group-files-trigger-btn {
@@ -359,11 +356,9 @@ body {
   font-size: 12px;
 }
 
-/* Group file exchange: trigger + modal (replaces always-mounted panel) */
-.group-files-overlay {
-  z-index: 100;
-}
-
+/* Group file exchange: trigger + modal (replaces always-mounted panel).
+   Stacking relies on .resume-overlay's z-index: 100, shared by every
+   fullscreen overlay in this file. */
 .group-files-dialog {
   position: relative;
   max-width: 560px;

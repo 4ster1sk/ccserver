@@ -134,7 +134,7 @@ export default function GroupTabView({
     };
   }, [visible, groupId]);
 
-  // Files polling (same 3s interval, independent)
+  // Files polling (badge cadence: 10s while the modal is closed, 3s while open)
   const fetchFiles = useCallback(async () => {
     try {
       const res = await authFetch(`/api/groups/${groupId}/files`);
@@ -317,7 +317,7 @@ export default function GroupTabView({
         </button>
         {orchestrator?.exited && (
           <button
-            className="btn btn-secondary group-restart-orch-btn group-restart-orch-btn--with-files"
+            className="btn btn-secondary group-restart-orch-btn"
             onClick={restartOrchestrator}
             disabled={restartingOrch}
             title="オーケストレーターが終了しています。再起動しますか?"
