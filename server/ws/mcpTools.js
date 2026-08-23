@@ -237,7 +237,12 @@ function capSandboxOpts(requested, cap) {
 // can record what actually launched (and see whether/how sandboxOpts was
 // capped).
 export async function openTab(deps, { role, app, model, cwd, sandboxOpts }) {
-  const options = { cwd };
+  // cwd is destructured (and intentionally left unused below) only to
+  // document that the wire argument still exists for compatibility; the
+  // server always assigns this role its own dedicated git worktree (or the
+  // shared project cwd for a non-git project) -- see
+  // groupManager.resolveMemberLaunchCwd / plan section 3.3.
+  const options = {};
   if (app !== undefined) options.app = app;
   if (model !== undefined) options.model = model;
   if (sandboxOpts !== undefined) {
@@ -254,7 +259,9 @@ export async function openTab(deps, { role, app, model, cwd, sandboxOpts }) {
   return {
     sessionId: res.sessionId,
     role,
-    cwd,
+    // The actual cwd the session launched with (its own git worktree, or
+    // the shared project cwd) -- never the (ignored) input `cwd` above.
+    cwd: res.cwd,
     app: res.app,
     model: res.model,
     sandboxOpts: res.sandboxOpts || null,
@@ -336,6 +343,30 @@ export function handoffToOrchestrator(deps, { summary, status = 'done', nextRole
     at: Date.now(),
   });
   return ok ? { ok: true } : { error: 'group-not-found' };
+}
+
+// --- publish_doc / fetch_doc / list_docs ------------------------------------
+// Group-scoped document sharing (plan section 7): lets any member hand off
+// content directly to any other member (worker<->worker, or a worker
+// publishing something the orchestrator wants to see) without relaying it
+// through send_input/handoff_to_orchestrator text. deps.role (handoff
+// server only -- see mcpServer.js) is the publisher's identity, exactly the
+// same "never taken from the wire" pattern as handoffToOrchestrator's
+// sessionId/role above. The control server's fetch_doc/list_docs pass
+// deps.role as undefined (the orchestrator has no role string of its own);
+// publishGroupDoc is only ever wired on the handoff server, so it always
+// gets a real role.
+
+export function publishDoc(deps, { key, content }) {
+  return deps.groupManager.publishGroupDoc(deps.groupId, deps.role || null, key, content);
+}
+
+export function fetchDoc(deps, { key }) {
+  return deps.groupManager.fetchGroupDoc(deps.groupId, key);
+}
+
+export function listDocs(deps) {
+  return { docs: deps.groupManager.listGroupDocs(deps.groupId) };
 }
 
 // --- repo_info -------------------------------------------------------------

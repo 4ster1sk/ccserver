@@ -9,19 +9,28 @@
 
 import { EventEmitter } from 'node:events';
 import { mkdirSync, writeFileSync, readFileSync, unlinkSync } from 'node:fs';
-import { basename, dirname, join } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
-import { getSession, destroySession, createSession, writeToSession, waitUntilSettled, setSessionExitListener, setSessionCreateListener, setMcpSocketResolver, setOrchestratorClaudeMdResolver, peekSavedSessions, dockerAvailability } from './sessionManager.js';
+import { getSession, destroySession, createSession, writeToSession, waitUntilSettled, setSessionExitListener, setSessionCreateListener, setMcpSocketResolver, setOrchestratorClaudeMdResolver, setMemberCwdResolver, peekSavedSessions, dockerAvailability } from './sessionManager.js';
 import { startControlBroker, startHandoffChannel, stopBroker } from './mcpBroker.js';
 import { isValidApp } from './appLaunch.js';
 import { loadSandboxConfig } from './sandbox.js';
+import { resolveMemberWorktree, removeMemberWorktree, listWorktreeDirs } from './worktree.js';
+import { sendNotification } from './notify.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 // Groups survive a server restart via this file (groupId, member roles,
 // orchestrator dir/app/instructions -- see persistGroups). Overridable for
 // tests, which must never touch the real repo-root state file.
 const GROUPS_PATH = process.env.CCSERVER_GROUPS_PATH || join(__dirname, '..', '..', '.saved-groups.json');
+// Group-scoped published documents (publish_doc/fetch_doc/list_docs, see
+// section 7 of the plan), kept in their own file rather than folded into
+// GROUPS_PATH: persistGroups() is called far more often (every member
+// registration / pref change) than documents are published, and mixing the
+// two would mean re-serializing every doc's content on each of those
+// unrelated writes.
+const GROUP_DOCS_PATH = process.env.CCSERVER_GROUP_DOCS_PATH || join(__dirname, '..', '..', '.saved-group-docs.json');
 
 // Orchestrator CLAUDE.md/AGENTS.md source: a repo-tracked template, read
 // fresh on every (re)spawn (never cached at module load) so an edit to the
@@ -179,6 +188,19 @@ export async function createGroup({ groupId, cwd, orchestratorDir, sandboxOpts =
     // with; open_tab workers inherit them unless the tool overrides.
     sandboxOpts: normalizedGroupSandboxOpts,
     memberPrefs: normalizedMemberPrefs,
+    // role -> { path, gitCommonDir, branch } for every non-orchestrator role
+    // that has ever been resolved to its own git worktree (see
+    // resolveMemberLaunchCwd / worktree.js). Absent for a role whose project
+    // isn't a git repo (worktree resolution falls back to sharing cwd, see
+    // plan section 2.8) or that has never been spawned yet.
+    memberWorktrees: new Map(),
+    // key(string) -> { content, publishedBy(role), publishedAt(epoch ms) } --
+    // the group-scoped "message board" (publish_doc/fetch_doc/list_docs, see
+    // plan section 7), letting workers hand off content to each other
+    // directly without going through the orchestrator or a shared ./tmp/
+    // (each role's ./tmp/ lives in its own git worktree now and is not
+    // visible to the others).
+    docs: new Map(),
     controlBroker: null, // { server, sockPath, dir } | null
     handoffChannels: new Map(), // role -> { server, sockPath, dir, role, sessionId }
     handoffQueue: [],
@@ -395,6 +417,7 @@ function persistGroups() {
         sandboxOpts: g.sandboxOpts || null,
         memberPrefs: g.memberPrefs || {},
         members: Object.fromEntries([...g.members]),
+        memberWorktrees: Object.fromEntries([...g.memberWorktrees]),
       });
     }
     if (arr.length > 0) {
@@ -443,6 +466,8 @@ export function restoreGroups() {
       instructions: typeof e.instructions === 'string' ? e.instructions : null,
       sandboxOpts: e.sandboxOpts || null,
       memberPrefs: normalizeMemberPrefs(e.memberPrefs, e.orchestratorApp, e.sandboxOpts),
+      memberWorktrees: new Map(),
+      docs: new Map(),
       controlBroker: null,
       handoffChannels: new Map(),
       handoffQueue: [],
@@ -450,6 +475,17 @@ export function restoreGroups() {
       pendingTakes: new Set(),
       memberSaved: new Map(),
     };
+    if (e.memberWorktrees && typeof e.memberWorktrees === 'object') {
+      for (const [role, wt] of Object.entries(e.memberWorktrees)) {
+        if (wt && typeof wt === 'object' && typeof wt.path === 'string') {
+          group.memberWorktrees.set(role, {
+            path: wt.path,
+            gitCommonDir: typeof wt.gitCommonDir === 'string' ? wt.gitCommonDir : null,
+            branch: typeof wt.branch === 'string' ? wt.branch : null,
+          });
+        }
+      }
+    }
     if (group.orchestratorModel != null && !hasOwn(e.memberPrefs?.orchestrator, 'model')) {
       group.memberPrefs.orchestrator.model = group.orchestratorModel;
     }
@@ -480,7 +516,55 @@ export function restoreGroups() {
     ids.push(group.id);
     restored++;
   }
+  // Independent of the .saved-groups.json restore above (a corrupt/missing
+  // docs file must not block group restoration, and vice versa -- see plan
+  // section 7.3): docs are plain persisted text with no filesystem
+  // counterpart, so this can never fail for the same reasons a worktree
+  // restore could.
+  try {
+    const rawDocs = JSON.parse(readFileSync(GROUP_DOCS_PATH, 'utf-8'));
+    if (rawDocs && typeof rawDocs === 'object') {
+      for (const [gid, docsObj] of Object.entries(rawDocs)) {
+        const group = groups.get(gid);
+        if (!group || !docsObj || typeof docsObj !== 'object') continue;
+        for (const [key, doc] of Object.entries(docsObj)) {
+          if (doc && typeof doc === 'object' && typeof doc.content === 'string') {
+            group.docs.set(key, {
+              content: doc.content,
+              publishedBy: typeof doc.publishedBy === 'string' ? doc.publishedBy : null,
+              publishedAt: typeof doc.publishedAt === 'number' ? doc.publishedAt : Date.now(),
+            });
+          }
+        }
+      }
+    }
+  } catch {
+    // no persisted docs yet / unreadable -- groups still restore fine
+  }
   return { restored, ids };
+}
+
+// Startup orphan scan (plan section 3.7-3): warns (never deletes) about any
+// `<projectHash>/<role>` directory under worktree.js's worktreeRoot() that
+// isn't claimed by any currently known group. Meant to be called once, right
+// after restoreGroups() (server/index.js) -- a directory only becomes
+// orphaned through a removal that failed (see cleanupMemberWorktree, which
+// deliberately never `--force`s) or a crash between creation and the next
+// persistGroups(), so this is purely diagnostic: the human decides whether
+// to inspect/remove it by hand. Returns the list of orphaned paths (for
+// tests / callers that want to log a count).
+export function detectOrphanWorktrees() {
+  const claimed = new Set();
+  for (const group of groups.values()) {
+    for (const wt of group.memberWorktrees.values()) {
+      if (wt?.path) claimed.add(resolve(wt.path));
+    }
+  }
+  const orphans = listWorktreeDirs().filter((dir) => !claimed.has(resolve(dir)));
+  for (const dir of orphans) {
+    console.warn(`[groupManager] orphaned worktree directory (belongs to no known group): ${dir}`);
+  }
+  return orphans;
 }
 
 // The authorization chokepoint: is `sessionId` a member of this group?
@@ -563,10 +647,72 @@ export async function resolveGroupMcpSocket(groupId, groupRole) {
   }
 }
 
-// open_tab: add a new worker session to the group. cwd is restricted to
-// allowedCwds (initialized to the shared project dir). Reuses the same
-// channel-then-session flow as the initial trio. Returns { sessionId, app }
-// or { error, message }.
+// Single canonical resolver for "what cwd (and git-common-dir sandbox bind)
+// should this group member launch with" -- called from every (re)spawn site
+// (addMember above, terminal.js's `init` reconnect, sessionManager's
+// scheduled-prompt auto-resume) so they can never disagree (plan section
+// 3.6.1). The orchestrator always gets its stable orchestratorDir (no
+// worktree involved); every other role gets its own git worktree via
+// resolveMemberWorktree, or -- when the project isn't a git repo -- falls
+// back to sharing the project cwd exactly like every role did before this
+// feature existed (plan section 2.8).
+//
+// Returns { cwd, gitCommonDir } or null when the group is unknown or
+// worktree resolution itself threw (a real git failure, not just "not a
+// repo") -- callers must treat that the same as any other unresolvable-
+// launch-target case (refuse the spawn rather than launch into a guess).
+export function resolveMemberLaunchCwd(groupId, role) {
+  const group = groups.get(groupId);
+  if (!group) return null;
+  if (role === 'orchestrator') {
+    return group.orchestratorDir ? { cwd: group.orchestratorDir, gitCommonDir: null } : null;
+  }
+  if (!group.cwd) return null;
+  let resolution;
+  try {
+    resolution = resolveMemberWorktree(group.cwd, role);
+  } catch (err) {
+    console.warn(`[groupManager] worktree resolution failed for ${groupId}/${role}: ${err.message}`);
+    return null;
+  }
+  if (resolution.usedWorktree) {
+    group.memberWorktrees.set(role, { path: resolution.cwd, gitCommonDir: resolution.gitCommonDir, branch: resolution.branch });
+    if (!group.allowedCwds.has(resolution.cwd)) group.allowedCwds.add(resolution.cwd);
+    persistGroups();
+    if (resolution.lostWork) {
+      console.warn(`[groupManager] worktree for ${groupId}/${role} was recreated and lost uncommitted work -- notifying`);
+      notifyWorktreeDataLoss(group, role, resolution);
+    }
+  }
+  return { cwd: resolution.cwd, gitCommonDir: resolution.gitCommonDir };
+}
+
+// Human must always learn when a worktree recreation discarded an agent's
+// in-progress work -- never silently, log-only (plan section 3.6.1: this
+// mirrors why notify was made mandatory over idle-heuristic detection in the
+// first place). Best-effort and non-blocking: sendNotification degrades
+// gracefully with no channels configured (see notify.js), so this is safe to
+// call unconditionally and must never make the caller (a session spawn path)
+// wait on webhook delivery.
+function notifyWorktreeDataLoss(group, role, resolution) {
+  const identity = {
+    groupId: group.id,
+    groupRole: role,
+    cwd: group.cwd,
+    projectName: group.cwd ? basename(group.cwd) : null,
+  };
+  sendNotification({
+    title: `Worktree for ${role} was recreated`,
+    body: resolution.branch
+      ? `Its working branch "${resolution.branch}" survived, but uncommitted/untracked changes in the worktree were lost when it had to be recreated from disk.`
+      : 'Its working branch and any uncommitted work were lost when the worktree had to be recreated from scratch.',
+    level: 'warning',
+  }, identity).catch(() => { /* best effort, see notify.js */ });
+}
+
+// open_tab: add a new worker session to the group. Reuses the same
+// channel-then-session flow as the initial trio. Returns { sessionId, app,
+// cwd } or { error, message }.
 export async function addMember(groupId, role, options = {}) {
   const group = groups.get(groupId);
   if (!group) return { error: 'group-not-found', message: 'group not found' };
@@ -584,7 +730,6 @@ export async function addMember(groupId, role, options = {}) {
     app = 'claude';
   }
   const model = hasOwn(options, 'model') ? normalizeModel(options.model) : normalizeModel(pref.model);
-  const cwd = options.cwd;
   const sandboxOpts = hasOwn(options, 'sandboxOpts')
     ? normalizeSandboxOpts(options.sandboxOpts)
     : (pref.sandboxOpts || group.sandboxOpts);
@@ -595,9 +740,6 @@ export async function addMember(groupId, role, options = {}) {
       message: 'role must be a worker role (e.g. workerA, workerB), never orchestrator',
     };
   }
-  if (!group.allowedCwds.has(cwd)) {
-    return { error: 'cwd-not-allowed', message: `cwd must be one of: ${[...group.allowedCwds].join(', ')}` };
-  }
   // The orchestrator (a live LLM, reachable by prompt injection through the
   // workers) must not be able to grow the group without bound.
   if (!group.members.has(role) && group.members.size >= MAX_GROUP_MEMBERS) {
@@ -606,6 +748,18 @@ export async function addMember(groupId, role, options = {}) {
       message: `group is full (max ${MAX_GROUP_MEMBERS} members)`,
     };
   }
+
+  // options.cwd (accepted at the wire layer for open_tab -- see mcpTools.js
+  // and mcpServer.js's tool description) is intentionally never read here:
+  // the server always assigns this role its own dedicated git worktree (or
+  // falls back to the shared project cwd when it isn't a git repo), the
+  // same "orchestrator-requested value is capped/ignored, server decides"
+  // pattern already used for sandboxOpts -- see plan section 3.3.
+  const cwdRes = resolveMemberLaunchCwd(groupId, role);
+  if (!cwdRes) {
+    return { error: 'cwd-resolution-failed', message: 'failed to resolve a working directory for this role' };
+  }
+  const { cwd, gitCommonDir } = cwdRes;
 
   // A role is single-slot: replacing it retires the previous occupant. The
   // replacement is atomic -- the old session is only destroyed AFTER the new
@@ -640,6 +794,7 @@ export async function addMember(groupId, role, options = {}) {
     groupId,
     groupRole: role,
     mcpSocketPath: channel.sockPath,
+    gitCommonDir,
   });
   if (res.error || !res.session) {
     stopBroker(channel);
@@ -657,7 +812,7 @@ export async function addMember(groupId, role, options = {}) {
     group.orchestratorModel = model;
   }
   persistGroups();
-  return { sessionId: res.sessionId, app, model, sandboxOpts: normalizeSandboxOpts(sandboxOpts) };
+  return { sessionId: res.sessionId, app, model, sandboxOpts: normalizeSandboxOpts(sandboxOpts), cwd };
 }
 
 // (Re)listen a role's handoff channel and re-register it in the group. Used
@@ -677,16 +832,43 @@ async function ensureHandoffChannel(group, role) {
   return channel;
 }
 
-// close_tab / explicit removal: destroy the session and its handoff channel.
+// close_tab / explicit removal: destroy the session, its handoff channel,
+// and (if it had one) its git worktree.
 export function removeMember(groupId, sessionId) {
   const group = groups.get(groupId);
   if (!group) return;
   sessionApi.destroySession(sessionId, { keepSchedule: false });
   cleanupMemberChannels(group, sessionId);
+  let removedRole = null;
   for (const [role, sid] of group.members) {
-    if (sid === sessionId) group.members.delete(role);
+    if (sid === sessionId) {
+      group.members.delete(role);
+      removedRole = role;
+    }
   }
+  if (removedRole) cleanupMemberWorktree(group, removedRole);
   persistGroups();
+}
+
+// One centralized cleanup path for a role's worktree (plan section 3.7-1),
+// used by both removeMember (this role is being fully retired from the
+// group) and destroyGroup (every role is). Best-effort like the sibling
+// sandboxStateDir/git-broker cleanup in sessionManager.destroySession -- a
+// worktree removal failure must never abort the rest of teardown. Never
+// `--force`s the underlying `git worktree remove` (see worktree.js):
+// on failure the directory is left on disk for the startup orphan scan
+// (detectOrphanWorktrees) to flag, rather than risk destroying in-progress
+// work.
+function cleanupMemberWorktree(group, role) {
+  if (role === 'orchestrator' || !group.cwd || !group.memberWorktrees.has(role)) return;
+  try {
+    if (!removeMemberWorktree(group.cwd, role)) {
+      console.warn(`[groupManager] failed to remove worktree for ${group.id}/${role} (uncommitted changes?) -- left on disk`);
+    }
+  } catch (err) {
+    console.warn(`[groupManager] error removing worktree for ${group.id}/${role}: ${err.message}`);
+  }
+  group.memberWorktrees.delete(role);
 }
 
 // FIFO handoff queue + EventEmitter: workers push, orchestrator takes. The
@@ -841,6 +1023,13 @@ export function destroyGroup(groupId) {
     }
   }
   group.members.clear();
+  // Every role's worktree is removed here, unlike orchestratorDir (kept as a
+  // per-project resource, see the header comment above) -- worktrees are
+  // deliberately NOT reused across group launches, so the "delete by
+  // default" policy from plan section 3.7 applies even on a routine destroy.
+  for (const role of [...group.memberWorktrees.keys()]) {
+    cleanupMemberWorktree(group, role);
+  }
   if (group.controlBroker) {
     stopBroker(group.controlBroker);
     group.controlBroker = null;
@@ -853,6 +1042,100 @@ export function destroyGroup(groupId) {
   group.handoffEmitter.removeAllListeners();
   groups.delete(groupId);
   persistGroups();
+  // persistGroupDocs() serializes docs for every group still in `groups`
+  // (mirrors persistGroups() above); the group is already removed from that
+  // map, so this naturally drops its entry from .saved-group-docs.json too.
+  persistGroupDocs();
+}
+
+// --- group-scoped document sharing (publish_doc/fetch_doc/list_docs, plan
+// section 7): a simple key-value "message board" any member can publish to
+// and any member (including the orchestrator) can read, replacing the
+// pre-worktree convention of handing off content via a shared ./tmp/ (each
+// role's ./tmp/ now lives inside its own git worktree and is invisible to
+// the others) --------------------------------------------------------------
+
+// Per-doc/per-group caps mirroring repo_info's "shallow by design, capped in
+// size" posture: an MCP tool argument is untrusted-ish input from a live LLM
+// (reachable via prompt injection through worker/orchestrator output), so
+// the group's memory footprint must stay bounded regardless of how it's used.
+const MAX_DOC_BYTES = 256 * 1024;
+const MAX_DOCS_PER_GROUP = 50;
+
+// Re-publishing the same key overwrites it (whoever published most recently
+// wins) -- kept deliberately simple for a "message board", no per-key
+// ownership or versioning. See plan section 7.6 for what's left open here.
+export function publishGroupDoc(groupId, role, key, content) {
+  const group = groups.get(groupId);
+  if (!group) return { error: 'group-not-found', message: 'group not found' };
+  if (typeof key !== 'string' || !key) {
+    return { error: 'bad-request', message: 'key must be a non-empty string' };
+  }
+  const text = typeof content === 'string' ? content : '';
+  const byteLength = Buffer.byteLength(text, 'utf-8');
+  if (byteLength > MAX_DOC_BYTES) {
+    return { error: 'too-large', message: `content exceeds the ${MAX_DOC_BYTES} byte limit (got ${byteLength} bytes)` };
+  }
+  if (!group.docs.has(key) && group.docs.size >= MAX_DOCS_PER_GROUP) {
+    return { error: 'too-many-docs', message: `group already has the maximum of ${MAX_DOCS_PER_GROUP} published documents` };
+  }
+  const doc = { content: text, publishedBy: role, publishedAt: Date.now() };
+  group.docs.set(key, doc);
+  persistGroupDocs();
+  return { ok: true, key, publishedBy: doc.publishedBy, publishedAt: doc.publishedAt };
+}
+
+export function fetchGroupDoc(groupId, key) {
+  const group = groups.get(groupId);
+  if (!group) return { error: 'group-not-found', message: 'group not found' };
+  const doc = group.docs.get(key);
+  if (!doc) return { error: 'not-found', message: `no document published under key "${key}"` };
+  return { key, content: doc.content, publishedBy: doc.publishedBy, publishedAt: doc.publishedAt };
+}
+
+// Never includes `content` -- same "list is cheap, fetch is deliberate"
+// design as repo_info, so a member can see what's available without every
+// list_docs call hauling every document's full content into its context.
+export function listGroupDocs(groupId) {
+  const group = groups.get(groupId);
+  if (!group) return [];
+  return [...group.docs.entries()].map(([key, doc]) => ({
+    key,
+    publishedBy: doc.publishedBy,
+    publishedAt: doc.publishedAt,
+    size: Buffer.byteLength(doc.content, 'utf-8'),
+  }));
+}
+
+export function deleteGroupDoc(groupId, role, key) {
+  const group = groups.get(groupId);
+  if (!group) return { error: 'group-not-found', message: 'group not found' };
+  if (!group.docs.has(key)) return { error: 'not-found', message: `no document published under key "${key}"` };
+  group.docs.delete(key);
+  persistGroupDocs();
+  return { ok: true };
+}
+
+// Best effort, same pattern as persistGroups(): re-serializes every group's
+// docs on each call, but this is only ever called from publish/deleteGroupDoc
+// (not from the frequent member/pref-mutation paths that call persistGroups()),
+// so the write rate stays tied to how often documents actually change (plan
+// section 7.3).
+function persistGroupDocs() {
+  try {
+    const out = {};
+    for (const g of groups.values()) {
+      if (g.docs.size === 0) continue;
+      out[g.id] = Object.fromEntries([...g.docs]);
+    }
+    if (Object.keys(out).length > 0) {
+      writeFileSync(GROUP_DOCS_PATH, JSON.stringify(out));
+    } else {
+      try { unlinkSync(GROUP_DOCS_PATH); } catch { /* nothing to remove */ }
+    }
+  } catch {
+    // best effort -- persistence must never crash a publish/delete call
+  }
 }
 
 // --- session-exit / session-create observation (no import cycle: sessionManager
@@ -931,6 +1214,10 @@ const groupManagerApi = {
   removeMember,
   getOrchestratorSandboxOpts,
   getRegisteredMemberSandboxOpts,
+  publishGroupDoc,
+  fetchGroupDoc,
+  listGroupDocs,
+  deleteGroupDoc,
 };
 
 // Test seam: returns the exact facade the broker servers receive. Unit tests
@@ -964,3 +1251,4 @@ setSessionExitListener(onSessionExit);
 setSessionCreateListener(onSessionCreate);
 setMcpSocketResolver(resolveGroupMcpSocket);
 setOrchestratorClaudeMdResolver(generateOrchestratorClaudeMdSrc);
+setMemberCwdResolver(resolveMemberLaunchCwd);

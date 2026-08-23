@@ -21,7 +21,7 @@
 // Concurrent groups for one cwd are refused at creation time, so at most one
 // live group ever owns a dir at once.
 
-import { randomUUID, createHash } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { mkdirSync, statSync, rmSync, existsSync } from 'node:fs';
 import { basename, join, resolve } from 'node:path';
 import { homedir } from 'node:os';
@@ -29,6 +29,7 @@ import * as groupManager from '../ws/groupManager.js';
 import { createSession, getSession } from '../ws/sessionManager.js';
 import { sandboxAvailable } from '../ws/sandbox.js';
 import { isValidApp } from '../ws/appLaunch.js';
+import { projectHashForCwd } from '../ws/projectHash.js';
 
 const ORCHESTRATOR_ROOT = join(homedir(), '.local', 'share', 'ccserver-sandbox', 'orchestrator');
 
@@ -37,13 +38,9 @@ const ORCHESTRATOR_ROOT = join(homedir(), '.local', 'share', 'ccserver-sandbox',
 // (scratch space) across the group being destroyed and a new group launching
 // for the same project -- see destroyGroup's comment in groupManager.js.
 // CLAUDE.md/AGENTS.md themselves are never persisted here (see the header
-// comment above); only the dir itself is reused. resolve() normalizes
-// spelling variants (trailing slash, "..", ...) so they all map to the same
-// dir. 24 hex chars (96 bits) of the sha256 is plenty of collision headroom
-// for a handful of projects.
+// comment above); only the dir itself is reused.
 export function orchestratorDirForCwd(cwd) {
-  const hash = createHash('sha256').update(resolve(cwd)).digest('hex').slice(0, 24);
-  return join(ORCHESTRATOR_ROOT, hash);
+  return join(ORCHESTRATOR_ROOT, projectHashForCwd(cwd));
 }
 
 // Pure duplicate-project detection for POST /groups: two groups for the same

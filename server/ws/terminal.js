@@ -1,6 +1,6 @@
 import { homedir } from 'node:os';
 import { basename } from 'node:path';
-import { getGroup } from './groupManager.js';
+import { getGroup, resolveMemberLaunchCwd } from './groupManager.js';
 import {
   createSession,
   getSession,
@@ -60,6 +60,8 @@ export async function terminalWs(fastify, opts) {
           const groupId = typeof msg.groupId === 'string' ? msg.groupId : null;
           const groupRole = typeof msg.groupRole === 'string' ? msg.groupRole : null;
           let mcpSocketPath = null;
+          let resolvedCwd = null;
+          let gitCommonDir = null;
           if (groupId && groupRole) {
             mcpSocketPath = await resolveMcpSocketForSession(groupId, groupRole);
             if (!mcpSocketPath) {
@@ -70,6 +72,25 @@ export async function terminalWs(fastify, opts) {
               }));
               break;
             }
+            // Never trust the client-echoed msg.cwd for a group member: it's
+            // just a replay of what listGroupMembers told the browser last
+            // time (see GroupTabView), and a worker's worktree may have
+            // disappeared from disk since then. Resolving fresh here -- the
+            // same single resolver every other (re)spawn site uses -- lets a
+            // lost worktree be recreated (and the human notified on genuine
+            // data loss) instead of launching into a dead directory; see
+            // groupManager.resolveMemberLaunchCwd.
+            const cwdRes = resolveMemberLaunchCwd(groupId, groupRole);
+            if (!cwdRes) {
+              socket.send(JSON.stringify({
+                type: 'error',
+                message: `Cannot re-launch group member ${groupRole}: the group's working directory could not be resolved`,
+                code: 'SPAWN_FAILED',
+              }));
+              break;
+            }
+            resolvedCwd = cwdRes.cwd;
+            gitCommonDir = cwdRes.gitCommonDir;
           }
           // An orchestrator re-launched through the browser's re-init path
           // still reaches the group via the re-created control broker above.
@@ -80,7 +101,7 @@ export async function terminalWs(fastify, opts) {
           const projectName = group?.cwd ? basename(group.cwd) : undefined;
 
           const result = createSession({
-            cwd: msg.cwd || homedir(),
+            cwd: resolvedCwd || msg.cwd || homedir(),
             cols: msg.cols || 80,
             rows: msg.rows || 24,
             claudeSessionId: msg.claudeSessionId || null,
@@ -94,6 +115,7 @@ export async function terminalWs(fastify, opts) {
             groupRole,
             projectName,
             mcpSocketPath,
+            gitCommonDir,
             // Default reuse (keep the previous persistent HOME); only an
             // explicit false (client's "新規作成" dialog) wipes it.
             reuseSandboxHome: msg.reuseSandboxHome !== false,

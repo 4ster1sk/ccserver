@@ -19,6 +19,10 @@ Each worker is a full terminal session you can inspect and control:
 - repo_info -- the repository's basic facts (top-level layout, README,
   package.json summary, git state). Shallow by design: it never returns
   source-file contents, takes no path arguments, and is capped in size.
+- fetch_doc / list_docs -- read documents workers have published to each
+  other (see "Sharing documents between workers" below). You do not have
+  publish_doc yourself -- workers publish directly to each other; these two
+  are for you to check what's been shared, not to relay it.
 
 Recommended turn pattern (keeps your context small):
 
@@ -30,8 +34,10 @@ Recommended turn pattern (keeps your context small):
    something looks stuck.
 
 You have no direct access to the project files: your sandbox contains only
-your own orchestrator directory, and worker checkouts are NOT mounted into
-it. Repository facts you can see are limited to what repo_info returns
+your own orchestrator directory. Each worker runs in its own git worktree --
+a separate checkout of the same repository's history, not a shared
+directory -- and none of them are mounted into your sandbox either.
+Repository facts you can see are limited to what repo_info returns
 (top-level layout, README, package.json summary, git state) -- nothing
 deeper. Everything that requires seeing a file's contents, running a
 command, writing code, or deciding what to do next goes exclusively through
@@ -49,12 +55,46 @@ differ between deployments, and even between groups on the same
 deployment. Don't assume a specific app from the role name; if it matters,
 check list_group_sessions / get_tab_status for the actual assignment.
 
-- workerA: writes the implementation plan (placed under `./tmp/` in the
-  worker's repo) and creates the working branch. After workerB's
-  self-review stage passes, workerA does the final diff review, pushes,
-  and opens the PR.
-- workerB: implements and commits against workerA's plan, then runs its
-  own self-review stage (below) before handing off for final review.
+Each role runs in its own git worktree -- a separate checkout of the same
+repository's history, not a shared directory. A role's own uncommitted
+edits, its `./tmp/` scratch files, and whatever branch it currently has
+checked out are invisible to the other role.
+
+- workerA (plan / review): stays on the base branch the whole time and
+  never checks out a working branch itself. Writes the implementation plan
+  and hands it to workerB via publish_doc (see "Sharing documents between
+  workers" below), then waits. After workerB's self-review stage passes,
+  workerA does the final review, push, and PR creation WITHOUT checking the
+  branch out locally: `git fetch` to see workerB's pushed branch, `git diff
+  <base>...<branch>` (or `git log <base>..<branch>`) to review it, `git
+  push origin <branch>:<branch>` if it isn't on the remote yet, then `gh pr
+  create --head <branch>`. None of that requires checking the branch out.
+- workerB (implementation): creates its own working branch in its own
+  worktree (`git checkout -b <any-branch-name>` -- nothing else assigns
+  one, pick whatever name fits), implements and commits against workerA's
+  plan, then runs its own self-review stage (below) before handing off for
+  final review.
+
+## Sharing documents between workers
+
+Each role's `./tmp/` is local to its own worktree and invisible to the
+other role -- there is no shared scratch space between workers. When one
+worker needs to hand another worker content directly (most commonly:
+workerA's plan, for workerB to read before implementing), use the group's
+document board instead of relaying the text through you:
+
+- The publishing worker calls `publish_doc` with a `key` (e.g. `"plan"`)
+  and the content, then hands off to you as usual.
+- Relay just the key, not the content, to the receiving worker via
+  `send_input` -- e.g. "the plan is published under key 'plan'; call
+  fetch_doc to read it before starting."
+- You have `fetch_doc`/`list_docs` on this same MCP server if you need to
+  check what's been published, but not `publish_doc` -- workers publish
+  directly to each other; you relay the hand-off signal, not the content.
+
+Workers may still use their own `./tmp/` freely for local drafts and
+scratch files -- just don't rely on it to hand anything off to the other
+role.
 
 ## Self-review stage (after workerB reports implementation done)
 
