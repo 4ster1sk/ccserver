@@ -216,6 +216,33 @@ OpenAI Codexについて:
 - **オプトイン**: デフォルトでは注入されません。サーバーに claude バイナリがインストールされ、設定ファイルで `usageMcp: true` を明示した場合のみ注入されます。Usage ボタンの `showUsage` 設定とは独立しています。
 - サンドボックス内外どちらでも動作します (サンドボックス内はソケットを bind、外はホストの node でブリッジを実行) — 仕組みは `ccserver-notify` と同じパターンですが、`get_usage` は接続元によらず同じ結果を返すため識別情報 (identity) は一切やり取りしません。
 
+### ccserver-meta (メタエージェント用 MCP)
+
+ccserver 自体を MCP 経由で操作できる特権エージェント (**メタエージェント**) 向けの MCP サーバーです。プロジェクト/サンドボックス/グループ/セッションの一覧参照から、セッションやコンボの新規起動、プリセット管理、破壊的操作の実行までをカバーします。`ccserver-notify` / `ccserver-usage` と同じくプロセスグローバルな単一ソケット (`ccserver-meta.sock`) でホストされますが、サーバー全体 (全グループ・全サンドボックス・全プロジェクト) へのアクセスを持つ**単一の信頼されたエージェントにのみ渡す**前提のため、注入条件は両者とは別になっています。
+
+- **オプトイン**: 既定では無効です。設定ファイルで `metaAgentMcp: true` を明示した場合のみ有効化され、さらにセッション起動時に明示的にメタエージェントとして指定された単発セッションにだけ注入されます。コンボのワーカー/オーケストレーターへ自動注入されることは一切ありません (強い権限を持つため、既定オフは `usageMcp` よりさらに強く推奨されます)。
+- **ツール一覧** (権限区分: **R** = 読み取り専用 / **W-low** = 設定データの作成・変更・削除のみ / **W-create** = 新しいセッション・グループの起動 / **W-destructive** = 実行中リソースの終了・削除。W-destructive のみ承認必須):
+
+  | 区分 | ツール | 説明 |
+  |------|--------|------|
+  | R | `list_projects` | プロジェクト一覧 (表示ラベル / git remote / 最終利用時刻) |
+  | R | `list_sandboxes` | サンドボックス一覧 (サイズ / 利用中・削除中状態 / 所属プロジェクト) |
+  | R | `browse_directory` | 指定パスのディレクトリ・ファイル一覧 (`GET /api/dirs` 同等) |
+  | R | `list_groups` / `get_group` | コンボグループの一覧・メンバー詳細 |
+  | R | `list_sessions` | 全セッション一覧 |
+  | R | `list_worker_presets` / `list_launch_presets` | Worker プリセット・コンボ起動プリセットの一覧 |
+  | W-low | `create_worker_preset` / `update_worker_preset` / `delete_worker_preset` | Worker プリセットの CRUD (既存 REST API と同水準・確認なし) |
+  | W-low | `create_launch_preset` / `update_launch_preset` / `delete_launch_preset` | コンボ起動プリセット (複数ワーカーを一括起動するテンプレート) の CRUD |
+  | W-low | `update_project_label` | プロジェクトの表示ラベル変更 |
+  | W-low | `create_directory` | フォルダ作成 (`{ parent, name, gitInit? }`) |
+  | W-create | `launch_session` | 単発セッションの新規起動 (`POST /api/sessions` 相当) |
+  | W-create | `launch_group` / `launch_from_preset` | コンボの新規起動 (`POST /api/groups` 相当) / プリセットからの展開起動 |
+  | **W-destructive** | `close_session` / `destroy_group` / `delete_sandbox` | セッション強制終了 / グループ破棄 / サンドボックス削除。**必ず下記の承認フローを経由します** |
+
+- **承認フロー (W-destructive)**: 破壊的ツールが呼ばれると、サーバーは操作を即座には実行せず `pending_approvals` に記録してブラウザ UI からの判断を待ちます (その間、MCP ツール呼び出し自体がブロックされます)。ブラウザ側では画面上部の**グローバルバナー** (どのタブを開いていても表示) に操作内容の要約 (`summary`) が列挙され、**承認 / 却下** を選べます。バナーは `GET /api/approvals?status=pending` を数秒間隔でポーリングして更新され、判断は `POST /api/approvals/:id/decision { decision: 'approved' | 'rejected' }` で送信されます。
+- **タイムアウトは 5 分固定で、未応答のリクエストは常に「拒否」扱い**になります (fail-safe は常に「何もしない」側)。また、メタエージェントが**自分自身のセッションや自分の所属グループ**を対象に破壊的操作を呼んだ場合は、承認フローに回さずその場でエラーとして拒否されます (fail closed — 自己終了・自己破壊はどんな理由でも代行させません)。`delete_sandbox` については、メタエージェント自身がそのサンドボックス HOME 内で稼働中なら既存の「使用中」ガードが自然に自己削除を防ぎます。
+- **サンドボックス権限のキャップ**: メタエージェントが `launch_session` / `launch_group` 経由で他セッションに付与する `sandboxOpts` (gpg / sshAgent) は、メタエージェント自身が現在保持する権限でキャップされ、超過分は要求されていても暗黙に downgrade されます (エラーにはなりません)。コンボのオーケストレーターが子ワーカーの権限をキャップするのと同じルールです。
+
 ### コンボ起動: ロール別 git worktree
 
 コンボ起動の各ワーカー (workerA/workerB や `open_tab` で追加されたロール) は、プロジェクトが git リポジトリであれば**ロールごとに独立した git worktree** で起動します。以前は全ワーカーが同一チェックアウトを共有しており、別ブランチでの並行 git 操作 (実装とレビューを別ワーカーが同時に行う等) が衝突する事故が起きていたため、この分離が導入されました。
@@ -382,6 +409,7 @@ cp server/sandbox.config.example.json server/sandbox.config.json
   "defaultApp": "claude",
   "showUsage": true,
   "usageMcp": false,
+  "metaAgentMcp": false,
   "notify": {
     "discordWebhook": "",
     "subscriptions": []
@@ -402,6 +430,7 @@ cp server/sandbox.config.example.json server/sandbox.config.json
 | `defaultApp` | `"claude"` | 新規セッションの既定エージェント (`"claude"`、`"opencode"`、`"copilot"`)。UI で一度明示的に選んだ後はブラウザの記憶が優先され、この値は初回表示時の見た目とサーバー側フォールバック (予約プロンプトの自動再開など、クライアントが `app` を指定しない経路) にのみ使われます。**コンボ起動のメンバーには適用されません** (コンボのロール別選択は別途ブラウザの `localStorage` に記憶され、copilot はそもそも選択不可)。 |
 | `showUsage` | `true` | タブバー右端の Usage ボタン (Claude Code の `/usage` / Codex のレート制限読み取り) を表示するか。`false` で非表示。**claude/codex のどちらもサーバーに無い場合は設定に関わらず自動的に非表示**になります (片方だけあればボタンは表示され、ポップオーバーはそのアプリのみ表示)。 |
 | `usageMcp` | `false` | Claude セッションへ `ccserver-usage` MCP (`get_usage` ツール) を注入するか。安全のため既定はオフで、`true` の明示時だけ有効です。`showUsage` とは独立しています。 |
+| `metaAgentMcp` | `false` | メタエージェント用 MCP (`ccserver-meta`) を有効化するか。`true` の明示時のみ、メタエージェントとして起動されたセッションへ注入されます (上記「ccserver-meta (メタエージェント用 MCP)」参照)。全サーバーを操作できる特権ツールのため既定はオフです。 |
 | `binds` | `[]` | 追加で見せるホストパス。各要素 `{ src, mode?, dest? }`。`mode` は `ro` (既定) か `rw`。存在しないパスはスキップ。`~` はホームに展開。`~/.ssh` と `~/.config/gh` は `gitBroker` の設定に関わらず常にブロックされます。 |
 | `env` | `{}` | サンドボックス内の追加環境変数 (適用順は最後 = 既定値を上書き)。例: `sshAgent: true` のときに `SSH_AUTH_SOCK` を明示指定して自動検出を上書き。 |
 | `claudeBin` | 自動検出 | claude/opencode/copilot の起動方法。`claude` を PATH から解決し、ラッパー (例: `/usr/bin/claude` → `/opt/claude-code/bin/claude`) の場合は実体のインストール先を辿ってサンドボックスへ自動的に公開します。opencode は PATH に加えて `~/.opencode/bin` も自動探索。copilot は PATH (SANDBOX_PATH) で自動解決されます (通常 `~/.local/bin/copilot`)。自動検出で外れる場所にある場合や特定ビルドに固定したい場合のみ絶対パスで指定 (環境変数 `CCSERVER_CLAUDE_BIN` が優先。copilot に個別の bin 設定はありません)。 |
@@ -454,6 +483,7 @@ ccserver/
 │   ├── routes/
 │   │   ├── dirs.js                 # GET/POST /api/dirs, GET /api/dirs/home
 │   │   ├── sessions.js             # GET/DELETE /api/sessions...
+│   │   ├── approvals.js            # GET /api/approvals, POST /api/approvals/:id/decision (メタエージェント承認)
 │   │   ├── files.js                # GET/POST /api/files (アップロード/ダウンロード)
 │   │   ├── system.js               # GET /api/system-stats (CPU/メモリ/温度/GPU/IPMI/ストレージ)
 │   │   └── usage.js                # GET /api/usage (?app=claude|codex)
@@ -468,6 +498,8 @@ ccserver/
 │       ├── mcpServer.js            # control / handoff / notify / usage 各 MCP サーバー (SocketTransport 含む)
 │       ├── mcpBroker.js            # Unix-socket MCP ブローカー (control/handoff はグループ毎、notify/usage はプロセス毎 1 つ)
 │       ├── mcpTools.js             # control/handoff ツールの実装 (deps 注入)
+│       ├── metaTools.js            # メタエージェント用ツールの実装 (ワイヤ引数を信頼する、mcpTools とは別の信頼境界ファイル)
+│       ├── metaAgent.js            # ccserver-meta: metaAgentMcp ゲーティング + プロセスグローバル MCP ソケット
 │       ├── screenModel.js          # read_output 用の軽量仮想画面 (ANSI 解釈 + 変化検知)
 │       ├── sandbox.js              # bwrap + rootless docker サンドボックス構築
 │       ├── sandbox-entrypoint.sh
@@ -493,7 +525,8 @@ ccserver/
         │   ├── DirectoryBrowser.jsx
         │   ├── TerminalView.jsx    # 遅延ロード (初期バンドル削減)
         │   ├── UsageButton.jsx
-        │   └── SystemMonitor.jsx
+        │   ├── SystemMonitor.jsx
+        │   └── ApprovalBanner.jsx  # メタエージェント承認待ちグローバルバナー (ポーリング)
         └── styles/
             └── app.css
 ```
@@ -524,6 +557,8 @@ CCSERVER_TOKEN=some-secret NODE_ENV=production node server/index.js
 | GET / POST | `/api/worker-presets` | Worker プリセット一覧取得 / 作成 (`{ name, role, app, model }`、`model` は null 可) |
 | PUT / DELETE | `/api/worker-presets/:id` | プリセットの全置換更新 / 削除。role 重複は 409 |
 | POST | `/api/groups` | コンボ起動。従来の `workerA`/`workerB`/`orchestrator` に加え、canonical な `workers: [{ name?, role, app?, model?, sandboxOpts? }]` (1–7 人、role 一意) を受け付ける。プリセットはクライアントがスナップショットへ展開して送る。copilot はどちらの経路でも 400 拒否 |
+| GET | `/api/approvals?status=pending` | メタエージェントの承認待ち破壊的操作一覧 (`ccserver-meta` 参照)。ブラウザのグローバルバナーが数秒間隔でポーリング |
+| POST | `/api/approvals/:id/decision` | `{ decision: 'approved' \| 'rejected' }` で承認待ち操作を承認/却下する。5 分未応答のリクエストはサーバー側で expired (拒否扱い) になる |
 
 `GET /api/dirs` のレスポンス例:
 
