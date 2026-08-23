@@ -306,6 +306,12 @@ export default function GroupTabView({
     return role;
   };
 
+  // Display name chosen at launch (worker preset snapshot) next to the
+  // technical role -- "実装担当（workerImplement）". The role stays visible:
+  // it is the MCP handoff / session identifier. Legacy members without a
+  // name fall back to the plain role label.
+  const memberLabel = (m) => (m.name ? `${m.name}（${m.role}）` : roleLabel(m.role));
+
   return (
     <div className="group-tab-view">
       <div className="group-subtab-bar">
@@ -316,14 +322,14 @@ export default function GroupTabView({
             onClick={() => setActiveRole(m.role)}
             role="button"
             tabIndex={0}
-            title={m.cwd ? `${roleLabel(m.role)} — ${m.cwd}` : roleLabel(m.role)}
+            title={m.cwd ? `${memberLabel(m)} — ${m.cwd}` : memberLabel(m)}
             onKeyDown={(e) => {
               if (e.key === 'Enter') setActiveRole(m.role);
             }}
           >
             <span className="group-subtab-label">
               <TabIcon type="terminal" app={m.app === 'codex' ? 'codex' : m.app === 'opencode' ? 'opencode' : 'claude'} shell={false} />
-              {roleLabel(m.role)}
+              {memberLabel(m)}
               {m.model && <span className="group-subtab-model" title={m.model}>{m.model}</span>}
               {m.exited && <span className="group-subtab-exited" title="exited">&#10005;</span>}
             </span>

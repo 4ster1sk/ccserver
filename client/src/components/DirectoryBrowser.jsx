@@ -9,6 +9,11 @@ const APP_KEY = 'ccserver-app-default';
 const COMBO_APPS_KEY = 'ccserver-combo-apps';
 const COMBO_ROLES = ['workerA', 'workerB', 'orchestrator'];
 const COMBO_DEFAULT_APPS = { workerA: 'claude', workerB: 'opencode', orchestrator: 'claude' };
+// Apps a group member can run (copilot cannot join groups -- same whitelist
+// the server enforces for presets and workers[]).
+const COMBO_WORKER_APPS = ['claude', 'opencode', 'codex'];
+// Hard cap mirrored from the server (MAX_GROUP_MEMBERS - 1 orchestrator).
+const MAX_COMBO_WORKERS = 7;
 
 // Combo-mode role app picks, remembered per browser like the single-launch
 // APP_KEY so the next combo launch reuses them instead of the claude/
@@ -110,6 +115,23 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
   const [orchestratorInstructions, setOrchestratorInstructions] = useState('');
   const [sandboxOpts, setSandboxOpts] = useState(() => loadSandboxOpts(currentPath));
 
+  // Worker presets (shared server-side library). presetsState: 'idle' until
+  // the combo modal first needs them, then 'loading' | 'ready' | 'error'.
+  // An 'error' (or an empty library) keeps the classic workerA/workerB draft
+  // UI fully functional -- a broken preset API must never break the modal.
+  const [presets, setPresets] = useState([]);
+  const [presetsState, setPresetsState] = useState('idle');
+  // Workers added from presets for THIS launch: { uid, presetId, name, role,
+  // app, model }. Per-launch snapshot only: editing/deleting a preset later
+  // never touches already-selected rows or launched groups.
+  const [selectedWorkers, setSelectedWorkers] = useState([]);
+  const workerUidRef = useRef(0);
+  // Preset management dialog state (create/edit/delete).
+  const [manageOpen, setManageOpen] = useState(false);
+  const [editingPresetId, setEditingPresetId] = useState(null);
+  const [presetForm, setPresetForm] = useState({ name: '', role: '', app: 'claude', model: '' });
+  const [presetFormError, setPresetFormError] = useState(null);
+
   // Combo-mode state is per-launch, not sticky: leaving the modal (cancel,
   // overlay click, or a launch) must return it to the plain single mode,
   // otherwise the user's next "起動" -- possibly for a different project --
@@ -123,6 +145,10 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
     setOrchestratorInstructions('');
     setComboModels({ workerA: '', workerB: '', orchestrator: '' });
     setComboRoleSandbox({ workerA: null, workerB: null, orchestrator: null });
+    setSelectedWorkers([]);
+    setManageOpen(false);
+    setEditingPresetId(null);
+    setPresetFormError(null);
     setOpenMenuOpen(false);
   }, []);
 
@@ -146,6 +172,121 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
       return next;
     });
   }, [availableApps]);
+
+  // --- worker presets -------------------------------------------------------
+
+  const fetchPresets = useCallback(async () => {
+    setPresetsState('loading');
+    try {
+      const res = await authFetch('/api/worker-presets');
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      setPresets(data.presets || []);
+      setPresetsState('ready');
+    } catch {
+      // Fallback: the classic workerA/workerB drafts keep working; the modal
+      // must never break because the preset API is unavailable.
+      setPresets([]);
+      setPresetsState('error');
+    }
+  }, []);
+
+  // Fetch once when combo mode first becomes visible in the modal.
+  useEffect(() => {
+    if (openMenuOpen && launchMode === 'combo' && presetsState === 'idle') fetchPresets();
+  }, [openMenuOpen, launchMode, presetsState, fetchPresets]);
+
+  const addSelectedWorker = useCallback((presetId) => {
+    const p = presets.find((x) => x.id === presetId);
+    if (!p) return;
+    setSelectedWorkers((rows) => {
+      if (rows.some((r) => r.role === p.role)) return rows; // roles are unique per launch
+      if (rows.length >= MAX_COMBO_WORKERS) return rows;
+      return [...rows, {
+        uid: ++workerUidRef.current,
+        presetId: p.id,
+        name: p.name,
+        role: p.role,
+        app: COMBO_WORKER_APPS.includes(p.app) ? p.app : 'claude',
+        model: p.model || '',
+      }];
+    });
+  }, [presets]);
+
+  const updateSelectedWorker = useCallback((uid, patch) => {
+    setSelectedWorkers((rows) => rows.map((r) => (r.uid === uid ? { ...r, ...patch } : r)));
+  }, []);
+
+  const removeSelectedWorker = useCallback((uid) => {
+    setSelectedWorkers((rows) => rows.filter((r) => r.uid !== uid));
+  }, []);
+
+  const moveSelectedWorker = useCallback((uid, dir) => {
+    setSelectedWorkers((rows) => {
+      const i = rows.findIndex((r) => r.uid === uid);
+      const j = i + dir;
+      if (i < 0 || j < 0 || j >= rows.length) return rows;
+      const next = rows.slice();
+      [next[i], next[j]] = [next[j], next[i]];
+      return next;
+    });
+  }, []);
+
+  const openPresetManage = useCallback(() => {
+    setEditingPresetId(null);
+    setPresetForm({ name: '', role: '', app: 'claude', model: '' });
+    setPresetFormError(null);
+    setManageOpen(true);
+  }, []);
+
+  const startEditPreset = useCallback((p) => {
+    setEditingPresetId(p.id);
+    setPresetForm({ name: p.name, role: p.role, app: p.app, model: p.model || '' });
+    setPresetFormError(null);
+  }, []);
+
+  const savePreset = useCallback(async () => {
+    setPresetFormError(null);
+    const body = {
+      name: presetForm.name.trim(),
+      role: presetForm.role.trim(),
+      app: presetForm.app,
+      model: presetForm.model.trim() || null,
+    };
+    try {
+      const res = await authFetch(editingPresetId ? `/api/worker-presets/${editingPresetId}` : '/api/worker-presets', {
+        method: editingPresetId ? 'PUT' : 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) {
+        const errBody = await res.json().catch(() => ({}));
+        throw new Error(errBody.error || `HTTP ${res.status}`);
+      }
+      // Back to the create form, refreshed library.
+      setEditingPresetId(null);
+      setPresetForm({ name: '', role: '', app: presetForm.app, model: '' });
+      fetchPresets();
+    } catch (err) {
+      setPresetFormError(err.message);
+    }
+  }, [presetForm, editingPresetId, fetchPresets]);
+
+  const deletePreset = useCallback(async (p) => {
+    if (!window.confirm(`プリセット「${p.name}」(${p.role}) を削除しますか?`)) return;
+    try {
+      const res = await authFetch(`/api/worker-presets/${p.id}`, { method: 'DELETE' });
+      if (!res.ok) {
+        const errBody = await res.json().catch(() => ({}));
+        throw new Error(errBody.error || `HTTP ${res.status}`);
+      }
+      // Deleting a preset must not touch rows already selected for a launch
+      // (they are snapshots); only the library shrinks.
+      fetchPresets();
+    } catch (err) {
+      setPresetFormError(err.message);
+    }
+  }, [fetchPresets]);
 
   // gpg/sshAgent are remembered per directory, not globally -- reload whenever
   // the browser navigates to a different one.
@@ -652,6 +793,81 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
                   それらをMCP経由で操作するオーケストレーターをセットで起動します。
                   全セッション常時サンドボックスです ({displayPath(currentPath, homeDir)})。
                 </p>
+                {/* Worker presets (shared server-side library). Selected rows
+                    are a launch-time snapshot: editing/deleting a preset later
+                    never changes them, and launched groups are independent. */}
+                {presetsState === 'ready' && (
+                  <>
+                    <div className="open-menu-label">Worker プリセット</div>
+                    <div className="open-menu-presets-row">
+                      <select
+                        className="open-menu-preset-select"
+                        value=""
+                        onChange={(e) => { if (e.target.value) addSelectedWorker(e.target.value); }}
+                        disabled={selectedWorkers.length >= MAX_COMBO_WORKERS}
+                      >
+                        <option value="">
+                          {selectedWorkers.length >= MAX_COMBO_WORKERS ? `上限 (${MAX_COMBO_WORKERS})` : 'プリセットを追加…'}
+                        </option>
+                        {presets.map((p) => (
+                          <option key={p.id} value={p.id} disabled={selectedWorkers.some((r) => r.role === p.role)}>
+                            {p.name}（{p.role}）
+                          </option>
+                        ))}
+                      </select>
+                      <button type="button" className="btn btn-secondary open-menu-manage-btn" onClick={openPresetManage}>
+                        プリセット管理
+                      </button>
+                    </div>
+                    {selectedWorkers.length > 0 && (
+                      <div className="open-menu-selected-workers">
+                        {selectedWorkers.map((r, i) => (
+                          <div key={r.uid} className="open-menu-selected-worker">
+                            <span className="open-menu-selected-worker-name" title={r.role}>{r.name}</span>
+                            <span className="open-menu-selected-worker-role">{r.role}</span>
+                            <span className="open-menu-app-row open-menu-selected-worker-apps">
+                              {COMBO_WORKER_APPS.map((app) => (
+                                <button
+                                  key={app}
+                                  type="button"
+                                  className={`open-menu-app-btn${r.app === app ? ' active' : ''}${availableApps && !availableApps[app] ? ' open-menu-item-disabled' : ''}`}
+                                  onClick={() => updateSelectedWorker(r.uid, { app })}
+                                  title={availableApps && !availableApps[app] ? 'サーバーに未インストール' : ''}
+                                >
+                                  {app === 'claude' ? 'Claude Code' : app === 'opencode' ? 'opencode' : 'OpenAI Codex'}
+                                </button>
+                              ))}
+                            </span>
+                            <input
+                              type="text"
+                              className="open-menu-model-input open-menu-selected-worker-model"
+                              placeholder="モデル (空=既定)"
+                              value={r.model}
+                              onChange={(e) => updateSelectedWorker(r.uid, { model: e.target.value })}
+                              autoComplete="off"
+                              autoCorrect="off"
+                              spellCheck={false}
+                            />
+                            <span className="open-menu-selected-worker-actions">
+                              <button type="button" className="btn btn-secondary" onClick={() => moveSelectedWorker(r.uid, -1)} disabled={i === 0} title="上へ">&#8593;</button>
+                              <button type="button" className="btn btn-secondary" onClick={() => moveSelectedWorker(r.uid, 1)} disabled={i === selectedWorkers.length - 1} title="下へ">&#8595;</button>
+                              <button type="button" className="btn btn-secondary" onClick={() => removeSelectedWorker(r.uid)} title="除去">&#10005;</button>
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </>
+                )}
+                {presetsState === 'error' && (
+                  <p className="open-menu-note">プリセット一覧を取得できませんでした。従来どおりワーカーA/Bを指定して起動できます。</p>
+                )}
+                {selectedWorkers.length > 0 && (
+                  <p className="open-menu-note">
+                    プリセットから {selectedWorkers.length} 人追加されています。
+                    この場合、下のワーカーA/ワーカーBのドラフトは起動されません（プリセットの選択リストのみが起動します）。
+                  </p>
+                )}
                 <div className="open-menu-label">ワーカーA</div>
                 <div className="open-menu-app-row">
                   {['claude', 'opencode', 'codex'].map((app) => (
@@ -860,12 +1076,30 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
                       if (comboRoleSandbox[role]) spec.sandboxOpts = comboRoleSandbox[role];
                       return spec;
                     };
-                    onOpenCombo(currentPath, {
-                      workerA: roleSpec('workerA'),
-                      workerB: roleSpec('workerB'),
-                      orchestrator: { ...roleSpec('orchestrator'), instructions: orchestratorInstructions },
-                      sandboxOpts,
-                    });
+                    // Preset selections win: they launch as a canonical
+                    // workers[] snapshot (name/role/app/model copied now --
+                    // the server never re-reads the preset, so editing or
+                    // deleting it cannot TOCTOU a running launch). With no
+                    // selection, the legacy workerA/workerB payload keeps
+                    // working exactly as before.
+                    const cfg = selectedWorkers.length > 0
+                      ? {
+                          workers: selectedWorkers.map((r) => ({
+                            name: r.name,
+                            role: r.role,
+                            app: r.app,
+                            model: r.model.trim() ? r.model.trim() : null,
+                          })),
+                          orchestrator: { ...roleSpec('orchestrator'), instructions: orchestratorInstructions },
+                          sandboxOpts,
+                        }
+                      : {
+                          workerA: roleSpec('workerA'),
+                          workerB: roleSpec('workerB'),
+                          orchestrator: { ...roleSpec('orchestrator'), instructions: orchestratorInstructions },
+                          sandboxOpts,
+                        };
+                    onOpenCombo(currentPath, cfg);
                     closeOpenMenu();
                   }}
                 >
@@ -879,6 +1113,106 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
                   起動
                 </button>
               )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {openMenuOpen && manageOpen && (
+        // Preset management dialog: stacked above the launch modal's own
+        // overlay. CRUD here only affects the shared library and future
+        // launches -- already-selected rows and running groups are snapshots.
+        <div className="resume-overlay preset-manage-overlay" onClick={() => setManageOpen(false)}>
+          <div className="resume-dialog preset-manage-dialog" onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true" aria-label="Worker プリセット管理">
+            <h3>Worker プリセット管理</h3>
+            <div className="preset-manage-list">
+              {presets.length === 0 && (
+                <div className="preset-manage-empty">プリセットはまだありません。最初の1件を作成してください。</div>
+              )}
+              {presets.map((p) => (
+                <div key={p.id} className={`preset-manage-item${editingPresetId === p.id ? ' editing' : ''}`}>
+                  <span className="preset-manage-item-name" title={p.name}>{p.name}</span>
+                  <span className="preset-manage-item-role">{p.role}</span>
+                  <span className="preset-manage-item-meta">
+                    {COMBO_WORKER_APPS.includes(p.app) ? (p.app === 'claude' ? 'Claude Code' : p.app === 'opencode' ? 'opencode' : 'OpenAI Codex') : p.app}
+                    {p.model ? ` · ${p.model}` : ''}
+                  </span>
+                  <button type="button" className="btn btn-secondary" onClick={() => startEditPreset(p)}>編集</button>
+                  <button type="button" className="btn btn-secondary preset-manage-delete" onClick={() => deletePreset(p)}>削除</button>
+                </div>
+              ))}
+            </div>
+            <div className="preset-manage-form">
+              <h4>{editingPresetId ? 'プリセットを編集' : '新規プリセット'}</h4>
+              <label className="preset-form-row">
+                <span>表示名</span>
+                <input
+                  type="text"
+                  value={presetForm.name}
+                  onChange={(e) => setPresetForm((f) => ({ ...f, name: e.target.value }))}
+                  placeholder="例: 実装担当"
+                  maxLength={80}
+                  autoComplete="off"
+                />
+              </label>
+              <label className="preset-form-row">
+                <span>ロール</span>
+                <input
+                  type="text"
+                  value={presetForm.role}
+                  onChange={(e) => setPresetForm((f) => ({ ...f, role: e.target.value }))}
+                  placeholder="workerImplement の形 (workerで始まる識別子)"
+                  maxLength={80}
+                  autoComplete="off"
+                  spellCheck={false}
+                />
+              </label>
+              <div className="preset-form-row">
+                <span>アプリ</span>
+                <div className="open-menu-app-row">
+                  {COMBO_WORKER_APPS.map((app) => (
+                    <button
+                      key={app}
+                      type="button"
+                      className={`open-menu-app-btn${presetForm.app === app ? ' active' : ''}${availableApps && !availableApps[app] ? ' open-menu-item-disabled' : ''}`}
+                      onClick={() => setPresetForm((f) => ({ ...f, app }))}
+                      title={availableApps && !availableApps[app] ? 'サーバーに未インストール' : ''}
+                    >
+                      {app === 'claude' ? 'Claude Code' : app === 'opencode' ? 'opencode' : 'OpenAI Codex'}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <label className="preset-form-row">
+                <span>モデル</span>
+                <input
+                  type="text"
+                  value={presetForm.model}
+                  onChange={(e) => setPresetForm((f) => ({ ...f, model: e.target.value }))}
+                  placeholder="空 = アプリ既定"
+                  maxLength={200}
+                  autoComplete="off"
+                  spellCheck={false}
+                />
+              </label>
+              {presetFormError && <div className="preset-form-error">{presetFormError}</div>}
+              <div className="resume-actions preset-form-actions">
+                <button type="button" className="btn btn-primary" onClick={savePreset}>
+                  {editingPresetId ? '更新して保存' : '作成'}
+                </button>
+                {editingPresetId && (
+                  <button
+                    type="button"
+                    className="btn btn-secondary"
+                    onClick={() => { setEditingPresetId(null); setPresetForm({ name: '', role: '', app: 'claude', model: '' }); setPresetFormError(null); }}
+                  >
+                    新規作成に切替
+                  </button>
+                )}
+              </div>
+            </div>
+            <div className="resume-actions">
+              <button type="button" className="btn btn-secondary" onClick={() => setManageOpen(false)}>閉じる</button>
             </div>
           </div>
         </div>
