@@ -4,6 +4,9 @@
   "description": "Context & Coordination Server for browser-based AI CLI sessions",
   "private": true,
   "type": "module",
+  "engines": {
+    "node": ">=22.13"
+  },
   "workspaces": [
     "server",
     "client"
