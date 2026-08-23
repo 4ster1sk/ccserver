@@ -8,7 +8,7 @@
 // here, by this process, never declared by clients.
 
 import { EventEmitter } from 'node:events';
-import { mkdirSync, writeFileSync, readFileSync, unlinkSync } from 'node:fs';
+import { mkdirSync, writeFileSync, readFileSync, unlinkSync, copyFileSync, statSync, rmSync, renameSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -18,6 +18,24 @@ import { isValidApp } from './appLaunch.js';
 import { loadSandboxConfig } from './sandbox.js';
 import { resolveMemberWorktree, removeMemberWorktree, listWorktreeDirs } from './worktree.js';
 import { sendNotification } from './notify.js';
+import {
+  getGroupFilesRoot,
+  getGroupFilesDir,
+  ensureGroupFilesDir,
+  sanitizeDisplayName,
+  mimeForName,
+  generateFileId,
+  storedNameForId,
+  blobPathFor,
+  sandboxPathFor,
+  checkQuotaBeforeAdd,
+  resolveAgentSourcePath,
+  safeGroupFilesDirForDelete,
+  MAX_FILE_BYTES,
+  MAX_FILES_PER_GROUP,
+  MAX_GROUP_BYTES,
+  SANDBOX_GROUP_FILES_PATH,
+} from './groupFiles.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 // Groups survive a server restart via this file (groupId, member roles,
@@ -31,6 +49,7 @@ const GROUPS_PATH = process.env.CCSERVER_GROUPS_PATH || join(__dirname, '..', '.
 // two would mean re-serializing every doc's content on each of those
 // unrelated writes.
 const GROUP_DOCS_PATH = process.env.CCSERVER_GROUP_DOCS_PATH || join(__dirname, '..', '..', '.saved-group-docs.json');
+const GROUP_FILES_PATH = process.env.CCSERVER_GROUP_FILES_PATH || join(__dirname, '..', '..', '.saved-group-files.json');
 
 // Orchestrator CLAUDE.md/AGENTS.md source: a repo-tracked template, read
 // fresh on every (re)spawn (never cached at module load) so an edit to the
@@ -201,6 +220,9 @@ export async function createGroup({ groupId, cwd, orchestratorDir, sandboxOpts =
     // (each role's ./tmp/ lives in its own git worktree now and is not
     // visible to the others).
     docs: new Map(),
+    // id(string) -> { id, name, size, mimeType, direction, publishedBy, publishedAt, storedName } --
+    // group-scoped file exchange (browser <-> agent, agent <-> browser).
+    files: new Map(),
     controlBroker: null, // { server, sockPath, dir } | null
     handoffChannels: new Map(), // role -> { server, sockPath, dir, role, sessionId }
     handoffQueue: [],
@@ -222,6 +244,14 @@ export async function createGroup({ groupId, cwd, orchestratorDir, sandboxOpts =
     lastHandoffAt: null,
   };
   groups.set(groupId, group);
+
+  // Ensure the group's file blob directory exists (read-only bound at
+  // /ccserver-group-files for every live member).
+  try {
+    ensureGroupFilesDir(groupId);
+  } catch {
+    // best effort -- file exchange is not critical to group creation
+  }
 
   // The orchestrator's own socket; hosts the control MCP server. Created at
   // group creation so the orchestrator session can be launched with it.
@@ -468,6 +498,7 @@ export function restoreGroups() {
       memberPrefs: normalizeMemberPrefs(e.memberPrefs, e.orchestratorApp, e.sandboxOpts),
       memberWorktrees: new Map(),
       docs: new Map(),
+      files: new Map(),
       controlBroker: null,
       handoffChannels: new Map(),
       handoffQueue: [],
@@ -540,6 +571,49 @@ export function restoreGroups() {
     }
   } catch {
     // no persisted docs yet / unreadable -- groups still restore fine
+  }
+  // Restore group files manifest (independent of docs/groups): stale entries
+  // whose blob is missing or not a regular file under the group's root are
+  // ignored.
+  try {
+    const rawFiles = JSON.parse(readFileSync(GROUP_FILES_PATH, 'utf-8'));
+    if (rawFiles && typeof rawFiles === 'object') {
+      for (const [gid, filesObj] of Object.entries(rawFiles)) {
+        const group = groups.get(gid);
+        if (!group || !filesObj || typeof filesObj !== 'object') continue;
+        // Ensure the group's blob directory exists so later binds succeed.
+        try { ensureGroupFilesDir(gid); } catch { /* ignore */ }
+        const dir = getGroupFilesDir(gid);
+        for (const [fid, meta] of Object.entries(filesObj)) {
+          if (!meta || typeof meta !== 'object') continue;
+          if (typeof meta.id !== 'string' || typeof meta.name !== 'string') continue;
+          if (typeof meta.storedName !== 'string') continue;
+          const blobPath = join(dir, meta.storedName);
+          try {
+            const st = statSync(blobPath);
+            if (!st.isFile()) continue;
+            // Verify containment (storedName was server-generated, but be safe).
+            const resolved = resolve(blobPath);
+            const rootResolved = resolve(dir);
+            if (resolved !== rootResolved && !resolved.startsWith(rootResolved + '/')) continue;
+          } catch {
+            continue; // blob missing -- stale manifest entry
+          }
+          group.files.set(fid, {
+            id: meta.id,
+            name: sanitizeDisplayName(meta.name),
+            size: typeof meta.size === 'number' ? meta.size : 0,
+            mimeType: typeof meta.mimeType === 'string' ? meta.mimeType : mimeForName(meta.name),
+            direction: meta.direction === 'agent' ? 'agent' : 'user',
+            publishedBy: typeof meta.publishedBy === 'string' ? meta.publishedBy : null,
+            publishedAt: typeof meta.publishedAt === 'number' ? meta.publishedAt : Date.now(),
+            storedName: meta.storedName,
+          });
+        }
+      }
+    }
+  } catch {
+    // no persisted files yet / unreadable -- groups still restore fine
   }
   return { restored, ids };
 }
@@ -1041,12 +1115,21 @@ export function destroyGroup(groupId) {
   group.handoffChannels.clear();
   group.handoffQueue = [];
   group.handoffEmitter.removeAllListeners();
+  // Cleanup group file blobs (verified path only).
+  try {
+    const dir = safeGroupFilesDirForDelete(groupId);
+    rmSync(dir, { recursive: true, force: true });
+  } catch {
+    // best effort -- never touch arbitrary host paths
+  }
+
   groups.delete(groupId);
   persistGroups();
   // persistGroupDocs() serializes docs for every group still in `groups`
   // (mirrors persistGroups() above); the group is already removed from that
   // map, so this naturally drops its entry from .saved-group-docs.json too.
   persistGroupDocs();
+  persistGroupFiles();
 }
 
 // --- group-scoped document sharing (publish_doc/fetch_doc/list_docs, plan
@@ -1139,6 +1222,192 @@ function persistGroupDocs() {
   }
 }
 
+// --- group-scoped file exchange (browser <-> agent, agent <-> browser) -----
+// Blobs are stored under <groupFilesRoot>/<groupId>/<storedName> (generated),
+// never using the upload filename as a path component. Metadata lives in
+// group.files Map and is persisted to .saved-group-files.json.
+
+export function listGroupFiles(groupId) {
+  const group = groups.get(groupId);
+  if (!group) return { error: 'group-not-found', message: 'group not found' };
+  const files = [...group.files.values()].map((m) => ({
+    id: m.id,
+    name: m.name,
+    size: m.size,
+    mimeType: m.mimeType,
+    direction: m.direction,
+    publishedBy: m.publishedBy,
+    publishedAt: m.publishedAt,
+  }));
+  return { files };
+}
+
+export function fetchGroupFile(groupId, fileId) {
+  const group = groups.get(groupId);
+  if (!group) return { error: 'group-not-found', message: 'group not found' };
+  const meta = group.files.get(fileId);
+  if (!meta) return { error: 'not-found', message: 'file not found' };
+  const blobPath = blobPathFor(groupId, meta.storedName);
+  try {
+    const st = statSync(blobPath);
+    if (!st.isFile()) return { error: 'not-found', message: 'file not found' };
+  } catch {
+    return { error: 'not-found', message: 'file not found' };
+  }
+  return {
+    id: meta.id,
+    name: meta.name,
+    size: meta.size,
+    mimeType: meta.mimeType,
+    direction: meta.direction,
+    publishedBy: meta.publishedBy,
+    publishedAt: meta.publishedAt,
+    storedName: meta.storedName,
+    blobPath,
+    sandboxPath: sandboxPathFor(meta.storedName),
+  };
+}
+
+export function deleteGroupFile(groupId, fileId) {
+  const group = groups.get(groupId);
+  if (!group) return { error: 'group-not-found', message: 'group not found' };
+  const meta = group.files.get(fileId);
+  if (!meta) return { error: 'not-found', message: 'file not found' };
+  const blobPath = blobPathFor(groupId, meta.storedName);
+  try { unlinkSync(blobPath); } catch { /* best effort */ }
+  group.files.delete(fileId);
+  persistGroupFiles();
+  return { ok: true };
+}
+
+// Browser upload: data is a Buffer, name is the original filename.
+export function publishGroupFilesFromUpload(groupId, files, publishedBy = null) {
+  const group = groups.get(groupId);
+  if (!group) return { error: 'group-not-found', message: 'group not found' };
+  if (!Array.isArray(files) || files.length === 0) {
+    return { error: 'bad-request', message: 'no files provided' };
+  }
+  // Pre-check quotas atomically for the batch.
+  let batchBytes = 0;
+  for (const f of files) batchBytes += f.data ? f.data.length : 0;
+  // Check count: batch size must not exceed per-group limit alone, nor with existing.
+  if (files.length > MAX_FILES_PER_GROUP || group.files.size + files.length > MAX_FILES_PER_GROUP) {
+    return { error: 'too-many-files', message: `group already has the maximum of ${MAX_FILES_PER_GROUP} files` };
+  }
+  const total = [...group.files.values()].reduce((s, m) => s + m.size, 0);
+  if (total + batchBytes > MAX_GROUP_BYTES) {
+    return { error: 'quota-exceeded', message: `group storage quota exceeded (${MAX_GROUP_BYTES} bytes)` };
+  }
+  for (const f of files) {
+    const sz = f.data ? f.data.length : 0;
+    if (sz > MAX_FILE_BYTES) {
+      return { error: 'too-large', message: `file ${f.name} exceeds the ${MAX_FILE_BYTES} byte limit (got ${sz} bytes)` };
+    }
+  }
+  const dir = ensureGroupFilesDir(groupId);
+  const metas = [];
+  for (const f of files) {
+    const name = sanitizeDisplayName(f.name);
+    const mimeType = f.mimeType || mimeForName(name);
+    const size = f.data.length;
+    const id = generateFileId();
+    const storedName = storedNameForId(id);
+    const blobPath = join(dir, storedName);
+    // Atomic write: temp file then rename.
+    const tmpPath = join(dir, `.tmp-${storedName}`);
+    try {
+      writeFileSync(tmpPath, f.data);
+      renameSync(tmpPath, blobPath);
+    } catch (err) {
+      try { unlinkSync(tmpPath); } catch { /* ignore */ }
+      return { error: 'internal', message: `failed to store file ${name}: ${err.message}` };
+    }
+    const meta = {
+      id,
+      name,
+      size,
+      mimeType,
+      direction: 'user',
+      publishedBy: null,
+      publishedAt: Date.now(),
+      storedName,
+    };
+    group.files.set(id, meta);
+    metas.push({ id, name, size, mimeType, direction: 'user', publishedBy: null, publishedAt: meta.publishedAt });
+  }
+  persistGroupFiles();
+  return { ok: true, files: metas };
+}
+
+// Agent publish: relative path inside the agent's own worktree.
+export function publishGroupFileFromAgent(groupId, role, relativePath) {
+  const group = groups.get(groupId);
+  if (!group) return { error: 'group-not-found', message: 'group not found' };
+  // Resolve the agent's live session cwd.
+  const sessionId = group.members.get(role);
+  const session = sessionId ? sessionApi.getSession(sessionId) : null;
+  const cwd = session?.cwd || group.memberSaved.get(role)?.cwd || null;
+  if (!cwd) return { error: 'bad-request', message: 'agent worktree not found' };
+  const resolved = resolveAgentSourcePath(cwd, relativePath);
+  if (resolved.error) return resolved;
+  const quotaErr = checkQuotaBeforeAdd(group.files, resolved.size);
+  if (quotaErr) return quotaErr;
+  const dir = ensureGroupFilesDir(groupId);
+  const name = sanitizeDisplayName(basename(relativePath));
+  const mimeType = mimeForName(name);
+  const id = generateFileId();
+  const storedName = storedNameForId(id);
+  const blobPath = join(dir, storedName);
+  const tmpPath = join(dir, `.tmp-${storedName}`);
+  try {
+    copyFileSync(resolved.realPath, tmpPath);
+    // Verify size after copy matches (and still under limit) and is regular file.
+    const st = statSync(tmpPath);
+    if (!st.isFile()) throw new Error('not a regular file');
+    renameSync(tmpPath, blobPath);
+  } catch (err) {
+    try { unlinkSync(tmpPath); } catch { /* ignore */ }
+    return { error: 'internal', message: `failed to publish file: ${err.message}` };
+  }
+  const meta = {
+    id,
+    name,
+    size: resolved.size,
+    mimeType,
+    direction: 'agent',
+    publishedBy: role,
+    publishedAt: Date.now(),
+    storedName,
+  };
+  group.files.set(id, meta);
+  persistGroupFiles();
+  return { ok: true, id, name, size: meta.size, mimeType, direction: 'agent', publishedBy: role, publishedAt: meta.publishedAt };
+}
+
+function persistGroupFiles() {
+  try {
+    const out = {};
+    for (const g of groups.values()) {
+      if (g.files.size === 0) continue;
+      out[g.id] = Object.fromEntries([...g.files]);
+    }
+    const tmp = GROUP_FILES_PATH + '.tmp';
+    if (Object.keys(out).length > 0) {
+      writeFileSync(tmp, JSON.stringify(out));
+      renameSync(tmp, GROUP_FILES_PATH);
+    } else {
+      try { unlinkSync(GROUP_FILES_PATH); } catch { /* nothing to remove */ }
+      try { unlinkSync(tmp); } catch { /* ignore */ }
+    }
+  } catch {
+    // best effort
+  }
+}
+
+export function getGroupFilesDirForGroup(groupId) {
+  return getGroupFilesDir(groupId);
+}
+
 // --- session-exit / session-create observation (no import cycle: sessionManager
 // never imports this module; we subscribe via the listener setters) ----------
 
@@ -1219,6 +1488,12 @@ const groupManagerApi = {
   fetchGroupDoc,
   listGroupDocs,
   deleteGroupDoc,
+  listGroupFiles,
+  fetchGroupFile,
+  deleteGroupFile,
+  publishGroupFileFromAgent,
+  publishGroupFilesFromUpload,
+  getGroupFilesDirForGroup,
 };
 
 // Test seam: returns the exact facade the broker servers receive. Unit tests

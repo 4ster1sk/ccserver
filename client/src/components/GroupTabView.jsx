@@ -1,8 +1,23 @@
 import { useState, useEffect, useRef, useCallback, lazy, Suspense } from 'react';
-import { authFetch } from '../auth.js';
+import { authFetch, getToken } from '../auth.js';
 import TabIcon from './TabIcon.jsx';
 
 const TerminalView = lazy(() => import('./TerminalView.jsx'));
+
+function formatSize(bytes) {
+  if (bytes === 0) return '0 B';
+  const units = ['B', 'KB', 'MB', 'GB'];
+  const i = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
+  const val = bytes / Math.pow(1024, i);
+  return `${i === 0 ? val : val.toFixed(1)} ${units[i]}`;
+}
+
+function formatTime(ts) {
+  if (!ts) return '';
+  try {
+    return new Date(ts).toLocaleString();
+  } catch { return ''; }
+}
 
 // A combo group's tab body: a second-level sub-tab bar (one entry per member:
 // workerA / workerB / orchestrator) above always-mounted TerminalViews, one
@@ -36,6 +51,15 @@ export default function GroupTabView({
   const membersRef = useRef(members);
   const wasVisibleRef = useRef(visible);
   const currentTurnRef = useRef(null);
+
+  // Group file exchange state
+  const [files, setFiles] = useState([]);
+  const [filesError, setFilesError] = useState(null);
+  const [uploadProgress, setUploadProgress] = useState('');
+  const [uploading, setUploading] = useState(false);
+  const [dragOver, setDragOver] = useState(false);
+  const fileInputRef = useRef(null);
+  const dragCountRef = useRef(0);
 
   useEffect(() => { membersRef.current = members; }, [members]);
 
@@ -88,6 +112,106 @@ export default function GroupTabView({
       clearInterval(timer);
     };
   }, [visible, groupId]);
+
+  // Files polling (same 3s interval, independent)
+  const fetchFiles = useCallback(async () => {
+    try {
+      const res = await authFetch(`/api/groups/${groupId}/files`);
+      if (res.status === 404) { setFiles([]); return; }
+      if (!res.ok) { setFilesError(`HTTP ${res.status}`); return; }
+      const data = await res.json();
+      setFiles(data.files || []);
+      setFilesError(null);
+    } catch (err) {
+      setFilesError(err.message);
+    }
+  }, [groupId]);
+
+  useEffect(() => {
+    if (!visible) return;
+    fetchFiles();
+    const timer = setInterval(fetchFiles, 3000);
+    return () => clearInterval(timer);
+  }, [visible, fetchFiles]);
+
+  const uploadFiles = useCallback(async (fileList) => {
+    if (!fileList || fileList.length === 0) return;
+    setUploading(true);
+    setUploadProgress(`Uploading ${fileList.length} file(s)...`);
+    setFilesError(null);
+    try {
+      const formData = new FormData();
+      for (const file of fileList) {
+        formData.append('files', file);
+      }
+      const res = await authFetch(`/api/groups/${groupId}/files`, { method: 'POST', body: formData });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.message || body.error || `HTTP ${res.status}`);
+      }
+      setUploadProgress(`Uploaded ${fileList.length} file(s)`);
+      fetchFiles();
+      setTimeout(() => setUploadProgress(''), 3000);
+    } catch (err) {
+      setFilesError(err.message);
+      setUploadProgress('');
+    } finally {
+      setUploading(false);
+    }
+  }, [groupId, fetchFiles]);
+
+  const handleFileInputChange = useCallback((e) => {
+    uploadFiles(e.target.files);
+    e.target.value = '';
+  }, [uploadFiles]);
+
+  const handleDownload = useCallback((file) => {
+    const token = getToken();
+    const tokenParam = token ? `&token=${encodeURIComponent(token)}` : '';
+    const a = document.createElement('a');
+    a.href = `/api/groups/${encodeURIComponent(groupId)}/files/${encodeURIComponent(file.id)}?token=${token ? encodeURIComponent(token) : ''}`;
+    // token already handled via query; but also include via authFetch header not needed for anchor.
+    // Use direct href with token query.
+    if (token) a.href = `/api/groups/${encodeURIComponent(groupId)}/files/${encodeURIComponent(file.id)}?token=${encodeURIComponent(token)}`;
+    else a.href = `/api/groups/${encodeURIComponent(groupId)}/files/${encodeURIComponent(file.id)}`;
+    a.download = file.name;
+    a.click();
+  }, [groupId]);
+
+  const handleDelete = useCallback(async (file) => {
+    if (!window.confirm(`Delete ${file.name}?`)) return;
+    try {
+      const res = await authFetch(`/api/groups/${encodeURIComponent(groupId)}/files/${encodeURIComponent(file.id)}`, { method: 'DELETE' });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.message || body.error || `HTTP ${res.status}`);
+      }
+      fetchFiles();
+    } catch (err) {
+      setFilesError(err.message);
+    }
+  }, [groupId, fetchFiles]);
+
+  const handleDragEnter = useCallback((e) => {
+    e.preventDefault();
+    dragCountRef.current++;
+    setDragOver(true);
+  }, []);
+  const handleDragLeave = useCallback((e) => {
+    e.preventDefault();
+    dragCountRef.current--;
+    if (dragCountRef.current <= 0) {
+      dragCountRef.current = 0;
+      setDragOver(false);
+    }
+  }, []);
+  const handleDragOver = useCallback((e) => { e.preventDefault(); }, []);
+  const handleDrop = useCallback((e) => {
+    e.preventDefault();
+    dragCountRef.current = 0;
+    setDragOver(false);
+    uploadFiles(e.dataTransfer.files);
+  }, [uploadFiles]);
 
   // Report the active member's app upward (App uses it to hide the Usage
   // button for opencode). While this tab is visible it emits on every change
@@ -176,6 +300,40 @@ export default function GroupTabView({
           このグループはサーバー上で削除されています。このタブを閉じてください。
         </div>
       )}
+      {/* Group file exchange panel (browser <-> agent) */}
+      <div
+        className={`group-files-panel${dragOver ? ' drag-over' : ''}`}
+        onDragEnter={handleDragEnter}
+        onDragLeave={handleDragLeave}
+        onDragOver={handleDragOver}
+        onDrop={handleDrop}
+      >
+        <div className="group-files-header">
+          <span className="group-files-title">Files</span>
+          <span className="group-files-count">{files.length} file(s)</span>
+          <button className="btn btn-secondary group-files-upload-btn" onClick={() => fileInputRef.current?.click()} disabled={uploading} title="Upload files to this group">
+            {uploading ? 'Uploading...' : 'Upload'}
+          </button>
+          <input ref={fileInputRef} type="file" multiple onChange={handleFileInputChange} style={{ display: 'none' }} />
+        </div>
+        {uploadProgress && <div className="group-files-progress">{uploadProgress}</div>}
+        {filesError && <div className="group-files-error">Error: {filesError}</div>}
+        {files.length === 0 ? (
+          <div className="group-files-empty">No files yet. Drag & drop or click Upload. Max 50 MiB/file, 20 files / 200 MiB per group.</div>
+        ) : (
+          <div className="group-files-list">
+            {files.map((f) => (
+              <div key={f.id} className="group-files-item">
+                <span className="group-files-name" title={f.name}>{f.name}</span>
+                <span className="group-files-meta">{formatSize(f.size)} · {f.mimeType} · {f.direction === 'agent' ? `agent:${f.publishedBy || ''}` : 'browser'} · {formatTime(f.publishedAt)}</span>
+                <button className="btn btn-secondary group-files-download-btn" onClick={() => handleDownload(f)} title="Download">↓</button>
+                <button className="btn btn-secondary group-files-delete-btn" onClick={() => handleDelete(f)} title="Delete">✕</button>
+              </div>
+            ))}
+          </div>
+        )}
+        {dragOver && <div className="group-files-drag-overlay">Drop files to upload</div>}
+      </div>
       <div className="group-subtab-body">
         {members.map((m) => (
           <div

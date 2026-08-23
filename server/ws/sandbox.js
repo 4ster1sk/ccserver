@@ -753,7 +753,7 @@ export function sandboxAvailable() {
 // but not including the trailing `-- <cmd...>`).
 //   homeDir - host path of the persistent per-project HOME to bind at HOME
 //             (see persistentHomeDir), or null for a fresh tmpfs HOME.
-function buildBwrapArgs({ cwd, docker, gpg, extraBinds, extraEnv, authSock, stateDir, claudeDir, gitBroker, mcpSocketPath, notifySocketPath, usageSocketPath, homeDir = null, orchestratorClaudeMdSrc = null, gitCommonDir = null }) {
+function buildBwrapArgs({ cwd, docker, gpg, extraBinds, extraEnv, authSock, stateDir, claudeDir, gitBroker, mcpSocketPath, notifySocketPath, usageSocketPath, homeDir = null, orchestratorClaudeMdSrc = null, gitCommonDir = null, groupFilesDir = null }) {
   const args = [
     '--die-with-parent',
     // Own PID namespace so the whole sandbox tree is reaped as a unit. Without
@@ -838,6 +838,14 @@ function buildBwrapArgs({ cwd, docker, gpg, extraBinds, extraEnv, authSock, stat
   if (orchestratorClaudeMdSrc) {
     args.push('--ro-bind', orchestratorClaudeMdSrc, join(cwd, 'CLAUDE.md'));
     args.push('--ro-bind', orchestratorClaudeMdSrc, join(cwd, 'AGENTS.md'));
+  }
+
+  // Group file exchange: read-only bind of the group's blob directory at a
+  // fixed in-sandbox path. Only for group members; standalone sessions have
+  // groupFilesDir null and get no bind.
+  if (groupFilesDir) {
+    try { mkdirSync(groupFilesDir, { recursive: true }); } catch { /* ignore */ }
+    args.push('--ro-bind-try', groupFilesDir, '/ccserver-group-files');
   }
 
   // Combo sessions (worker / orchestrator) get the group's MCP socket bound at
@@ -1175,7 +1183,7 @@ export function buildMinimalSandboxSpawn({ cwd, targetCommand }) {
 //                 resolveMemberWorktree), bound into the sandbox alongside
 //                 cwd when cwd is a git worktree whose real .git lives
 //                 elsewhere. null for regular sessions and non-worktree cwds.
-export function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, mcpSocketPath = null, notifySocketPath = null, usageSocketPath = null, reuseSandboxHome = true, orchestratorClaudeMdSrc = null, gitCommonDir = null }) {
+export function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, mcpSocketPath = null, notifySocketPath = null, usageSocketPath = null, reuseSandboxHome = true, orchestratorClaudeMdSrc = null, gitCommonDir = null, groupFilesDir = null }) {
   const { docker: cfgDocker, persistentHome, gpg: cfgGpg, sshAgent: cfgSshAgent, gitBroker: gitBrokerEnabled, binds, env, claudeBin } = loadSandboxConfig();
   const docker = cfgDocker && dockerSandboxAvailable();
   const gpg = sandboxOpts?.gpg ?? cfgGpg;
@@ -1239,7 +1247,7 @@ export function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, mcpSoc
   }
 
   const { command, installDir } = resolveApp(app, claudeBin);
-  const bwrapArgs = buildBwrapArgs({ cwd, docker, gpg, extraBinds: binds, extraEnv: env, authSock, stateDir, claudeDir: installDir, gitBroker, mcpSocketPath, notifySocketPath, usageSocketPath, homeDir, orchestratorClaudeMdSrc, gitCommonDir });
+  const bwrapArgs = buildBwrapArgs({ cwd, docker, gpg, extraBinds: binds, extraEnv: env, authSock, stateDir, claudeDir: installDir, gitBroker, mcpSocketPath, notifySocketPath, usageSocketPath, homeDir, orchestratorClaudeMdSrc, gitCommonDir, groupFilesDir });
   const innerCmd = [BASH, '/ccserver-sandbox-entrypoint.sh', ...withClaude(targetCommand, command)];
 
   const gitBrokerFields = {

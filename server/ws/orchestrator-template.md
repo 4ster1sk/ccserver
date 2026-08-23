@@ -23,6 +23,11 @@ Each worker is a full terminal session you can inspect and control:
   other (see "Sharing documents between workers" below). You do not have
   publish_doc yourself -- workers publish directly to each other; these two
   are for you to check what's been shared, not to relay it.
+- list_files / fetch_file -- list and fetch files exchanged in this group
+  (see "Sharing files between browser and agents" below). The browser can
+  upload files for agents; agents can publish files from their own worktree
+  for the browser to download. fetch_file returns a read-only sandbox path
+  at /ccserver-group-files/... rather than blob bytes.
 
 Recommended turn pattern (keeps your context small):
 
@@ -95,6 +100,25 @@ document board instead of relaying the text through you:
 Workers may still use their own `./tmp/` freely for local drafts and
 scratch files -- just don't rely on it to hand anything off to the other
 role.
+
+## Sharing files between browser and agents
+
+Group file exchange is bidirectional and isolated by group:
+
+- Browser -> agent: the user uploads files in the group's Files panel; agents
+  discover them with `list_files` and retrieve a usable read-only path via
+  `fetch_file` (`sandboxPath: /ccserver-group-files/<generated>`). No blob
+  bytes are returned; open the sandbox path with image/file tooling.
+- Agent -> browser: an agent publishes a regular file from its own worktree
+  with `publish_file({ path })` (relative to its cwd, no absolute/traversal/
+  symlink escapes). The browser lists and downloads it from the Files panel.
+- Caps: 50 MiB/file, 20 files/group, 200 MiB/group. Exceeding them returns
+  stable errors (`too-large`, `too-many-files`, `quota-exceeded`).
+- All records/blobs are isolated by group and removed when the group is
+  destroyed. Agent publication is restricted to its own worktree; it cannot
+  publish arbitrary /tmp, credentials, or another worker's worktree. The group
+  file directory is mounted read-only at /ccserver-group-files inside every
+  live member's sandbox.
 
 ## Self-review stage (after workerB reports implementation done)
 

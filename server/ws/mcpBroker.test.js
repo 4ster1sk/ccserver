@@ -194,7 +194,7 @@ test('handoff socket: exposes ONLY handoff_to_orchestrator and the doc-sharing t
   const { tools } = await c.call('tools/list');
   assert.deepEqual(
     tools.map((t) => t.name).sort(),
-    ['fetch_doc', 'handoff_to_orchestrator', 'list_docs', 'publish_doc'].sort(),
+    ['fetch_doc', 'fetch_file', 'handoff_to_orchestrator', 'list_docs', 'list_files', 'publish_doc', 'publish_file'].sort(),
   );
   c.close();
 });
