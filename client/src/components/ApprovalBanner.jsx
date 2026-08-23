@@ -60,7 +60,12 @@ export default function ApprovalBanner() {
       const res = await authFetch('/api/approvals?status=pending');
       if (!res.ok) return;
       const data = await res.json();
-      const list = Array.isArray(data) ? data : Array.isArray(data.approvals) ? data.approvals : [];
+      // Server contract (routes/approvals.js): { pending: [...], history: [...] }.
+      // The status=pended query param is accepted for forward compatibility;
+      // the server always answers with both lists and we render only pending.
+      const list = Array.isArray(data?.pending)
+        ? data.pending
+        : Array.isArray(data?.approvals) ? data.approvals : [];
       setApprovals(list.map(normalizeApproval).filter((a) => a && a.id));
       setNow(Date.now());
     } catch {
@@ -95,9 +100,10 @@ export default function ApprovalBanner() {
         body: JSON.stringify({ decision }),
       });
       if (!res.ok) {
-        // 404 means someone else (another browser tab) already decided it:
-        // the refresh below picks up the new state, no error to show.
-        if (res.status !== 404) {
+        // 404 = the approval row is gone, 409 = another browser tab already
+        // decided it (the server answers already-resolved with 409): either
+        // way the refresh below picks up the new state, no error to show.
+        if (res.status !== 404 && res.status !== 409) {
           const body = await res.json().catch(() => ({}));
           setActionError({ id, message: body.error || `HTTP ${res.status}` });
         }

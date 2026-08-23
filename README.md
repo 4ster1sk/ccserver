@@ -330,10 +330,10 @@ docker も安全に使えるよう、サンドボックス**内部**に rootless
 
 ディレクトリブラウザの「Select a Directory」ヘッダー右端の **スパナ (🔧)** ボタンから設定タブを開けます。設定タブには**作成済みサンドボックス**が一覧表示されます:
 
-- 各行はサンドボックスの**実プロジェクトパス** (サイドカー index で管理、未知のものは slug) と**使用容量**、右端の **✕** 削除ボタンで構成されます。
+- 各行はサンドボックスの**実プロジェクトパス** (SQLite の projects/sandboxes テーブルで管理、未知のものは slug)、プロジェクトの**表示ラベル** (設定されている場合) と **git remote**、**最終使用時刻**、**使用容量**、右端の **✕** 削除ボタンで構成されます (旧サイドカー JSON index は DB v2 マイグレーションで取り込まれ、`.index.json.migrated` として退避されます)。
 - ✕ を押すと確認ダイアログを経て、そのサンドボックスの永続 HOME (`~/.local/share/ccserver-sandbox/home/<slug>`) と同名の **docker data-root** (`dind/<slug>`) を削除します。
 - **利用中のサンドボックス** (生存セッションがマウント中) は「利用中」バッジが付き、✕ は無効化されます (サーバー側でも 409 で拒否)。
-- API: `GET /api/sandboxes` (一覧: `name` / `cwd` / `size` / `inUse`)、`DELETE /api/sandboxes/:name` (削除)。
+- API: `GET /api/sandboxes` (一覧: `name` / `cwd` / `projectLabel` / `gitRemote` / `lastUsedAt` / `size` / `inUse`)、`DELETE /api/sandboxes/:name` (削除)。
 
 ### 必要なもの (docker を使う場合)
 
@@ -482,8 +482,10 @@ ccserver/
 │   ├── sandbox.config.example.json
 │   ├── routes/
 │   │   ├── dirs.js                 # GET/POST /api/dirs, GET /api/dirs/home
-│   │   ├── sessions.js             # GET/DELETE /api/sessions...
+│   │   ├── sessions.js             # GET/POST/DELETE /api/sessions (POST は単発セッション新規起動)
 │   │   ├── approvals.js            # GET /api/approvals, POST /api/approvals/:id/decision (メタエージェント承認)
+│   │   ├── projects.js             # GET /api/projects, PUT /api/projects/:id/label
+│   │   ├── launchPresets.js        # GET/POST/PUT/DELETE /api/launch-presets (コンボ起動プリセット)
 │   │   ├── files.js                # GET/POST /api/files (アップロード/ダウンロード)
 │   │   ├── system.js               # GET /api/system-stats (CPU/メモリ/温度/GPU/IPMI/ストレージ)
 │   │   └── usage.js                # GET /api/usage (?app=claude|codex)
@@ -494,9 +496,9 @@ ccserver/
 │       ├── notify.js               # ccserver-notify: 購読レジストリ + Discord/webhook/Vikunja 配送 + MCP ソケット
 │       ├── vikunjaClient.js        # notify.js から呼ばれる Vikunja タスク作成/更新クライアント
 │       ├── usageMcp.js             # ccserver-usage: get_usage MCP ツール (server/usage.js の getUsage を直接呼ぶ)
-│       ├── mcpConfig.js            # MCP 設定の生成 (ccserver / ccserver-notify / ccserver-usage、sandbox/host 両モード)
-│       ├── mcpServer.js            # control / handoff / notify / usage 各 MCP サーバー (SocketTransport 含む)
-│       ├── mcpBroker.js            # Unix-socket MCP ブローカー (control/handoff はグループ毎、notify/usage はプロセス毎 1 つ)
+│       ├── mcpConfig.js            # MCP 設定の生成 (ccserver / ccserver-notify / ccserver-usage / ccserver-meta、sandbox/host 両モード)
+│       ├── mcpServer.js            # control / handoff / notify / usage / meta 各 MCP サーバー (SocketTransport 含む)
+│       ├── mcpBroker.js            # Unix-socket MCP ブローカー (control/handoff はグループ毎、notify/usage/meta はプロセス毎 1 つ)
 │       ├── mcpTools.js             # control/handoff ツールの実装 (deps 注入)
 │       ├── metaTools.js            # メタエージェント用ツールの実装 (ワイヤ引数を信頼する、mcpTools とは別の信頼境界ファイル)
 │       ├── metaAgent.js            # ccserver-meta: metaAgentMcp ゲーティング + プロセスグローバル MCP ソケット
@@ -556,6 +558,11 @@ CCSERVER_TOKEN=some-secret NODE_ENV=production node server/index.js
 | GET | `/api/usage?force=1` | Claude Code `/usage` のキャッシュ済みスナップショット (`force=1` で即時再取得) |
 | GET / POST | `/api/worker-presets` | Worker プリセット一覧取得 / 作成 (`{ name, role, app, model }`、`model` は null 可) |
 | PUT / DELETE | `/api/worker-presets/:id` | プリセットの全置換更新 / 削除。role 重複は 409 |
+| GET / POST | `/api/launch-presets` | コンボ起動プリセット一覧 / 作成 (`{ name, workers: [1–7 x { role, app, model?, name?, sandboxOpts? }], orchestratorApp?, orchestratorModel?, instructions? }`)。管理 UI は無く、メタエージェントの MCP ツールと対になる REST |
+| PUT / DELETE | `/api/launch-presets/:id` | コンボ起動プリセットの全置換更新 (workers スナップショットごと置換) / 削除。preset 名重複は 409 |
+| GET | `/api/projects` | プロジェクト一覧 (サンドボックス永続 HOME の所属プロジェクト行。`{ id, cwd, pathHash, label, gitRemote, lastSeenAt }`) |
+| PUT | `/api/projects/:id/label` | プロジェクト表示ラベル変更 (`{ label }`、null でクリア)。メタエージェントの `update_project_label` と同じストア経由 |
+| POST | `/api/sessions` | 単発セッションをサーバー側で新規起動 (`{ cwd, app?, model?, shell?, sandbox?, sandboxOpts?, resume?, isMetaAgent? }`)。メタエージェントの `launch_session` と同一実装 (`isMetaAgent: true` は `metaAgentMcp: true` のときのみ意味を持つ) |
 | POST | `/api/groups` | コンボ起動。従来の `workerA`/`workerB`/`orchestrator` に加え、canonical な `workers: [{ name?, role, app?, model?, sandboxOpts? }]` (1–7 人、role 一意) を受け付ける。プリセットはクライアントがスナップショットへ展開して送る。copilot はどちらの経路でも 400 拒否 |
 | GET | `/api/approvals?status=pending` | メタエージェントの承認待ち破壊的操作一覧 (`ccserver-meta` 参照)。ブラウザのグローバルバナーが数秒間隔でポーリング |
 | POST | `/api/approvals/:id/decision` | `{ decision: 'approved' \| 'rejected' }` で承認待ち操作を承認/却下する。5 分未応答のリクエストはサーバー側で expired (拒否扱い) になる |
