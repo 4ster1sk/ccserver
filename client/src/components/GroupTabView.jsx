@@ -63,14 +63,32 @@ export default function GroupTabView({
   const dragCountRef = useRef(0);
 
   const openFiles = useCallback(() => setIsFilesOpen(true), []);
-  const closeFiles = useCallback(() => setIsFilesOpen(false), []);
+  const closeFiles = useCallback(() => {
+    setIsFilesOpen(false);
+    dragCountRef.current = 0;
+    setDragOver(false);
+  }, []);
 
   useEffect(() => {
-    if (!isFilesOpen) return;
-    const onKey = (e) => { if (e.key === 'Escape') setIsFilesOpen(false); };
+    if (!visible && isFilesOpen) {
+      dragCountRef.current = 0;
+      setDragOver(false);
+      setIsFilesOpen(false);
+    }
+  }, [visible, isFilesOpen]);
+
+  useEffect(() => {
+    if (!isFilesOpen || !visible) return;
+    const onKey = (e) => {
+      if (e.key === 'Escape') {
+        dragCountRef.current = 0;
+        setDragOver(false);
+        setIsFilesOpen(false);
+      }
+    };
     document.addEventListener('keydown', onKey);
     return () => document.removeEventListener('keydown', onKey);
-  }, [isFilesOpen]);
+  }, [isFilesOpen, visible]);
 
   useEffect(() => { membersRef.current = members; }, [members]);
 
