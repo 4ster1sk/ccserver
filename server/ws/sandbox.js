@@ -17,11 +17,15 @@
 
 import { homedir } from 'node:os';
 import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
-import { execFileSync } from 'node:child_process';
+import { chmod as chmodP, readdir as readdirP, rm as rmP, stat as statP } from 'node:fs/promises';
+import { execFile, execFileSync } from 'node:child_process';
+import { promisify } from 'node:util';
 import { randomUUID } from 'node:crypto';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { startGitBroker } from './git-broker.js';
+
+const execFileAsync = promisify(execFile);
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ENTRYPOINT = join(__dirname, 'sandbox-entrypoint.sh');
@@ -121,7 +125,8 @@ const DOCKERD_STATUS_NAME = '.ccserver-dockerd.status';
 // daemon would corrupt the data-root. flock(1) is the same util-linux binary
 // the entrypoint uses; -n makes it exit non-zero immediately when the lock is
 // held. A missing flock (ENOENT) must NOT hard-block deletion, so only a
-// non-ENOENT failure counts as "held".
+// non-ENOENT failure counts as "held". Stays synchronous on purpose: flock -n
+// exits instantly, dockerAvailability() consumes it as a plain boolean.
 function dindLockHeld(name) {
   const lock = join(dindRoot(), name, DOCKERD_LOCK_NAME);
   if (!existsSync(lock)) return false;
@@ -222,6 +227,57 @@ function removeTreeViaSudo(path) {
   }
 }
 
+// Async twin of removeTree for the settings-page DELETE route: deleting a
+// multi-GB docker data-root takes minutes, and the sync version froze the
+// event loop (and with it every WS session and HTTP request) for that whole
+// time. Same escalation order and semantics as removeTree, just non-blocking.
+async function removeTreeAsync(path) {
+  if (!existsSync(path)) return null;
+  const tryRemove = async (fn) => {
+    try {
+      await fn();
+      if (!existsSync(path)) return true;
+    } catch {
+      // fall through to the next strategy
+    }
+    return false;
+  };
+  if (await tryRemove(() => rmP(path, { recursive: true, force: true }))) return null;
+  if (await tryRemove(async () => {
+    await chmodP(path, 0o700);
+    await execFileAsync('chmod', ['-R', 'u+rwx', path], { stdio: 'ignore' });
+    await rmP(path, { recursive: true, force: true });
+  })) return null;
+  if (await tryRemove(() => removeTreeViaRootlesskitAsync(path))) return null;
+  if (await tryRemove(() => removeTreeViaSudoAsync(path))) return null;
+  return `permission denied removing ${path}; run manually: sudo rm -rf "${path}"`;
+}
+
+async function removeTreeViaRootlesskitAsync(path) {
+  if (!existsSync(ROOTLESSKIT)) return;
+  const stateDir = join(XDG_RUNTIME_DIR, `ccserver-dind-cleanup-${randomUUID()}`);
+  mkdirSync(stateDir, { recursive: true });
+  try {
+    await execFileAsync(ROOTLESSKIT, [
+      `--state-dir=${stateDir}`,
+      '--net=none',
+      '--disable-host-loopback',
+      'rm', '-rf', path,
+    ], { stdio: 'ignore', timeout: 120_000 });
+  } finally {
+    try { await rmP(stateDir, { recursive: true, force: true }); } catch { /* best effort */ }
+  }
+}
+
+async function removeTreeViaSudoAsync(path) {
+  try {
+    await execFileAsync('sudo', ['-n', 'true'], { stdio: 'ignore' });
+    await execFileAsync('sudo', ['-n', 'rm', '-rf', path], { stdio: 'ignore', timeout: 120_000 });
+  } catch {
+    // no passwordless sudo, or sudo itself failed
+  }
+}
+
 // Deterministic per-project path of the persistent HOME. resolve() normalizes
 // spelling variants (trailing slash, "..", ...) so they all map to one dir,
 // mirroring orchestratorDirForCwd in routes/groups.js.
@@ -286,27 +342,47 @@ export function listSandboxHomes() {
   return entries;
 }
 
-// Apparent size in bytes of a sandbox home (du -sb; recursive stat fallback).
-export function sandboxHomeSize(path) {
+// Memoized du results, keyed by home path: the settings page's refresh button
+// can be hit repeatedly and du over a big docker data-root takes seconds.
+const SANDBOX_SIZE_TTL_MS = 60_000;
+const sizeCache = new Map(); // path -> { size, fetchedAt }
+
+export function clearSandboxSizeCache() {
+  sizeCache.clear();
+}
+
+async function measureSandboxHomeSize(path) {
   try {
-    const out = execFileSync('du', ['-sb', path], { encoding: 'utf-8', timeout: 30_000 });
-    const m = /^\s*(\d+)/.exec(out);
+    const { stdout } = await execFileAsync('du', ['-sb', path], { encoding: 'utf-8', timeout: 30_000 });
+    const m = /^\s*(\d+)/.exec(stdout);
     if (m) return Number(m[1]);
   } catch { /* fall through to the stat walk */ }
   let total = 0;
-  const walk = (p) => {
+  const walk = async (p) => {
     let st;
-    try { st = statSync(p); } catch { return; }
+    try { st = await statP(p); } catch { return; }
     if (st.isDirectory()) {
       let children;
-      try { children = readdirSync(p); } catch { return; }
-      for (const c of children) walk(join(p, c));
+      try { children = await readdirP(p); } catch { return; }
+      for (const c of children) await walk(join(p, c));
     } else {
       total += st.size;
     }
   };
-  walk(path);
+  await walk(path);
   return total;
+}
+
+// Apparent size in bytes of a sandbox home (du -sb; recursive stat fallback),
+// memoized for SANDBOX_SIZE_TTL_MS. Async + cached because this used to run
+// execFileSync('du') directly in the route handler and froze the whole server
+// (every WS session included) for as long as du took.
+export async function sandboxHomeSize(path) {
+  const hit = sizeCache.get(path);
+  if (hit && Date.now() - hit.fetchedAt < SANDBOX_SIZE_TTL_MS) return hit.size;
+  const size = await measureSandboxHomeSize(path);
+  sizeCache.set(path, { size, fetchedAt: Date.now() });
+  return size;
 }
 
 // Delete a sandbox: its persistent HOME plus the matching docker data-root
@@ -314,17 +390,17 @@ export function sandboxHomeSize(path) {
 // the caller can never escape the roots. The in-use guard lives in the route
 // (see sessionManager.sandboxHomeInUsePath). Removal is permission-tolerant:
 // containerd overlayfs snapshot dirs can be owned by subuid-mapped uids the
-// server can't read (see removeTree), and a still-running dockerd must block
-// the whole delete rather than corrupt its data-root (dindLockHeld).
-export function deleteSandboxHome(name) {
+// server can't read (see removeTreeAsync), and a still-running dockerd must
+// block the whole delete rather than corrupt its data-root (dindLockHeld).
+export async function deleteSandboxHome(name) {
   if (!/^[A-Za-z0-9_]+$/.test(name)) {
     return { ok: false, error: 'invalid-sandbox-name' };
   }
   if (dindLockHeld(name)) {
     return { ok: false, error: 'docker-daemon-in-use' };
   }
-  const homeErr = removeTree(join(sandboxHomeRoot(), name));
-  const dindErr = removeTree(join(dindRoot(), name));
+  const homeErr = await removeTreeAsync(join(sandboxHomeRoot(), name));
+  const dindErr = await removeTreeAsync(join(dindRoot(), name));
   if (homeErr || dindErr) {
     // Keep the index entry on partial failure so the settings page still
     // shows the sandbox and the user can retry.
@@ -335,6 +411,7 @@ export function deleteSandboxHome(name) {
     delete index[name];
     try { writeFileSync(homeIndexPath(), JSON.stringify(index)); } catch { /* best effort */ }
   }
+  sizeCache.delete(join(sandboxHomeRoot(), name));
   return { ok: true };
 }
 

@@ -12,7 +12,7 @@ import { spawn, spawnSync, execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { sandboxesRoute } from './sandboxes.js';
-import { sandboxHomeRoot } from '../ws/sandbox.js';
+import { sandboxHomeRoot, clearSandboxSizeCache } from '../ws/sandbox.js';
 
 let tmpRoot;
 let app;
@@ -37,6 +37,7 @@ before(async () => {
   process.env.CCSERVER_SANDBOX_DIND_ROOT = join(tmpRoot, 'dind');
   mkdirSync(join(tmpRoot, 'home'), { recursive: true });
   mkdirSync(join(tmpRoot, 'dind'), { recursive: true });
+  clearSandboxSizeCache();
   app = Fastify();
   await app.register(sandboxesRoute, { prefix: '/api' });
 });
@@ -44,12 +45,34 @@ before(async () => {
 after(async () => {
   delete process.env.CCSERVER_SANDBOX_HOME_ROOT;
   delete process.env.CCSERVER_SANDBOX_DIND_ROOT;
+  clearSandboxSizeCache();
   try { await app.close(); } catch { /* ignore */ }
   try { rmSync(tmpRoot, { recursive: true, force: true }); } catch { /* ignore */ }
 });
 
 test('GET /api/sandboxes: empty when no sandboxes exist', async () => {
   assert.deepEqual(await list(), []);
+});
+
+test('GET /api/sandboxes serves sizes from a short-TTL cache', async () => {
+  const cwd = '/srv/cached';
+  const slug = slugFromCwd(cwd);
+  clearSandboxSizeCache();
+  const dir = join(sandboxHomeRoot(), slug);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, 'blob'), 'c'.repeat(1024));
+  try {
+    const first = (await list()).find((s) => s.name === slug);
+    assert.ok(first.size >= 1024, 'first read measures the directory');
+    // Grow the tree: within the TTL the next read still reports the memoized
+    // size instead of re-running du (which would report the larger value).
+    writeFileSync(join(dir, 'blob2'), 'd'.repeat(4096));
+    const second = (await list()).find((s) => s.name === slug);
+    assert.equal(second.size, first.size, 'second read within the TTL is served from the cache');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    clearSandboxSizeCache();
+  }
 });
 
 test('GET /api/sandboxes: lists created sandboxes with real path, size and inUse', async () => {

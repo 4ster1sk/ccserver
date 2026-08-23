@@ -10,13 +10,13 @@ import { sandboxHomeInUsePath } from '../ws/sessionManager.js';
 export async function sandboxesRoute(fastify) {
   fastify.get('/sandboxes', async () => {
     const homes = listSandboxHomes();
-    const sandboxes = homes.map((h) => ({
+    const sandboxes = await Promise.all(homes.map(async (h) => ({
       name: h.name,
       path: h.path,
       cwd: h.cwd,
-      size: sandboxHomeSize(h.path),
+      size: await sandboxHomeSize(h.path),
       inUse: sandboxHomeInUsePath(h.path),
-    }));
+    })));
     return { sandboxes };
   });
 
@@ -33,7 +33,7 @@ export async function sandboxesRoute(fastify) {
         error: 'このサンドボックスを利用中のセッションがあるため削除できません。先にタブを閉じてください。',
       });
     }
-    const res = deleteSandboxHome(name);
+    const res = await deleteSandboxHome(name);
     if (!res.ok) {
       if (res.error === 'docker-daemon-in-use') {
         return reply.code(409).send({
