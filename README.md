@@ -265,7 +265,7 @@ OpenAI Codexについて:
 
 - **ハンドオフは失われません**: `wait_for_handoff` はタイムアウト (`{timedOut:true}`) 時に**そのままもう一度呼ぶだけで安全**です。誰も待っていない間に届いたハンドオフはキューに残り、また**待機中に接続が切れても**イベントを消費しないため、再接続後の次の `wait_for_handoff` が必ず受け取ります。サーバー再起動後も未受信ハンドオフは残っています。
 - **`read_output` の `screen` / `screenAlt` / `screenIdleMs` を使う**: ワーカーのスピナー等の動的描画はカーソル移動と行消去でその場を書き換えるため、生のバイト列 (`raw` / `text`) からは「今見えている画面」を復元できません。サーバーはセッションごとに軽量な仮想画面 (ANSI 解釈) を維持しており、`screen` が現在の可視画面、`screenIdleMs` が**画面が最後に変化してからの経過** (スピナーが回っていれば小さい値、静止プロンプトなら大きい値) です。stuck/busy 判定は `text` や `idleForMs` (バイトベース) よりこれらを優先してください。`get_tab_status` の `screenIdleMs` も同様です。
-- **通常の進捗確認は `wait_for_handoff` の待ち受けで行う (原則)**: `read_output` は進捗ポーリング用のツールではありません。`{timedOut:true}` の連続自体は異常ではなく、そのまま再呼び出しするのが正規の待ち方です。`read_output` を許容するのは具体的な異常シグナルがある場合 (`wait_for_handoff` の連続タイムアウト目安2〜3回、稼働中のはずのメンバーの大きな `idleForMs` / 静止画面が `list_group_sessions` / `get_tab_status` で見つかった、ワーカー自身が異常を報告した) に限定され、その場合も**1回だけ**読んで判断します (`send_input` での nudge または待ち戻り)。この規律はオーケストレーター注入テンプレート (`orchestrator-template.md`) と control MCP の各ツール説明文に反映されています。
+- **通常の進捗確認は `wait_for_handoff` の待ち受けで行う (原則)**: `read_output` は進捗ポーリング用のツールではありません。`{timedOut:true}` 自体は異常ではなく (worker が単に長時間作業しているだけの可能性が高い)、そのまま再呼び出しするのが正規の待ち方です。`read_output` を許容するのは具体的な異常シグナルがある場合 (`wait_for_handoff` の連続タイムアウト目安2〜3回、稼働中のはずのメンバーの大きな `idleForMs` / 静止画面が `list_group_sessions` / `get_tab_status` で見つかった、ワーカー自身が異常を報告した) に限定され、その場合も**1回だけ**読んで判断します (`send_input` での nudge または待ち戻り)。この規律はオーケストレーター注入テンプレート (`orchestrator-template.md`) と control MCP の各ツール説明文に反映されています。
 
 #### オーケストレーターから見えるのは repo_info の基本情報だけ
 

@@ -35,8 +35,12 @@ test('template: handoff discipline gates read_output behind concrete anomaly sig
   assert.match(template, /nudge it via\s*\n\s+`send_input` \("done\? call handoff_to_orchestrator"\)/);
   // The old opportunistic-read habit is explicitly retired.
   assert.match(template, /action opportunity \(a new user message, another worker's handoff, \.\.\.\)\s*\n\s+to judge whether a pending worker is idle is retired/);
-  // Timeouts alone are normal and safe to retry.
-  assert.match(template, /timeouts alone are not a reason\s*\n\s+to intervene/);
+  // An isolated timeout is normal and safe to retry; the trigger list (not
+  // the retry advice itself) defines when a look is allowed.
+  assert.match(template, /an isolated timeout is nothing\s*\n\s+to act on/);
+  // Triggers stay independent alternatives -- no "timeout streak plus
+  // status-tool anomaly" conjunction anywhere.
+  assert.doesNotMatch(template, /streak plus/);
 });
 
 test('template: notification discipline requires exactly one start-of-task notify(info)', () => {
@@ -53,8 +57,10 @@ test('mcpServer.js: read_output description states the discipline, status tools 
   assert.match(mcpServerSource, /fallback for inspecting a possibly-stuck member, NOT a progress-check tool/);
   assert.match(mcpServerSource, /Justify every call with a concrete anomaly signal \(repeated wait_for_handoff timeouts/);
   assert.match(mcpServerSource, /never poll this for reassurance/);
-  assert.match(mcpServerSource, /treat that as an anomaly signal only: if it piles up alongside repeated wait_for_handoff timeouts, confirm with a single read_output/);
-  assert.match(mcpServerSource, /treat it as an anomaly signal and confirm with at most a single read_output/);
+  assert.match(mcpServerSource, /a concrete anomaly signal on its own: confirm with a single read_output/);
+  assert.match(mcpServerSource, /a concrete anomaly signal on its own: confirm with at most a single read_output/);
+  // Status-tool anomalies must not be gated behind timeout pile-ups either.
+  assert.doesNotMatch(mcpServerSource, /piles up alongside|only once repeated wait_for_handoff timeouts/);
   // wait_for_handoff stays the once-per-turn default.
   assert.match(mcpServerSource, /Call this once per turn instead of polling read_output/);
 });

@@ -165,8 +165,8 @@ orchestrator should catch this itself.
   reconnect) receives it.
 - After sending a step, default to pure waiting: re-calling
   `wait_for_handoff` after `{timedOut:true}` is normal and safe (the
-  worker may simply still be working), so timeouts alone are not a reason
-  to intervene, and you must NOT spend `read_output` calls on routine
+  worker may simply still be working), so an isolated timeout is nothing
+  to act on, and you must NOT spend `read_output` calls on routine
   progress checks while a handoff is pending. Treat `read_output` as an
   anomaly-driven, single-shot confirmation justified only by a concrete
   signal:
@@ -182,8 +182,8 @@ orchestrator should catch this itself.
   to waiting. The old habit of spending a `read_output` on every other
   action opportunity (a new user message, another worker's handoff, ...)
   to judge whether a pending worker is idle is retired -- at such moments
-  just continue your business; the handoff itself, or a timeout streak
-  plus a status-tool anomaly, will tell you when to look. Don't invent a
+  just continue your business; the handoff itself, or one of the anomaly
+  signals above, will tell you when to look. Don't invent a
   polling loop (e.g. `ScheduleWakeup`) just to check sooner -- that
   mechanism belongs to the `/loop` skill, not ad hoc waiting here.
 
@@ -192,8 +192,9 @@ orchestrator should catch this itself.
 The MCP server "ccserver-notify" is configured in this session. Its `notify`
 tool (title / body / level) delivers to every configured channel (Discord
 webhook and any subscribed webhooks) -- the only way the human learns what
-happened without watching the terminal. End every one of the following
-situations with a `notify` call, no exceptions:
+happened without watching the terminal. Every one of the following
+situations carries a `notify` call, no exceptions -- **Starting** opens
+the task with it; the rest close their situation with it:
 
 - **Starting**: when you take on a NEW task from the human, open it with
   exactly ONE `notify` call BEFORE dispatching any work to the workers:
