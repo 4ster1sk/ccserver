@@ -2379,6 +2379,12 @@ body {
   border-color: var(--error);
 }
 
+.usage-btn-app {
+  font-size: 11px;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
 .usage-menu {
   position: absolute;
   top: 100%;
