@@ -22,7 +22,7 @@ Navigateur (xterm.js) <── WebSocket ──> Fastify <── node-pty ──>
 
 ## Prérequis
 
-- Node.js >= 22 et npm >= 9
+- Node.js >= 22.13 et npm >= 9 (utilise `node:sqlite` intégré ; le serveur ouvre SQLite (`ccserver.sqlite3`) au démarrage et refuse de démarrer avec un journal clair en cas d'échec de migration)
 - Un compilateur C++ pour construire `node-pty` (`base-devel` sur Arch, `build-essential` sur Ubuntu)
 - Au moins une CLI d'IA prise en charge installée sur le serveur. Seules les CLI installées sont sélectionnables.
 - Facultatif : `bwrap` (bubblewrap), Docker rootless, `rootlesskit`, `uidmap` et `slirp4netns` pour toutes les fonctions du bac à sable
@@ -67,6 +67,8 @@ Ouvrez <http://localhost:3001>. Le port peut être modifié avec `PORT`.
 3. Le menu de lancement permet de choisir Claude Code, opencode, GitHub Copilot ou OpenAI Codex, et d'activer si nécessaire le bac à sable, la signature GPG ou le transfert de l'agent SSH.
 
 L'application et les options de lancement sont mémorisées dans le `localStorage` du navigateur. Les sessions combo peuvent utiliser deux workers et un orchestrateur. Elles prennent en charge Claude Code, opencode et OpenAI Codex. Copilot CLI ne peut pas être utilisé en combo car il ne peut pas recevoir les outils MCP de ccserver via les arguments CLI ou les variables d'environnement (configuration par fichier uniquement). Codex est injecté par processus via `-c mcp_servers...` sans modifier `~/.codex/config.toml`.
+
+**Préréglages de workers** : des modèles de lancement combinant nom affiché, rôle technique (`workerImplement`, ... -- l'identifiant utilisé pour les handoffs MCP, les git worktrees et les ids de session), CLI et modèle peuvent être stockés côté serveur dans SQLite (`ccserver.sqlite3`, remplaçable par `CCSERVER_DB_PATH`) et sélectionnés ensemble dans la section « Worker プリセット » du modal combo. Créez-les, modifiez-les ou supprimez-les via le dialogue プリセット管理 : ces changements n'affectent que les sélections futures, car les sélections sont développées en instantané au lancement. Si l'API des préréglages est indisponible, les brouillons classiques workerA/workerB continuent de fonctionner. Les onglets de groupe affichent les membres nommés sous la forme `実装担当（workerImplement）`, avec repli sur le libellé du rôle.
 
 Le bouton représentant une horloge permet de programmer des prompts. Ceux-ci sont conservés dans `.scheduled-prompts.json` et peuvent être exécutés après la fermeture du navigateur ou un redémarrage du serveur. L'heure est interprétée dans le fuseau horaire du serveur.
 
@@ -138,6 +140,9 @@ Les endpoints REST principaux sont :
 | GET / POST | `/api/files` | Télécharger ou envoyer des fichiers |
 | GET | `/api/system-stats` | Statistiques CPU, mémoire, température, GPU et stockage |
 | GET | `/api/usage?force=1` | Instantané d'utilisation de Claude Code |
+| GET / POST | `/api/worker-presets` | Lister / créer des préréglages de workers (`{ name, role, app, model }`, `model` peut être null) |
+| PUT / DELETE | `/api/worker-presets/:id` | Mise à jour complète / suppression d'un préréglage ; rôle dupliqué -> 409 |
+| POST | `/api/groups` | Lancement combo. En plus des clés historiques `workerA`/`workerB`/`orchestrator`, accepte le format canonique `workers: [{ name?, role, app?, model?, sandboxOpts? }]` (1–7 entrées, rôles uniques). Le client développe les préréglages en instantanés ; copilot est refusé avec 400 sur les deux chemins |
 
 Les entrées/sorties du terminal et la gestion des sessions passent par `/ws/terminal` en WebSocket.
 

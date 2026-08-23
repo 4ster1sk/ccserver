@@ -23,7 +23,7 @@ VS Code のようにフォルダを選択し、ブラウザ内のターミナル
 
 ## 必要な環境
 
-- Node.js >= 22 / npm >= 9
+- Node.js >= 22.13 / npm >= 9（組み込みの `node:sqlite` を使用。サーバーは起動時に SQLite (`ccserver.sqlite3`) を open し、migration 失敗時は明示的なログとともに起動を拒否します）
 - C++ コンパイラ（node-pty のビルドに必要。Arch: `base-devel`、Ubuntu: `build-essential`）
 - 対応する AI CLI のいずれか 1 つ以上 — Claude Code、[opencode](https://opencode.ai/)、[GitHub Copilot CLI](https://github.com/github/copilot-cli) (`copilot`)、[OpenAI Codex CLI](https://developers.openai.com/codex/cli/) (`codex`) の各CLIは個別に任意です。サーバーにインストールされているCLIだけを起動時に選べます。
 - [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) — Usage表示など、一部の機能で使用します。インストールされていない場合も、opencodeやCopilot CLIだけで通常のセッションを利用できます。Usageボタンは Codex CLI (下記) でも利用できます。
@@ -86,6 +86,8 @@ NODE_ENV=production node server/index.js
 サンドボックス・GPG・ssh-agent の詳細は [サンドボックス (bwrap + rootless docker)](#サンドボックス-bwrap--rootless-docker) を参照。「アプリ」と「起動モード」のどちらの項目をクリックしても、選んだ内容で即座に起動します。
 
 コンボ起動のロール別アプリ選択 (ワーカーA / ワーカーB / オーケストレーター) もブラウザの `localStorage` に記憶され、次回のコンボ起動の既定になります (初期値: ワーカーA・オーケストレーターが Claude Code、ワーカーB が opencode)。各ロールで Claude Code / opencode / OpenAI Codex を選択可能です（copilot のみ不可）。単発起動の「アプリ」記憶とは独立しており、コンボ起動には `defaultApp` は適用されません。
+
+**Worker プリセット**: 表示名・ロール・CLI・モデルを1組み合わせにした起動テンプレートをサーバー共有で保存でき (SQLite `ccserver.sqlite3`、`CCSERVER_DB_PATH` で変更可)、コンボモーダルの「Worker プリセット」から複数選択して起動できます。ロール (`workerImplement` 等) は MCP handoff・git worktree・セッション識別子として使われる技術識別子で、表示名とは独立です。プリセットの追加・編集・削除は「プリセット管理」ダイアログから行え、選択済みの行や起動済みグループには影響しません (起動時にスナップショットとして展開されるため)。プリセット一覧の取得に失敗した場合も、従来どおりワーカーA/Bのドラフトで起動できます。起動済みグループのタブでは、表示名があるメンバーは「実装担当（workerImplement）」のように表示されます。
 
 新規セッションの既定アプリ・サンドボックス設定は `sandbox.config.json` (下記「設定ファイル」参照) でサーバー全体の初期値を決められますが、上記モーダルで一度でも明示的に選んだ後はブラウザ側の記憶が優先されます。
 
@@ -519,6 +521,9 @@ CCSERVER_TOKEN=some-secret NODE_ENV=production node server/index.js
 | POST | `/api/files` | multipart アップロード (`destination` フィールド + ファイルパート) |
 | GET | `/api/system-stats?ipmi=1` | CPU/メモリ/温度/GPU (`nvidia-smi`)/IPMI (要 `ENABLE_IPMI=1`)・load average |
 | GET | `/api/usage?force=1` | Claude Code `/usage` のキャッシュ済みスナップショット (`force=1` で即時再取得) |
+| GET / POST | `/api/worker-presets` | Worker プリセット一覧取得 / 作成 (`{ name, role, app, model }`、`model` は null 可) |
+| PUT / DELETE | `/api/worker-presets/:id` | プリセットの全置換更新 / 削除。role 重複は 409 |
+| POST | `/api/groups` | コンボ起動。従来の `workerA`/`workerB`/`orchestrator` に加え、canonical な `workers: [{ name?, role, app?, model?, sandboxOpts? }]` (1–7 人、role 一意) を受け付ける。プリセットはクライアントがスナップショットへ展開して送る。copilot はどちらの経路でも 400 拒否 |
 
 `GET /api/dirs` のレスポンス例:
 

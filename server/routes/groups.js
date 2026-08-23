@@ -210,7 +210,7 @@ export async function groupsRoute(fastify, opts) {
     const invalidApp = (spec) => Object.prototype.hasOwnProperty.call(spec || {}, 'app')
       && (!spec.app || spec.app === 'copilot');
     if (workers.some(({ spec }) => invalidApp(spec)) || invalidApp(orchestrator)) {
-      return reply.code(400).send({ error: 'worker app must be claude, opencode, or codex (Copilot is not supported in groups)' });
+      return reply.code(400).send({ error: 'worker app must be claude, opencode, or codex (copilot is not supported in groups)' });
     }
     const badModel = (spec) => Object.prototype.hasOwnProperty.call(spec || {}, 'model') && spec.model === undefined;
     if (workers.some(({ spec }) => badModel(spec)) || badModel(orchestrator)) {

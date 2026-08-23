@@ -22,7 +22,7 @@ Browser (xterm.js) <── WebSocket ──> Fastify <── node-pty ──> AI
 
 ## Requirements
 
-- Node.js >= 22 and npm >= 9
+- Node.js >= 22.13 and npm >= 9 (uses the built-in `node:sqlite`; the server opens SQLite (`ccserver.sqlite3`) at startup and refuses to boot with a clear log when a migration fails)
 - A C++ compiler for building `node-pty` (`base-devel` on Arch, `build-essential` on Ubuntu)
 - At least one supported AI CLI installed on the server. Only installed CLIs can be selected.
 - Optional: `bwrap` (bubblewrap), rootless Docker, `rootlesskit`, `uidmap`, and `slirp4netns` for the full sandbox features
@@ -67,6 +67,8 @@ Open <http://localhost:3001>. Change the port with `PORT`, for example `PORT=808
 3. Use the launch menu to choose Claude Code, opencode, GitHub Copilot, or OpenAI Codex, and optionally enable sandboxing, GPG signing, or SSH-agent forwarding.
 
 The selected application and launch options are remembered in the browser's `localStorage`. Combo sessions can run two workers and an orchestrator. Combo sessions support Claude Code, opencode, and OpenAI Codex. Copilot CLI cannot be used in combos because it cannot receive ccserver's MCP tools through CLI arguments or environment variables (file-based config only). Codex is injected per-process via `-c mcp_servers...` without touching `~/.codex/config.toml`.
+
+**Worker presets**: launch templates combining a display name, a technical role (`workerImplement`, ... -- the identifier used for MCP handoffs, git worktrees and session ids), a CLI and a model can be stored server-side in SQLite (`ccserver.sqlite3`, overridable with `CCSERVER_DB_PATH`) and selected together in the combo modal's "Worker プリセット" section. Create/edit/delete them through the プリセット管理 dialog: changes only affect future selections, because selections are expanded into a snapshot at launch time. If the preset API is unavailable, the classic workerA/workerB drafts keep working. Group tabs display members with a name as `実装担当（workerImplement）`, falling back to the role label.
 
 Scheduled prompts can be created with the clock button in the terminal header. They are persisted on disk in `.scheduled-prompts.json` and can fire after the browser is closed or the server restarts. The time is interpreted in the server's timezone.
 
@@ -138,6 +140,9 @@ Available REST endpoints include:
 | GET / POST | `/api/files` | Download or upload files |
 | GET | `/api/system-stats` | CPU, memory, temperature, GPU, and storage stats |
 | GET | `/api/usage?force=1` | Claude Code usage snapshot |
+| GET / POST | `/api/worker-presets` | List / create worker presets (`{ name, role, app, model }`, `model` may be null) |
+| PUT / DELETE | `/api/worker-presets/:id` | Full-replace update / delete a preset; duplicate roles get 409 |
+| POST | `/api/groups` | Combo launch. Besides the legacy `workerA`/`workerB`/`orchestrator` keys, accepts the canonical `workers: [{ name?, role, app?, model?, sandboxOpts? }]` (1–7 entries, unique roles). The client expands presets into snapshots; copilot is refused with 400 on both paths |
 
 Terminal I/O and session management use the WebSocket endpoint `/ws/terminal`.
 
