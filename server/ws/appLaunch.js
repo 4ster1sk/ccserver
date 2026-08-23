@@ -122,9 +122,13 @@ export function detectPermissionPrompt(app, bufNoSpace) {
     // ever misdetects.
     return /1\.Yes/i.test(bufNoSpace) || /runningsession/i.test(bufNoSpace);
   }
-  // Codex approval rendering is not verified on this host. Do not auto-approve
-  // an unverified frame; the user can answer it in the terminal.
-  if (app === 'codex') return false;
+  if (app === 'codex') {
+    // Codex 0.149.0 renders its local-command approval as a three-choice
+    // menu. Its initial focus is `1. Yes, proceed (y)`, so Enter accepts the
+    // one-time approval. Require both the question and the complete approve-
+    // once option rather than matching a generic "Yes" in model output.
+    return /Wouldyouliketorunthefollowingcommand.*1\.Yes,proceed\(y\)/i.test(bufNoSpace);
+  }
   return (
     /Doyouwantto(proceed|makethisedit|use)/i.test(bufNoSpace) ||
     /Yes,allow/i.test(bufNoSpace) ||
