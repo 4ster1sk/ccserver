@@ -205,7 +205,7 @@ export async function sendInput(deps, { sessionId, text, submit = true }) {
 }
 
 // Cap a requested sandboxOpts against a grant-holder's own (see
-// groupManager.getOrchestratorSandboxCoords for the orchestrator case):
+// groupManager.getOrchestratorSandboxOpts for the orchestrator case):
 // a flag can never be granted to someone who does not already hold it.
 // Missing requested / cap flags resolve to false (deny by default).
 // Exported for the meta agent's launch tools, which apply the SAME rule with

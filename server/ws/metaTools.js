@@ -71,12 +71,16 @@ const MAX_REASON_CHARS = 500;
 
 // Store/route result objects ({ ok, ...payload } / { ok:false, code, message })
 // -> success passes through verbatim; failure becomes the uniform tool-layer
-// shape { error: code, message }.
+// shape { error: code, message }. A failure can still carry a `data` payload
+// (e.g. createDirectory's git-init-failed: the directory WAS created) -- the
+// REST route forwards that as `path` on the error response, so do the same
+// here rather than silently dropping it.
 function unwrap(res) {
   if (res && res.ok) return res;
   return {
     error: res?.code || 'internal',
     message: res?.message || 'request failed',
+    ...(res?.data ? { data: res.data } : {}),
   };
 }
 
