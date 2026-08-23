@@ -217,8 +217,10 @@ function capSandboxOpts(requested, cap) {
 }
 
 // Open a new member session (worker role) inside the group, with its own
-// handoff channel. cwd is restricted to the group's allowedCwds (initialized
-// to the shared project directory -- see groupManager). app/model/sandboxOpts
+// handoff channel. cwd is accepted on the wire for compatibility but never
+// read: the server always assigns this role its own dedicated git worktree
+// (or the shared project cwd for a non-git project) -- see
+// groupManager.resolveMemberLaunchCwd. app/model/sandboxOpts
 // are optional at the wire layer: omitted values fall back to the role's
 // persisted preference, then to the group/app defaults. sandboxOpts (gpg /
 // ssh-agent forwarding) defaults to the group's launch flags; an explicit
