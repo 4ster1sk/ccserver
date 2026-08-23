@@ -250,6 +250,37 @@ test('detectPermissionPrompt: copilot model prose is not a prompt', () => {
   }
 });
 
+test('detectPermissionPrompt: Codex local-command approval menu', () => {
+  const buf = (s) => noSpace(s);
+  // Captured from Codex CLI 0.149.0 (Aug 2026). Enter selects the highlighted
+  // first option: "Yes, proceed". The question and selected option can arrive
+  // in different PTY chunks, so exercise the session-level accumulator too.
+  const prompt = `
+    Would you like to run the following command?
+    Environment: local
+    Reason: Do you want to allow checking the current GitHub Actions status?
+    $ gh pr checks 69
+    › 1. Yes, proceed (y)
+      2. Yes, and don't ask again for commands that start with \`gh pr checks\` (p)
+      3. No, and tell Codex what to do differently (esc)
+  `;
+  assert.ok(detectPermissionPrompt('codex', buf(prompt)));
+  const cut = prompt.indexOf('1. Yes') + '1. Yes'.length;
+  assert.ok(accumulateDetect('codex', [prompt.slice(0, cut), prompt.slice(cut)]));
+});
+
+test('detectPermissionPrompt: Codex model prose is not a prompt', () => {
+  const buf = (s) => noSpace(s);
+  const prose = [
+    'Would you like to run the following command? This is an example in the documentation.',
+    '1. Yes, proceed (y) 2. No',
+    'The command will run locally after you proceed.',
+  ];
+  for (const p of prose) {
+    assert.ok(!detectPermissionPrompt('codex', buf(p)), p);
+  }
+});
+
 test('detectPermissionPrompt: opencode permission box', () => {
   const buf = (s) => noSpace(s);
   assert.ok(detectPermissionPrompt('opencode', buf('┃  △ Permission required ┃')));
