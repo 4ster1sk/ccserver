@@ -167,15 +167,13 @@ export default function GroupTabView({
 
   const handleDownload = useCallback((file) => {
     const token = getToken();
-    const tokenParam = token ? `&token=${encodeURIComponent(token)}` : '';
     const a = document.createElement('a');
-    a.href = `/api/groups/${encodeURIComponent(groupId)}/files/${encodeURIComponent(file.id)}?token=${token ? encodeURIComponent(token) : ''}`;
-    // token already handled via query; but also include via authFetch header not needed for anchor.
-    // Use direct href with token query.
     if (token) a.href = `/api/groups/${encodeURIComponent(groupId)}/files/${encodeURIComponent(file.id)}?token=${encodeURIComponent(token)}`;
     else a.href = `/api/groups/${encodeURIComponent(groupId)}/files/${encodeURIComponent(file.id)}`;
     a.download = file.name;
+    document.body.appendChild(a);
     a.click();
+    a.remove();
   }, [groupId]);
 
   const handleDelete = useCallback(async (file) => {

@@ -8,7 +8,7 @@
 
 import { homedir } from 'node:os';
 import { basename, dirname, extname, join, resolve } from 'node:path';
-import { mkdirSync, existsSync, statSync, realpathSync } from 'node:fs';
+import { mkdirSync, statSync, realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
 
@@ -138,15 +138,6 @@ export function resolveAgentSourcePath(cwd, relativePath) {
   if (relativePath.startsWith('/') || relativePath.includes('\0')) {
     return { error: 'bad-request', message: 'path must be relative and not absolute' };
   }
-  // Reject traversal attempts before realpath as well (defense in depth).
-  // The real containment check below is authoritative, this just gives a
-  // clearer error for obvious traversal.
-  if (relativePath.split('/').includes('..')) {
-    // Still attempt realpath check to catch symlink escapes, but flag early
-    // if the normalized join would escape.
-    // We don't return immediately; let the containment check decide, but we
-    // can keep the error as bad-request.
-  }
   const joined = join(cwd, relativePath);
   const resolved = resolve(joined);
   // Ensure the resolved path is inside cwd (before realpath).
@@ -186,14 +177,14 @@ export function resolveAgentSourcePath(cwd, relativePath) {
 // Verify that a path to be deleted is safely under the group-files root.
 // Prevents recursive delete of arbitrary host paths via a caller-derived groupId.
 export function safeGroupFilesDirForDelete(groupId) {
+  const gid = String(groupId);
+  if (!gid || gid.includes('/') || gid.includes('\0') || gid.includes('..')) {
+    throw new Error('invalid groupId for deletion');
+  }
   const root = resolve(getGroupFilesRoot());
-  const dir = resolve(getGroupFilesDir(groupId));
+  const dir = resolve(getGroupFilesDir(gid));
   if (dir === root || (!dir.startsWith(root + '/'))) {
     throw new Error('group files dir escapes root');
-  }
-  // Also guard against empty or path-traversal groupIds.
-  if (String(groupId).includes('/') || String(groupId).includes('\0') || String(groupId).includes('..')) {
-    throw new Error('invalid groupId for deletion');
   }
   return dir;
 }
