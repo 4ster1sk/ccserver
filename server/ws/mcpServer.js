@@ -114,7 +114,7 @@ export function buildControlMcpServer(deps) {
 
   server.tool(
     'open_tab',
-    'Open a new worker session inside this group (with its own handoff channel) and return its sessionId. role must be a worker role (workerA, workerB, ...) -- never orchestrator. cwd is restricted to the group project directory. app (claude, opencode, or codex) is optional: omitted values fall back to the role\'s persisted preferences, then to the group defaults. copilot is not supported in groups because its MCP configuration is file-based and cannot be injected per session. For a genuinely new member, sandboxOpts.gpg / sandboxOpts.sshAgent cannot exceed what the calling orchestrator session itself currently has enabled -- a request for a flag the orchestrator does not hold is silently downgraded to false; check the returned sandboxOpts to see what was actually granted. Restarting an already-registered role (role currently has a member) always keeps that member\'s existing sandboxOpts regardless of what this call requests.',
+    'Open a new worker session inside this group (with its own handoff channel) and return its sessionId. role must be a worker role (workerA, workerB, ...) -- never orchestrator. cwd is no longer read: the server always assigns each role its own dedicated git worktree automatically (or the shared project directory when the project isn\'t a git repo) -- the returned cwd tells you what was actually assigned; the argument is still accepted on the wire but has no effect and any value works. app (claude, opencode, or codex) is optional: omitted values fall back to the role\'s persisted preferences, then to the group defaults. copilot is not supported in groups because its MCP configuration is file-based and cannot be injected per session. For a genuinely new member, sandboxOpts.gpg / sandboxOpts.sshAgent cannot exceed what the calling orchestrator session itself currently has enabled -- a request for a flag the orchestrator does not hold is silently downgraded to false; check the returned sandboxOpts to see what was actually granted. Restarting an already-registered role (role currently has a member) always keeps that member\'s existing sandboxOpts regardless of what this call requests.',
     {
       role: z.string().regex(/^worker[A-Za-z0-9_-]+$/),
       app: z.enum(['claude', 'opencode', 'codex']).optional(),
@@ -123,6 +123,20 @@ export function buildControlMcpServer(deps) {
       sandboxOpts: z.object({ gpg: z.boolean().optional(), sshAgent: z.boolean().optional() }).optional(),
     },
     async (args) => ({ content: [{ type: 'text', text: JSON.stringify(await tools.openTab(deps, args)) }] }),
+  );
+
+  server.tool(
+    'fetch_doc',
+    'Fetch a document previously published (by any member) under a key via publish_doc.',
+    { key: z.string() },
+    async (args) => ({ content: [{ type: 'text', text: JSON.stringify(tools.fetchDoc(deps, args)) }] }),
+  );
+
+  server.tool(
+    'list_docs',
+    'List documents published in this group (key, publishedBy role, publishedAt, size) without their content -- fetch_doc the ones you need.',
+    {},
+    async () => ({ content: [{ type: 'text', text: JSON.stringify(tools.listDocs(deps)) }] }),
   );
 
   server.tool(
@@ -168,6 +182,27 @@ export function buildHandoffMcpServer(deps) {
     'Notify the orchestrator that your task is complete, blocked, needs input, or hit an error. Call this exactly once when you finish a task or when you need the orchestrator to make a decision. The orchestrator is waiting on wait_for_handoff and will see the summary you provide here.',
     { summary: z.string(), status: z.enum(['done', 'blocked', 'needs_input', 'error']).optional(), nextRole: z.string().optional() },
     async (args) => ({ content: [{ type: 'text', text: JSON.stringify(tools.handoffToOrchestrator(deps, args)) }] }),
+  );
+
+  server.tool(
+    'publish_doc',
+    'Publish a document under a key, visible to every member of this group (including the orchestrator and other workers) via fetch_doc/list_docs -- the direct way to hand off content (e.g. a plan) to another worker WITHOUT going through the orchestrator. Your own ./tmp/ is local to your own git worktree and is NOT visible to other workers; publish only what you want to hand off, not your whole working directory. Re-publishing the same key overwrites it.',
+    { key: z.string(), content: z.string() },
+    async (args) => ({ content: [{ type: 'text', text: JSON.stringify(tools.publishDoc(deps, args)) }] }),
+  );
+
+  server.tool(
+    'fetch_doc',
+    'Fetch a document previously published (by any member) under a key via publish_doc.',
+    { key: z.string() },
+    async (args) => ({ content: [{ type: 'text', text: JSON.stringify(tools.fetchDoc(deps, args)) }] }),
+  );
+
+  server.tool(
+    'list_docs',
+    'List documents published in this group (key, publishedBy role, publishedAt, size) without their content -- fetch_doc the ones you need.',
+    {},
+    async () => ({ content: [{ type: 'text', text: JSON.stringify(tools.listDocs(deps)) }] }),
   );
 
   return server;

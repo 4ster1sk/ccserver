@@ -188,11 +188,14 @@ test('control socket: tools/call list_group_sessions over the wire', async () =>
   c.close();
 });
 
-test('handoff socket: exposes ONLY handoff_to_orchestrator', async () => {
+test('handoff socket: exposes ONLY handoff_to_orchestrator and the doc-sharing tools', async () => {
   const c = mcpClient(handoff.sockPath);
   await c.connected;
   const { tools } = await c.call('tools/list');
-  assert.deepEqual(tools.map((t) => t.name), ['handoff_to_orchestrator']);
+  assert.deepEqual(
+    tools.map((t) => t.name).sort(),
+    ['fetch_doc', 'handoff_to_orchestrator', 'list_docs', 'publish_doc'].sort(),
+  );
   c.close();
 });
 

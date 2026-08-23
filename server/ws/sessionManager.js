@@ -102,6 +102,35 @@ export async function resolveOrchestratorClaudeMdSrc(groupId) {
   return null;
 }
 
+// Resolvers of a group member's launch cwd + git-common-dir sandbox bind:
+// worker roles get their own git worktree (resolved/recreated fresh on
+// every (re)spawn, see worktree.js), the orchestrator gets its stable
+// orchestratorDir. groupManager registers one (resolveMemberLaunchCwd) --
+// same resolver-registration pattern as the two above, and for the same
+// reason: this auto-resume path cannot import groupManager.js (circular
+// import).
+const memberCwdResolvers = new Set();
+
+export function setMemberCwdResolver(fn) {
+  memberCwdResolvers.add(fn);
+}
+
+// Resolve { cwd, gitCommonDir } for a group member being (re)spawned.
+// Resolves to null when no resolver can produce one (group gone, or
+// worktree resolution itself failed) -- the caller must refuse the spawn
+// rather than fall back to a stale/blind cwd.
+export async function resolveMemberCwdForSession(groupId, groupRole) {
+  for (const fn of memberCwdResolvers) {
+    try {
+      const result = await fn(groupId, groupRole);
+      if (result) return result;
+    } catch {
+      // try the next resolver
+    }
+  }
+  return null;
+}
+
 function resolveCommand(cmd) {
   if (process.platform !== 'win32') return cmd;
   try {
@@ -132,7 +161,7 @@ function normalizeModel(model) {
   return typeof model === 'string' && model.length > 0 ? model : null;
 }
 
-export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox, sandboxOpts, app, model, resumeLast, groupId = null, groupRole = null, mcpSocketPath = null, projectName = null, reuseSandboxHome = true, orchestratorClaudeMdSrc = null }) {
+export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox, sandboxOpts, app, model, resumeLast, groupId = null, groupRole = null, mcpSocketPath = null, projectName = null, reuseSandboxHome = true, orchestratorClaudeMdSrc = null, gitCommonDir = null }) {
   const id = randomUUID();
 
   // claude (and likely opencode) aborts immediately (SIGABRT, exit 134, no
@@ -304,7 +333,7 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox
       }
     }
     try {
-      const spawn = buildSandboxSpawn({ cwd, targetCommand: [command, ...args], app: sessionApp, sandboxOpts, mcpSocketPath, notifySocketPath, usageSocketPath, reuseSandboxHome, orchestratorClaudeMdSrc });
+      const spawn = buildSandboxSpawn({ cwd, targetCommand: [command, ...args], app: sessionApp, sandboxOpts, mcpSocketPath, notifySocketPath, usageSocketPath, reuseSandboxHome, orchestratorClaudeMdSrc, gitCommonDir });
       command = spawn.command;
       args = spawn.args;
       sandboxDocker = !!spawn.docker;
@@ -1049,8 +1078,27 @@ async function fireSchedule(scheduleId) {
     console.warn(`[scheduler] dropping prompt for orchestrator of ${entry.groupId}: CLAUDE.md generation unavailable`);
     return;
   }
+  // Same "server decides, never trust a persisted value blindly" resolution
+  // as every other group-member (re)spawn site (terminal.js's init
+  // reconnect, groupManager.addMember): entry.cwd may point at a worker's
+  // worktree that's since been lost from disk, so the resolver is always
+  // consulted (it recreates it -- and notifies on genuine data loss --
+  // rather than launching into a dead directory); see
+  // groupManager.resolveMemberLaunchCwd. Same fail-closed policy as
+  // mcpSocketPath/orchestratorClaudeMdSrc above.
+  let cwd = entry.cwd;
+  let gitCommonDir = null;
+  if (entry.groupId && entry.groupRole) {
+    const cwdRes = await resolveMemberCwdForSession(entry.groupId, entry.groupRole);
+    if (!cwdRes) {
+      console.warn(`[scheduler] dropping prompt for group member ${entry.groupRole} of ${entry.groupId}: working directory unavailable`);
+      return;
+    }
+    cwd = cwdRes.cwd;
+    gitCommonDir = cwdRes.gitCommonDir;
+  }
   const res = createSession({
-    cwd: entry.cwd,
+    cwd,
     cols: 80,
     rows: 24,
     claudeSessionId: entry.claudeSessionId,
@@ -1066,6 +1114,7 @@ async function fireSchedule(scheduleId) {
     groupRole: entry.groupRole,
     mcpSocketPath,
     orchestratorClaudeMdSrc,
+    gitCommonDir,
   });
   if (!res?.session) return;
   const session = res.session;

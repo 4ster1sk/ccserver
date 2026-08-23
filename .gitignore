@@ -6,6 +6,7 @@ playwright-report/
 .saved-sessions.json
 .scheduled-prompts.json
 .saved-groups.json
+.saved-group-docs.json
 .saved-notifications.json
 .saved-vikunja-tasks.json
 server/sandbox.config.json

@@ -753,7 +753,7 @@ export function sandboxAvailable() {
 // but not including the trailing `-- <cmd...>`).
 //   homeDir - host path of the persistent per-project HOME to bind at HOME
 //             (see persistentHomeDir), or null for a fresh tmpfs HOME.
-function buildBwrapArgs({ cwd, docker, gpg, extraBinds, extraEnv, authSock, stateDir, claudeDir, gitBroker, mcpSocketPath, notifySocketPath, usageSocketPath, homeDir = null, orchestratorClaudeMdSrc = null }) {
+function buildBwrapArgs({ cwd, docker, gpg, extraBinds, extraEnv, authSock, stateDir, claudeDir, gitBroker, mcpSocketPath, notifySocketPath, usageSocketPath, homeDir = null, orchestratorClaudeMdSrc = null, gitCommonDir = null }) {
   const args = [
     '--die-with-parent',
     // Own PID namespace so the whole sandbox tree is reaped as a unit. Without
@@ -814,6 +814,18 @@ function buildBwrapArgs({ cwd, docker, gpg, extraBinds, extraEnv, authSock, stat
 
   // The project directory (read-write).
   args.push('--bind', cwd, cwd);
+
+  // git worktree sessions (combo group workers, see worktree.js): a
+  // worktree's own .git is just a file pointing at the main checkout's real
+  // .git dir, where the object store, refs and .git/worktrees/<role>
+  // metadata all actually live. Without also exposing that dir, `git
+  // status` and everything else fails inside the sandbox even though cwd
+  // itself is rw-bound (see plan section 2.4). rw, matching cwd's own bind
+  // mode -- read-only would still block writes (index lock, ORIG_HEAD, ...)
+  // that ordinary git operations from inside the worktree need to make.
+  if (gitCommonDir) {
+    args.push('--bind', gitCommonDir, gitCommonDir);
+  }
 
   // Orchestrator sessions only: overlay a ro-bind of the freshly generated
   // (template + saved per-project custom instructions, merged host-side on
@@ -1159,7 +1171,11 @@ export function buildMinimalSandboxSpawn({ cwd, targetCommand }) {
 //                 saved custom instructions) CLAUDE.md/AGENTS.md content to
 //                 ro-bind over cwd's copies (combo orchestrator sessions
 //                 only). null for regular sessions and workers.
-export function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, mcpSocketPath = null, notifySocketPath = null, usageSocketPath = null, reuseSandboxHome = true, orchestratorClaudeMdSrc = null }) {
+//   gitCommonDir - absolute path of cwd's git-common-dir (see worktree.js's
+//                 resolveMemberWorktree), bound into the sandbox alongside
+//                 cwd when cwd is a git worktree whose real .git lives
+//                 elsewhere. null for regular sessions and non-worktree cwds.
+export function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, mcpSocketPath = null, notifySocketPath = null, usageSocketPath = null, reuseSandboxHome = true, orchestratorClaudeMdSrc = null, gitCommonDir = null }) {
   const { docker: cfgDocker, persistentHome, gpg: cfgGpg, sshAgent: cfgSshAgent, gitBroker: gitBrokerEnabled, binds, env, claudeBin } = loadSandboxConfig();
   const docker = cfgDocker && dockerSandboxAvailable();
   const gpg = sandboxOpts?.gpg ?? cfgGpg;
@@ -1223,7 +1239,7 @@ export function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, mcpSoc
   }
 
   const { command, installDir } = resolveApp(app, claudeBin);
-  const bwrapArgs = buildBwrapArgs({ cwd, docker, gpg, extraBinds: binds, extraEnv: env, authSock, stateDir, claudeDir: installDir, gitBroker, mcpSocketPath, notifySocketPath, usageSocketPath, homeDir, orchestratorClaudeMdSrc });
+  const bwrapArgs = buildBwrapArgs({ cwd, docker, gpg, extraBinds: binds, extraEnv: env, authSock, stateDir, claudeDir: installDir, gitBroker, mcpSocketPath, notifySocketPath, usageSocketPath, homeDir, orchestratorClaudeMdSrc, gitCommonDir });
   const innerCmd = [BASH, '/ccserver-sandbox-entrypoint.sh', ...withClaude(targetCommand, command)];
 
   const gitBrokerFields = {

@@ -14,7 +14,7 @@ import { sandboxRoute } from './routes/sandbox.js';
 import { sandboxesRoute } from './routes/sandboxes.js';
 import { terminalWs } from './ws/terminal.js';
 import { gracefulShutdown, restoreSchedules } from './ws/sessionManager.js';
-import { restoreGroups } from './ws/groupManager.js';
+import { restoreGroups, detectOrphanWorktrees } from './ws/groupManager.js';
 import { restoreNotify, ensureNotifyBroker, stopNotifyBroker, notifyEnabled } from './ws/notify.js';
 import { ensureUsageBroker, stopUsageBroker, usageEnabled } from './ws/usageMcp.js';
 import { warmUsage } from './usage.js';
@@ -116,6 +116,18 @@ try {
   }
 } catch (err) {
   fastify.log.error({ err }, 'Failed to restore combo groups');
+}
+
+// Diagnostic-only scan (never deletes) for worktree directories left behind
+// by a removal that failed, or a crash between creation and persistence --
+// see groupManager.detectOrphanWorktrees / plan section 3.7-3.
+try {
+  const orphans = detectOrphanWorktrees();
+  if (orphans.length) {
+    fastify.log.warn(`Found ${orphans.length} orphaned worktree director${orphans.length === 1 ? 'y' : 'ies'} (see warnings above); not removed automatically`);
+  }
+} catch (err) {
+  fastify.log.error({ err }, 'Failed to scan for orphaned worktrees');
 }
 
 try {

@@ -480,11 +480,30 @@ test('waitForHandoff: a handoff that arrives while waiting resolves immediately'
   assert.equal(ev.summary, 'late arrival');
 });
 
-test('openTab: cwd outside the group project dir is refused before any spawn', async () => {
+// Superseded by the worktree feature (plan section 3.3): cwd is no longer a
+// caller-controlled input at all, so there is nothing left to validate here
+// -- the server always resolves its own cwd for the role (its own git
+// worktree, or the shared project cwd for a non-git project) and any wire
+// value, valid or not, is simply ignored.
+test('openTab: the cwd argument is accepted but never reaches session creation', async () => {
   const g = await makeGroupAsync();
   groupManager.registerMember(g, 'workerA', 'sess-a1');
-  const res = await tools.openTab(controlDeps(g), { role: 'workerC', app: 'claude', cwd: '/somewhere/else' });
-  assert.equal(res.error, 'cwd-not-allowed');
+  let seenOpts = null;
+  const fake = {
+    getSession: () => null,
+    createSession: (opts) => { seenOpts = opts; return { sessionId: 'sess-c', session: {} }; },
+    destroySession: () => {},
+    writeToSession: () => false,
+  };
+  groupManager.setSessionApiForTests(fake);
+  try {
+    const res = await tools.openTab(controlDeps(g), { role: 'workerC', app: 'claude', cwd: '/somewhere/else' });
+    assert.equal(res.error, undefined, res.message || '');
+    assert.notEqual(seenOpts.cwd, '/somewhere/else', 'the wire cwd argument must never reach session creation');
+    assert.equal(res.cwd, seenOpts.cwd, 'the tool result reports the cwd the server actually resolved');
+  } finally {
+    groupManager.setSessionApiForTests(null);
+  }
 });
 
 test('openTab: invalid app is refused', async () => {
@@ -1056,6 +1075,48 @@ test('stripAnsi: removes common escape sequences', () => {
   assert.equal(tools.stripAnsi('\x1b[31mred\x1b[0m text'), 'red text');
   assert.equal(tools.stripAnsi('\x1b]0;title\x07hi'), 'hi');
   assert.equal(tools.stripAnsi('plain'), 'plain');
+});
+
+// --- publish_doc / fetch_doc / list_docs (worker<->worker handoff, plan
+// section 7) -----------------------------------------------------------------
+
+test('publishDoc: the publisher is deps.role (handoff server), never wire input', async () => {
+  const g = await makeGroupAsync();
+  const res = tools.publishDoc(handoffDeps(g, 'workerA', 'sess-a1'), { key: 'plan', content: '# plan' });
+  assert.equal(res.ok, true);
+  assert.equal(res.publishedBy, 'workerA');
+});
+
+test('fetchDoc/listDocs: a document published by one worker is visible to another worker and to the orchestrator (control socket)', async () => {
+  const g = await makeGroupAsync();
+  tools.publishDoc(handoffDeps(g, 'workerA', 'sess-a1'), { key: 'plan', content: 'the plan body' });
+
+  // Another worker's handoff socket can fetch/list it too.
+  const fromWorkerB = tools.fetchDoc(handoffDeps(g, 'workerB', 'sess-b1'), { key: 'plan' });
+  assert.equal(fromWorkerB.content, 'the plan body');
+  assert.equal(fromWorkerB.publishedBy, 'workerA');
+
+  // The control socket (orchestrator) has fetch_doc/list_docs too, but no
+  // publish_doc -- see mcpServer.js's buildControlMcpServer.
+  const fromControl = tools.fetchDoc(controlDeps(g), { key: 'plan' });
+  assert.equal(fromControl.content, 'the plan body');
+  const listed = tools.listDocs(controlDeps(g));
+  assert.deepEqual(listed.docs.map((d) => d.key), ['plan']);
+  assert.equal(listed.docs[0].content, undefined);
+});
+
+test('fetchDoc: an unpublished key is a clean not-found', async () => {
+  const g = await makeGroupAsync();
+  const res = tools.fetchDoc(controlDeps(g), { key: 'nope' });
+  assert.equal(res.error, 'not-found');
+});
+
+test('publishDoc/fetchDoc/listDocs are scoped per group: a document in one group is invisible from another', async () => {
+  const g1 = await makeGroupAsync();
+  const g2 = await makeGroupAsync();
+  tools.publishDoc(handoffDeps(g1, 'workerA', 'sess-a1'), { key: 'plan', content: 'group 1 plan' });
+  assert.equal(tools.fetchDoc(controlDeps(g2), { key: 'plan' }).error, 'not-found');
+  assert.deepEqual(tools.listDocs(controlDeps(g2)).docs, []);
 });
 
 // --- repo_info (Issue: orchestrator repo-facts tool) -----------------------
