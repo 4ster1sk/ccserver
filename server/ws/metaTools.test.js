@@ -276,13 +276,19 @@ test('launch_group caps the group flags and each worker spec\'s sandboxOpts', as
       { role: 'workerB', app: 'codex', sandboxOpts: { gpg: true, sshAgent: false } },
     ],
     instructions: 'do things',
+    orchestratorApp: 'opencode',
+    orchestratorModel: 'm2',
     sandboxOpts: { gpg: true, sshAgent: true },
   });
   const body = deps.calls.launchedGroups[0];
   assert.deepEqual(body.sandboxOpts, { gpg: false, sshAgent: true });
   assert.deepEqual(body.workers[0].sandboxOpts, { gpg: false, sshAgent: true }); // gpg downgraded
   assert.deepEqual(body.workers[1].sandboxOpts, { gpg: false, sshAgent: false });
-  assert.deepEqual(body.orchestrator, { instructions: 'do things' }, 'instructions ride the orchestrator spec');
+  assert.deepEqual(
+    body.orchestrator,
+    { app: 'opencode', model: 'm2', instructions: 'do things' },
+    'orchestratorApp/orchestratorModel/instructions all ride the orchestrator spec -- these must reach launch_group\'s own wire schema too, not just launch_from_preset\'s',
+  );
   assert.equal(body.instructions, undefined, 'top-level instructions must never be sent (route ignores it)');
   assert.equal(out.groupId, 'g-new');
 

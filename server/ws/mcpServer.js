@@ -464,7 +464,7 @@ export function buildMetaMcpServer(deps) {
   );
   server.tool(
     'launch_group',
-    'Launch a combo group (N workers + an auto-created orchestrator) at an absolute cwd. Same canonical payload as POST /api/groups: workers 1-7 with unique roles starting "worker"; copilot is refused. Returns groupId + members.',
+    'Launch a combo group (N workers + an auto-created orchestrator) at an absolute cwd. Same canonical payload as POST /api/groups: workers 1-7 with unique roles starting "worker"; copilot is refused. orchestratorApp/orchestratorModel select the orchestrator\'s own app/model (omitted -> claude / group default, same as leaving orchestrator out of the REST payload). Returns groupId + members.',
     {
       cwd: z.string(),
       workers: z.array(z.object({
@@ -475,6 +475,8 @@ export function buildMetaMcpServer(deps) {
         sandboxOpts: z.object({ gpg: z.boolean().optional(), sshAgent: z.boolean().optional() }).optional(),
       })).min(1).max(7),
       instructions: z.string().nullable().optional(),
+      orchestratorApp: z.enum(['claude', 'opencode', 'codex']).optional(),
+      orchestratorModel: z.string().nullable().optional(),
       sandboxOpts: z.object({ gpg: z.boolean().optional(), sshAgent: z.boolean().optional() }).optional(),
     },
     async (args) => text(await metaTools.launchGroup(deps, args)),
