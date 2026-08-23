@@ -30,8 +30,13 @@ import { createSession, getSession } from '../ws/sessionManager.js';
 import { sandboxAvailable } from '../ws/sandbox.js';
 import { isValidApp } from '../ws/appLaunch.js';
 import { projectHashForCwd } from '../ws/projectHash.js';
+import { normalizePresetInput } from '../ws/workerPresets.js';
 
 const ORCHESTRATOR_ROOT = join(homedir(), '.local', 'share', 'ccserver-sandbox', 'orchestrator');
+
+// Initial workers per group: MAX_GROUP_MEMBERS includes the orchestrator, so
+// the canonical workers[] payload accepts at most that many minus one.
+export const MAX_WORKERS = groupManager.MAX_GROUP_MEMBERS - 1;
 
 // The orchestrator dir is derived deterministically from the project path
 // (not the random groupId), so it can be reused as the orchestrator's cwd
@@ -77,6 +82,67 @@ function memberSpecFromBody(spec) {
       : null;
   }
   return result;
+}
+
+// Canonical initial-member normalization for POST /groups (pure; exported for
+// tests).
+//
+// `workers` present -> the canonical path: a validated snapshot array of
+// { name?, role, app?, model?, sandboxOpts? } entries. Validation reuses the
+// preset input rules so a preset and its expanded snapshot can never diverge;
+// name/app stay optional there (absent -> null -> role label / defaultApp),
+// while an explicit copilot or unknown app is refused exactly like here.
+//
+// `workers` absent -> the legacy adapter: workerA/workerB specs through
+// memberSpecFromBody, wrapped as the same two-element shape. Existing
+// clients, E2E and external API callers keep working unchanged.
+export function normalizeWorkers(body) {
+  const hasOwn = (o, k) => Object.prototype.hasOwnProperty.call(o || {}, k);
+  const workersRaw = body?.workers;
+
+  if (workersRaw !== undefined && workersRaw !== null) {
+    if (!Array.isArray(workersRaw)) {
+      return { error: 'workers must be an array' };
+    }
+    if (workersRaw.length < 1) {
+      return { error: 'workers must contain at least one worker' };
+    }
+    if (workersRaw.length > MAX_WORKERS) {
+      return { error: `too many workers (max ${MAX_WORKERS}; groups are capped at ${groupManager.MAX_GROUP_MEMBERS} members including the orchestrator)` };
+    }
+    const seen = new Set();
+    const out = [];
+    for (const [i, raw] of workersRaw.entries()) {
+      const src = raw && typeof raw === 'object' ? raw : {};
+      const n = normalizePresetInput(src, { allowMissingName: true, allowMissingApp: true });
+      if (!n.ok) {
+        return { error: `workers[${i}]: ${n.errors.join('; ')}` };
+      }
+      if (seen.has(n.value.role)) {
+        return { error: `duplicate worker role: ${n.value.role}` };
+      }
+      seen.add(n.value.role);
+      const spec = {};
+      if (hasOwn(src, 'name')) spec.name = n.value.name;
+      if (hasOwn(src, 'app')) spec.app = n.value.app;
+      if (hasOwn(src, 'model')) spec.model = n.value.model;
+      if (hasOwn(src, 'sandboxOpts')) {
+        spec.sandboxOpts = src.sandboxOpts && typeof src.sandboxOpts === 'object'
+          ? { gpg: !!src.sandboxOpts.gpg, sshAgent: !!src.sandboxOpts.sshAgent }
+          : null;
+      }
+      out.push({ role: n.value.role, spec });
+    }
+    return { workers: out };
+  }
+
+  // Legacy payload: fixed workerA/workerB tuple, presence-based member specs.
+  return {
+    workers: [
+      { role: 'workerA', spec: memberSpecFromBody(body?.workerA) },
+      { role: 'workerB', spec: memberSpecFromBody(body?.workerB) },
+    ],
+  };
 }
 
 // Session options for the orchestrator-restart route. Extracted (and pure)
@@ -128,20 +194,26 @@ export async function groupsRoute(fastify, opts) {
       return reply.code(400).send({ error: 'combo launch requires the sandbox (bwrap not found on this host)' });
     }
 
-    const workerA = memberSpecFromBody(body.workerA);
-    const workerB = memberSpecFromBody(body.workerB);
+    // Canonical workers[] snapshot or the legacy workerA/workerB adapter --
+    // see normalizeWorkers above.
+    const workersNorm = normalizeWorkers(body);
+    if (workersNorm.error) {
+      return reply.code(400).send({ error: workersNorm.error });
+    }
+    const { workers } = workersNorm;
     const orchestrator = memberSpecFromBody(body.orchestrator);
     // copilot has no CLI-arg/env MCP injection (config-file only), so combo
     // members can never use the group's broker tools -- refuse it explicitly
-    // here. Codex supports process-scoped -c MCP overrides.
+    // here. Codex supports process-scoped -c MCP overrides. (The canonical
+    // path's whitelist already refused copilot inside normalizeWorkers; this
+    // also covers the legacy specs' "present but not a known app" shape.)
     const invalidApp = (spec) => Object.prototype.hasOwnProperty.call(spec || {}, 'app')
       && (!spec.app || spec.app === 'copilot');
-    if (invalidApp(workerA) || invalidApp(workerB) || invalidApp(orchestrator)) {
-      return reply.code(400).send({ error: 'workerA/workerB/orchestrator app must be claude, opencode, or codex (Copilot is not supported in groups)' });
+    if (workers.some(({ spec }) => invalidApp(spec)) || invalidApp(orchestrator)) {
+      return reply.code(400).send({ error: 'worker app must be claude, opencode, or codex (Copilot is not supported in groups)' });
     }
-    if ((Object.prototype.hasOwnProperty.call(workerA, 'model') && workerA.model === undefined)
-      || (Object.prototype.hasOwnProperty.call(workerB, 'model') && workerB.model === undefined)
-      || (Object.prototype.hasOwnProperty.call(orchestrator, 'model') && orchestrator.model === undefined)) {
+    const badModel = (spec) => Object.prototype.hasOwnProperty.call(spec || {}, 'model') && spec.model === undefined;
+    if (workers.some(({ spec }) => badModel(spec)) || badModel(orchestrator)) {
       return reply.code(400).send({ error: 'member model must be a string or null' });
     }
     const sandboxOpts = (body.sandboxOpts && typeof body.sandboxOpts === 'object')
@@ -167,6 +239,9 @@ export async function groupsRoute(fastify, opts) {
 
     // Broker start failures (socket path collision, permission errors, ...)
     // must surface as a launch error, not a silent "success".
+    // memberPrefs are seeded from the launch snapshot itself (role -> name/
+    // app/model/sandboxOpts), keyed by the workers' actual roles -- the
+    // fixed workerA/workerB pair is just the legacy adapter's two roles.
     try {
       await groupManager.createGroup({
         groupId,
@@ -176,7 +251,10 @@ export async function groupsRoute(fastify, opts) {
         orchestratorApp: orchestrator.app,
         orchestratorModel: orchestrator.model,
         orchestratorSandboxOpts: orchestrator.sandboxOpts ?? null,
-        memberPrefs: { workerA, workerB, orchestrator },
+        memberPrefs: {
+          ...Object.fromEntries(workers.map(({ role, spec }) => [role, spec])),
+          orchestrator,
+        },
         instructions,
       });
     } catch (err) {
@@ -215,9 +293,9 @@ export async function groupsRoute(fastify, opts) {
 
     // Workers reuse addMember (the open_tab path) so validation, channel
     // creation, session spawn and registration can't drift between the
-    // initial trio and later open_tab additions. Two workers in parallel.
+    // initial members and later open_tab additions. All workers in parallel.
     const workerResults = await Promise.all(
-      [['workerA', workerA], ['workerB', workerB]].map(async ([role, spec]) => ({
+      workers.map(async ({ role, spec }) => ({
         role,
         res: await groupManager.addMember(groupId, role, { ...spec, cwd }),
       })),
@@ -260,7 +338,7 @@ export async function groupsRoute(fastify, opts) {
     // not tear the half-built group (and its control broker) down.
     groupManager.markGroupAssembled(groupId);
 
-    fastify.log.info(`[groups] ${groupId} launched at ${cwd} (workers ${workerA.app || 'default'}/${workerB.app || 'default'}, orchestrator ${orchRes.session.app})`);
+    fastify.log.info(`[groups] ${groupId} launched at ${cwd} (workers ${workers.map(({ role, spec }) => `${role}:${spec.app || 'default'}`).join(', ')}, orchestrator ${orchRes.session.app})`);
     return {
       groupId,
       cwd,

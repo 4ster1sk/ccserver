@@ -99,7 +99,9 @@ const MAX_HANDOFF_QUEUE = 100;
 // Group size cap: an orchestrator (a live LLM, subject to prompt injection
 // via worker output) must not be able to spawn members without bound and
 // exhaust pty/sandbox/socket resources. Includes the orchestrator itself.
-const MAX_GROUP_MEMBERS = 8;
+// Exported: POST /groups' canonical workers[] validation derives its
+// "max initial workers" from it (cap minus one for the orchestrator).
+export const MAX_GROUP_MEMBERS = 8;
 
 const hasOwn = (obj, key) => Object.prototype.hasOwnProperty.call(obj || {}, key);
 
