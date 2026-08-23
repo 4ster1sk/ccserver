@@ -10,6 +10,7 @@ import { filesRoute } from './routes/files.js';
 import { systemRoute } from './routes/system.js';
 import { usageRoute } from './routes/usage.js';
 import { groupsRoute } from './routes/groups.js';
+import { workerPresetsRoute } from './routes/workerPresets.js';
 import { groupFilesRoute } from './routes/groupFiles.js';
 import { sandboxRoute } from './routes/sandbox.js';
 import { sandboxesRoute } from './routes/sandboxes.js';
@@ -20,6 +21,7 @@ import { restoreNotify, ensureNotifyBroker, stopNotifyBroker, notifyEnabled } fr
 import { ensureUsageBroker, stopUsageBroker, usageEnabled } from './ws/usageMcp.js';
 import { warmUsage } from './usage.js';
 import { warmCodexUsage } from './codexUsage.js';
+import { initDb, dbPath } from './db.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const fastify = Fastify({ logger: true });
@@ -48,6 +50,7 @@ await fastify.register(filesRoute, { prefix: '/api' });
 await fastify.register(systemRoute, { prefix: '/api' });
 await fastify.register(usageRoute, { prefix: '/api' });
 await fastify.register(groupsRoute, { prefix: '/api' });
+await fastify.register(workerPresetsRoute, { prefix: '/api' });
 await fastify.register(groupFilesRoute, { prefix: '/api' });
 await fastify.register(sandboxRoute, { prefix: '/api' });
 await fastify.register(sandboxesRoute, { prefix: '/api' });
@@ -74,6 +77,18 @@ const cleanup = () => {
 };
 process.on('SIGTERM', cleanup);
 process.on('SIGINT', cleanup);
+
+// SQLite (worker presets today, more stores in later phases): open + migrate
+// before the server accepts connections. A failed migration refuses boot with
+// a clear log instead of a systemd Restart=on-failure loop -- fail fast by
+// design (see db.js).
+try {
+  initDb();
+  fastify.log.info(`SQLite database ready at ${dbPath()}`);
+} catch (err) {
+  fastify.log.error({ err }, `Failed to initialize SQLite database (${dbPath()}): ${err.message}`);
+  process.exit(1);
+}
 
 const PORT = process.env.PORT || 3001;
 
