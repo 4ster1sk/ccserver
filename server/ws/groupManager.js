@@ -87,8 +87,10 @@ const groups = new Map(); // groupId -> group (see createGroup)
 // Roles an orchestrator may open via open_tab: workerA/workerB plus any
 // similarly-shaped worker role (workerC, worker-extra, ...). The
 // orchestrator's own role is deliberately excluded -- an orchestrator must
-// never be able to spawn/replace "itself".
-const WORKER_ROLE_RE = /^worker[A-Za-z0-9_-]+$/;
+// never be able to spawn/replace "itself". Shared (exported, never copied)
+// with worker preset validation and POST /groups' workers[] normalization,
+// so a preset role is always a role addMember() will accept.
+export const WORKER_ROLE_RE = /^worker[A-Za-z0-9_-]+$/;
 
 // FIFO handoff queue cap: workers pushing while the orchestrator is gone must
 // not grow the queue without bound.
@@ -109,6 +111,17 @@ function normalizeModel(model) {
   return typeof model === 'string' && model.length > 0 ? model : null;
 }
 
+// Optional display name ("実装担当") kept alongside a member's technical role.
+// Same shape rules as workerPresets' name field, but silent: memberPrefs
+// arrive from already-validated launch paths (POST /groups' workers[]) or MCP
+// calls, and a display-name typo must never fail a launch -- an invalid value
+// simply degrades to null (the UI falls back to showing the role).
+function normalizeDisplayName(name) {
+  if (typeof name !== 'string') return null;
+  const t = name.trim();
+  return t && t.length <= 80 && !/[\u0000-\u001f\u007f]/.test(t) ? t : null;
+}
+
 function normalizeSandboxOpts(opts) {
   if (!opts || typeof opts !== 'object') return null;
   return { gpg: !!opts.gpg, sshAgent: !!opts.sshAgent };
@@ -116,12 +129,13 @@ function normalizeSandboxOpts(opts) {
 
 function normalizeMemberPref(pref, fallback = {}) {
   const source = pref && typeof pref === 'object' ? pref : {};
+  const name = hasOwn(source, 'name') ? normalizeDisplayName(source.name) : normalizeDisplayName(fallback.name);
   const app = isValidApp(source.app) ? source.app : (isValidApp(fallback.app) ? fallback.app : null);
   const model = hasOwn(source, 'model') ? normalizeModel(source.model) : normalizeModel(fallback.model);
   const sandboxOpts = hasOwn(source, 'sandboxOpts')
     ? normalizeSandboxOpts(source.sandboxOpts)
     : normalizeSandboxOpts(fallback.sandboxOpts);
-  return { app, model, sandboxOpts };
+  return { name, app, model, sandboxOpts };
 }
 
 function normalizeMemberPrefs(memberPrefs, legacyOrchestratorApp = null, groupSandboxOpts = null) {
@@ -330,6 +344,9 @@ export function listGroupMembers(groupId) {
     out.push({
       role,
       sessionId,
+      // Display name chosen at launch (from a worker preset snapshot);
+      // null for legacy members -- the UI falls back to the role label.
+      name: group.memberPrefs[role]?.name ?? null,
       app: session?.app ?? saved?.app ?? group.memberPrefs[role]?.app ?? null,
       model: session?.model ?? saved?.model ?? group.memberPrefs[role]?.model ?? null,
       cwd: session?.cwd ?? saved?.cwd ?? null,
@@ -892,7 +909,17 @@ export async function addMember(groupId, role, options = {}) {
   // New member is fully in place -- only now retire the previous occupant.
   if (prevSessionId) sessionApi.destroySession(prevSessionId, { keepSchedule: false });
   registerMember(groupId, role, res.sessionId);
-  group.memberPrefs[role] = { app, model, sandboxOpts: normalizeSandboxOpts(sandboxOpts) };
+  // normalizeMemberPref's fallback merge keeps a display name across open_tab
+  // replacements unless the call explicitly passes a new one.
+  group.memberPrefs[role] = normalizeMemberPref(
+    {
+      app,
+      model,
+      sandboxOpts,
+      ...(hasOwn(options, 'name') ? { name: options.name } : {}),
+    },
+    group.memberPrefs[role] || {},
+  );
   if (role === 'orchestrator') {
     group.orchestratorApp = app;
     group.orchestratorModel = model;

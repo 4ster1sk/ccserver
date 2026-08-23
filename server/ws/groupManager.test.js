@@ -788,9 +788,9 @@ test('createGroup persists memberPrefs for all three roles; workers fall back to
   groupsToDestroy.push(gid);
 
   const prefs = groupManager.getMemberPrefs(gid);
-  assert.deepEqual(prefs.workerA, { app: 'opencode', model: 'gpt-5', sandboxOpts: { gpg: false, sshAgent: true } });
-  assert.deepEqual(prefs.workerB, { app: 'claude', model: null, sandboxOpts: null });
-  assert.deepEqual(prefs.orchestrator, { app: 'claude', model: 'gpt-5', sandboxOpts: null });
+  assert.deepEqual(prefs.workerA, { name: null, app: 'opencode', model: 'gpt-5', sandboxOpts: { gpg: false, sshAgent: true } });
+  assert.deepEqual(prefs.workerB, { name: null, app: 'claude', model: null, sandboxOpts: null });
+  assert.deepEqual(prefs.orchestrator, { name: null, app: 'claude', model: 'gpt-5', sandboxOpts: null });
 
   const group = groupManager.getGroup(gid);
   assert.equal(group.orchestratorApp, 'claude');
@@ -799,21 +799,21 @@ test('createGroup persists memberPrefs for all three roles; workers fall back to
   // The persisted file carries memberPrefs (survives a restart).
   const saved = JSON.parse(readFileSync(process.env.CCSERVER_GROUPS_PATH, 'utf-8'));
   const entry = saved.find((g) => g.id === gid);
-  assert.deepEqual(entry.memberPrefs.workerA, { app: 'opencode', model: 'gpt-5', sandboxOpts: { gpg: false, sshAgent: true } });
+  assert.deepEqual(entry.memberPrefs.workerA, { name: null, app: 'opencode', model: 'gpt-5', sandboxOpts: { gpg: false, sshAgent: true } });
 });
 
 test('memberPrefs defaults: omitted worker sandboxOpts inherit the group flags, orchestrator has none', async () => {
   const gid = await makeGroup();
   const prefs = groupManager.getMemberPrefs(gid);
   // Default group has no sandboxOpts, so workers fall back to null.
-  assert.deepEqual(prefs.workerA, { app: null, model: null, sandboxOpts: null });
-  assert.deepEqual(prefs.orchestrator, { app: null, model: null, sandboxOpts: null });
+  assert.deepEqual(prefs.workerA, { name: null, app: null, model: null, sandboxOpts: null });
+  assert.deepEqual(prefs.orchestrator, { name: null, app: null, model: null, sandboxOpts: null });
 });
 
 test('setMemberPrefs updates a role and keeps orchestratorApp/orchestratorModel in sync', async () => {
   const gid = await makeGroup();
   assert.equal(groupManager.setMemberPrefs(gid, 'workerA', { app: 'opencode', model: 'gpt-5' }), true);
-  assert.deepEqual(groupManager.getMemberPrefs(gid, 'workerA'), { app: 'opencode', model: 'gpt-5', sandboxOpts: null });
+  assert.deepEqual(groupManager.getMemberPrefs(gid, 'workerA'), { name: null, app: 'opencode', model: 'gpt-5', sandboxOpts: null });
 
   groupManager.setMemberPrefs(gid, 'orchestrator', { app: 'opencode', model: 'claude-opus', sandboxOpts: { gpg: true } });
   const group = groupManager.getGroup(gid);
@@ -873,9 +873,9 @@ test('restoreGroups: persisted memberPrefs round-trip (model preserved)', async 
 
   groupManager.restoreGroups();
   const prefs = groupManager.getMemberPrefs(gid);
-  assert.deepEqual(prefs.workerA, { app: 'opencode', model: 'gpt-5', sandboxOpts: { gpg: false, sshAgent: true } });
-  assert.deepEqual(prefs.workerB, { app: 'claude', model: null, sandboxOpts: null });
-  assert.deepEqual(prefs.orchestrator, { app: 'claude', model: 'gpt-5', sandboxOpts: null });
+  assert.deepEqual(prefs.workerA, { name: null, app: 'opencode', model: 'gpt-5', sandboxOpts: { gpg: false, sshAgent: true } });
+  assert.deepEqual(prefs.workerB, { name: null, app: 'claude', model: null, sandboxOpts: null });
+  assert.deepEqual(prefs.orchestrator, { name: null, app: 'claude', model: 'gpt-5', sandboxOpts: null });
 });
 
 test('restoreGroups: open_tab-created extra roles keep their memberPrefs (workerC survives restart)', async () => {
@@ -902,7 +902,7 @@ test('restoreGroups: open_tab-created extra roles keep their memberPrefs (worker
 
   groupManager.restoreGroups();
   const prefs = groupManager.getMemberPrefs(gid);
-  assert.deepEqual(prefs.workerC, { app: 'opencode', model: 'gpt-5', sandboxOpts: { gpg: false, sshAgent: true } },
+  assert.deepEqual(prefs.workerC, { name: null, app: 'opencode', model: 'gpt-5', sandboxOpts: { gpg: false, sshAgent: true } },
     'a non-fixed-trio worker role must not lose its preference on restore');
   assert.ok('workerA' in prefs, 'the fixed trio is still normalized');
 });
@@ -956,7 +956,7 @@ test('addMember resolves options by precedence: explicit > memberPrefs > default
     const failing = { getSession: () => null, createSession: () => ({ error: 'boom' }), destroySession: () => {}, writeToSession: () => false };
     groupManager.setSessionApiForTests(failing);
     await groupManager.addMember(gid, 'workerA', { app: 'claude', model: 'claude-sonnet', cwd: '/srv/proj' });
-    assert.deepEqual(groupManager.getMemberPrefs(gid, 'workerA'), { app: 'claude', model: null, sandboxOpts: { gpg: false, sshAgent: true } }, 'failed spawn must leave the old preference untouched');
+    assert.deepEqual(groupManager.getMemberPrefs(gid, 'workerA'), { name: null, app: 'claude', model: null, sandboxOpts: { gpg: false, sshAgent: true } }, 'failed spawn must leave the old preference untouched');
   } finally {
     groupManager.setSessionApiForTests(null);
     groupManager.destroyGroup(gid);
@@ -975,7 +975,7 @@ test('addMember stores the effective launch data as the role preference (atomic 
   try {
     const res = await groupManager.addMember(gid, 'workerA', { app: 'opencode', model: 'gpt-5', cwd: '/srv/proj', sandboxOpts: { gpg: true } });
     assert.equal(res.error, undefined);
-    assert.deepEqual(groupManager.getMemberPrefs(gid, 'workerA'), { app: 'opencode', model: 'gpt-5', sandboxOpts: { gpg: true, sshAgent: false } });
+    assert.deepEqual(groupManager.getMemberPrefs(gid, 'workerA'), { name: null, app: 'opencode', model: 'gpt-5', sandboxOpts: { gpg: true, sshAgent: false } });
   } finally {
     groupManager.setSessionApiForTests(null);
     groupManager.destroyGroup(gid);
@@ -1039,4 +1039,71 @@ test('generateOrchestratorClaudeMdSrc: same orchestratorDir -> same path, regene
 
 test('generateOrchestratorClaudeMdSrc: unknown groupId returns null', () => {
   assert.equal(groupManager.generateOrchestratorClaudeMdSrc(randomUUID()), null);
+});
+
+test('an arbitrary worker role keeps its display name in memberPrefs, persistence and listGroupMembers', async () => {
+  const gid = randomUUID();
+  await groupManager.createGroup({
+    groupId: gid,
+    cwd: '/srv/proj',
+    orchestratorDir: join(runtimeDir, gid),
+    // POST /groups' workers[] path passes name/app/model/sandboxOpts keyed by
+    // the (arbitrary) worker role.
+    memberPrefs: {
+      workerImplement: { name: '実装担当', app: 'codex', model: 'gpt-5.4', sandboxOpts: null },
+      orchestrator: { app: 'claude', model: null, sandboxOpts: null },
+    },
+  });
+  groupsToDestroy.push(gid);
+  groupManager.registerMember(gid, 'workerImplement', 'sess-impl');
+
+  const member = groupManager.listGroupMembers(gid).find((m) => m.role === 'workerImplement');
+  assert.equal(member.name, '実装担当');
+
+  const saved = JSON.parse(readFileSync(process.env.CCSERVER_GROUPS_PATH, 'utf-8'));
+  const entry = saved.find((g) => g.id === gid);
+  assert.equal(entry.memberPrefs.workerImplement.name, '実装担当', 'display name persisted');
+
+  // setMemberPrefs without a name keeps the existing one (fallback merge).
+  groupManager.setMemberPrefs(gid, 'workerImplement', { app: 'claude', model: null, sandboxOpts: null });
+  assert.equal(groupManager.getMemberPrefs(gid, 'workerImplement').name, '実装担当');
+  // An explicit new name wins.
+  groupManager.setMemberPrefs(gid, 'workerImplement', { name: '実装二番手', app: 'claude' });
+  assert.equal(groupManager.getMemberPrefs(gid, 'workerImplement').name, '実装二番手');
+});
+
+test('restoreGroups: legacy records without a display name restore with name null (role fallback)', () => {
+  const gid = randomUUID();
+  const orchDir = join(runtimeDir, `orch-name-${gid}`);
+  writeFileSync(process.env.CCSERVER_GROUPS_PATH, JSON.stringify([{
+    id: gid,
+    createdAt: 1,
+    cwd: '/srv/proj',
+    allowedCwds: ['/srv/proj'],
+    orchestratorDir: orchDir,
+    members: { workerA: 'dead-a' },
+    memberPrefs: { workerA: { app: 'opencode', model: null, sandboxOpts: null } },
+  }]));
+  const info = groupManager.restoreGroups();
+  assert.ok(info.ids.includes(gid));
+  const member = groupManager.listGroupMembers(gid).find((m) => m.role === 'workerA');
+  assert.equal(member.name, null, 'no name in the old record -> null, UI shows the role');
+  assert.equal(member.app, 'opencode');
+});
+
+test('restoreGroups: a persisted display name survives a restart for arbitrary roles', () => {
+  const gid = randomUUID();
+  const orchDir = join(runtimeDir, `orch-name2-${gid}`);
+  writeFileSync(process.env.CCSERVER_GROUPS_PATH, JSON.stringify([{
+    id: gid,
+    createdAt: 1,
+    cwd: '/srv/proj',
+    allowedCwds: ['/srv/proj'],
+    orchestratorDir: orchDir,
+    members: { workerReview: 'dead-r' },
+    memberPrefs: { workerReview: { name: 'レビュー担当', app: 'claude', model: 'm', sandboxOpts: null } },
+  }]));
+  groupManager.restoreGroups();
+  const member = groupManager.listGroupMembers(gid).find((m) => m.role === 'workerReview');
+  assert.equal(member.name, 'レビュー担当');
 });
