@@ -1,8 +1,10 @@
 // Settings page sandbox management: GET /api/sandboxes lists created
-// persistent sandboxes (name/real-path/size/inUse); DELETE /api/sandboxes/:name
-// removes the HOME + matching docker data-root and clears the index entry.
-// The in-use (409) branch depends on live sessions (covered by the pure
-// sandboxHomeConflict tests); here we exercise the filesystem-backed paths.
+// persistent sandboxes (name/real-path/size/inUse, plus `deleting` /
+// `deleteError` while a removal is in flight or just failed); DELETE
+// /api/sandboxes/:name answers 204 immediately and removes the HOME +
+// matching docker data-root in the background. The in-use (409),
+// dockerd-lock (409) and already-in-flight (409) branches are checked
+// synchronously; here we exercise the filesystem-backed paths.
 
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
@@ -12,7 +14,7 @@ import { spawn, spawnSync, execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { sandboxesRoute } from './sandboxes.js';
-import { sandboxHomeRoot } from '../ws/sandbox.js';
+import { sandboxHomeRoot, clearSandboxSizeCache, beginSandboxDelete, endSandboxDelete } from '../ws/sandbox.js';
 
 let tmpRoot;
 let app;
@@ -31,12 +33,23 @@ async function del(name) {
   return app.inject({ method: 'DELETE', url: `/api/sandboxes/${name}` });
 }
 
+async function waitFor(fn, timeoutMs = 5000) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const value = await fn();
+    if (value) return value;
+    if (Date.now() > deadline) throw new Error('waitFor: timed out');
+    await new Promise((r) => setTimeout(r, 25));
+  }
+}
+
 before(async () => {
   tmpRoot = mkdtempSync(join(tmpdir(), 'ccserver-sandboxes-'));
   process.env.CCSERVER_SANDBOX_HOME_ROOT = join(tmpRoot, 'home');
   process.env.CCSERVER_SANDBOX_DIND_ROOT = join(tmpRoot, 'dind');
   mkdirSync(join(tmpRoot, 'home'), { recursive: true });
   mkdirSync(join(tmpRoot, 'dind'), { recursive: true });
+  clearSandboxSizeCache();
   app = Fastify();
   await app.register(sandboxesRoute, { prefix: '/api' });
 });
@@ -44,12 +57,34 @@ before(async () => {
 after(async () => {
   delete process.env.CCSERVER_SANDBOX_HOME_ROOT;
   delete process.env.CCSERVER_SANDBOX_DIND_ROOT;
+  clearSandboxSizeCache();
   try { await app.close(); } catch { /* ignore */ }
   try { rmSync(tmpRoot, { recursive: true, force: true }); } catch { /* ignore */ }
 });
 
 test('GET /api/sandboxes: empty when no sandboxes exist', async () => {
   assert.deepEqual(await list(), []);
+});
+
+test('GET /api/sandboxes serves sizes from a short-TTL cache', async () => {
+  const cwd = '/srv/cached';
+  const slug = slugFromCwd(cwd);
+  clearSandboxSizeCache();
+  const dir = join(sandboxHomeRoot(), slug);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, 'blob'), 'c'.repeat(1024));
+  try {
+    const first = (await list()).find((s) => s.name === slug);
+    assert.ok(first.size >= 1024, 'first read measures the directory');
+    // Grow the tree: within the TTL the next read still reports the memoized
+    // size instead of re-running du (which would report the larger value).
+    writeFileSync(join(dir, 'blob2'), 'd'.repeat(4096));
+    const second = (await list()).find((s) => s.name === slug);
+    assert.equal(second.size, first.size, 'second read within the TTL is served from the cache');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    clearSandboxSizeCache();
+  }
 });
 
 test('GET /api/sandboxes: lists created sandboxes with real path, size and inUse', async () => {
@@ -87,10 +122,9 @@ test('DELETE /api/sandboxes/:name removes the HOME, matching dind root and index
   writeFileSync(index, JSON.stringify({ [slug]: cwd }));
 
   const res = await del(slug);
-  assert.equal(res.statusCode, 200);
-  assert.equal(res.json().success, true);
-  assert.equal(existsSync(join(sandboxHomeRoot(), slug)), false, 'HOME removed');
-  assert.equal(existsSync(join(process.env.CCSERVER_SANDBOX_DIND_ROOT, slug)), false, 'docker data-root removed');
+  assert.equal(res.statusCode, 204, 'the request returns immediately');
+  await waitFor(() => !existsSync(join(sandboxHomeRoot(), slug))
+    && !existsSync(join(process.env.CCSERVER_SANDBOX_DIND_ROOT, slug)));
   const afterIndex = JSON.parse(readFileSync(index, 'utf-8'));
   assert.equal(afterIndex[slug], undefined, 'index entry cleared');
 });
@@ -124,16 +158,17 @@ test('DELETE /api/sandboxes/:name refuses while a dockerd holds the data-root lo
   }
 });
 
-test('DELETE /api/sandboxes/:name returns a clean error when the dind root cannot be removed', async (t) => {
+test('DELETE /api/sandboxes/:name surfaces a clean error through the list when the dind root cannot be removed', async (t) => {
   const cwd = '/srv/stuck';
   const slug = slugFromCwd(cwd);
   const dind = join(process.env.CCSERVER_SANDBOX_DIND_ROOT, slug);
   const snap = join(dind, 'snap');
   mkdirSync(snap, { recursive: true });
   writeFileSync(join(snap, 'layer'), 'x');
-  // A bind mount on an entry makes rmSync fail with EBUSY, like a live
+  // A bind mount on an entry makes the removal fail with EBUSY, like a live
   // container's overlayfs mountpoint -- every removal strategy must give up
-  // and surface a clean message instead of an opaque 500.
+  // and surface a clean message via GET's deleteError instead of an opaque
+  // Fastify 500 (the DELETE itself answers 204 immediately).
   let mounted = false;
   try {
     execFileSync('mount', ['--bind', snap, snap], { stdio: 'ignore' });
@@ -147,10 +182,15 @@ test('DELETE /api/sandboxes/:name returns a clean error when the dind root canno
       return;
     }
     const res = await del(slug);
-    assert.notEqual(res.statusCode, 200, 'deletion must not succeed while the root is stuck');
-    const body = res.json();
-    assert.ok(typeof body.error === 'string' && body.error.length > 0, 'a clean error message is present');
-    assert.notEqual(body.error, 'Internal Server Error', 'must not be the opaque Fastify 500');
+    assert.equal(res.statusCode, 204, 'the request returns immediately even though removal will fail');
+    const entry = await waitFor(async () => {
+      const found = (await list()).find((s) => s.name === slug);
+      return found && !found.deleting && found.deleteError ? found : null;
+    });
+    assert.ok(typeof entry.deleteError === 'string' && entry.deleteError.length > 0,
+      'a clean error message is exposed on the list');
+    assert.notEqual(entry.deleteError, 'Internal Server Error', 'must not be the opaque Fastify 500');
+    assert.equal(existsSync(dind), true, 'the stuck data-root is left in place for a retry');
   } finally {
     if (mounted) {
       try { execFileSync('umount', [snap], { stdio: 'ignore' }); } catch { /* ignore */ }
@@ -166,5 +206,76 @@ test('DELETE /api/sandboxes/:name refuses path-like names', async () => {
     const res = await del(bad);
     assert.ok(res.statusCode >= 400 && res.statusCode !== 200,
       `name ${JSON.stringify(bad)} must be rejected (got ${res.statusCode})`);
+  }
+});
+
+test('GET /api/sandboxes retires a synthesized error row once the leftovers are cleaned up manually', async (t) => {
+  const cwd = '/srv/manual-cleanup';
+  const slug = slugFromCwd(cwd);
+  const dind = join(process.env.CCSERVER_SANDBOX_DIND_ROOT, slug);
+  const snap = join(dind, 'snap');
+  mkdirSync(snap, { recursive: true });
+  writeFileSync(join(snap, 'layer'), 'x');
+  let mounted = false;
+  try {
+    try {
+      execFileSync('mount', ['--bind', snap, snap], { stdio: 'ignore' });
+      mounted = true;
+    } catch {
+      console.log('skipping: bind mounts unavailable');
+      return;
+    }
+    const res = await del(slug);
+    assert.equal(res.statusCode, 204);
+    await waitFor(async () => {
+      const found = (await list()).find((s) => s.name === slug);
+      return found && !found.deleting && found.deleteError ? found : null;
+    });
+    // Follow the error message's own instruction and remove the leftovers by
+    // hand: the phantom row must disappear from the list instead of lingering
+    // until restart.
+    execFileSync('umount', [snap], { stdio: 'ignore' });
+    mounted = false;
+    rmSync(dind, { recursive: true, force: true });
+    await waitFor(async () => !(await list()).some((s) => s.name === slug));
+  } finally {
+    if (mounted) {
+      try { execFileSync('umount', [snap], { stdio: 'ignore' }); } catch { /* ignore */ }
+    }
+    rmSync(dind, { recursive: true, force: true });
+  }
+});
+
+test('DELETE /api/sandboxes/:name refuses while a deletion of the same slug is already in flight', async () => {
+  const cwd = '/srv/inflight';
+  const slug = slugFromCwd(cwd);
+  const home = join(sandboxHomeRoot(), slug);
+  mkdirSync(join(home, 'data'), { recursive: true });
+  writeFileSync(join(home, 'data', 'keepme'), 'x');
+  beginSandboxDelete(slug); // simulate a background removal currently running
+  try {
+    const res = await del(slug);
+    assert.equal(res.statusCode, 409, 'a second kick must not race the running one');
+    assert.equal(existsSync(join(home, 'data', 'keepme')), true,
+      'the refused request must not have removed anything');
+  } finally {
+    endSandboxDelete(slug);
+  }
+});
+
+test('GET /api/sandboxes synthesizes a deleting row for an in-flight slug with no HOME left', async () => {
+  // Mid-deletion the HOME may already be gone (it is removed first): without
+  // synthesis the row would vanish and the client would stop polling.
+  const slug = slugFromCwd('/srv/ghost');
+  mkdirSync(join(sandboxHomeRoot(), slug), { recursive: true });
+  rmSync(join(sandboxHomeRoot(), slug), { recursive: true, force: true }); // ensure truly absent
+  beginSandboxDelete(slug);
+  try {
+    const entry = (await list()).find((s) => s.name === slug);
+    assert.ok(entry, 'the row stays visible while the deletion runs');
+    assert.equal(entry.deleting, true);
+    assert.equal(entry.deleteError, null);
+  } finally {
+    endSandboxDelete(slug);
   }
 });

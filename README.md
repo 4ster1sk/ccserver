@@ -178,6 +178,7 @@ OpenAI Codexについて:
 `notify.vikunja` (`baseUrl` https のみ + `apiToken`、両方必須) を設定すると、`notify` 呼び出し1回ごとに Vikunja タスクを作成/更新します (`server/ws/vikunjaClient.js`)。
 
 - **追跡単位**: `groupId` (無ければ `sessionId`) をキーに、進行中のタスク ID を `.saved-vikunja-tasks.json` (`.gitignore` 済み) に永続化します。identity が無い呼び出し (`groupId`/`sessionId` どちらも無し) は Vikunja 連携をスキップし、Discord/webhook のみ配送します。
+- **オーケストレーターの運用フロー (開始報告)**: コンボ起動のオーケストレーターは、人間から新しいタスクを引き受けたら作業投入の前に `notify({ title: '開始: <概要>', body: '<スコープ/分担>', level: 'info' })` を**タスクあたり1回だけ**呼びます (オーケストレーター注入テンプレート `server/ws/orchestrator-template.md` の Notification discipline に明記)。この初回 `info` がグループの追跡タスクを自動作成 (`status-running`) し、以後の通知は同一タスクへのコメントになり、完了時の `notify(success)` で done 化します。開始報告を省くとそのタスクは Vikunja 上で追跡されません。Vikunja 未設定環境では Discord/webhook 配送のみ行われます。
 - **初回**: 新規タスクを作成 (`title` = notify の `title`、`description` = `body` + 送信元フッター)。**2回目以降 (同じキー)**: タスクへコメントを1件追記 (`title` を先頭行、`body` を本文)。タスクの説明欄そのものは書き換えません。
 - **状態はラベルで表現** (`notify.vikunja.statusLabelPrefix`、既定 `status-`)。`success` の場合のみ Vikunja タスクを実際に `done: true` にします (`POST /tasks/{id}` の部分更新、title/description 等の他フィールドは変更しません)。それ以外のレベルでは done にせず、タスクの削除も行いません:
 
@@ -195,7 +196,7 @@ OpenAI Codexについて:
 
 ### 使用量 (Usage) ボタン
 
-画面上部タブバー右端の **Usage** ボタンから、Claude Code の `/usage` または Codex の利用率 (セッション/週次相当の利用率・リセット時刻・プラン) をポップオーバーで確認できます。ボタンには現在セッションの使用率が常時表示されます (opencode / copilot セッションでは非表示)。ポップオーバーは現在アクティブなタブのアプリ (claude / codex) の表示から開きますが、両方インストールされている場合はポップオーバー内の **Claude / Codex タブ** でいつでも切り替えられます (アクティブなタブとは独立)。
+画面上部タブバー右端の **Usage** ボタンから、Claude Code の `/usage` または Codex の利用率 (セッション/週次相当の利用率・リセット時刻・プラン) をポップオーバーで確認できます。ボタンには現在セッションの使用率と、現在表示中のアプリを示すバッジ (`(claude)` / `(codex)`) が常時表示されます (opencode / copilot セッションでは非表示)。ポップオーバーは現在アクティブなタブのアプリ (claude / codex) の表示から開きますが、両方インストールされている場合はポップオーバー内の **Claude / Codex タブ** でいつでも切り替えられます (アクティブなタブとは独立。バッジも切り替えに追従します)。
 
 - **Claude**: 裏側で `claude --ax-screen-reader` を短時間起動して `/usage` の描画をパースします (`/usage` の閲覧自体は API を消費しません)。
 - **Codex**: `codex app-server` を起動し、JSON-RPC (`account/rateLimits/read`) でレート制限のスナップショットを直接取得します。TUI 描画のスクレイピングではないため、起動待ちやプロジェクト信頼ダイアログのハンドリングは不要です。
@@ -264,6 +265,7 @@ OpenAI Codexについて:
 
 - **ハンドオフは失われません**: `wait_for_handoff` はタイムアウト (`{timedOut:true}`) 時に**そのままもう一度呼ぶだけで安全**です。誰も待っていない間に届いたハンドオフはキューに残り、また**待機中に接続が切れても**イベントを消費しないため、再接続後の次の `wait_for_handoff` が必ず受け取ります。サーバー再起動後も未受信ハンドオフは残っています。
 - **`read_output` の `screen` / `screenAlt` / `screenIdleMs` を使う**: ワーカーのスピナー等の動的描画はカーソル移動と行消去でその場を書き換えるため、生のバイト列 (`raw` / `text`) からは「今見えている画面」を復元できません。サーバーはセッションごとに軽量な仮想画面 (ANSI 解釈) を維持しており、`screen` が現在の可視画面、`screenIdleMs` が**画面が最後に変化してからの経過** (スピナーが回っていれば小さい値、静止プロンプトなら大きい値) です。stuck/busy 判定は `text` や `idleForMs` (バイトベース) よりこれらを優先してください。`get_tab_status` の `screenIdleMs` も同様です。
+- **通常の進捗確認は `wait_for_handoff` の待ち受けで行う (原則)**: `read_output` は進捗ポーリング用のツールではありません。`{timedOut:true}` 自体は異常ではなく (worker が単に長時間作業しているだけの可能性が高い)、そのまま再呼び出しするのが正規の待ち方です。`read_output` を許容するのは具体的な異常シグナルがある場合 (`wait_for_handoff` の連続タイムアウト目安2〜3回、稼働中のはずのメンバーの大きな `idleForMs` / 静止画面が `list_group_sessions` / `get_tab_status` で見つかった、ワーカー自身が異常を報告した) に限定され、その場合も**1回だけ**読んで判断します (`send_input` での nudge または待ち戻り)。この規律はオーケストレーター注入テンプレート (`orchestrator-template.md`) と control MCP の各ツール説明文に反映されています。
 
 #### オーケストレーターから見えるのは repo_info の基本情報だけ
 
