@@ -322,7 +322,9 @@ export default function GroupTabView({
         <div className="group-project-bar" title={groupCwd}>
           <span className="group-project-label">Project</span>
           <span className="group-project-path">{displayPath(groupCwd, homeDir)}</span>
-          {members.length > 0 && (
+          {/* Badge only when at least one worker exists: with every worker
+              removed the isolation claim would be about nobody. */}
+          {workers.length > 0 && (
             <span
               className={`group-project-badge${isShared ? ' shared' : ''}`}
               title={isShared
