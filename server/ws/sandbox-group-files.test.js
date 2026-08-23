@@ -1,7 +1,34 @@
-import { test } from 'node:test';
+import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { buildSandboxSpawn } from './sandbox.js';
 import { getGroupFilesDir } from './groupFiles.js';
+
+// gitBroker defaults on (see sandbox.js loadSandboxConfig) and buildSandboxSpawn
+// spawns a real broker child process/socket when it is. Every other test that
+// calls buildSandboxSpawn pins gitBroker:false via CCSERVER_SANDBOX_CONFIG for
+// exactly this reason (see sandbox-git-common-dir.test.js etc.) -- this file
+// didn't, so each call here leaked a live broker process that never exits,
+// hanging `node --test` until CI's job timeout.
+let cfgPath;
+let tmpRoot;
+let prevCfgEnv;
+
+before(() => {
+  tmpRoot = mkdtempSync(join(tmpdir(), 'ccserver-sandbox-group-files-'));
+  cfgPath = join(tmpRoot, 'sandbox.config.json');
+  writeFileSync(cfgPath, JSON.stringify({ docker: false, gitBroker: false, persistentHome: false }));
+  prevCfgEnv = process.env.CCSERVER_SANDBOX_CONFIG;
+  process.env.CCSERVER_SANDBOX_CONFIG = cfgPath;
+});
+
+after(() => {
+  if (prevCfgEnv === undefined) delete process.env.CCSERVER_SANDBOX_CONFIG;
+  else process.env.CCSERVER_SANDBOX_CONFIG = prevCfgEnv;
+  try { rmSync(tmpRoot, { recursive: true, force: true }); } catch { /* ignore */ }
+});
 
 test('sandbox: group member gets read-only bind at /ccserver-group-files, standalone does not', () => {
   const cwd = '/tmp';
