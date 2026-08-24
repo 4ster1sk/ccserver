@@ -22,12 +22,18 @@ const MAX_COMBO_WORKERS = 7;
 // Same picker set + labels as single mode, so the two can't drift apart.
 const APP_LABELS = { claude: 'Claude Code', opencode: 'opencode', copilot: 'GitHub Copilot', codex: 'OpenAI Codex' };
 
+// Apps a meta agent can actually run: shouldInjectMetaAgent structurally
+// excludes copilot (no CLI-arg/env MCP injection at all), so offering it
+// would only produce a guaranteed silent downgrade behind the privilege
+// confirm. Mirrors COMBO_WORKER_APPS.
+const META_APPS = ['claude', 'opencode', 'codex'];
+
 // Explicitly picked meta app (null = follow the single-mode default). Stored
 // under its own key, never APP_KEY -- see above.
 function loadMetaApp() {
   try {
     const v = localStorage.getItem(META_APP_KEY);
-    return v === 'claude' || v === 'opencode' || v === 'copilot' || v === 'codex' ? v : null;
+    return META_APPS.includes(v) ? v : null;
   } catch { /* ignore */ }
   return null;
 }
@@ -369,6 +375,13 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
       return;
     }
     const app = metaApp || appDefault;
+    // Belt-and-braces (the picker already omits copilot): a server whose
+    // defaultApp is copilot would otherwise launch through the whole confirm
+    // chain into a session that can never carry the meta MCP.
+    if (app === 'copilot') {
+      window.alert('GitHub Copilot はMCP注入に対応していないため、メタエージェントでは起動できません。アプリを選択してください。');
+      return;
+    }
     closeOpenMenu();
     onOpen(currentPath, {
       sandbox: sandboxDefault,
@@ -1170,7 +1183,11 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
                   起動のたびに確認ダイアログが表示されます。
                 </p>
                 <div className="open-menu-label">アプリ</div>
-                {Object.entries(APP_LABELS).map(([appKey, label]) => (
+                {/* META_APPS, not all of APP_LABELS: copilot can never carry
+                    the meta MCP (see shouldInjectMetaAgent). When the effective
+                    default is copilot nothing is checked -- the launch button
+                    refuses until an explicit pick is made. */}
+                {META_APPS.map((appKey) => (
                   <div
                     key={appKey}
                     className={`open-menu-item${availableApps && !availableApps[appKey] ? ' open-menu-item-disabled' : ''}`}
@@ -1178,7 +1195,7 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
                     title={availableApps && !availableApps[appKey] ? 'サーバーに未インストール' : ''}
                   >
                     <span className="open-menu-check">{(metaApp || appDefault) === appKey ? '✓' : ''}</span>
-                    {label}
+                    {APP_LABELS[appKey]}
                   </div>
                 ))}
                 {(metaApp || appDefault) === 'codex' && (

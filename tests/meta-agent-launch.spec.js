@@ -117,6 +117,9 @@ test('enabled meta agent mode launches behind a per-launch confirm', async ({ pa
   await expect.poll(() => page.locator('.launch-mode-btn.active').textContent()).toBe('メタエージェント');
 
   // Pick an app inside the meta pane (opencode) and launch.
+  // copilot must not be offered at all: shouldInjectMetaAgent structurally
+  // excludes it, so offering it would only produce silent downgrades.
+  await expect(page.locator('.resume-dialog .open-menu-item', { hasText: 'GitHub Copilot' })).toHaveCount(0);
   const opencodeItem = page.locator('.resume-dialog .open-menu-item', { hasText: 'opencode' });
   await opencodeItem.click();
   // The check mark moves to opencode (the item text gains "✓", so the same

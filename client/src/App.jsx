@@ -89,8 +89,13 @@ export default function App() {
   // reuseSandboxHome through so a resumed conversation keeps the same HOME.
   const continueOpen = useCallback((dirPath, { sandbox = false, sandboxOpts = null, app = 'claude', model = null, resume = false, skipResumePrompt = false, reuseSandboxHome = true, isMetaAgent = false } = {}) => {
     // Only claude sessions carry a resumable conversation id (opencode resumes
-    // the last session of the project itself via -c).
-    if (!skipResumePrompt && app === 'claude') {
+    // the last session of the project itself via -c). Meta-agent opens skip
+    // the prompt and always start fresh: the user just confirmed a privileged
+    // launch, and resuming whatever worker conversation last ran in this
+    // directory would graft ccserver-meta onto a context written without it.
+    // Conscious returns to a specific meta session still work (sidebar
+    // re-open, SESSION_NOT_FOUND re-init) -- those keep claudeSessionId.
+    if (!skipResumePrompt && !isMetaAgent && app === 'claude') {
       const savedSessionId = localStorage.getItem(`ccserver-resume:claude:${dirPath}`);
       if (savedSessionId) {
         pendingOpenRef.current = dirPath;

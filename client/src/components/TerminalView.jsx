@@ -732,16 +732,19 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
             // 再接続などで同一タブに新しいセッションが始まるケースがあるため、
             // セッション確立のたびにexitedフラグを戻す。
             if (onExitedRef.current) onExitedRef.current(false);
+            if (msg.isReconnect) {
+              term.clear();
+            }
             // Silent-downgrade guard: the init asked for the meta MCP but the
             // server did not grant it (feature disabled / broker not running).
+            // Written AFTER the reconnect clear() so a warning about an
+            // attached, downgraded session stays visible instead of being
+            // wiped the moment it appears.
             if (requestedMetaRef.current != null) {
               if (requestedMetaRef.current && msg.isMetaAgent !== true) {
                 term.writeln('\r\n[警告: ccserver-meta は注入されませんでした (metaAgentMcp 無効またはブローカー未起動)]');
               }
               requestedMetaRef.current = null;
-            }
-            if (msg.isReconnect) {
-              term.clear();
             }
             if (!selectionModeRef.current) term.focus();
             break;
