@@ -160,8 +160,8 @@ export default function App() {
   // user to pick a project dir for it; the app/model/sandbox come from the
   // dedicated dialog and the sandbox's reuse dialog (for the fixed dir) still
   // applies via handleOpen.
-  const handleOpenMeta = useCallback(async ({ app, model, sandbox }) => {
-    const dir = metaAgentDir;
+  const handleOpenMeta = useCallback(async ({ app, model, sandbox, metaAgentDir: dirFromCaller }) => {
+    const dir = dirFromCaller || metaAgentDir;
     if (!dir) {
       window.alert('メタエージェントのディレクトリを取得できませんでした。ページを再読込してください。');
       return;

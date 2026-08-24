@@ -576,9 +576,9 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
   const pathRoot = homeBase || (currentPath.match(/^([a-zA-Z]:\\|\/)/)?.[0] || '/');
   const breadcrumbs = currentPath.slice(homeBase ? homeBase.length : pathRoot.length).split(/[/\\]/).filter(Boolean);
 
-  // Sandbox choice + gpg/sshAgent suboptions, byte-identical between the
-  // single and meta panes: the meta agent inherits the single mode's current
-  // sandbox default (no separate default exists), so both bind the same state.
+  // Sandbox choice + gpg/sshAgent suboptions for the single-launch pane.
+  // The meta agent has no separate picker -- it inherits the global
+  // sandboxDefault via the dedicated MetaLaunchDialog (see App.handleOpenMeta).
   const sandboxPicker = (
     <>
       <div className="open-menu-sep" />
@@ -1165,8 +1165,10 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
           setMetaDialogOpen(false);
           // Prefer the caller-provided handler (App's handleOpenMeta which
           // knows the fixed dir), fallback to direct onOpen with fixed dir.
+          // Pass effectiveMetaAgentDir explicitly so App doesn't need to
+          // refetch when its own metaAgentDir is still pending.
           if (onOpenMeta) {
-            onOpenMeta({ app, model, sandbox: sandboxDefault });
+            onOpenMeta({ app, model, sandbox: sandboxDefault, metaAgentDir: effectiveMetaAgentDir });
           } else if (effectiveMetaAgentDir) {
             onOpen(effectiveMetaAgentDir, { sandbox: sandboxDefault, sandboxOpts: null, app, model, isMetaAgent: true });
           }
