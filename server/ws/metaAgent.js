@@ -25,6 +25,8 @@
 // closed facade (metaDeps) is assembled for buildMetaMcpServer.
 
 import { join } from 'node:path';
+import { homedir } from 'node:os';
+import { mkdirSync, chmodSync } from 'node:fs';
 import { loadSandboxConfig } from './sandbox.js';
 
 const META_SOCKET_NAME = 'ccserver-meta.sock';
@@ -36,6 +38,23 @@ export function getMetaSockPath() {
   const base = process.env.XDG_RUNTIME_DIR
     || (typeof process.getuid === 'function' ? `/run/user/${process.getuid()}` : '/tmp');
   return join(base, META_SOCKET_NAME);
+}
+
+// The fixed, project-outside directory every meta-agent session runs in.
+// See the invariant in sessionManager.createSession: isMetaAgent:true +
+// groupId-less sessions never use a client-supplied cwd -- they are forced
+// here. ~-based (homedir()) like orchestratorDirForCwd, not XDG_DATA_HOME.
+export function metaAgentDir() {
+  return join(homedir(), '.local', 'share', 'ccserver-sandbox', 'meta-agent');
+}
+
+// Ensure the fixed meta-agent directory exists (mode 0o700), returning its
+// path. Idempotent -- safe to call on every meta-agent launch.
+export function ensureMetaAgentDir() {
+  const dir = metaAgentDir();
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  try { chmodSync(dir, 0o700); } catch { /* best effort */ }
+  return dir;
 }
 
 // Whether the meta agent feature is on at all: an explicit opt-in flag in

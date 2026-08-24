@@ -43,6 +43,7 @@ export default function App() {
   // installed here (availableApps). Usage is only meaningful when claude
   // exists, so a missing claude hides the button regardless of showUsage.
   const [usagePrefs, setUsagePrefs] = useState({ showUsage: true, availableApps: null });
+  const [metaAgentDir, setMetaAgentDir] = useState(null);
 
   useEffect(() => {
     applyThemeCss(themeId);
@@ -66,6 +67,7 @@ export default function App() {
           showUsage: data.showUsage !== false,
           availableApps: data.availableApps || null,
         });
+        if (data.metaAgentDir) setMetaAgentDir(data.metaAgentDir);
       })
       .catch(() => {});
   }, []);
@@ -81,7 +83,7 @@ export default function App() {
       { id, type: 'terminal', label, cwd: dirPath, claudeSessionId, shell, sessionId, attachSessionId, sandbox, sandboxOpts, app, model, resume, reuseSandboxHome, isMetaAgent, exited: false },
     ]);
     setActiveTabId(id);
-    setLastDir(dirPath);
+    if (!isMetaAgent) setLastDir(dirPath);
   }, []);
 
   // The post-sandbox-dialog open flow: claude's resume prompt (if a saved
@@ -152,6 +154,23 @@ export default function App() {
   const handleOpenShell = useCallback((dirPath) => {
     openTerminalTab(dirPath, { shell: true });
   }, [openTerminalTab]);
+
+  // Meta-agent opens always use the fixed server-side directory
+  // (~/.local/share/ccserver-sandbox/meta-agent). The UI never asks the
+  // user to pick a project dir for it; the app/model/sandbox come from the
+  // dedicated dialog and the sandbox's reuse dialog (for the fixed dir) still
+  // applies via handleOpen.
+  const handleOpenMeta = useCallback(async ({ app, model, sandbox, metaAgentDir: dirFromCaller }) => {
+    const dir = dirFromCaller || metaAgentDir;
+    if (!dir) {
+      window.alert('メタエージェントのディレクトリを取得できませんでした。ページを再読込してください。');
+      return;
+    }
+    // Meta has no per-dir sandboxOpts (project-bound); pass null and let the
+    // global sandboxDefault decide. The reuse dialog for the fixed dir is
+    // still handled by handleOpen.
+    await handleOpen(dir, { sandbox: !!sandbox, sandboxOpts: null, app, model, isMetaAgent: true });
+  }, [metaAgentDir, handleOpen]);
 
   // Settings page as a tab (singleton): the gear button in the directory
   // browser opens/activates it; it is closable like any dynamic tab.
@@ -460,7 +479,7 @@ export default function App() {
       </div>
       <div className="tab-content">
         <div style={{ display: activeTabId === 'browser' ? 'flex' : 'none', height: '100%', flexDirection: 'column' }}>
-          <DirectoryBrowser onOpen={handleOpen} onOpenShell={handleOpenShell} onOpenCombo={handleOpenCombo} onOpenGroup={handleOpenGroup} onSessionClick={handleSessionClick} onOpenSettings={openSettingsTab} initialPath={lastDir} groupsVersion={groupsVersion} />
+          <DirectoryBrowser onOpen={handleOpen} onOpenShell={handleOpenShell} onOpenCombo={handleOpenCombo} onOpenGroup={handleOpenGroup} onSessionClick={handleSessionClick} onOpenSettings={openSettingsTab} initialPath={lastDir} groupsVersion={groupsVersion} metaAgentDir={metaAgentDir} onOpenMeta={handleOpenMeta} />
         </div>
         <div style={{ display: activeTabId === 'monitor' ? 'flex' : 'none', height: '100%', flexDirection: 'column' }}>
           <SystemMonitor visible={activeTabId === 'monitor'} />

@@ -996,6 +996,11 @@ body {
   border-left: 1px solid rgba(0, 0, 0, 0.25);
 }
 
+.meta-launch-btn {
+  margin-left: 8px;
+  white-space: nowrap;
+}
+
 .open-menu-item {
   display: flex;
   align-items: center;

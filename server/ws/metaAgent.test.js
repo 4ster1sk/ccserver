@@ -4,10 +4,11 @@
 
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, rmSync, existsSync, statSync, rmdirSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { shouldInjectMetaAgent, metaAgentEnabled, getMetaSockPath, metaBrokerRunning } from './metaAgent.js';
+import { shouldInjectMetaAgent, metaAgentEnabled, getMetaSockPath, metaBrokerRunning, metaAgentDir, ensureMetaAgentDir } from './metaAgent.js';
 
 let tmpRoot;
 let savedConfigEnv;
@@ -62,4 +63,25 @@ test('the socket path lives under XDG_RUNTIME_DIR and the broker starts stopped'
     else process.env.XDG_RUNTIME_DIR = savedRuntime;
   }
   assert.equal(metaBrokerRunning(), false, 'nothing started in this test run');
+});
+
+test('metaAgentDir is the fixed project-outside path; ensureMetaAgentDir creates it 0o700 and is idempotent', () => {
+  assert.equal(
+    metaAgentDir(),
+    join(homedir(), '.local', 'share', 'ccserver-sandbox', 'meta-agent'),
+    'the dir is homedir-based, matching orchestratorDirForCwd\'s convention',
+  );
+  const dir = metaAgentDir();
+  const existed = existsSync(dir);
+  const first = ensureMetaAgentDir();
+  const second = ensureMetaAgentDir();
+  assert.equal(first, dir);
+  assert.equal(second, dir);
+  assert.equal(existsSync(dir), true);
+  assert.equal(statSync(dir).mode & 0o777, 0o700, 'private to the server user');
+  // Politeness only: remove the dir again when this run created it (and it
+  // stayed empty -- a real deployment's dir carries state and must survive).
+  if (!existed) {
+    try { rmdirSync(dir); } catch { /* non-empty or gone: leave it */ }
+  }
 });
