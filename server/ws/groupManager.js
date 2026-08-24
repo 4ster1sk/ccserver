@@ -437,6 +437,24 @@ export function listGroups() {
   }));
 }
 
+// Public per-group summary for the meta agent's get_group tool (and any other
+// privileged consumer): the same fields the GET /api/groups/:id route returns,
+// MINUS the internals that facade deliberately withholds (orchestratorDir /
+// allowedCwds -- host paths and scope internals an LLM-facing tool must not
+// reach; see getGroupManagerApi's comment). null when the group is gone.
+export function getGroupSummary(groupId) {
+  const group = groups.get(groupId);
+  if (!group) return null;
+  return {
+    groupId: group.id,
+    cwd: group.cwd,
+    createdAt: group.createdAt,
+    members: listGroupMembers(groupId),
+    currentTurn: group.currentTurn ?? null,
+    lastHandoffAt: group.lastHandoffAt ?? null,
+  };
+}
+
 export function getMemberPrefs(groupId, role = null) {
   const group = groups.get(groupId);
   if (!group) return null;
@@ -1744,6 +1762,14 @@ const groupManagerApi = {
   publishGroupFilesFromUpload,
   commitStagedUploads,
   getGroupFilesDirForGroup,
+  // Meta-agent extensions (see ws/metaAgent.js): the meta broker is a
+  // process-global PRIVILEGED socket, so its facade legitimately spans every
+  // group -- unlike the per-group control server above, which must never see
+  // beyond its own groupId. getGroupSummary (not raw getGroup) keeps
+  // orchestratorDir/allowedCwds out of LLM reach even here.
+  listGroups,
+  getGroupSummary,
+  destroyGroup,
 };
 
 // Test seam: returns the exact facade the broker servers receive. Unit tests

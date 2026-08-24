@@ -11,6 +11,9 @@ import { systemRoute } from './routes/system.js';
 import { usageRoute } from './routes/usage.js';
 import { groupsRoute } from './routes/groups.js';
 import { workerPresetsRoute } from './routes/workerPresets.js';
+import { launchPresetsRoute } from './routes/launchPresets.js';
+import { projectsRoute } from './routes/projects.js';
+import { approvalsRoute } from './routes/approvals.js';
 import { groupFilesRoute } from './routes/groupFiles.js';
 import { sandboxRoute } from './routes/sandbox.js';
 import { sandboxesRoute } from './routes/sandboxes.js';
@@ -19,6 +22,8 @@ import { gracefulShutdown, restoreSchedules } from './ws/sessionManager.js';
 import { restoreGroups, detectOrphanWorktrees } from './ws/groupManager.js';
 import { restoreNotify, ensureNotifyBroker, stopNotifyBroker, notifyEnabled } from './ws/notify.js';
 import { ensureUsageBroker, stopUsageBroker, usageEnabled } from './ws/usageMcp.js';
+import { ensureMetaAgentBroker, stopMetaAgentBroker, metaAgentEnabled } from './ws/metaAgent.js';
+import { expireStalePendingApprovals } from './ws/approvals.js';
 import { warmUsage } from './usage.js';
 import { warmCodexUsage } from './codexUsage.js';
 import { initDb, dbPath } from './db.js';
@@ -51,6 +56,9 @@ await fastify.register(systemRoute, { prefix: '/api' });
 await fastify.register(usageRoute, { prefix: '/api' });
 await fastify.register(groupsRoute, { prefix: '/api' });
 await fastify.register(workerPresetsRoute, { prefix: '/api' });
+await fastify.register(launchPresetsRoute, { prefix: '/api' });
+await fastify.register(projectsRoute, { prefix: '/api' });
+await fastify.register(approvalsRoute, { prefix: '/api' });
 await fastify.register(groupFilesRoute, { prefix: '/api' });
 await fastify.register(sandboxRoute, { prefix: '/api' });
 await fastify.register(sandboxesRoute, { prefix: '/api' });
@@ -73,6 +81,7 @@ if (process.env.NODE_ENV === 'production') {
 const cleanup = () => {
   stopNotifyBroker();
   stopUsageBroker();
+  stopMetaAgentBroker();
   gracefulShutdown().then(() => process.exit(0));
 };
 process.on('SIGTERM', cleanup);
@@ -85,6 +94,10 @@ process.on('SIGINT', cleanup);
 try {
   initDb();
   fastify.log.info(`SQLite database ready at ${dbPath()}`);
+  // Approvals whose waiter died with a previous process can never be decided:
+  // expire them (fail-safe -- nothing runs just because the server restarted).
+  const swept = expireStalePendingApprovals();
+  if (swept > 0) fastify.log.warn(`Expired ${swept} stale pending approval(s) left by a previous run`);
 } catch (err) {
   fastify.log.error({ err }, `Failed to initialize SQLite database (${dbPath()}): ${err.message}`);
   process.exit(1);
@@ -117,6 +130,19 @@ try {
   }
 } catch (err) {
   fastify.log.error({ err }, 'Failed to start ccserver-usage broker');
+}
+
+// ccserver-meta: host the privileged meta-agent MCP socket when explicitly
+// enabled (metaAgentMcp in sandbox.config.json). Same bind-before-listen
+// ordering requirement: the meta agent's sandbox snapshots this socket at
+// launch, so it must exist before any isMetaAgent session can be created.
+try {
+  if (metaAgentEnabled()) {
+    await ensureMetaAgentBroker();
+    fastify.log.info('ccserver-meta MCP broker started');
+  }
+} catch (err) {
+  fastify.log.error({ err }, 'Failed to start ccserver-meta broker');
 }
 
 await fastify.listen({ port: PORT, host: '0.0.0.0' });

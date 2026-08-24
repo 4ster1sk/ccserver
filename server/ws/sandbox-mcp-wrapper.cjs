@@ -6,10 +6,11 @@
 // byte pipe with no protocol logic.
 //
 // Which broker this reaches is decided by argv + which host socket was bound
-// in (see mcpBroker.js / notify.js / usageMcp.js):
+// in (see mcpBroker.js / notify.js / usageMcp.js / metaAgent.js):
 //   plain    -> CCSANDBOX_MCP_SOCK  (the group's control / handoff socket)
 //   'notify' -> CCSANDBOX_NOTIFY_MCP_SOCK (the process-global notify socket)
 //   'usage'  -> CCSANDBOX_USAGE_MCP_SOCK (the process-global usage socket)
+//   'meta'   -> CCSANDBOX_META_MCP_SOCK (the process-global meta-agent socket)
 // The wrapper itself is role-agnostic.
 //
 // In notify mode the wrapper additionally writes a single JSON line
@@ -17,15 +18,23 @@
 // MCP bytes -- so the server can attribute this connection's notifications
 // (see mcpBroker.js). The identity comes from the CCSERVER_NOTIFY_IDENTITY
 // env set by mcpConfig.js; absent or unparseable it sends an empty object
-// (host-only attribution). Usage mode carries no identity (get_usage answers
-// the same regardless of caller), so it never writes this frame.
+// (host-only attribution). Meta mode writes the same kind of frame from
+// CCSERVER_META_IDENTITY: the per-connection sessionId/groupId there power
+// the meta tools' self-target guards and approval attribution. Usage mode
+// carries no identity at all (get_usage answers the same regardless of
+// caller).
 'use strict';
 const net = require('net');
 const mode = process.argv[2];
-const isNotify = mode === 'notify';
+const IDENTITY_ENV = {
+  notify: 'CCSERVER_NOTIFY_IDENTITY',
+  meta: 'CCSERVER_META_IDENTITY',
+};
+const wantsIdentityFrame = !!IDENTITY_ENV[mode];
 const MODE_SOCK_ENV = {
   notify: 'CCSANDBOX_NOTIFY_MCP_SOCK',
   usage: 'CCSANDBOX_USAGE_MCP_SOCK',
+  meta: 'CCSANDBOX_META_MCP_SOCK',
 };
 const sockPath = process.env[MODE_SOCK_ENV[mode] || 'CCSANDBOX_MCP_SOCK'];
 if (!sockPath) {
@@ -54,8 +63,8 @@ function connect(attempt = 0) {
   const sock = net.createConnection(sockPath);
   sock.on('connect', () => {
     established = true;
-    if (isNotify) {
-      sock.write(`${JSON.stringify({ ccserver: parseIdentity(process.env.CCSERVER_NOTIFY_IDENTITY) })}\n`);
+    if (wantsIdentityFrame) {
+      sock.write(`${JSON.stringify({ ccserver: parseIdentity(process.env[IDENTITY_ENV[mode]]) })}\n`);
     }
     process.stdin.pipe(sock);
     sock.pipe(process.stdout);

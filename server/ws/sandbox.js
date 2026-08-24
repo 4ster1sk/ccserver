@@ -16,7 +16,7 @@
 // outer layer. See memory: sandbox-dind-recipe.
 
 import { homedir } from 'node:os';
-import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, statSync } from 'node:fs';
 import { chmod as chmodP, readdir as readdirP, rm as rmP, stat as statP } from 'node:fs/promises';
 import { execFile, execFileSync } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -24,6 +24,7 @@ import { randomUUID } from 'node:crypto';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { startGitBroker } from './git-broker.js';
+import { recordSandboxHome as recordSandboxHomeDb, listSandboxRowsBySlug, forgetSandboxHome } from './projects.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -58,10 +59,13 @@ const SANDBOX_KNOWN_HOSTS_DEFAULT_PATH = '/ccserver-sandbox-known-hosts-default'
 // second fixed path the same wrapper reaches when invoked with the 'notify'
 // argument. The process-global usage socket (ccserver-usage, see
 // usageMcp.js) is bound at a third fixed path, reached with the 'usage'
+// argument. The process-global meta-agent socket (ccserver-meta, see
+// metaAgent.js) is bound at a fourth fixed path, reached with the 'meta'
 // argument.
 const SANDBOX_MCP_SOCK_PATH = '/ccserver-sandbox-mcp.sock';
 const SANDBOX_NOTIFY_SOCK_PATH = '/ccserver-sandbox-notify.sock';
 const SANDBOX_USAGE_SOCK_PATH = '/ccserver-sandbox-usage.sock';
+const SANDBOX_META_SOCK_PATH = '/ccserver-sandbox-meta.sock';
 const SANDBOX_MCP_BRIDGE_PATH = '/ccserver-sandbox-mcp-bridge';
 const MCP_BRIDGE_SCRIPT = join(__dirname, 'sandbox-mcp-wrapper.cjs');
 
@@ -309,38 +313,27 @@ export function sandboxHomeStatus(cwd) {
 }
 
 // Sidecar index mapping a home dir's slug back to the project path it was
-// created for (the settings page shows real paths instead of opaque slugs).
-// Lives in the home root itself -- OUTSIDE every sandbox's HOME -- so a
-// sandboxed process never sees it. Best-effort: a missing/corrupt index just
-// falls back to displaying the slug.
-function homeIndexPath() {
-  return join(sandboxHomeRoot(), '.index.json');
-}
+// created for has moved into SQLite (DB v2, see ws/projects.js) -- the old
+// homeIndex.json is imported once by the v2 migration and retired to
+// `.index.json.migrated`. The disk walk below stays the source of truth for
+// what actually exists; the sandboxes table enriches each row with the real
+// project path, label, git remote and usage timestamps.
 
-function readHomeIndex() {
-  try {
-    const raw = JSON.parse(readFileSync(homeIndexPath(), 'utf-8'));
-    return raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
-  } catch {
-    return {};
-  }
-}
-
-// Remember the project path a persistent HOME was created for. Called from
-// buildSandboxSpawn; sync (single-threaded) so concurrent launches can't race.
-function recordSandboxHome(cwd) {
-  const slug = slugify(resolve(cwd));
-  const index = readHomeIndex();
-  if (index[slug] === resolve(cwd)) return;
-  index[slug] = resolve(cwd);
-  try { writeFileSync(homeIndexPath(), JSON.stringify(index)); } catch { /* best effort */ }
+// Remember which project a persistent HOME belongs to (settings-page labels).
+// Best-effort by contract (a bookkeeping failure must never fail a launch);
+// the SQLite details live in ws/projects.js. Sync (single-threaded) so
+// concurrent launches can't race.
+function recordSandboxHome(cwd, createdBy = null) {
+  recordSandboxHomeDb(cwd, { createdBy });
 }
 
 // Enumerate the persistent sandbox homes for the settings page:
-//   { name (slug), path, cwd (real project path when the index knows it) }
+//   { name (slug), path, cwd (real project path when known), projectId,
+//     projectLabel (user-editable display name; null falls back to
+//     basename(cwd) client-side), gitRemote, lastUsedAt, createdBy }
 export function listSandboxHomes() {
   const root = sandboxHomeRoot();
-  const index = readHomeIndex();
+  const rows = listSandboxRowsBySlug();
   const entries = [];
   let names = [];
   try { names = readdirSync(root); } catch { return []; }
@@ -349,7 +342,17 @@ export function listSandboxHomes() {
     let isDir = false;
     try { isDir = statSync(path).isDirectory(); } catch { /* not a dir */ }
     if (!isDir) continue;
-    entries.push({ name, path, cwd: typeof index[name] === 'string' ? index[name] : null });
+    const row = rows.get(name);
+    entries.push({
+      name,
+      path,
+      cwd: typeof row?.cwd === 'string' ? row.cwd : null,
+      projectId: row?.project_id ?? null,
+      projectLabel: row?.project_label ?? null,
+      gitRemote: row?.git_remote ?? null,
+      lastUsedAt: typeof row?.last_used_at === 'number' ? row.last_used_at : null,
+      createdBy: row?.created_by ?? null,
+    });
   }
   return entries;
 }
@@ -443,11 +446,7 @@ export async function deleteSandboxHome(name) {
     // shows the sandbox and the user can retry.
     return { ok: false, error: homeErr || dindErr };
   }
-  const index = readHomeIndex();
-  if (Object.prototype.hasOwnProperty.call(index, name)) {
-    delete index[name];
-    try { writeFileSync(homeIndexPath(), JSON.stringify(index)); } catch { /* best effort */ }
-  }
+  forgetSandboxHome(name);
   sizeCache.delete(join(sandboxHomeRoot(), name));
   return { ok: true };
 }
@@ -581,8 +580,13 @@ export function loadSandboxConfig() {
   // The Usage MCP is exposed to every Claude session, so keep it opt-in
   // independently of the UI's showUsage setting.
   const usageMcp = raw.usageMcp === true;
+  // ccserver-meta (see metaAgent.js): the privileged self-management MCP for
+  // the single isMetaAgent session. Opt-in like usageMcp -- but with a much
+  // stronger reason: this toolset spans every project/group/session/sandbox,
+  // and its destructive tools kill real running work.
+  const metaAgentMcp = raw.metaAgentMcp === true;
   return {
-    docker, persistentHome, gpg, sshAgent, gitBroker, forceSandbox, binds, env, claudeBin, defaultApp, showUsage, usageMcp,
+    docker, persistentHome, gpg, sshAgent, gitBroker, forceSandbox, binds, env, claudeBin, defaultApp, showUsage, usageMcp, metaAgentMcp,
     notify: {
       discordWebhook, subscriptions, hostname: notifyHostname, attribution: notifyAttribution,
       vikunja: {
@@ -867,7 +871,7 @@ export function sandboxAvailable() {
 // but not including the trailing `-- <cmd...>`).
 //   homeDir - host path of the persistent per-project HOME to bind at HOME
 //             (see persistentHomeDir), or null for a fresh tmpfs HOME.
-function buildBwrapArgs({ cwd, docker, gpg, extraBinds, extraEnv, authSock, stateDir, claudeDir, gitBroker, mcpSocketPath, notifySocketPath, usageSocketPath, homeDir = null, orchestratorClaudeMdSrc = null, gitCommonDir = null, groupFilesDir = null }) {
+function buildBwrapArgs({ cwd, docker, gpg, extraBinds, extraEnv, authSock, stateDir, claudeDir, gitBroker, mcpSocketPath, notifySocketPath, usageSocketPath, metaSocketPath, homeDir = null, orchestratorClaudeMdSrc = null, gitCommonDir = null, groupFilesDir = null }) {
   const args = [
     '--die-with-parent',
     // Own PID namespace so the whole sandbox tree is reaped as a unit. Without
@@ -990,11 +994,20 @@ function buildBwrapArgs({ cwd, docker, gpg, extraBinds, extraEnv, authSock, stat
     args.push('--setenv', 'CCSANDBOX_USAGE_MCP_SOCK', SANDBOX_USAGE_SOCK_PATH);
   }
 
-  // The bridge wrapper is shared by the group socket, the notify socket and
-  // the usage socket (bound once -- a combo orchestrator may have all three)
-  // and its node shebang lives at SANDBOX_NODE_PATH (ro-bound with the
-  // git-broker branch below).
-  if (mcpSocketPath || notifySocketPath || usageSocketPath) {
+  // ccserver-meta: same wrapper once more, reached with the 'meta' argv so it
+  // reads CCSANDBOX_META_MCP_SOCK (bound here). Only ever set for the single
+  // isMetaAgent session (see sessionManager) -- this socket is the privilege
+  // boundary for server-wide self-management, so nothing else may bind it.
+  if (metaSocketPath) {
+    args.push('--bind-try', metaSocketPath, SANDBOX_META_SOCK_PATH);
+    args.push('--setenv', 'CCSANDBOX_META_MCP_SOCK', SANDBOX_META_SOCK_PATH);
+  }
+
+  // The bridge wrapper is shared by the group socket, the notify socket, the
+  // usage socket and the meta socket (bound once -- a combo orchestrator may
+  // have all three of the first kind) and its node shebang lives at
+  // SANDBOX_NODE_PATH (ro-bound with the git-broker branch below).
+  if (mcpSocketPath || notifySocketPath || usageSocketPath || metaSocketPath) {
     args.push('--ro-bind', MCP_BRIDGE_SCRIPT, SANDBOX_MCP_BRIDGE_PATH);
   }
 
@@ -1108,7 +1121,7 @@ function buildBwrapArgs({ cwd, docker, gpg, extraBinds, extraEnv, authSock, stat
   // /usr/bin/node exists, mirroring how resolveApp follows the real
   // agent binary instead of assuming a host layout. Shared between the
   // git-broker machinery and the MCP bridge wrapper.
-  if (gitBroker || mcpSocketPath || notifySocketPath || usageSocketPath) {
+  if (gitBroker || mcpSocketPath || notifySocketPath || usageSocketPath || metaSocketPath) {
     const nodeBin = realpathSync(process.execPath);
     args.push('--ro-bind', nodeBin, SANDBOX_NODE_PATH);
   }
@@ -1253,6 +1266,7 @@ export function buildMinimalSandboxSpawn({ cwd, targetCommand, app = 'claude' })
     mcpSocketPath: null,
     notifySocketPath: null,
     usageSocketPath: null,
+    metaSocketPath: null,
     // The /usage capture is a throwaway read: it must not create (or depend
     // on) a persistent per-project HOME.
     homeDir: null,
@@ -1285,6 +1299,10 @@ export function buildMinimalSandboxSpawn({ cwd, targetCommand, app = 'claude' })
 //   usageSocketPath - host path of the process-global ccserver-usage socket
 //                 to bind into the sandbox at a fixed path. null when the
 //                 session gets no usage MCP injection.
+//   metaSocketPath - host path of the process-global ccserver-meta socket to
+//                 bind into the sandbox at a fixed path. Only set for the
+//                 single isMetaAgent session (see metaAgent.js); null
+//                 otherwise.
 //   reuseSandboxHome - false to start a *fresh* persistent HOME for this
 //                 launch: the previous per-project HOME is wiped (via the same
 //                 escalated removeTree as deleteSandboxHome) and recreated
@@ -1300,7 +1318,10 @@ export function buildMinimalSandboxSpawn({ cwd, targetCommand, app = 'claude' })
 //                 resolveMemberWorktree), bound into the sandbox alongside
 //                 cwd when cwd is a git worktree whose real .git lives
 //                 elsewhere. null for regular sessions and non-worktree cwds.
-export function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, mcpSocketPath = null, notifySocketPath = null, usageSocketPath = null, reuseSandboxHome = true, orchestratorClaudeMdSrc = null, gitCommonDir = null, groupFilesDir = null }) {
+//   sandboxHomeCreatedBy - optional attribution stored on the sandbox HOME's
+//                 bookkeeping row ('user' | 'meta-agent:<sessionId>' | ...).
+//                 Display only; never an authorization input.
+export function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, mcpSocketPath = null, notifySocketPath = null, usageSocketPath = null, metaSocketPath = null, reuseSandboxHome = true, orchestratorClaudeMdSrc = null, gitCommonDir = null, groupFilesDir = null, sandboxHomeCreatedBy = null }) {
   const { docker: cfgDocker, persistentHome, gpg: cfgGpg, sshAgent: cfgSshAgent, gitBroker: gitBrokerEnabled, binds, env, claudeBin } = loadSandboxConfig();
   const docker = cfgDocker && dockerSandboxAvailable();
   const gpg = sandboxOpts?.gpg ?? cfgGpg;
@@ -1342,7 +1363,7 @@ export function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, mcpSoc
     }
     mkdirSync(homeDir, { recursive: true });
     // Remember which project this HOME belongs to (settings-page labels).
-    recordSandboxHome(cwd);
+    recordSandboxHome(cwd, sandboxHomeCreatedBy);
   }
 
   // Computes the repo/submodule allow-list once and spawns the host-side
@@ -1371,7 +1392,7 @@ export function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, mcpSoc
   }
 
   const { command, installDir } = resolveApp(app, claudeBin);
-  const bwrapArgs = buildBwrapArgs({ cwd, docker, gpg, extraBinds: binds, extraEnv: env, authSock, stateDir, claudeDir: installDir, gitBroker, mcpSocketPath, notifySocketPath, usageSocketPath, homeDir, orchestratorClaudeMdSrc, gitCommonDir, groupFilesDir });
+  const bwrapArgs = buildBwrapArgs({ cwd, docker, gpg, extraBinds: binds, extraEnv: env, authSock, stateDir, claudeDir: installDir, gitBroker, mcpSocketPath, notifySocketPath, usageSocketPath, metaSocketPath, homeDir, orchestratorClaudeMdSrc, gitCommonDir, groupFilesDir });
   const innerCmd = [BASH, '/ccserver-sandbox-entrypoint.sh', ...withClaude(targetCommand, command)];
 
   const gitBrokerFields = {
