@@ -55,22 +55,28 @@ export async function sessionsRoute(fastify, opts) {
 
 // Shared implementation for POST /api/sessions and the meta agent's
 // launch_session tool. body:
-//   { cwd, app?, model?, shell?, sandbox?, sandboxOpts?, resume?,
+//   { cwd?, app?, model?, shell?, sandbox?, sandboxOpts?, resume?,
 //     reuseSandboxHome?, isMetaAgent?, requestedBy? }
+// `cwd` is required for normal launches, but when `isMetaAgent:true` it is
+// optional/ignored: createSession forces the fixed meta-agent directory
+// server-side (see sessionManager.createSession), so a client-supplied cwd
+// (even a missing/non-existent one) is never used.
 // Returns { ok:true, body } or { ok:false, code:'validation'|'internal',
 // message }. Spawning happens synchronously inside createSession; a failed
 // spawn surfaces as validation-shaped 400 (the client-visible contract of
 // every other launch path).
 export async function createSessionViaApi(body) {
+  const isMetaAgent = body.isMetaAgent === true;
   const cwd = typeof body.cwd === 'string' && body.cwd ? body.cwd : null;
-  // The WS init path never needed this (the browser only offers real
-  // directories), but a headless caller can pass anything: verify the
-  // directory exists BEFORE spawning, or node-pty's post-chdir failure would
-  // leave a session that dies with an opaque exit code.
-  let cwdIsDir = false;
-  try { cwdIsDir = statSync(cwd).isDirectory(); } catch { /* missing */ }
-  if (!cwd || !cwdIsDir) {
-    return { ok: false, code: 'validation', message: 'cwd must be an existing directory' };
+  // Normal launches require an existing directory. Meta-agent launches skip
+  // this: the cwd is forced to the fixed meta-agent dir server-side, so any
+  // client-supplied value (including absent/nonexistent) is ignored.
+  if (!isMetaAgent) {
+    let cwdIsDir = false;
+    try { cwdIsDir = statSync(cwd).isDirectory(); } catch { /* missing */ }
+    if (!cwd || !cwdIsDir) {
+      return { ok: false, code: 'validation', message: 'cwd must be an existing directory' };
+    }
   }
   if (body.app !== undefined && body.app !== null && !isValidApp(body.app)) {
     return { ok: false, code: 'validation', message: 'app must be one of claude, opencode, copilot, codex' };

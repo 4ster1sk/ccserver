@@ -221,6 +221,7 @@ OpenAI Codexについて:
 ccserver 自体を MCP 経由で操作できる特権エージェント (**メタエージェント**) 向けの MCP サーバーです。プロジェクト/サンドボックス/グループ/セッションの一覧参照から、セッションやコンボの新規起動、プリセット管理、破壊的操作の実行までをカバーします。`ccserver-notify` / `ccserver-usage` と同じくプロセスグローバルな単一ソケット (`ccserver-meta.sock`) でホストされますが、サーバー全体 (全グループ・全サンドボックス・全プロジェクト) へのアクセスを持つ**単一の信頼されたエージェントにのみ渡す**前提のため、注入条件は両者とは別になっています。
 
 - **オプトイン**: 既定では無効です。設定ファイルで `metaAgentMcp: true` を明示した場合のみ有効化され、さらにセッション起動時に明示的にメタエージェントとして指定された単発セッションにだけ注入されます。コンボのワーカー/オーケストレーターへ自動注入されることは一切ありません (強い権限を持つため、既定オフは `usageMcp` よりさらに強く推奨されます)。
+- **固定ディレクトリ起動**: メタエージェントは常にプロジェクト外の固定ディレクトリ `~/.local/share/ccserver-sandbox/meta-agent` で起動されます。ブラウザや API が指定する `cwd` はサーバー側で無視され、プロジェクトのファイルや `CLAUDE.md` が特権セッションに混入することを防ぎます (サーバー側 `createSession` の不変則として強制。`metaAgentMcp` がオフでも flag 付きなら固定化される)。サンドボックスもこの固定ディレクトリ基準で作成され、通常の起動方法選択とは分離した専用の「⌘ メタエージェント」ボタンから起動します。単一の固定ディレクトリのため同時起動はクライアント側の確認で制御され、永続 HOME も `meta-agent` 専用のものが作成されます。
 - **ツール一覧** (権限区分: **R** = 読み取り専用 / **W-low** = 設定データの作成・変更・削除のみ / **W-create** = 新しいセッション・グループの起動 / **W-destructive** = 実行中リソースの終了・削除。W-destructive のみ承認必須):
 
   | 区分 | ツール | 説明 |
@@ -548,7 +549,7 @@ CCSERVER_TOKEN=some-secret NODE_ENV=production node server/index.js
 | メソッド | パス | 説明 |
 |---|---|---|
 | GET | `/api/dirs?path=<path>&showHidden=1` | 指定パスのサブディレクトリ/ファイル一覧 |
-| GET | `/api/dirs/home` | `{ home, defaultApp, availableApps }` — サーバーのホームディレクトリ、既定起動アプリ、検出済みCLI (`claude`/`opencode`/`copilot`/`codex`) |
+| GET | `/api/dirs/home` | `{ home, defaultApp, availableApps, metaAgentEnabled, metaAgentDir }` — サーバーのホームディレクトリ、既定起動アプリ、検出済みCLI (`claude`/`opencode`/`copilot`/`codex`)、メタエージェント有効フラグと固定ディレクトリ |
 | POST | `/api/dirs` | `{ parent, name }` でフォルダ作成 |
 | GET | `/api/sessions` | 実行中セッションの一覧 |
 | DELETE | `/api/sessions/:id` | セッションを終了する (予約プロンプトも解除) |
@@ -562,7 +563,7 @@ CCSERVER_TOKEN=some-secret NODE_ENV=production node server/index.js
 | PUT / DELETE | `/api/launch-presets/:id` | コンボ起動プリセットの全置換更新 (workers スナップショットごと置換) / 削除。preset 名重複は 409 |
 | GET | `/api/projects` | プロジェクト一覧 (サンドボックス永続 HOME の所属プロジェクト行。`{ id, cwd, pathHash, label, gitRemote, lastSeenAt }`) |
 | PUT | `/api/projects/:id/label` | プロジェクト表示ラベル変更 (`{ label }`、null でクリア)。メタエージェントの `update_project_label` と同じストア経由 |
-| POST | `/api/sessions` | 単発セッションをサーバー側で新規起動 (`{ cwd, app?, model?, shell?, sandbox?, sandboxOpts?, resume?, isMetaAgent? }`)。メタエージェントの `launch_session` と同一実装 (`isMetaAgent: true` は `metaAgentMcp: true` のときのみ意味を持つ) |
+| POST | `/api/sessions` | 単発セッションをサーバー側で新規起動 (`{ cwd, app?, model?, shell?, sandbox?, sandboxOpts?, resume?, isMetaAgent? }` — `isMetaAgent: true` のとき `cwd` は省略可かつ無視され、固定ディレクトリ `~/.local/share/ccserver-sandbox/meta-agent` で起動)。メタエージェントの `launch_session` と同一実装 (`isMetaAgent: true` は `metaAgentMcp: true` のときのみ意味を持つ) |
 | POST | `/api/groups` | コンボ起動。従来の `workerA`/`workerB`/`orchestrator` に加え、canonical な `workers: [{ name?, role, app?, model?, sandboxOpts? }]` (1–7 人、role 一意) を受け付ける。プリセットはクライアントがスナップショットへ展開して送る。copilot はどちらの経路でも 400 拒否 |
 | GET | `/api/approvals?status=pending` | メタエージェントの承認待ち破壊的操作一覧 (`ccserver-meta` 参照)。ブラウザのグローバルバナーが数秒間隔でポーリング |
 | POST | `/api/approvals/:id/decision` | `{ decision: 'approved' \| 'rejected' }` で承認待ち操作を承認/却下する。5 分未応答のリクエストはサーバー側で expired (拒否扱い) になる |

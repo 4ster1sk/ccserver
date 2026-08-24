@@ -4,7 +4,7 @@ import { homedir } from 'node:os';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { loadSandboxConfig, installedApps } from '../ws/sandbox.js';
-import { metaAgentEnabled } from '../ws/metaAgent.js';
+import { metaAgentEnabled, metaAgentDir } from '../ws/metaAgent.js';
 import { resolvedHostname } from '../ws/notify.js';
 
 const execFileAsync = promisify(execFile);
@@ -131,7 +131,7 @@ export async function dirsRoute(fastify, opts) {
     // metaAgentEnabled: the launch modal's メタエージェント mode is disabled
     // (with an explanation) unless the privileged ccserver-meta feature is
     // explicitly opted into via sandbox.config.json. Extra field as well.
-    return { home: homedir(), defaultApp, forceSandbox, hostname: resolvedHostname(), showUsage, availableApps: installedApps(), metaAgentEnabled: metaAgentEnabled() };
+    return { home: homedir(), defaultApp, forceSandbox, hostname: resolvedHostname(), showUsage, availableApps: installedApps(), metaAgentEnabled: metaAgentEnabled(), metaAgentDir: metaAgentDir() };
   });
 
   fastify.get('/dirs', async (request, reply) => {

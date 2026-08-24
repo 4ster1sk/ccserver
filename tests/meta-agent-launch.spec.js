@@ -1,20 +1,16 @@
 import { test, expect } from '@playwright/test';
 
-// メタエージェント起動 UI (launch modal's third mode):
-// - disabled (with an explanation tooltip) unless the server opted into
-//   metaAgentMcp -- asserted here against the real e2e webServer, which runs
-//   without a sandbox.config.json, so the feature is off by default;
-// - when "enabled" (stubbed /api/dirs/home), launching asks for confirmation
-//   every time, spawns a terminal tab whose init payload carries
-//   isMetaAgent:true (asserted via a mocked /ws/terminal), and renders the
-//   ⌘-prefixed tab label + key icon;
-// - a second launch while another meta agent is alive adds a second confirm;
-// - flipping the server flag off between opening the modal and pressing the
-//   launch button must refuse (the server would silently ignore the flag).
+// メタエージェント起動 UI (固定ディレクトリ + 独立ボタン):
+// - 「起動方法を選択」モーダルにはメタエージェントモードが存在しない (2択のみ)
+// - 専用ボタン ⌘ メタエージェント は metaAgentEnabled === true でのみ有効、無効時は tooltip と disabled
+// - 有効時は専用ダイアログが開き、アプリ選択→確認チェーン→固定 metaAgentDir で isMetaAgent:true の init が飛び、⌘タブが作られる
+// - 二重起動ガード / 無効化後の拒否 / silent downgrade 警告は従来のロジックを移植
 //
 // The enabled-state tests stub the HTTP/WS surface instead of pointing the
 // webServer at a metaAgentMcp:true config: the webServer is shared across all
 // specs in the run, so per-test config flips are not possible there.
+
+const META_AGENT_DIR_STUB = '/home/tester/.local/share/ccserver-sandbox/meta-agent';
 
 const HOME_RESPONSE_BASE = {
   home: '/home/tester',
@@ -23,6 +19,7 @@ const HOME_RESPONSE_BASE = {
   hostname: 'e2e-meta',
   showUsage: false,
   availableApps: { claude: true, opencode: true, copilot: true, codex: true },
+  metaAgentDir: META_AGENT_DIR_STUB,
 };
 
 async function stubDirsHome(page, bodyOrFn) {
@@ -68,7 +65,17 @@ async function stubTerminalWs(page, inits, { echoMeta = true } = {}) {
   });
 }
 
-test('meta agent mode exists but is disabled while the feature is off server-side', async ({ page }) => {
+test('launch modal no longer offers meta mode as a third toggle', async ({ page }) => {
+  await stubDirsHome(page, { ...HOME_RESPONSE_BASE, metaAgentEnabled: true });
+  await stubSessions(page);
+  await page.goto('/');
+  await page.getByRole('button', { name: '起動方法を選択' }).click();
+  // Only 2 toggles remain (通常起動 / コンボ起動)
+  await expect(page.locator('.launch-mode-btn')).toHaveCount(2);
+  await expect(page.locator('.launch-mode-btn', { hasText: 'メタエージェント' })).toHaveCount(0);
+});
+
+test('dedicated meta button is disabled while the feature is off server-side', async ({ page }) => {
   // The shared e2e webServer runs without sandbox.config.json -> default off.
   await page.goto('/');
   const flags = await page.evaluate(async () => {
@@ -77,18 +84,17 @@ test('meta agent mode exists but is disabled while the feature is off server-sid
   });
   expect(flags).toBe(false);
 
-  await page.getByRole('button', { name: '起動方法を選択' }).click();
-  const metaBtn = page.locator('.resume-dialog .launch-mode-btn', { hasText: 'メタエージェント' });
+  const metaBtn = page.locator('.meta-launch-btn');
   await expect(metaBtn).toBeVisible();
-  await expect(metaBtn).toHaveClass(/open-menu-item-disabled/, 'disabled mode must carry the disabled class');
+  await expect(metaBtn).toBeDisabled();
   await expect(metaBtn).toHaveAttribute('title', /metaAgentMcp/);
 
-  // Clicking the disabled button must not switch modes (still 通常起動).
-  await metaBtn.click();
-  await expect.poll(() => page.locator('.launch-mode-btn.active').textContent()).toBe('通常起動');
+  // Launch modal must not contain meta mode any more (2 toggles only)
+  await page.getByRole('button', { name: '起動方法を選択' }).click();
+  await expect(page.locator('.launch-mode-btn')).toHaveCount(2);
 });
 
-test('enabled meta agent mode launches behind a per-launch confirm', async ({ page }) => {
+test('enabled dedicated button opens dialog and launches behind a per-launch confirm', async ({ page }) => {
   const dialogs = [];
   const inits = [];
   page.on('dialog', async (d) => {
@@ -96,9 +102,6 @@ test('enabled meta agent mode launches behind a per-launch confirm', async ({ pa
     await d.accept();
   });
 
-  // Pin the browser to a project directory (same pattern as
-  // copilot-launch.spec.js): on a first visit the directory browser would
-  // otherwise still sit at "/" when the launch fires.
   await page.addInitScript(() => {
     localStorage.setItem('ccserver-last-dir', '/tmp/opencode');
   });
@@ -108,22 +111,20 @@ test('enabled meta agent mode launches behind a per-launch confirm', async ({ pa
   await stubTerminalWs(page, inits);
 
   await page.goto('/');
-  await page.getByRole('button', { name: '起動方法を選択' }).click();
-
-  const metaBtn = page.locator('.resume-dialog .launch-mode-btn', { hasText: 'メタエージェント' });
+  const metaBtn = page.locator('.meta-launch-btn');
   await expect(metaBtn).toBeVisible();
-  await expect(metaBtn).not.toHaveClass(/open-menu-item-disabled/);
+  await expect(metaBtn).toBeEnabled();
   await metaBtn.click();
-  await expect.poll(() => page.locator('.launch-mode-btn.active').textContent()).toBe('メタエージェント');
 
-  // Pick an app inside the meta pane (opencode) and launch.
+  // Dialog appears
+  await expect(page.locator('.resume-dialog', { hasText: 'メタエージェントを起動' })).toBeVisible();
+  await expect(page.locator('.resume-dialog', { hasText: '専用ディレクトリ' })).toContainText(META_AGENT_DIR_STUB);
+
   // copilot must not be offered at all: shouldInjectMetaAgent structurally
   // excludes it, so offering it would only produce silent downgrades.
   await expect(page.locator('.resume-dialog .open-menu-item', { hasText: 'GitHub Copilot' })).toHaveCount(0);
   const opencodeItem = page.locator('.resume-dialog .open-menu-item', { hasText: 'opencode' });
   await opencodeItem.click();
-  // The check mark moves to opencode (the item text gains "✓", so the same
-  // locator keeps resolving while its content changes).
   await expect(opencodeItem.locator('.open-menu-check')).toHaveText('✓');
   await page.locator('.resume-dialog .btn-primary', { hasText: 'メタエージェントを起動' }).click();
 
@@ -133,15 +134,15 @@ test('enabled meta agent mode launches behind a per-launch confirm', async ({ pa
   expect(dialogs[0].message).toMatch(/特権/);
 
   // The tab opens with the ⌘ prefix and the meta key icon...
-  const tab = page.locator('.tab-item', { hasText: '⌘ opencode' });
+  const tab = page.locator('.tab-item', { hasText: '⌘ meta-agent' });
   await expect(tab).toBeVisible();
   await expect(tab.locator('.tab-icon-meta')).toHaveCount(1);
 
-  // ...and its init asked for the meta MCP explicitly.
+  // ...and its init asked for the meta MCP explicitly with fixed dir.
   await expect.poll(() => inits.length).toBe(1);
   expect(inits[0].isMetaAgent).toBe(true);
   expect(inits[0].app).toBe('opencode');
-  expect(inits[0].cwd).toBe('/tmp/opencode');
+  expect(inits[0].cwd).toBe(META_AGENT_DIR_STUB);
 });
 
 test('launching a second meta agent while one is live asks again', async ({ page }) => {
@@ -169,11 +170,8 @@ test('launching a second meta agent while one is live asks again', async ({ page
   await stubTerminalWs(page, inits);
 
   await page.goto('/');
-  await page.getByRole('button', { name: '起動方法を選択' }).click();
-  // Wait for the flag fetch to resolve before switching modes: the toggle is
-  // inert (disabled) while metaAgentEnabled is still unknown.
-  const metaBtn = page.locator('.resume-dialog .launch-mode-btn', { hasText: 'メタエージェント' });
-  await expect(metaBtn).not.toHaveClass(/open-menu-item-disabled/);
+  const metaBtn = page.locator('.meta-launch-btn');
+  await expect(metaBtn).toBeEnabled();
   await metaBtn.click();
   await page.locator('.resume-dialog .btn-primary', { hasText: 'メタエージェントを起動' }).click();
 
@@ -184,9 +182,10 @@ test('launching a second meta agent while one is live asks again', async ({ page
   expect(dialogs[1]).toMatch(/特権/);
   await expect.poll(() => inits.length).toBe(1);
   expect(inits[0].isMetaAgent).toBe(true);
+  expect(inits[0].cwd).toBe(META_AGENT_DIR_STUB);
 });
 
-test('flag turned off after the modal opened refuses at submit time', async ({ page }) => {
+test('flag turned off after the dialog opened refuses at submit time', async ({ page }) => {
   const dialogs = [];
   const inits = [];
   page.on('dialog', async (d) => {
@@ -195,7 +194,7 @@ test('flag turned off after the modal opened refuses at submit time', async ({ p
   });
 
   // Serves true until the test flips the variable ("config changed while the
-  // modal was open"); the launch-time recheck must then see false.
+  // dialog was open"); the launch-time recheck must then see false.
   let metaEnabled = true;
   await stubDirsHome(page, async () => ({ ...HOME_RESPONSE_BASE, metaAgentEnabled: metaEnabled }));
   await stubSessions(page);
@@ -205,14 +204,11 @@ test('flag turned off after the modal opened refuses at submit time', async ({ p
     localStorage.setItem('ccserver-last-dir', '/tmp/opencode');
   });
   await page.goto('/');
-  await page.getByRole('button', { name: '起動方法を選択' }).click();
-  // Wait for the mount-time (true) flag before switching modes: the toggle is
-  // inert while metaAgentEnabled is still unknown.
-  const metaBtn = page.locator('.resume-dialog .launch-mode-btn', { hasText: 'メタエージェント' });
-  await expect(metaBtn).not.toHaveClass(/open-menu-item-disabled/);
-  metaEnabled = false; // the server-side config "changes" behind the open modal
+  const metaBtn = page.locator('.meta-launch-btn');
+  await expect(metaBtn).toBeEnabled();
+  metaEnabled = false; // the server-side config "changes" behind the open dialog
   await metaBtn.click();
-  await expect.poll(() => page.locator('.launch-mode-btn.active').textContent()).toBe('メタエージェント');
+  await expect(page.locator('.resume-dialog', { hasText: 'メタエージェントを起動' })).toBeVisible();
   await page.locator('.resume-dialog .btn-primary', { hasText: 'メタエージェントを起動' }).click();
 
   // An alert explains the refusal; no confirm chain, no session spawn.
@@ -241,14 +237,14 @@ test('requested but ungranted meta MCP warns inside the terminal', async ({ page
   await stubTerminalWs(page, inits, { echoMeta: false });
 
   await page.goto('/');
-  await page.getByRole('button', { name: '起動方法を選択' }).click();
-  const metaBtn = page.locator('.resume-dialog .launch-mode-btn', { hasText: 'メタエージェント' });
-  await expect(metaBtn).not.toHaveClass(/open-menu-item-disabled/);
+  const metaBtn = page.locator('.meta-launch-btn');
+  await expect(metaBtn).toBeEnabled();
   await metaBtn.click();
   await page.locator('.resume-dialog .btn-primary', { hasText: 'メタエージェントを起動' }).click();
 
   await expect.poll(() => inits.length).toBe(1);
   expect(inits[0].isMetaAgent).toBe(true);
+  expect(inits[0].cwd).toBe(META_AGENT_DIR_STUB);
 
   const rows = page.locator('.terminal-container .xterm-rows');
   await expect(rows).toContainText(/ccserver-meta は注入されませんでした/, { timeout: 15_000 });

@@ -9,7 +9,7 @@ import { getGroupFilesDir, ensureGroupFilesDir } from './groupFiles.js';
 import { buildMcpConfigArgsAndEnv } from './mcpConfig.js';
 import { shouldInjectNotify, notifyEnabled, getNotifySockPath, notifyBrokerRunning } from './notify.js';
 import { shouldInjectUsage, usageEnabled, getUsageSockPath, usageBrokerRunning } from './usageMcp.js';
-import { shouldInjectMetaAgent, metaAgentEnabled, getMetaSockPath, metaBrokerRunning } from './metaAgent.js';
+import { shouldInjectMetaAgent, metaAgentEnabled, getMetaSockPath, metaBrokerRunning, ensureMetaAgentDir } from './metaAgent.js';
 import { createScreenModel, SCREEN_ROWS } from './screenModel.js';
 import { bunTmpdirEnv } from './bunTmpdir.js';
 import {
@@ -165,6 +165,18 @@ function normalizeModel(model) {
 
 export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox, sandboxOpts, app, model, resumeLast, groupId = null, groupRole = null, mcpSocketPath = null, projectName = null, reuseSandboxHome = true, orchestratorClaudeMdSrc = null, gitCommonDir = null, groupFilesDir = null, isMetaAgent = false, sandboxHomeCreatedBy = null }) {
   const id = randomUUID();
+
+  // Invariant: meta-agent sessions (isMetaAgent:true, groupId-less) always
+  // run in the fixed project-outside directory ~/.local/share/ccserver-
+  // sandbox/meta-agent, regardless of the client-supplied cwd. This is a
+  // safety force, NOT an authorization boundary -- even when metaAgentMcp is
+  // off or the broker is not running we still force the cwd so a privileged
+  // flag can never land the session inside a project (prompt-injection
+  // material / bwrap rw-bind). Shells are included (no real caller sends
+  // shell+isMetaAgent, but tests use it to verify with a real pty).
+  if (isMetaAgent && !groupId) {
+    cwd = ensureMetaAgentDir();
+  }
 
   // claude (and likely opencode) aborts immediately (SIGABRT, exit 134, no
   // output at all) when launched with the filesystem root as cwd -- refuse
