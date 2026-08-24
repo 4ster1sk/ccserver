@@ -20,6 +20,7 @@ import { basename, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { spawn as spawnProcess } from 'node:child_process';
 import { persistentHomeDir } from './sandbox.js';
+import { metaAgentDir } from './metaAgent.js';
 import { findSessionLimitReset } from './sessionLimitDetect.js';
 import { getLatestSessionLimitReset } from '../sessionLimitState.js';
 
@@ -1133,5 +1134,66 @@ test('onData session-limit detection: a redraw of the same reset time does not r
     assert.equal(stateMsgCount(), 1, 'redraw of the same event does not re-push');
   } finally {
     sessionManager.destroySession(sessionId, { keepSchedule: false });
+  }
+});
+
+// Meta-agent cwd invariant (see ws/metaAgent.js / createSession): sessions
+// launched with isMetaAgent:true and no groupId ALWAYS run in the fixed
+// project-outside meta-agent dir -- a client-supplied project cwd must never
+// reach the privileged session (prompt-injection material / bwrap rw-bind).
+// Flag-less launches keep the requested cwd; group members are excluded from
+// the force (their cwd is resolved server-side from the group).
+test('meta-agent launches are forced into the fixed meta-agent dir; plain and group launches are not', () => {
+  const projectDir = mkdtempSync(join(tmpdir(), 'ccserver-meta-cwd-'));
+  const spawned = [];
+  try {
+    const flagged = sessionManager.createSession({
+      cwd: projectDir, cols: 80, rows: 24, shell: true, sandbox: false, isMetaAgent: true,
+    });
+    assert.ok(flagged.session, 'meta-flagged shell should spawn');
+    spawned.push(flagged.sessionId);
+    assert.equal(flagged.session.cwd, metaAgentDir(), 'isMetaAgent forces the fixed dir');
+    assert.notEqual(flagged.session.cwd, projectDir, 'the client-supplied cwd is never used');
+
+    const plain = sessionManager.createSession({
+      cwd: projectDir, cols: 80, rows: 24, shell: true, sandbox: false,
+    });
+    assert.ok(plain.session, 'plain shell should spawn');
+    spawned.push(plain.sessionId);
+    assert.equal(plain.session.cwd, projectDir, 'flag-less launches keep the requested cwd');
+
+    const member = sessionManager.createSession({
+      cwd: projectDir, cols: 80, rows: 24, shell: true, sandbox: false,
+      groupId: `g-meta-invariant-${randomUUID()}`, groupRole: 'workerA', isMetaAgent: true,
+    });
+    assert.ok(member.session, 'group-member shell should spawn');
+    spawned.push(member.sessionId);
+    assert.equal(member.session.cwd, projectDir, 'group members are resolved from the group, not forced');
+
+    assert.equal(sessionManager.listSessions().find((s) => s.id === flagged.sessionId).isMetaAgent, true);
+  } finally {
+    for (const id of spawned) sessionManager.destroySession(id, { keepSchedule: false });
+    rmSync(projectDir, { recursive: true, force: true });
+  }
+});
+
+// REST contract (shared with the meta agent's launch_session tool): a meta
+// launch needs no client cwd at all (the server forces the fixed dir), while
+// a normal launch without an existing directory is still refused.
+test('createSessionViaApi: isMetaAgent:true needs no cwd; normal launches still require one', async () => {
+  const { createSessionViaApi } = await import('../routes/sessions.js');
+  let sessionId = null;
+  try {
+    const meta = await createSessionViaApi({ isMetaAgent: true, shell: true });
+    assert.equal(meta.ok, true, 'meta launch must not require a client cwd');
+    sessionId = meta.body.sessionId;
+    assert.equal(meta.body.cwd, metaAgentDir(), 'the API reports the forced fixed dir');
+    assert.equal(meta.body.isMetaAgent, true);
+
+    const bad = await createSessionViaApi({});
+    assert.equal(bad.ok, false);
+    assert.equal(bad.code, 'validation', 'a normal launch without cwd stays refused');
+  } finally {
+    if (sessionId) sessionManager.destroySession(sessionId, { keepSchedule: false });
   }
 });
