@@ -25,6 +25,7 @@ import { federationPort } from './federationServer.js';
 
 const CONNECT_TIMEOUT_MS = 10_000;
 const RPC_TIMEOUT_MS = 15_000;
+const FEDERATION_KEEPALIVE_MS = 30_000;
 
 export function parseRemoteAddr(remoteAddr) {
   if (typeof remoteAddr !== 'string' || !remoteAddr.includes(':')) {
@@ -79,6 +80,7 @@ async function connectTls({ host, port }) {
       }
       resolve({ socket, info });
     });
+    try { socket.setKeepAlive(true, FEDERATION_KEEPALIVE_MS); } catch { /* ignore: keepalive not critical */ }
     socket.once('error', reject);
     socket.once('timeout', () => {
       try { socket.destroy(); } catch { /* ignore */ }
@@ -207,9 +209,12 @@ export async function callInstanceRpc(instanceId, method, params, { timeoutMs } 
 // server/ws/remoteTerminal.js). The returned handle stays open for as long
 // as the browser tab does; TerminalView.jsx's existing reconnect-on-close
 // logic is what recovers from this connection dying (a fresh browser
-// reconnect calls this again) -- no federation-specific heartbeat needed on
-// top of the terminal protocol's own ping/pong, which flows through this
-// relay unchanged like every other terminal message.
+// reconnect calls this again). TCP keepalive (FEDERATION_KEEPALIVE_MS via
+// socket.setKeepAlive in connectTls) keeps the underlying TLS socket alive
+// at the kernel level through NAT idle timeouts, complementing the terminal
+// protocol's own ping/pong which still flows through this relay unchanged
+// like every other terminal message. Kernel probes are not throttled when
+// JS timers are suspended in background tabs.
 export async function openTerminalChannel(instanceId) {
   const row = pairing.getActiveInstance(instanceId);
   if (!row) throw new Error('instance is not an active paired peer');

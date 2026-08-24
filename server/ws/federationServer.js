@@ -32,6 +32,8 @@ import { federationConfig } from './federationConfig.js';
 import { resolvedHostname } from './notify.js';
 import { attachTerminalHandler } from './terminal.js';
 
+const FEDERATION_KEEPALIVE_MS = 30_000;
+
 let tlsServer = null;
 let routeDeps = null;
 
@@ -215,6 +217,7 @@ function closeChanFor(socket) {
 }
 
 function handleConnection(socket, { log, selfIdentity }) {
+  try { socket.setKeepAlive(true, FEDERATION_KEEPALIVE_MS); } catch { /* ignore: keepalive not critical */ }
   const remoteAddr = `${socket.remoteAddress}:${socket.remotePort}`;
   const info = peerCertInfo(socket);
   if (!info) {
