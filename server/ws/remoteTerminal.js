@@ -22,6 +22,7 @@ export async function remoteTerminalWs(fastify, opts) {
   fastify.get('/ws/remote-terminal', { websocket: true }, (socket, req) => {
     let channel = null;
     let opening = false;
+    let closed = false;
 
     function sendError(message, code) {
       try {
@@ -56,8 +57,9 @@ export async function remoteTerminalWs(fastify, opts) {
       }
 
       opening = true;
+      let opened;
       try {
-        channel = await openTerminalChannel(instanceId);
+        opened = await openTerminalChannel(instanceId);
       } catch (err) {
         opening = false;
         sendError(`could not reach the remote instance: ${err.message}`, 'REMOTE_UNREACHABLE');
@@ -65,6 +67,19 @@ export async function remoteTerminalWs(fastify, opts) {
         return;
       }
       opening = false;
+
+      if (closed) {
+        // The browser socket went away while the mTLS handshake to the peer
+        // was still in flight (e.g. the user closed the tab right after
+        // opening it). Without this check we'd forward `msg` below anyway --
+        // spawning or attaching a real remote session nobody will ever see -
+        // and never close the freshly opened federation TLS connection,
+        // since the 'close' handler below already ran once with channel still
+        // null and won't fire again.
+        opened.close();
+        return;
+      }
+      channel = opened;
 
       channel.onMessage((frame) => {
         try {
@@ -82,9 +97,11 @@ export async function remoteTerminalWs(fastify, opts) {
     });
 
     socket.on('close', () => {
+      closed = true;
       if (channel) channel.close();
     });
     socket.on('error', () => {
+      closed = true;
       if (channel) channel.close();
     });
   });
