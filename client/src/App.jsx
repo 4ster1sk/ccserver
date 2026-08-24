@@ -478,7 +478,7 @@ export default function App() {
           <div
             key={tab.id}
             className={`tab-item${tab.id === activeTabId ? ' active' : ''}${tab.type === 'terminal' && !tab.shell && !tab.sandbox ? ' no-sandbox' : ''}`}
-            title={tab.type === 'group' && tab.cwd ? tab.cwd : tab.remote ? `${tab.remote.label} — ${tab.cwd || ''}`.trim() : tab.type === 'terminal' && tab.cwd ? tab.cwd : undefined}
+            title={tab.type === 'group' && tab.cwd ? tab.cwd : tab.remote ? `${tab.remote.label} — ${tab.cwd || ''}`.trim() : (tab.type === 'terminal' && tab.cwd ? tab.cwd : undefined)}
             onClick={() => handleTabClick(tab.id)}
           >
             <span className="tab-label">
@@ -489,7 +489,7 @@ export default function App() {
                   {tab.currentTurn === 'orchestrator' ? 'ORCH' : tab.currentTurn.toUpperCase()}
                 </span>
               )}
-              {tab.remote && <span className="tab-remote-badge" title={`接続先: ${tab.remote.label} (${tab.remote.instanceId.slice(0, 8)})`}>⇄ {tab.remote.label}</span>}
+              {tab.type === 'terminal' && tab.remote && <span className="tab-remote-badge" title={`接続先: ${tab.remote.label} (${tab.remote.instanceId.slice(0, 8)})`}>⇄ {tab.remote.label}</span>}
             </span>
             {tab.type !== 'browser' && tab.type !== 'monitor' && tab.type !== 'remote' && (
               <button
