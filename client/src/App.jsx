@@ -471,7 +471,7 @@ export default function App() {
                 </span>
               )}
             </span>
-            {tab.type !== 'browser' && tab.type !== 'monitor' && (
+            {tab.type !== 'browser' && tab.type !== 'monitor' && tab.type !== 'remote' && (
               <button
                 className="tab-close"
                 onClick={(e) => {
