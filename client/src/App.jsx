@@ -3,9 +3,11 @@ import DirectoryBrowser from './components/DirectoryBrowser.jsx';
 import SystemMonitor from './components/SystemMonitor.jsx';
 import SettingsView from './components/SettingsView.jsx';
 import ApprovalBanner from './components/ApprovalBanner.jsx';
+import PairingRequestBanner from './components/PairingRequestBanner.jsx';
 import UsageButton from './components/UsageButton.jsx';
 import TabIcon from './components/TabIcon.jsx';
 import GroupTabView from './components/GroupTabView.jsx';
+import RemoteInstanceView from './components/RemoteInstanceView.jsx';
 import { useNotifications } from './hooks/useNotifications.js';
 import { authFetch } from './auth.js';
 import { getTheme, loadThemeId, saveThemeId, applyThemeCss } from './themes.js';
@@ -18,6 +20,7 @@ export default function App() {
   const [tabs, setTabs] = useState([
     { id: 'browser', type: 'browser', label: 'Files' },
     { id: 'monitor', type: 'monitor', label: 'Monitor' },
+    { id: 'remote', type: 'remote', label: 'Remote' },
   ]);
   const [activeTabId, setActiveTabId] = useState('browser');
   const [lastDir, setLastDir] = useState(() => localStorage.getItem('ccserver-last-dir'));
@@ -84,6 +87,30 @@ export default function App() {
     ]);
     setActiveTabId(id);
     if (!isMetaAgent) setLastDir(dirPath);
+  }, []);
+
+  // Remote (federated) counterpart of openTerminalTab: same tab shape, plus
+  // `remote: {instanceId, label}` so TerminalView connects through
+  // /ws/remote-terminal instead of /ws/terminal (see its remoteInstanceId
+  // prop). `instance` is a paired_instances row (from RemoteInstanceView's
+  // GET /api/federation/instances poll); `dirPath`/opts describe the REMOTE
+  // session, so no local sandbox-reuse-dialog / resume-prompt detour applies
+  // (Phase 1's remote launch surface is intentionally the plain REST shape,
+  // see RemoteInstanceView.jsx's header comment) -- this always opens
+  // directly, unlike handleOpen/continueOpen for local sessions.
+  const openRemoteTerminalTab = useCallback((instance, dirPath, { shell = false, attachSessionId = null, sandbox = false, sandboxOpts = null, app = 'claude' } = {}) => {
+    const id = `terminal-${++tabIdCounter}`;
+    const dirName = (dirPath || '').split(/[/\\]/).filter(Boolean).pop() || dirPath || instance.label;
+    const label = `⇄ ${dirName}`;
+    setTabs((prev) => [
+      ...prev,
+      {
+        id, type: 'terminal', label, cwd: dirPath, shell, attachSessionId, sandbox, sandboxOpts, app,
+        exited: false,
+        remote: { instanceId: instance.id, label: instance.label || instance.fingerprint?.slice(0, 8) },
+      },
+    ]);
+    setActiveTabId(id);
   }, []);
 
   // The post-sandbox-dialog open flow: claude's resume prompt (if a saved
@@ -441,6 +468,10 @@ export default function App() {
       {/* Meta-agent approval requests (ccserver-meta): global banner above
           the tab bar so it is visible no matter which tab is active. */}
       <ApprovalBanner />
+      {/* Cross-instance federation pairing requests (plan Phase 1): same
+          always-visible placement, so an incoming pairing request from
+          another ccserver instance can't be missed on any tab. */}
+      <PairingRequestBanner />
       <div className="tab-bar">
         <div className="tab-list">
         {tabs.map((tab) => (
@@ -459,7 +490,7 @@ export default function App() {
                 </span>
               )}
             </span>
-            {tab.type !== 'browser' && tab.type !== 'monitor' && (
+            {tab.type !== 'browser' && tab.type !== 'monitor' && tab.type !== 'remote' && (
               <button
                 className="tab-close"
                 onClick={(e) => {
@@ -483,6 +514,9 @@ export default function App() {
         </div>
         <div style={{ display: activeTabId === 'monitor' ? 'flex' : 'none', height: '100%', flexDirection: 'column' }}>
           <SystemMonitor visible={activeTabId === 'monitor'} />
+        </div>
+        <div style={{ display: activeTabId === 'remote' ? 'flex' : 'none', height: '100%', flexDirection: 'column', overflow: 'auto' }}>
+          <RemoteInstanceView onOpenRemoteTerminal={openRemoteTerminalTab} visible={activeTabId === 'remote'} />
         </div>
         {tabs.some((t) => t.type === 'settings') && (
           <div style={{ display: activeTabId === 'settings' ? 'flex' : 'none', height: '100%', flexDirection: 'column' }}>
@@ -522,6 +556,7 @@ export default function App() {
                   onThemeChange={setThemeId}
                   tabId={tab.id}
                   onFocusTab={() => handleTabClick(tab.id)}
+                  remoteInstanceId={tab.remote?.instanceId || null}
                 />
               </Suspense>
             </div>

@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { authFetch } from '../auth.js';
+import PairedInstancesSection from './PairedInstancesSection.jsx';
 
 function formatSize(bytes) {
   if (!Number.isFinite(bytes) || bytes <= 0) return '0 B';
@@ -151,6 +152,7 @@ export default function SettingsView() {
           </ul>
         )}
       </section>
+      <PairedInstancesSection />
     </div>
   );
 }

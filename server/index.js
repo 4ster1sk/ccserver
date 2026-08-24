@@ -17,13 +17,17 @@ import { approvalsRoute } from './routes/approvals.js';
 import { groupFilesRoute } from './routes/groupFiles.js';
 import { sandboxRoute } from './routes/sandbox.js';
 import { sandboxesRoute } from './routes/sandboxes.js';
+import { federationRoute } from './routes/federation.js';
 import { terminalWs } from './ws/terminal.js';
+import { remoteTerminalWs } from './ws/remoteTerminal.js';
 import { gracefulShutdown, restoreSchedules } from './ws/sessionManager.js';
 import { restoreGroups, detectOrphanWorktrees } from './ws/groupManager.js';
 import { restoreNotify, ensureNotifyBroker, stopNotifyBroker, notifyEnabled } from './ws/notify.js';
 import { ensureUsageBroker, stopUsageBroker, usageEnabled } from './ws/usageMcp.js';
 import { ensureMetaAgentBroker, stopMetaAgentBroker, metaAgentEnabled } from './ws/metaAgent.js';
 import { expireStalePendingApprovals } from './ws/approvals.js';
+import { ensureFederationServer, stopFederationServer, federationEnabled } from './ws/federationServer.js';
+import { sweepExpiredPending } from './ws/federationPairing.js';
 import { warmUsage } from './usage.js';
 import { warmCodexUsage } from './codexUsage.js';
 import { initDb, dbPath } from './db.js';
@@ -62,7 +66,9 @@ await fastify.register(approvalsRoute, { prefix: '/api' });
 await fastify.register(groupFilesRoute, { prefix: '/api' });
 await fastify.register(sandboxRoute, { prefix: '/api' });
 await fastify.register(sandboxesRoute, { prefix: '/api' });
+await fastify.register(federationRoute, { prefix: '/api' });
 await fastify.register(terminalWs);
+await fastify.register(remoteTerminalWs);
 
 if (process.env.NODE_ENV === 'production') {
   await fastify.register(fastifyStatic, {
@@ -82,6 +88,7 @@ const cleanup = () => {
   stopNotifyBroker();
   stopUsageBroker();
   stopMetaAgentBroker();
+  stopFederationServer();
   gracefulShutdown().then(() => process.exit(0));
 };
 process.on('SIGTERM', cleanup);
@@ -98,6 +105,12 @@ try {
   // expire them (fail-safe -- nothing runs just because the server restarted).
   const swept = expireStalePendingApprovals();
   if (swept > 0) fastify.log.warn(`Expired ${swept} stale pending approval(s) left by a previous run`);
+  // Federation pairing requests older than the 7-day window (see
+  // federationPairing.js) never had a waiter to lose, so unlike the sweep
+  // above this isn't a crash-recovery step -- just the same boot-time
+  // opportunity to catch up before the first browser poll does.
+  const expiredPairings = sweepExpiredPending();
+  if (expiredPairings > 0) fastify.log.info(`Expired ${expiredPairings} stale federation pairing request(s)`);
 } catch (err) {
   fastify.log.error({ err }, `Failed to initialize SQLite database (${dbPath()}): ${err.message}`);
   process.exit(1);
@@ -143,6 +156,20 @@ try {
   }
 } catch (err) {
   fastify.log.error({ err }, 'Failed to start ccserver-meta broker');
+}
+
+// Federation (plan Phase 1): a dedicated mTLS listener on
+// CCSERVER_FEDERATION_PORT, separate from the Fastify port above -- see
+// ws/federationServer.js's header comment. Opt-in via the env var; a failure
+// here (missing openssl, port already in use) disables federation for this
+// run rather than refusing to boot, matching the notify/usage/meta brokers.
+try {
+  if (federationEnabled()) {
+    await ensureFederationServer({ log: fastify.log });
+    fastify.log.info(`ccserver federation listener started on port ${process.env.CCSERVER_FEDERATION_PORT}`);
+  }
+} catch (err) {
+  fastify.log.error({ err }, 'Failed to start ccserver federation listener');
 }
 
 await fastify.listen({ port: PORT, host: '0.0.0.0' });

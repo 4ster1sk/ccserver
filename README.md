@@ -244,6 +244,23 @@ ccserver 自体を MCP 経由で操作できる特権エージェント (**メ�
 - **タイムアウトは 5 分固定で、未応答のリクエストは常に「拒否」扱い**になります (fail-safe は常に「何もしない」側)。また、メタエージェントが**自分自身のセッションや自分の所属グループ**を対象に破壊的操作を呼んだ場合は、承認フローに回さずその場でエラーとして拒否されます (fail closed — 自己終了・自己破壊はどんな理由でも代行させません)。`delete_sandbox` については、メタエージェント自身がそのサンドボックス HOME 内で稼働中なら既存の「使用中」ガードが自然に自己削除を防ぎます。
 - **サンドボックス権限のキャップ**: メタエージェントが `launch_session` / `launch_group` 経由で他セッションに付与する `sandboxOpts` (gpg / sshAgent) は、メタエージェント自身が現在保持する権限でキャップされ、超過分は要求されていても暗黙に downgrade されます (エラーにはなりません)。コンボのオーケストレーターが子ワーカーの権限をキャップするのと同じルールです。
 
+### 拠点間 (federation) ペアリング
+
+複数の ccserver インスタンス (別マシン・別ネットワーク上でもよい) を**ペアリング**すると、ブラウザの **Remote** タブから他インスタンスのセッション/コンボの**一覧・起動・端末操作**ができます。現時点 (Phase 1) では一覧・起動・端末 I/O 中継のみが対象で、あるインスタンスのオーケストレーターが別インスタンスの MCP ツールを直接操作する分散コンボ (Phase 2) は未実装です。
+
+- **オプトイン**: 既定では無効です。`CCSERVER_FEDERATION_PORT` 環境変数を設定した場合のみ、メインの Fastify ポートとは別listenerとして相互 TLS (mTLS) の待受を開始します。未設定 (または `0`) なら federation 機能自体が丸ごと無効になり、`Settings` タブにも `GET /api/federation/identity` にも「無効」と表示されます。
+
+  ```bash
+  CCSERVER_FEDERATION_PORT=3210 NODE_ENV=production node server/index.js
+  ```
+
+- **信頼モデル**: 各インスタンスは初回起動時に自己署名 Ed25519 証明書を1組生成し (`openssl` が必要。無い環境では federation は無効のまま動作を継続します)、`~/.local/share/ccserver-sandbox/federation/{instance.key,instance.crt}` に `0600` で保存します (`CCSERVER_FEDERATION_HOME` で置き場を上書き可能)。federation ポートの TLS は **CA 検証を完全に無効化**しており、代わりに「ペアリング時に人間が承認して pin した証明書 fingerprint (`fingerprint256`) との完全一致」だけを信頼根拠とします。SSH のホスト鍵 + `known_hosts` と同じメンタルモデルです。
+- **双方向承認が必須**: どちらから接続を開始しても、**発信側・着信側それぞれの人間が別々にブラウザの承認バナーで fingerprint を確認して承認ボタンを押すまで有効になりません**。片側だけの承認では `active` になりません。承認/却下は `Settings` タブの上に出るグローバルバナーから行います (`GET /api/federation/pending` を数秒間隔でポーリング)。取り消しはいつでも `Settings` タブの「ペアリング済みインスタンス」一覧から (相手には通知されません。相手側から見ると以後の接続が単に拒否されるだけです)。
+- **自己申告アドレスの到達性**: ペアリング相手が後からこちらへ接続し直せるよう、自分の `<ホスト名>:<CCSERVER_FEDERATION_PORT>` を相手に伝えます。ホスト名は `CCSERVER_HOSTNAME` 環境変数 (未設定なら `ccserver-notify` の footer と同じ解決順) が使われるため、Tailscale などフラットなネットワークでない構成では **`CCSERVER_HOSTNAME` に相手から解決できるホスト名を明示してください** (でないと相手が pending 状態から `active` へ進めません)。
+- **ペアリング時のトークン要求 (任意)**: `sandbox.config.json` の `federation.requireTokenForPairing: true` を設定すると、ペアリング開始リクエスト (bootstrap) にだけ相手側の `CCSERVER_TOKEN` の提示を必須にできます。あくまでスパム対策で、**トークンが合っていても人間の双方向承認は省略されません**。
+- **できること (Remote タブ)**: ペアリング済みで `active` なインスタンスごとに、実行中セッション/コンボの一覧、新規セッション/コンボの起動、既存セッションへの接続 (通常のターミナルタブと同じ xterm 画面で、入出力は federation 経由で中継されます) ができます。コンボのメンバーは個別の通常セッションとして開けます (ローカルの3ペイン統合ビューとは異なります — MCP によるハンドオフはあくまで相手インスタンス内で完結する仕組みのため)。
+- **できないこと (Phase 2 未実装)**: あるインスタンスのオーケストレーターが別インスタンス上に直接ワーカーを生成・操作する分散コンボ。REST API 経由で REST/端末 I/O を中継しているだけで、MCP ソケットそのものを跨マシンで公開しているわけではありません。
+
 ### コンボ起動: ロール別 git worktree
 
 コンボ起動の各ワーカー (workerA/workerB や `open_tab` で追加されたロール) は、プロジェクトが git リポジトリであれば**ロールごとに独立した git worktree** で起動します。以前は全ワーカーが同一チェックアウトを共有しており、別ブランチでの並行 git 操作 (実装とレビューを別ワーカーが同時に行う等) が衝突する事故が起きていたため、この分離が導入されました。
@@ -436,6 +453,7 @@ cp server/sandbox.config.example.json server/sandbox.config.json
 | `env` | `{}` | サンドボックス内の追加環境変数 (適用順は最後 = 既定値を上書き)。例: `sshAgent: true` のときに `SSH_AUTH_SOCK` を明示指定して自動検出を上書き。 |
 | `claudeBin` | 自動検出 | claude/opencode/copilot の起動方法。`claude` を PATH から解決し、ラッパー (例: `/usr/bin/claude` → `/opt/claude-code/bin/claude`) の場合は実体のインストール先を辿ってサンドボックスへ自動的に公開します。opencode は PATH に加えて `~/.opencode/bin` も自動探索。copilot は PATH (SANDBOX_PATH) で自動解決されます (通常 `~/.local/bin/copilot`)。自動検出で外れる場所にある場合や特定ビルドに固定したい場合のみ絶対パスで指定 (環境変数 `CCSERVER_CLAUDE_BIN` が優先。copilot に個別の bin 設定はありません)。 |
 | `notify` | `{}` | 通知用 MCP (ccserver-notify) の設定 (上記「ccserver-notify (通知用 MCP)」参照)。`discordWebhook` は https のみ (非 https は無視)、`subscriptions` は初期購読 (https のみ)。`CCSERVER_DISCORD_WEBHOOK` 環境変数で discordWebhook を上書き可。`vikunja` は Vikunja タスク連携の設定 (上記「Vikunja 連携」参照、`baseUrl`+`apiToken` で有効化)。 |
+| `federation` | `{}` | 拠点間ペアリング (上記「拠点間 (federation) ペアリング」参照) の設定。`requireTokenForPairing: true` でペアリング開始リクエストに `CCSERVER_TOKEN` の提示を必須化 (既定 `false`)。機能自体の有効/無効は `CCSERVER_FEDERATION_PORT` 環境変数で制御し、ここでは切り替えられません。 |
 
 サンドボックスは Linux 限定です。同じプロジェクトを 2 つのサンドボックスで同時に開いた場合、docker の data-root は1つしかないため、rootless dockerd が実際に起動できる (`sandbox-entrypoint.sh` の `flock` を取れる) のはどちらか一方だけです。**先に取れた方が勝つだけで、workerA/workerB のような役割やコンボの登録順とは無関係** — 起動順が入れ替われば逆転しえます。負けた方は docker 無しで (エラーにはならず) 起動します。
 
@@ -567,6 +585,14 @@ CCSERVER_TOKEN=some-secret NODE_ENV=production node server/index.js
 | POST | `/api/groups` | コンボ起動。従来の `workerA`/`workerB`/`orchestrator` に加え、canonical な `workers: [{ name?, role, app?, model?, sandboxOpts? }]` (1–7 人、role 一意) を受け付ける。プリセットはクライアントがスナップショットへ展開して送る。copilot はどちらの経路でも 400 拒否 |
 | GET | `/api/approvals?status=pending` | メタエージェントの承認待ち破壊的操作一覧 (`ccserver-meta` 参照)。ブラウザのグローバルバナーが数秒間隔でポーリング |
 | POST | `/api/approvals/:id/decision` | `{ decision: 'approved' \| 'rejected' }` で承認待ち操作を承認/却下する。5 分未応答のリクエストはサーバー側で expired (拒否扱い) になる |
+| GET | `/api/federation/identity` | `{ enabled, fingerprint?, keyPermissionsSafe? }` — このインスタンス自身の federation 有効/無効と証明書 fingerprint |
+| GET | `/api/federation/instances` | ペアリング済みインスタンス一覧 (全ステータス)。呼び出しのたびに未確定 (pending) 行を相手へ問い合わせて解決を試みる |
+| POST | `/api/federation/instances` | `{ remoteAddr, remoteToken?, label? }` で新規ペアリングを発信 (`remoteAddr` は `host:port`) |
+| PATCH | `/api/federation/instances/:id` | `{ label }` で表示名を変更 |
+| DELETE | `/api/federation/instances/:id` | ペアリングを取り消す (即時・ローカルのみ。相手には通知されない) |
+| GET | `/api/federation/pending` | 未承認 (双方向承認の途中) のペアリング一覧 |
+| POST | `/api/federation/pending/:id/decide` | `{ decision: 'approved' \| 'rejected' }` — このインスタンス側の人間の承認/却下を記録する |
+| GET/POST/DELETE | `/api/federation/instances/:id/{sessions,groups,dirs}` | `active` なペアへの薄いプロキシ。ボディ/レスポンス形状はそれぞれ `/api/sessions`・`/api/groups`・`/api/dirs` と同一 |
 
 `GET /api/dirs` のレスポンス例:
 
@@ -605,6 +631,10 @@ JSON メッセージでターミナル I/O とセッション管理 (アタッ�
 | ← | `schedule_state` | `scheduled`, `serverTz`, `serverNow`, `error?` | 予約プロンプトの現在状態 (サーバー時刻/TZ 付き) |
 | ← | `error` | `message`, `code` | エラー通知 (`SESSION_NOT_FOUND` は自動再接続、それ以外はターミナルにメッセージを表示) |
 | ← | `pong` | – | `ping` への応答 |
+
+### `WebSocket /ws/remote-terminal`
+
+拠点間ペアリング (上記) のリモート端末タブが使う中継専用エンドポイント。メッセージ語彙は `/ws/terminal` と完全に同一で、`init`/`attach` の最初のメッセージに `instanceId` (ペアリング済みインスタンスの id) を追加で含める点だけが違います。以降のメッセージはそのまま federation TLS チャンネル経由で相手インスタンスの `/ws/terminal` ロジックへ中継され、`output`/`replay`/`exit` などの応答もそのまま返ってきます。相手が `active` なペアでない場合は `error` (`code: 'INSTANCE_NOT_FOUND'`)、接続後に federation 側が切断された場合は `error` (`code: 'REMOTE_DISCONNECTED'`) を送ってからソケットを閉じ、クライアント側の既存の自動再接続ロジックに委ねます。
 
 ## systemd でバックグラウンド実行
 
