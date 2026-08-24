@@ -110,6 +110,11 @@ export async function terminalWs(fastify, opts) {
             sandboxOpts: msg.sandboxOpts || null,
             app: msg.app || null,
             model: typeof msg.model === 'string' ? msg.model : null,
+            // Meta-agent launch from the browser UI (same flag REST
+            // POST /api/sessions already accepts). The server still gates the
+            // actual MCP injection on metaAgentMcp + broker state, so a stale
+            // client can never conjure privileges by sending this.
+            isMetaAgent: !!msg.isMetaAgent,
             resumeLast: !!msg.resume,
             groupId,
             groupRole,
@@ -141,6 +146,10 @@ export async function terminalWs(fastify, opts) {
               cols: session.cols,
               rows: session.rows,
               isReconnect: false,
+              // Echo whether the meta MCP was really injected so the client
+              // can surface a silent downgrade (flag requested but the broker
+              // is off) instead of leaving it invisible.
+              isMetaAgent: !!session.isMetaAgent,
             })
           );
           socket.send(scheduleStateMsg(scheduledPromptPublic(session)));
@@ -193,6 +202,7 @@ export async function terminalWs(fastify, opts) {
               cols: session.cols,
               rows: session.rows,
               isReconnect: true,
+              isMetaAgent: !!session.isMetaAgent,
             })
           );
 

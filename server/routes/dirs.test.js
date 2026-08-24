@@ -6,7 +6,7 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import Fastify from 'fastify';
-import { mkdtempSync, rmSync, existsSync } from 'node:fs';
+import { mkdtempSync, rmSync, existsSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { dirsRoute } from './dirs.js';
@@ -89,5 +89,35 @@ test('POST /dirs keeps the directory but reports failure when git init cannot ru
     assert.ok(existsSync(body.path), 'the created directory is kept for manual retry');
   } finally {
     if (realPath !== undefined) process.env.PATH = realPath;
+  }
+});
+
+// GET /dirs/home exposes the meta-agent feature flag so the launch modal can
+// disable (and explain) its メタエージェント mode. The value must follow
+// sandbox.config.json's "metaAgentMcp" live (loadSandboxConfig re-reads on
+// every call), and a missing file / missing key means false.
+test('GET /dirs/home exposes metaAgentEnabled following sandbox.config.json', async () => {
+  const cfg = join(runtimeDir, 'sandbox.config.json');
+  process.env.CCSERVER_SANDBOX_CONFIG = cfg;
+  try {
+    // No config file at all -> default off.
+    let res = await app.inject({ method: 'GET', url: '/api/dirs/home' });
+    assert.equal(res.json().metaAgentEnabled, false);
+
+    writeFileSync(cfg, JSON.stringify({ metaAgentMcp: true }));
+    res = await app.inject({ method: 'GET', url: '/api/dirs/home' });
+    assert.equal(res.json().metaAgentEnabled, true);
+
+    writeFileSync(cfg, JSON.stringify({ metaAgentMcp: false }));
+    res = await app.inject({ method: 'GET', url: '/api/dirs/home' });
+    assert.equal(res.json().metaAgentEnabled, false);
+
+    // Key absent -> off (same as the pre-feature config shape).
+    writeFileSync(cfg, JSON.stringify({ docker: true }));
+    res = await app.inject({ method: 'GET', url: '/api/dirs/home' });
+    assert.equal(res.json().metaAgentEnabled, false);
+  } finally {
+    delete process.env.CCSERVER_SANDBOX_CONFIG;
+    try { rmSync(cfg, { force: true }); } catch {}
   }
 });

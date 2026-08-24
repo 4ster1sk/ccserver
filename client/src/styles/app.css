@@ -1098,6 +1098,14 @@ body {
   font-weight: 600;
 }
 
+/* Disabled メタエージェント mode button: reuses .open-menu-item-disabled, but
+   that rule loses to .launch-mode-btn's own cursor (same specificity, later
+   in file), so the not-allowed cursor needs reinforcing here. */
+.launch-mode-btn.open-menu-item-disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
 .open-menu-app-row {
   display: flex;
   gap: 4px;

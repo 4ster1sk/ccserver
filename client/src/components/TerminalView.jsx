@@ -233,7 +233,7 @@ function osc52Response(text) {
 
 const themeIds = getThemeIds();
 
-export default function TerminalView({ cwd, onClose, claudeSessionId, shell, sandbox, sandboxOpts, reuseSandboxHome = true, app = 'claude', model = null, resume = false, notify, notifyEnabled, notifyPermission, onToggleNotify, visible, onSessionId, onExited, attachSessionId, xtermTheme, themeId, onThemeChange, tabId, onFocusTab, groupId, groupRole, projectCwd = null }) {
+export default function TerminalView({ cwd, onClose, claudeSessionId, shell, sandbox, sandboxOpts, reuseSandboxHome = true, app = 'claude', model = null, resume = false, isMetaAgent = false, notify, notifyEnabled, notifyPermission, onToggleNotify, visible, onSessionId, onExited, attachSessionId, xtermTheme, themeId, onThemeChange, tabId, onFocusTab, groupId, groupRole, projectCwd = null }) {
   const isMobile = useMemo(() => 'ontouchstart' in window, []);
   const terminalRef = useRef(null);
   const terminalViewRef = useRef(null);
@@ -252,6 +252,13 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
   const appRef = useRef(app);
   const modelRef = useRef(model);
   const resumeRef = useRef(resume);
+  // Meta-agent flag: must ride along on EVERY init (first connect AND the
+  // SESSION_NOT_FOUND re-init) -- dropping it there would resurrect a dead
+  // meta agent as a silently unprivileged session.
+  const isMetaAgentRef = useRef(isMetaAgent);
+  // What the last init requested (true/false), so the 'session' response can
+  // be checked for a silent downgrade; null once consumed.
+  const requestedMetaRef = useRef(null);
   const [autoYes, setAutoYes] = useState(false);
   const [autoYesLog, setAutoYesLog] = useState([]);
   const [showAutoYesLog, setShowAutoYesLog] = useState(false);
@@ -692,6 +699,7 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
             reuseSandboxHome: reuseSandboxHomeRef.current !== false,
             app: appRef.current,
             model: shellRef.current ? null : modelRef.current,
+            isMetaAgent: !!isMetaAgentRef.current,
             // Group membership is carried into a re-launch so the server can
             // re-create the member's MCP channel and register it to the role.
             groupId: groupId || null,
@@ -703,6 +711,7 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
           } else if (!shellRef.current && (appRef.current === 'opencode' || appRef.current === 'copilot' || appRef.current === 'codex') && resumeRef.current) {
             initMsg.resume = true;
           }
+          requestedMetaRef.current = !!initMsg.isMetaAgent;
           ws.send(JSON.stringify(initMsg));
         }
       };
@@ -723,6 +732,14 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
             // 再接続などで同一タブに新しいセッションが始まるケースがあるため、
             // セッション確立のたびにexitedフラグを戻す。
             if (onExitedRef.current) onExitedRef.current(false);
+            // Silent-downgrade guard: the init asked for the meta MCP but the
+            // server did not grant it (feature disabled / broker not running).
+            if (requestedMetaRef.current != null) {
+              if (requestedMetaRef.current && msg.isMetaAgent !== true) {
+                term.writeln('\r\n[警告: ccserver-meta は注入されませんでした (metaAgentMcp 無効またはブローカー未起動)]');
+              }
+              requestedMetaRef.current = null;
+            }
             if (msg.isReconnect) {
               term.clear();
             }
@@ -803,6 +820,7 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
                 reuseSandboxHome: reuseSandboxHomeRef.current !== false,
                 app: appRef.current,
                 model: shellRef.current ? null : modelRef.current,
+                isMetaAgent: !!isMetaAgentRef.current,
                 groupId: groupId || null,
                 groupRole: groupRole || null,
               };
@@ -824,6 +842,7 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
                   initMsg.resume = true;
                 }
               }
+              requestedMetaRef.current = !!initMsg.isMetaAgent;
               ws.send(JSON.stringify(initMsg));
             } else {
               // Any other error (e.g. SPAWN_FAILED — the target app isn't
