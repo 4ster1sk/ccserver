@@ -68,7 +68,7 @@ async function selectionHandlePositions(page) {
 
 test('selection mode: keeps the keyboard closed and lets both ends be dragged independently', async ({ page, context }) => {
   await page.goto('/');
-  await page.locator('.open-btn', { hasText: 'Terminal' }).click();
+  await page.getByRole('button', { name: 'Terminal', exact: true }).click();
   await expect(page.locator('.terminal-container')).toBeVisible();
 
   // A plain shell session (no claude/opencode dependency). Give its prompt
