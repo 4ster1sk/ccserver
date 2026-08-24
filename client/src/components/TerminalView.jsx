@@ -233,7 +233,7 @@ function osc52Response(text) {
 
 const themeIds = getThemeIds();
 
-export default function TerminalView({ cwd, onClose, claudeSessionId, shell, sandbox, sandboxOpts, reuseSandboxHome = true, app = 'claude', model = null, resume = false, isMetaAgent = false, notify, notifyEnabled, notifyPermission, onToggleNotify, visible, onSessionId, onExited, attachSessionId, xtermTheme, themeId, onThemeChange, tabId, onFocusTab, groupId, groupRole, projectCwd = null, remoteInstanceId = null }) {
+export default function TerminalView({ cwd, onClose, claudeSessionId, shell, sandbox, sandboxOpts, reuseSandboxHome = true, app = 'claude', model = null, resume = false, isMetaAgent = false, notify, notifyEnabled, notifyPermission, onToggleNotify, visible, onSessionId, onExited, attachSessionId, xtermTheme, themeId, onThemeChange, tabId, onFocusTab, groupId, groupRole, projectCwd = null, remoteInstanceId = null, remoteInstanceLabel = null }) {
   const isMobile = useMemo(() => 'ontouchstart' in window, []);
   const terminalRef = useRef(null);
   const terminalViewRef = useRef(null);
@@ -257,6 +257,7 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
   // ref (not re-read from the prop on reconnect) is enough; kept as a ref
   // only for consistency with the other launch-setting refs above.
   const remoteInstanceIdRef = useRef(remoteInstanceId);
+  const remoteInstanceLabelRef = useRef(remoteInstanceLabel);
   // Meta-agent flag: must ride along on EVERY init (first connect AND the
   // SESSION_NOT_FOUND re-init) -- dropping it there would resurrect a dead
   // meta agent as a silently unprivileged session.
@@ -1263,6 +1264,7 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
   return (
     <div className={`terminal-view${keyboardOpen ? ' keyboard-open' : ''}${selectionMode ? ' selection-mode' : ''}`} ref={terminalViewRef}>
       <div className={`terminal-header${!sandbox && !shell ? ' no-sandbox' : ''}`}>
+        {remoteInstanceLabel && <span className="terminal-remote-badge" title={`リモート: ${remoteInstanceLabel} (${remoteInstanceId})`}>⇄ {remoteInstanceLabel}</span>}
         <span
           className="terminal-title"
           title={projectCwd && projectCwd !== cwd ? `Project: ${projectCwd}\nWorktree: ${cwd}` : cwd}

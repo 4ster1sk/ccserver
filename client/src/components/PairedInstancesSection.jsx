@@ -236,7 +236,7 @@ export default function PairedInstancesSection() {
 
       {modalOpen && (
         <div className="resume-overlay" onClick={closeModal}>
-          <form className="resume-dialog" onClick={(e) => e.stopPropagation()} onSubmit={submitPairing}>
+          <form className="resume-dialog pairing-dialog" onClick={(e) => e.stopPropagation()} onSubmit={submitPairing}>
             <h3>新しいインスタンスとペアリング</h3>
             <p className="pairing-modal-hint">
               相手インスタンスの federation ポート (host:port) を入力してください。

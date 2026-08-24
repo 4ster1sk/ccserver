@@ -18,6 +18,7 @@
   --border: #45475a;
   --error: #f38ba8;
   --success: #a6e3a1;
+  --warning: #f9e2af;
 }
 
 html,
@@ -932,14 +933,14 @@ body {
 }
 
 .pairing-status-active {
-  border-color: #a6e3a1;
-  color: #a6e3a1;
+  border-color: var(--success);
+  color: var(--success);
 }
 
 .pairing-status-pending_local_approval,
 .pairing-status-pending_remote_approval {
-  border-color: #f9e2af;
-  color: #f9e2af;
+  border-color: var(--warning, #f9e2af);
+  color: var(--warning, #f9e2af);
 }
 
 .pairing-status-revoked,
@@ -991,13 +992,47 @@ body {
   width: 100%;
 }
 
-.pairing-field input {
+.pairing-field input[type="text"],
+.pairing-field input[type="password"],
+.pairing-field select {
   font-size: 13px;
   padding: 6px 8px;
   border: 1px solid var(--border);
   border-radius: 4px;
   background: var(--bg-primary);
   color: var(--text-primary);
+  width: 100%;
+}
+
+.pairing-field select:focus,
+.pairing-field input:focus {
+  border-color: var(--accent);
+  outline: none;
+}
+
+.pairing-field--checkbox {
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--text-primary);
+}
+
+.pairing-field--checkbox input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+}
+
+.pairing-dialog,
+.remote-launch-dialog {
+  max-width: 520px;
+  max-height: 85vh;
+  overflow-y: auto;
+}
+
+.pairing-dialog .settings-error {
+  margin-top: 8px;
 }
 
 /* RemoteInstanceView (the "Remote" tab): mirrors settings-view's padding
@@ -1025,8 +1060,8 @@ body {
 }
 
 .remote-instance-tab.active {
-  border-color: #89b4fa;
-  color: #89b4fa;
+  border-color: var(--accent);
+  color: var(--accent);
 }
 
 .remote-instance-body h3 {
@@ -1073,6 +1108,7 @@ body {
   display: flex;
   flex-direction: column;
   gap: 4px;
+  background: var(--bg-secondary);
 }
 
 .remote-dir-current {
@@ -1080,6 +1116,52 @@ body {
   font-size: 11px;
   color: var(--text-secondary);
   margin-bottom: 4px;
+}
+
+.remote-instance-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 8px 12px;
+  margin-bottom: 12px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 12px;
+}
+
+.remote-instance-header-label {
+  font-weight: 600;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tab-remote-badge {
+  font-size: 10px;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: var(--bg-primary);
+  flex-shrink: 0;
+}
+
+.terminal-remote-badge {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--bg-surface);
+  border: 1px solid var(--accent);
+  color: var(--accent);
+  flex-shrink: 0;
+}
+
+.terminal-remote-badge + .terminal-title {
+  margin-left: 4px;
 }
 
 .sandbox-delete-btn {
@@ -1683,6 +1765,7 @@ body {
   background: var(--bg-secondary);
   border-bottom: 1px solid var(--border);
   flex-shrink: 0;
+  flex-wrap: wrap;
 }
 
 .terminal-title {
