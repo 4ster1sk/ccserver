@@ -28,6 +28,12 @@ function formatCwd(cwd) {
   return cwd || '/';
 }
 
+function shortFingerprint(fp) {
+  if (typeof fp !== 'string') return '';
+  const parts = fp.split(':');
+  return parts.length > 4 ? `${parts.slice(0, 4).join(':')}…` : fp;
+}
+
 export default function RemoteInstanceView({ onOpenRemoteTerminal, visible }) {
   const [instances, setInstances] = useState([]);
   const [selectedId, setSelectedId] = useState(null);
@@ -250,6 +256,16 @@ export default function RemoteInstanceView({ onOpenRemoteTerminal, visible }) {
           </div>
 
           {instance && (
+            <div className="remote-instance-header" data-testid="remote-instance-header">
+              <span className="remote-instance-header-label" title={instance.fingerprint}>{instance.label || '(名前未設定)'}</span>
+              <span className="pairing-status-badge pairing-status-active">接続中</span>
+              <span className="pairing-addr" title={instance.addr}>{instance.addr}</span>
+              {instance.hostnameClaimed && <span className="pairing-hostname" title="相手の自己申告ホスト名">{instance.hostnameClaimed}</span>}
+              <span className="pairing-fingerprint" title={instance.fingerprint}>{shortFingerprint(instance.fingerprint)}</span>
+            </div>
+          )}
+
+          {instance && (
             <div className="remote-instance-body">
               <div className="remote-instance-actions">
                 <button className="btn btn-secondary" onClick={() => openLaunch('session')}>+ セッションを起動</button>
@@ -322,7 +338,7 @@ export default function RemoteInstanceView({ onOpenRemoteTerminal, visible }) {
 
       {launchOpen && instance && (
         <div className="resume-overlay" onClick={() => !launching && setLaunchOpen(false)}>
-          <form className="resume-dialog" onClick={(e) => e.stopPropagation()} onSubmit={submitLaunch}>
+          <form className="resume-dialog pairing-dialog remote-launch-dialog" onClick={(e) => e.stopPropagation()} onSubmit={submitLaunch}>
             <h3>{launchKind === 'session' ? 'リモートセッションを起動' : 'リモートコンボを起動'}</h3>
             <p className="pairing-modal-hint">起動先: {instance.label || instance.fingerprint.slice(0, 8)}</p>
             <label className="pairing-field">
@@ -347,7 +363,7 @@ export default function RemoteInstanceView({ onOpenRemoteTerminal, visible }) {
             </div>
             {launchKind === 'session' && (
               <>
-                <label className="pairing-field">
+                <label className="pairing-field pairing-field--checkbox">
                   <input type="checkbox" checked={launchShell} onChange={(e) => setLaunchShell(e.target.checked)} /> シェル
                 </label>
                 {!launchShell && (
@@ -358,7 +374,7 @@ export default function RemoteInstanceView({ onOpenRemoteTerminal, visible }) {
                     </select>
                   </label>
                 )}
-                <label className="pairing-field">
+                <label className="pairing-field pairing-field--checkbox">
                   <input type="checkbox" checked={launchSandbox} onChange={(e) => setLaunchSandbox(e.target.checked)} /> サンドボックス
                 </label>
               </>

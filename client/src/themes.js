@@ -13,6 +13,7 @@ const THEMES = {
       '--border': '#45475a',
       '--error': '#f38ba8',
       '--success': '#a6e3a1',
+      '--warning': '#f9e2af',
     },
     xterm: {
       background: '#1e1e2e',
@@ -51,6 +52,7 @@ const THEMES = {
       '--border': '#bcc0cc',
       '--error': '#d20f39',
       '--success': '#40a02b',
+      '--warning': '#df8e1d',
     },
     xterm: {
       background: '#eff1f5',
@@ -89,6 +91,7 @@ const THEMES = {
       '--border': '#44475a',
       '--error': '#ff5555',
       '--success': '#50fa7b',
+      '--warning': '#f1fa8c',
     },
     xterm: {
       background: '#282a36',
@@ -127,6 +130,7 @@ const THEMES = {
       '--border': '#3b4261',
       '--error': '#f7768e',
       '--success': '#9ece6a',
+      '--warning': '#e0af68',
     },
     xterm: {
       background: '#1a1b26',
@@ -165,6 +169,7 @@ const THEMES = {
       '--border': '#2e5460',
       '--error': '#dc322f',
       '--success': '#859900',
+      '--warning': '#b58900',
     },
     xterm: {
       background: '#002b36',
@@ -203,6 +208,7 @@ const THEMES = {
       '--border': '#B8B49E',
       '--error': '#B12512',
       '--success': '#00A401',
+      '--warning': '#969602',
     },
     xterm: {
       background: '#DFDBC3',
@@ -241,6 +247,7 @@ const THEMES = {
       '--border': '#4c566a',
       '--error': '#bf616a',
       '--success': '#a3be8c',
+      '--warning': '#ebcb8b',
     },
     xterm: {
       background: '#2e3440',
@@ -279,6 +286,7 @@ const THEMES = {
       '--border': '#B8CED2',
       '--error': '#9D3E68',
       '--success': '#28705D',
+      '--warning': '#8C6B25',
     },
     xterm: {
       background: '#F9F8F5',
@@ -317,6 +325,7 @@ const THEMES = {
       '--border': '#D3CBB7',
       '--error': '#DC322F',
       '--success': '#859900',
+      '--warning': '#b58900',
     },
     xterm: {
       background: '#FDF6E3',
@@ -355,6 +364,7 @@ const THEMES = {
       '--border': '#EAC8D8',
       '--error': '#B4233A',
       '--success': '#2E7A5A',
+      '--warning': '#8C6B2E',
     },
     xterm: {
       background: '#FFF7F9',
@@ -393,6 +403,7 @@ const THEMES = {
       '--border': '#D5CCAA',
       '--error': '#9D2E2E',
       '--success': '#2E7A3A',
+      '--warning': '#8A6D1E',
     },
     xterm: {
       background: '#F7F3E0',
