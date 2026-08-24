@@ -744,10 +744,10 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
             className="btn btn-secondary meta-launch-btn"
             onClick={() => setMetaDialogOpen(true)}
             disabled={metaAgentEnabled !== true}
-            aria-label="メタエージェント"
-            title={metaAgentEnabled === true ? 'メタエージェントを起動' : 'サーバー設定 (sandbox.config.json) で "metaAgentMcp": true にすると使えます'}
+            aria-label="統括エージェント"
+            title={metaAgentEnabled === true ? '統括エージェントを起動' : 'サーバー設定 (sandbox.config.json) で "metaAgentMcp": true にすると使えます'}
           >
-            <span className="meta-icon" aria-hidden="true">⌘</span><span className="meta-label"> メタエージェント</span>
+            <span className="meta-icon" aria-hidden="true">⌘</span><span className="meta-label"> 統括</span>
           </button>
         </div>
       </div>
