@@ -70,13 +70,15 @@ export default function App() {
       .catch(() => {});
   }, []);
 
-  const openTerminalTab = useCallback((dirPath, { claudeSessionId = null, shell = false, sessionId = null, attachSessionId = null, sandbox = false, sandboxOpts = null, app = 'claude', model = null, resume = false, reuseSandboxHome = true } = {}) => {
+  const openTerminalTab = useCallback((dirPath, { claudeSessionId = null, shell = false, sessionId = null, attachSessionId = null, sandbox = false, sandboxOpts = null, app = 'claude', model = null, resume = false, reuseSandboxHome = true, isMetaAgent = false } = {}) => {
     const id = `terminal-${++tabIdCounter}`;
     const dirName = dirPath.split(/[/\\]/).filter(Boolean).pop() || dirPath;
-    const label = shell ? `$ ${dirName}` : dirName;
+    // Meta-agent tabs carry a ⌘ prefix (plus their own tab icon): the
+    // privileged session must be recognizable at a glance in the tab bar.
+    const label = shell ? `$ ${dirName}` : isMetaAgent ? `⌘ ${dirName}` : dirName;
     setTabs((prev) => [
       ...prev,
-      { id, type: 'terminal', label, cwd: dirPath, claudeSessionId, shell, sessionId, attachSessionId, sandbox, sandboxOpts, app, model, resume, reuseSandboxHome, exited: false },
+      { id, type: 'terminal', label, cwd: dirPath, claudeSessionId, shell, sessionId, attachSessionId, sandbox, sandboxOpts, app, model, resume, reuseSandboxHome, isMetaAgent, exited: false },
     ]);
     setActiveTabId(id);
     setLastDir(dirPath);
@@ -85,18 +87,23 @@ export default function App() {
   // The post-sandbox-dialog open flow: claude's resume prompt (if a saved
   // conversation exists), else a plain tab open. Carries the chosen
   // reuseSandboxHome through so a resumed conversation keeps the same HOME.
-  const continueOpen = useCallback((dirPath, { sandbox = false, sandboxOpts = null, app = 'claude', model = null, resume = false, skipResumePrompt = false, reuseSandboxHome = true } = {}) => {
+  const continueOpen = useCallback((dirPath, { sandbox = false, sandboxOpts = null, app = 'claude', model = null, resume = false, skipResumePrompt = false, reuseSandboxHome = true, isMetaAgent = false } = {}) => {
     // Only claude sessions carry a resumable conversation id (opencode resumes
-    // the last session of the project itself via -c).
-    if (!skipResumePrompt && app === 'claude') {
+    // the last session of the project itself via -c). Meta-agent opens skip
+    // the prompt and always start fresh: the user just confirmed a privileged
+    // launch, and resuming whatever worker conversation last ran in this
+    // directory would graft ccserver-meta onto a context written without it.
+    // Conscious returns to a specific meta session still work (sidebar
+    // re-open, SESSION_NOT_FOUND re-init) -- those keep claudeSessionId.
+    if (!skipResumePrompt && !isMetaAgent && app === 'claude') {
       const savedSessionId = localStorage.getItem(`ccserver-resume:claude:${dirPath}`);
       if (savedSessionId) {
         pendingOpenRef.current = dirPath;
-        setResumePrompt({ cwd: dirPath, sessionId: savedSessionId, sandbox, sandboxOpts, app, model, reuseSandboxHome });
+        setResumePrompt({ cwd: dirPath, sessionId: savedSessionId, sandbox, sandboxOpts, app, model, reuseSandboxHome, isMetaAgent });
         return;
       }
     }
-    openTerminalTab(dirPath, { sandbox, sandboxOpts, app, model, resume, reuseSandboxHome });
+    openTerminalTab(dirPath, { sandbox, sandboxOpts, app, model, resume, reuseSandboxHome, isMetaAgent });
   }, [openTerminalTab]);
 
   // Sandboxed agent launch: before opening, ask the server whether a previous
@@ -261,6 +268,9 @@ export default function App() {
       model: session.model || null,
       sandbox: !!session.sandbox,
       sandboxOpts: session.sandboxOpts || null,
+      // Needed by the SESSION_NOT_FOUND re-init path (TerminalView) so a
+      // re-launched meta agent keeps its privilege request.
+      isMetaAgent: !!session.isMetaAgent,
       // opencode/copilot re-launches resume the last session of the project
       // (-c / --continue), so a continued conversation survives the dead pty
       // like claude's does.
@@ -270,7 +280,7 @@ export default function App() {
 
   const handleResume = useCallback(() => {
     if (resumePrompt) {
-      openTerminalTab(resumePrompt.cwd, { claudeSessionId: resumePrompt.sessionId, sandbox: resumePrompt.sandbox, sandboxOpts: resumePrompt.sandboxOpts, app: resumePrompt.app || 'claude', model: resumePrompt.model || null, reuseSandboxHome: resumePrompt.reuseSandboxHome !== false });
+      openTerminalTab(resumePrompt.cwd, { claudeSessionId: resumePrompt.sessionId, sandbox: resumePrompt.sandbox, sandboxOpts: resumePrompt.sandboxOpts, app: resumePrompt.app || 'claude', model: resumePrompt.model || null, reuseSandboxHome: resumePrompt.reuseSandboxHome !== false, isMetaAgent: !!resumePrompt.isMetaAgent });
       setResumePrompt(null);
       pendingOpenRef.current = null;
     }
@@ -279,7 +289,7 @@ export default function App() {
   const handleNewSession = useCallback(() => {
     if (resumePrompt) {
       localStorage.removeItem(`ccserver-resume:claude:${resumePrompt.cwd}`);
-      openTerminalTab(resumePrompt.cwd, { sandbox: resumePrompt.sandbox, sandboxOpts: resumePrompt.sandboxOpts, app: resumePrompt.app || 'claude', model: resumePrompt.model || null, reuseSandboxHome: resumePrompt.reuseSandboxHome !== false });
+      openTerminalTab(resumePrompt.cwd, { sandbox: resumePrompt.sandbox, sandboxOpts: resumePrompt.sandboxOpts, app: resumePrompt.app || 'claude', model: resumePrompt.model || null, reuseSandboxHome: resumePrompt.reuseSandboxHome !== false, isMetaAgent: !!resumePrompt.isMetaAgent });
       setResumePrompt(null);
       pendingOpenRef.current = null;
     }
@@ -422,7 +432,7 @@ export default function App() {
             onClick={() => handleTabClick(tab.id)}
           >
             <span className="tab-label">
-              <TabIcon type={tab.type} app={tab.app} shell={tab.shell} />
+              <TabIcon type={tab.type} app={tab.app} shell={tab.shell} isMetaAgent={!!tab.isMetaAgent} />
               {tab.label}
               {tab.type === 'group' && tab.currentTurn && (
                 <span className="tab-turn-badge" title={`現在の手番: ${tab.currentTurn}`}>
@@ -479,6 +489,7 @@ export default function App() {
                   app={tab.app || 'claude'}
                   model={tab.model || null}
                   resume={!!tab.resume}
+                  isMetaAgent={!!tab.isMetaAgent}
                   notify={notify}
                   notifyEnabled={notifyEnabled}
                   notifyPermission={notifyPermission}

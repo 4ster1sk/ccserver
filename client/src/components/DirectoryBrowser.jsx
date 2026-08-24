@@ -7,6 +7,10 @@ const SANDBOX_KEY = 'ccserver-sandbox-default';
 const SANDBOX_OPTS_PREFIX = 'ccserver-sandbox-opts:';
 const APP_KEY = 'ccserver-app-default';
 const COMBO_APPS_KEY = 'ccserver-combo-apps';
+// Meta-mode app pick, remembered separately from APP_KEY: choosing an app as
+// the meta agent must NOT rewrite the regular-launch default (it would
+// pollute every future single launch).
+const META_APP_KEY = 'ccserver-meta-app';
 const COMBO_ROLES = ['workerA', 'workerB', 'orchestrator'];
 const COMBO_DEFAULT_APPS = { workerA: 'claude', workerB: 'opencode', orchestrator: 'claude' };
 // Apps a group member can run (copilot cannot join groups -- same whitelist
@@ -14,6 +18,25 @@ const COMBO_DEFAULT_APPS = { workerA: 'claude', workerB: 'opencode', orchestrato
 const COMBO_WORKER_APPS = ['claude', 'opencode', 'codex'];
 // Hard cap mirrored from the server (MAX_GROUP_MEMBERS - 1 orchestrator).
 const MAX_COMBO_WORKERS = 7;
+
+// Same picker set + labels as single mode, so the two can't drift apart.
+const APP_LABELS = { claude: 'Claude Code', opencode: 'opencode', copilot: 'GitHub Copilot', codex: 'OpenAI Codex' };
+
+// Apps a meta agent can actually run: shouldInjectMetaAgent structurally
+// excludes copilot (no CLI-arg/env MCP injection at all), so offering it
+// would only produce a guaranteed silent downgrade behind the privilege
+// confirm. Mirrors COMBO_WORKER_APPS.
+const META_APPS = ['claude', 'opencode', 'codex'];
+
+// Explicitly picked meta app (null = follow the single-mode default). Stored
+// under its own key, never APP_KEY -- see above.
+function loadMetaApp() {
+  try {
+    const v = localStorage.getItem(META_APP_KEY);
+    return META_APPS.includes(v) ? v : null;
+  } catch { /* ignore */ }
+  return null;
+}
 
 // Combo-mode role app picks, remembered per browser like the single-launch
 // APP_KEY so the next combo launch reuses them instead of the claude/
@@ -103,7 +126,16 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
   });
   const [codexModel, setCodexModel] = useState(() => localStorage.getItem('ccserver-codex-model') || '');
   const [openMenuOpen, setOpenMenuOpen] = useState(false);
-  const [launchMode, setLaunchMode] = useState('single'); // 'single' | 'combo'
+  const [launchMode, setLaunchMode] = useState('single'); // 'single' | 'combo' | 'meta'
+  // Whether the privileged ccserver-meta feature is on (sandbox.config.json's
+  // "metaAgentMcp", via /api/dirs/home). null = not fetched yet; anything but
+  // true (including the field missing on an older server) disables the mode.
+  const [metaAgentEnabled, setMetaAgentEnabled] = useState(null);
+  // Meta-mode app pick: null follows appDefault; an explicit pick is kept in
+  // localStorage under META_APP_KEY and never written back to APP_KEY.
+  const [metaApp, setMetaApp] = useState(loadMetaApp);
+  // Codex model for THIS meta launch only (per-launch draft, like combo's).
+  const [metaModel, setMetaModel] = useState('');
   const [comboApps, setComboApps] = useState(() => loadComboApps());
   // Free-form per-role model identifiers; empty string = omitted (server uses
   // the persisted role preference, then the app default). null would mean
@@ -139,7 +171,8 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
   // One close path for every exit route so future routes can't forget.
   // (The role app picks in comboApps are the exception: they are remembered
   // in localStorage, see loadComboApps/chooseComboApp, and intentionally
-  // survive both modal closes and reloads.)
+  // survive both modal closes and reloads. The meta mode's explicit app pick
+  // is remembered the same way, under its own key.)
   const closeOpenMenu = useCallback(() => {
     setLaunchMode('single');
     setOrchestratorInstructions('');
@@ -149,6 +182,7 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
     setManageOpen(false);
     setEditingPresetId(null);
     setPresetFormError(null);
+    setMetaModel('');
     // Back to 'idle' so the next combo open refetches the library -- retries a
     // failed fetch and picks up presets saved elsewhere since this modal opened.
     setPresetsState('idle');
@@ -174,6 +208,14 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
       localStorage.setItem(COMBO_APPS_KEY, JSON.stringify(next));
       return next;
     });
+  }, [availableApps]);
+
+  // Meta-mode app pick: remembered under its own key, never APP_KEY -- the
+  // regular launch default must stay untouched.
+  const chooseMetaApp = useCallback((val) => {
+    if (availableApps && !availableApps[val]) return; // server lacks this CLI
+    setMetaApp(val);
+    try { localStorage.setItem(META_APP_KEY, val); } catch { /* ignore */ }
   }, [availableApps]);
 
   // --- worker presets -------------------------------------------------------
@@ -302,6 +344,56 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
     saveSandboxOpts(path, next);
   }, []);
 
+  // Meta-agent launch. Four gates before the tab opens, in order:
+  // 1) a fresh /api/dirs/home re-check -- the modal may have been open while
+  //    the server config changed, and createSession silently ignores
+  //    isMetaAgent when the feature is off, which must never look like a
+  //    successful privileged launch;
+  // 2) an effective-app sanity check: copilot can structurally never carry
+  //    the meta MCP, so refuse before any dialog promises a launch;
+  // 3) double-launch guard: multiple meta agents CAN run (per-connection
+  //    identity), but the README assumes one trusted agent -- allow a second
+  //    only behind an explicit confirmation (zombie cleanup etc.);
+  // 4) privilege confirmation on EVERY launch, no "don't ask again".
+  const handleMetaLaunch = useCallback(async () => {
+    let enabled = false;
+    try {
+      const res = await authFetch('/api/dirs/home');
+      enabled = (await res.json()).metaAgentEnabled === true;
+    } catch { /* unreachable server -> treat as disabled */ }
+    if (!enabled) {
+      window.alert('メタエージェントは現在サーバー設定で無効です (sandbox.config.json の "metaAgentMcp": true で有効化できます)。');
+      return;
+    }
+    const app = metaApp || appDefault;
+    // Belt-and-braces (the picker already omits copilot): a server whose
+    // defaultApp is copilot would otherwise launch through the whole confirm
+    // chain into a session that can never carry the meta MCP.
+    if (app === 'copilot') {
+      window.alert('GitHub Copilot はMCP注入に対応していないため、メタエージェントでは起動できません。アプリを選択してください。');
+      return;
+    }
+    try {
+      const res = await authFetch('/api/sessions');
+      const data = await res.json();
+      const live = (data.sessions || []).filter((s) => s.isMetaAgent);
+      if (live.length > 0 && !window.confirm(`すでに稼働中のメタエージェントが ${live.length} 件あります。\n新たにもう1つ起動しますか?`)) {
+        return;
+      }
+    } catch { /* session list unavailable -> fall through to the confirm below */ }
+    if (!window.confirm('メタエージェントを起動しますか?\nサーバー全体(全プロジェクト/サンドボックス/セッション)を操作できる特権 MCP (ccserver-meta) がこのセッションに付与されます。')) {
+      return;
+    }
+    closeOpenMenu();
+    onOpen(currentPath, {
+      sandbox: sandboxDefault,
+      sandboxOpts,
+      app,
+      model: app === 'codex' ? metaModel.trim() || null : null,
+      isMetaAgent: true,
+    });
+  }, [metaApp, appDefault, metaModel, currentPath, sandboxDefault, sandboxOpts, closeOpenMenu, onOpen]);
+
   const fetchDirs = useCallback(async (path) => {
     setLoading(true);
     setError(null);
@@ -341,6 +433,10 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
         setForceSandbox(true);
         setSandboxDefault(true);
       }
+      // The privileged meta-agent feature is opt-in server-side; anything but
+      // an explicit true (missing field = older server) keeps the mode
+      // disabled in the launch modal.
+      setMetaAgentEnabled(data.metaAgentEnabled === true);
       // Server-side install detection: grey out picker entries for CLIs that
       // don't exist here, and correct a stale default (localStorage
       // ccserver-app-default, or the server's defaultApp) that points at an
@@ -359,6 +455,9 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
         if (avail.length > 0 && !data.availableApps[effectiveDefault]) {
           setAppDefault(avail[0]);
         }
+        // Same rule for the meta mode's remembered pick: an explicit app that
+        // is no longer installed falls back to following the single default.
+        setMetaApp((m) => (m && data.availableApps[m] ? m : null));
         // Same rule for the combo modal's role selections: workerA and the
         // orchestrator start as claude, workerB as opencode -- a role whose
         // default points at a missing CLI must not stay selected-active (the
@@ -559,6 +658,54 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
   const pathRoot = homeBase || (currentPath.match(/^([a-zA-Z]:\\|\/)/)?.[0] || '/');
   const breadcrumbs = currentPath.slice(homeBase ? homeBase.length : pathRoot.length).split(/[/\\]/).filter(Boolean);
 
+  // Sandbox choice + gpg/sshAgent suboptions, byte-identical between the
+  // single and meta panes: the meta agent inherits the single mode's current
+  // sandbox default (no separate default exists), so both bind the same state.
+  const sandboxPicker = (
+    <>
+      <div className="open-menu-sep" />
+      <div
+        className={`open-menu-item${forceSandbox ? ' open-menu-item-disabled' : ''}`}
+        onClick={() => chooseSandbox(false)}
+        title={forceSandbox ? 'サーバー設定でサンドボックス外の起動は禁止されています' : ''}
+      >
+        <span className="open-menu-check">{!sandboxDefault ? '✓' : ''}</span>
+        通常起動
+      </div>
+      <div
+        className="open-menu-item"
+        onClick={() => chooseSandbox(true)}
+        title={forceSandbox ? 'サーバー設定で強制' : ''}
+      >
+        <span className="open-menu-check">{sandboxDefault ? '✓' : ''}</span>
+        🔒 サンドボックスで起動
+      </div>
+      <div className="open-menu-suboptions">
+        <label className="open-menu-suboption">
+          <input
+            type="checkbox"
+            checked={sandboxOpts.gpg}
+            onChange={(e) => updateSandboxOpts(currentPath, { ...sandboxOpts, gpg: e.target.checked })}
+          />
+          GPG署名を使う
+        </label>
+        <label className="open-menu-suboption">
+          <input
+            type="checkbox"
+            checked={sandboxOpts.sshAgent}
+            onChange={(e) => updateSandboxOpts(currentPath, { ...sandboxOpts, sshAgent: e.target.checked })}
+          />
+          ssh-agentを転送する
+        </label>
+      </div>
+      <p className="open-menu-note">
+        {forceSandbox
+          ? 'サンドボックスがサーバー設定 (forceSandbox) で強制されています。通常起動はできません。'
+          : `サンドボックス: 隣接プロジェクトを隔離し、内部に rootless docker を用意。GPG/ssh-agentは既定オフ、このディレクトリ (${displayPath(currentPath, homeDir)}) に記憶されます。`}
+      </p>
+    </>
+  );
+
   return (
     <div
       className="directory-browser"
@@ -697,6 +844,13 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
               >
                 コンボ起動
               </button>
+              <button
+                className={`launch-mode-btn${launchMode === 'meta' ? ' active' : ''}${metaAgentEnabled !== true ? ' open-menu-item-disabled' : ''}`}
+                onClick={() => { if (metaAgentEnabled === true) setLaunchMode('meta'); }}
+                title={metaAgentEnabled === true ? '' : 'サーバー設定 (sandbox.config.json) で "metaAgentMcp": true にすると使えます'}
+              >
+                メタエージェント
+              </button>
             </div>
 
             {launchMode === 'single' ? (
@@ -748,48 +902,9 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
                     />
                   </div>
                 )}
-                <div className="open-menu-sep" />
-                <div
-                  className={`open-menu-item${forceSandbox ? ' open-menu-item-disabled' : ''}`}
-                  onClick={() => chooseSandbox(false)}
-                  title={forceSandbox ? 'サーバー設定でサンドボックス外の起動は禁止されています' : ''}
-                >
-                  <span className="open-menu-check">{!sandboxDefault ? '✓' : ''}</span>
-                  通常起動
-                </div>
-                <div
-                  className="open-menu-item"
-                  onClick={() => chooseSandbox(true)}
-                  title={forceSandbox ? 'サーバー設定で強制' : ''}
-                >
-                  <span className="open-menu-check">{sandboxDefault ? '✓' : ''}</span>
-                  🔒 サンドボックスで起動
-                </div>
-                <div className="open-menu-suboptions">
-                  <label className="open-menu-suboption">
-                    <input
-                      type="checkbox"
-                      checked={sandboxOpts.gpg}
-                      onChange={(e) => updateSandboxOpts(currentPath, { ...sandboxOpts, gpg: e.target.checked })}
-                    />
-                    GPG署名を使う
-                  </label>
-                  <label className="open-menu-suboption">
-                    <input
-                      type="checkbox"
-                      checked={sandboxOpts.sshAgent}
-                      onChange={(e) => updateSandboxOpts(currentPath, { ...sandboxOpts, sshAgent: e.target.checked })}
-                    />
-                    ssh-agentを転送する
-                  </label>
-                </div>
-                <p className="open-menu-note">
-                  {forceSandbox
-                    ? 'サンドボックスがサーバー設定 (forceSandbox) で強制されています。通常起動はできません。'
-                    : `サンドボックス: 隣接プロジェクトを隔離し、内部に rootless docker を用意。GPG/ssh-agentは既定オフ、このディレクトリ (${displayPath(currentPath, homeDir)}) に記憶されます。`}
-                </p>
+                {sandboxPicker}
               </>
-            ) : (
+            ) : launchMode === 'combo' ? (
               <>
                 <p className="open-menu-note">
                   コンボ起動: 1つのプロジェクトディレクトリで動く2つのワーカーと、
@@ -1060,6 +1175,45 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
                   rows={5}
                 />
               </>
+            ) : (
+              <>
+                <p className="open-menu-note">
+                  メタエージェント: サーバー全体(全プロジェクト/サンドボックス/セッション)を操作できる特権 MCP
+                  (ccserver-meta) を持って起動します。破壊的な操作はブラウザ上部のバナーでの承認を求めます。
+                  起動のたびに確認ダイアログが表示されます。
+                </p>
+                <div className="open-menu-label">アプリ</div>
+                {/* META_APPS, not all of APP_LABELS: copilot can never carry
+                    the meta MCP (see shouldInjectMetaAgent). When the effective
+                    default is copilot nothing is checked -- the launch button
+                    refuses until an explicit pick is made. */}
+                {META_APPS.map((appKey) => (
+                  <div
+                    key={appKey}
+                    className={`open-menu-item${availableApps && !availableApps[appKey] ? ' open-menu-item-disabled' : ''}`}
+                    onClick={() => chooseMetaApp(appKey)}
+                    title={availableApps && !availableApps[appKey] ? 'サーバーに未インストール' : ''}
+                  >
+                    <span className="open-menu-check">{(metaApp || appDefault) === appKey ? '✓' : ''}</span>
+                    {APP_LABELS[appKey]}
+                  </div>
+                ))}
+                {(metaApp || appDefault) === 'codex' && (
+                  <div className="open-menu-model-row">
+                    <input
+                      type="text"
+                      className="open-menu-model-input"
+                      placeholder="Codexモデル (空=既定)"
+                      value={metaModel}
+                      onChange={(e) => setMetaModel(e.target.value)}
+                      autoComplete="off"
+                      autoCorrect="off"
+                      spellCheck={false}
+                    />
+                  </div>
+                )}
+                {sandboxPicker}
+              </>
             )}
 
             <div className="resume-actions">
@@ -1110,6 +1264,10 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
                   }}
                 >
                   コンボ起動
+                </button>
+              ) : launchMode === 'meta' ? (
+                <button className="btn btn-primary" onClick={handleMetaLaunch}>
+                  メタエージェントを起動
                 </button>
               ) : (
                 <button
