@@ -284,7 +284,7 @@ const THEMES = {
       background: '#F9F8F5',
       foreground: '#243A58',
       cursor: '#9D3E68',
-      selectionBackground: '#DCEBED',
+      selectionBackground: '#F0DCE5',
       black: '#243A58',
       red: '#9D3E68',
       green: '#28705D',
