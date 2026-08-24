@@ -675,76 +675,80 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
       </nav>
 
       <div className="browser-toolbar">
-        <button className="btn btn-secondary" onClick={navigateUp} disabled={!parentPath}>
-          Up
-        </button>
-        <button className="btn btn-secondary" onClick={() => homeDir && navigateTo(homeDir)} disabled={!homeDir}>
-          Home
-        </button>
-        <button className="btn btn-secondary" onClick={() => { fetchDirs(currentPath); fetchSessions(); }} disabled={loading}>
-          Refresh
-        </button>
-        <button
-          className="btn btn-secondary"
-          onClick={() => {
-            setCreatingFolder(true);
-            setNewFolderName('');
-            setInitGit(false);
-          }}
-          title="Make a directory (optionally as a git repository)"
-        >
-          New Folder
-        </button>
-        <button
-          className="btn btn-secondary"
-          onClick={() => fileInputRef.current?.click()}
-          disabled={uploading}
-        >
-          Upload
-        </button>
-        <input
-          ref={fileInputRef}
-          type="file"
-          multiple
-          onChange={handleFileInputChange}
-          style={{ display: 'none' }}
-        />
-        <label className="toggle-hidden">
-          <input
-            type="checkbox"
-            checked={showHidden}
-            onChange={(e) => setShowHidden(e.target.checked)}
-          />
-          Show hidden
-        </label>
-        <button className="btn btn-secondary open-btn" onClick={() => onOpenShell(currentPath)}>
-          Terminal
-        </button>
-        <div className="open-split">
-          <button
-            className="btn btn-primary open-btn open-split-main"
-            onClick={() => onOpen(currentPath, { sandbox: sandboxDefault, sandboxOpts, app: appDefault, model: appDefault === 'codex' ? codexModel.trim() || null : null })}
-            title={sandboxDefault ? 'サンドボックスで起動' : '通常起動'}
-          >
-            {sandboxDefault ? '🔒 ' : ''}{appDefault === 'claude' ? 'Claude Code' : appDefault === 'copilot' ? 'GitHub Copilot' : appDefault === 'codex' ? 'OpenAI Codex' : 'opencode'}
+        <div className="toolbar-nav">
+          <button className="btn btn-secondary" onClick={navigateUp} disabled={!parentPath}>
+            Up
+          </button>
+          <button className="btn btn-secondary" onClick={() => homeDir && navigateTo(homeDir)} disabled={!homeDir}>
+            Home
+          </button>
+          <button className="btn btn-secondary" onClick={() => { fetchDirs(currentPath); fetchSessions(); }} disabled={loading}>
+            Refresh
           </button>
           <button
-            className="btn btn-primary open-btn open-split-caret"
-            onClick={() => setOpenMenuOpen(true)}
-            title="起動方法を選択"
-            aria-label="起動方法を選択"
+            className="btn btn-secondary"
+            onClick={() => {
+              setCreatingFolder(true);
+              setNewFolderName('');
+              setInitGit(false);
+            }}
+            title="Make a directory (optionally as a git repository)"
           >
-            &#9662;
+            New Folder
+          </button>
+          <button
+            className="btn btn-secondary"
+            onClick={() => fileInputRef.current?.click()}
+            disabled={uploading}
+          >
+            Upload
+          </button>
+          <input
+            ref={fileInputRef}
+            type="file"
+            multiple
+            onChange={handleFileInputChange}
+            style={{ display: 'none' }}
+          />
+          <label className="toggle-hidden">
+            <input
+              type="checkbox"
+              checked={showHidden}
+              onChange={(e) => setShowHidden(e.target.checked)}
+            />
+            Show hidden
+          </label>
+        </div>
+        <div className="toolbar-launch-group">
+          <button className="btn btn-secondary launch-btn" onClick={() => onOpenShell(currentPath)}>
+            Terminal
+          </button>
+          <div className="open-split">
+            <button
+              className="btn btn-primary open-split-main"
+              onClick={() => onOpen(currentPath, { sandbox: sandboxDefault, sandboxOpts, app: appDefault, model: appDefault === 'codex' ? codexModel.trim() || null : null })}
+              title={sandboxDefault ? 'サンドボックスで起動' : '通常起動'}
+            >
+              {sandboxDefault ? '🔒 ' : ''}{appDefault === 'claude' ? 'Claude Code' : appDefault === 'copilot' ? 'GitHub Copilot' : appDefault === 'codex' ? 'OpenAI Codex' : 'opencode'}
+            </button>
+            <button
+              className="btn btn-primary open-split-caret"
+              onClick={() => setOpenMenuOpen(true)}
+              title="起動方法を選択"
+              aria-label="起動方法を選択"
+            >
+              &#9662;
+            </button>
+          </div>
+          <button
+            className="btn btn-secondary meta-launch-btn"
+            onClick={() => setMetaDialogOpen(true)}
+            disabled={metaAgentEnabled !== true}
+            title={metaAgentEnabled === true ? 'メタエージェントを起動' : 'サーバー設定 (sandbox.config.json) で "metaAgentMcp": true にすると使えます'}
+          >
+            <span className="meta-icon">⌘</span><span className="meta-label"> メタエージェント</span>
           </button>
         </div>
-        <button
-          className="btn btn-secondary open-btn meta-launch-btn"
-          onClick={() => setMetaDialogOpen(true)}
-          disabled={metaAgentEnabled !== true}
-          title={metaAgentEnabled === true ? 'メタエージェントを起動' : 'サーバー設定 (sandbox.config.json) で "metaAgentMcp": true にすると使えます'}
-        >
-          ⌘ メタエージェント
-        </button>
       </div>
 
       {openMenuOpen && (

@@ -962,6 +962,34 @@ body {
   align-items: center;
   gap: 8px;
   margin-bottom: 12px;
+  flex-wrap: wrap;
+}
+
+.toolbar-nav {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.toolbar-launch-group {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  margin-left: auto;
+  flex-shrink: 0;
+  flex-wrap: wrap;
+}
+
+.launch-btn,
+.open-split-main,
+.open-split-caret,
+.meta-launch-btn {
+  padding: 6px 10px;
+  font-size: 12px;
+  line-height: 1;
 }
 
 .toggle-hidden {
@@ -971,10 +999,6 @@ body {
   align-items: center;
   gap: 4px;
   margin-left: 8px;
-}
-
-.open-btn:first-of-type {
-  margin-left: auto;
 }
 
 /* Claude Code split launch button (normal / sandbox) */
@@ -997,8 +1021,11 @@ body {
 }
 
 .meta-launch-btn {
-  margin-left: 8px;
   white-space: nowrap;
+}
+
+.meta-launch-btn .meta-label {
+  display: inline;
 }
 
 .open-menu-item {
@@ -2511,22 +2538,24 @@ body {
     margin-left: 0;
   }
 
-  .open-btn {
-    margin-left: 0;
+  .toolbar-launch-group {
     width: 100%;
-    text-align: center;
-    padding: 10px;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 6px;
   }
 
-  /* .open-split-main/.open-split-caret also carry .open-btn (for the shared
-     margin/padding above), so the blanket width:100% there stretches BOTH
-     halves of the split button to full width inside the inline-flex
-     .open-split wrapper -- the wrapper then has to fit two full-width
-     children side by side and blows out past the viewport, taking the
-     .open-menu dropdown anchored to it off-screen too. Give the wrapper the
-     full width instead and let its two children share it proportionally. */
-  .open-split {
+  .toolbar-launch-group .open-split {
+    grid-column: 1 / -1;
+    display: flex;
     width: 100%;
+  }
+
+  .toolbar-launch-group .launch-btn,
+  .toolbar-launch-group .meta-launch-btn {
+    width: 100%;
+    justify-content: center;
+    text-align: center;
   }
 
   .open-split-main {
@@ -2585,6 +2614,12 @@ body {
   .monitor-bar-value {
     min-width: 50px;
     font-size: 11px;
+  }
+}
+
+@media (max-width: 400px) {
+  .meta-launch-btn .meta-label {
+    display: none;
   }
 }
 
