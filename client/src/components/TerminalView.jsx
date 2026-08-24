@@ -233,7 +233,7 @@ function osc52Response(text) {
 
 const themeIds = getThemeIds();
 
-export default function TerminalView({ cwd, onClose, claudeSessionId, shell, sandbox, sandboxOpts, reuseSandboxHome = true, app = 'claude', model = null, resume = false, isMetaAgent = false, notify, notifyEnabled, notifyPermission, onToggleNotify, visible, onSessionId, onExited, attachSessionId, xtermTheme, themeId, onThemeChange, tabId, onFocusTab, groupId, groupRole, projectCwd = null }) {
+export default function TerminalView({ cwd, onClose, claudeSessionId, shell, sandbox, sandboxOpts, reuseSandboxHome = true, app = 'claude', model = null, resume = false, isMetaAgent = false, notify, notifyEnabled, notifyPermission, onToggleNotify, visible, onSessionId, onExited, attachSessionId, xtermTheme, themeId, onThemeChange, tabId, onFocusTab, groupId, groupRole, projectCwd = null, remoteInstanceId = null }) {
   const isMobile = useMemo(() => 'ontouchstart' in window, []);
   const terminalRef = useRef(null);
   const terminalViewRef = useRef(null);
@@ -252,6 +252,11 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
   const appRef = useRef(app);
   const modelRef = useRef(model);
   const resumeRef = useRef(resume);
+  // Set once per tab (a terminal tab never switches between local/remote
+  // mid-life -- App.jsx always creates a fresh tab id for that), so a plain
+  // ref (not re-read from the prop on reconnect) is enough; kept as a ref
+  // only for consistency with the other launch-setting refs above.
+  const remoteInstanceIdRef = useRef(remoteInstanceId);
   // Meta-agent flag: must ride along on EVERY init (first connect AND the
   // SESSION_NOT_FOUND re-init) -- dropping it there would resurrect a dead
   // meta agent as a silently unprivileged session.
@@ -670,7 +675,13 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
 
     function connect() {
       const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-      const wsUrl = `${protocol}//${window.location.host}/ws/terminal`;
+      // A remote (federated) tab talks to /ws/remote-terminal instead, which
+      // relays the exact same message vocabulary to the paired peer over its
+      // own federation channel (see server/ws/remoteTerminal.js) -- every
+      // message below stays unchanged except for the added instanceId, which
+      // the relay uses only to pick a channel and never forwards.
+      const wsPath = remoteInstanceIdRef.current ? '/ws/remote-terminal' : '/ws/terminal';
+      const wsUrl = `${protocol}//${window.location.host}${wsPath}`;
       const ws = new WebSocket(authWsUrl(wsUrl));
       wsRef.current = ws;
 
@@ -685,6 +696,7 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
               sessionId: sessionIdRef.current,
               cols: dims?.cols || 80,
               rows: dims?.rows || 24,
+              instanceId: remoteInstanceIdRef.current || undefined,
             })
           );
         } else {
@@ -704,6 +716,7 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
             // re-create the member's MCP channel and register it to the role.
             groupId: groupId || null,
             groupRole: groupRole || null,
+            instanceId: remoteInstanceIdRef.current || undefined,
           };
           if (!shellRef.current && claudeResumeIdRef.current) {
             initMsg.claudeSessionId = claudeResumeIdRef.current;

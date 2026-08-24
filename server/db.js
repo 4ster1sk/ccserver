@@ -211,6 +211,54 @@ export const MIGRATIONS = [
       `);
     },
   },
+  {
+    // v5: cross-instance (federation) pairing (see ws/federationPairing.js /
+    // ws/federationIdentity.js / ws/federationServer.js / ws/federationClient.js).
+    // Each instance's own long-lived identity key/cert lives in a FILE (SSH
+    // host-key style, 0600 -- see federationIdentity.js), never in this DB;
+    // this table only stores the *pinned* facts about the peers we trust.
+    //
+    // remote_fingerprint is the sole trust anchor (SHA-256 of the peer's
+    // whole leaf certificate, as Node's tls.getPeerCertificate().fingerprint256
+    // already reports it -- not a hand-rolled SPKI-only digest): CA validation
+    // is disabled entirely for the federation TLS listener/client (see
+    // federationServer.js), so a connection is only ever trusted by exact
+    // match against this column. remote_hostname_claimed/remote_addr are
+    // self-reported display strings and MUST NOT be used for authorization.
+    //
+    // Bidirectional human approval (plan decision 3, 2026-08-24): each side
+    // independently records its own human's decision in local_decision, and
+    // the last decision it learned about the peer (by asking, see
+    // federationPairing.reconcilePending) in remote_decision. `status` is a
+    // derived, persisted projection of the pair (local_decision,
+    // remote_decision, revoked_at) -- see federationPairing.deriveStatus --
+    // kept as a real column (rather than computed on every read) so the
+    // existing "WHERE status = ..." index-friendly queries the rest of the
+    // codebase's plan describes keep working unchanged.
+    version: 5,
+    up(db) {
+      db.exec(`
+        CREATE TABLE paired_instances (
+          id                       TEXT PRIMARY KEY,
+          label                    TEXT,
+          remote_fingerprint       TEXT NOT NULL UNIQUE,
+          remote_cert_pem          TEXT NOT NULL,
+          remote_hostname_claimed  TEXT,
+          remote_addr              TEXT NOT NULL,
+          direction                TEXT NOT NULL,
+          local_decision           TEXT,
+          remote_decision          TEXT,
+          status                   TEXT NOT NULL DEFAULT 'pending_local_approval',
+          created_at               INTEGER NOT NULL,
+          approved_at              INTEGER,
+          revoked_at               INTEGER,
+          last_seen_at             INTEGER
+        );
+        CREATE INDEX idx_paired_instances_status ON paired_instances(status);
+        CREATE INDEX idx_paired_instances_fingerprint ON paired_instances(remote_fingerprint);
+      `);
+    },
+  },
 ];
 
 // Runs pending migrations in order. Each one executes inside BEGIN IMMEDIATE

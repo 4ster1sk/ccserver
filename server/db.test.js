@@ -43,6 +43,19 @@ test('fresh open runs migrations to the latest version', () => {
   db.prepare('INSERT INTO sandboxes (slug, project_id, cwd, created_at, last_used_at, created_by) VALUES (?,?,?,?,?,NULL)')
     .run('srv_proj', 'p1', '/srv/proj', 1, 1);
   assert.equal(db.prepare('SELECT COUNT(*) AS c FROM sandboxes').get().c, 1);
+  // v5 table exists, usable, and enforces the UNIQUE(remote_fingerprint)
+  // constraint the whole trust model rests on (see federationPairing.js).
+  db.prepare(`INSERT INTO paired_instances
+      (id, label, remote_fingerprint, remote_cert_pem, remote_hostname_claimed, remote_addr, direction, status, created_at)
+      VALUES (?,?,?,?,?,?,?,?,?)`)
+    .run('pi1', null, 'FP:X', 'PEM', 'host-a', '10.0.0.1:3210', 'inbound_initiated', 'pending_local_approval', 1);
+  assert.equal(db.prepare('SELECT COUNT(*) AS c FROM paired_instances').get().c, 1);
+  assert.throws(() => {
+    db.prepare(`INSERT INTO paired_instances
+        (id, label, remote_fingerprint, remote_cert_pem, remote_hostname_claimed, remote_addr, direction, status, created_at)
+        VALUES (?,?,?,?,?,?,?,?,?)`)
+      .run('pi2', null, 'FP:X', 'PEM2', 'host-b', '10.0.0.2:3210', 'outbound_initiated', 'pending_local_approval', 2);
+  }, /UNIQUE/, 'remote_fingerprint is the sole trust anchor -- a duplicate must be impossible at the schema level');
 });
 
 test('reopening is idempotent (migrations do not re-apply) and data survives', () => {

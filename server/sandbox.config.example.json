@@ -53,5 +53,10 @@
       "verifyTls": true,
       "statusLabelPrefix": "status-"
     }
+  },
+
+  "//federation": "拠点間ペアリング (下記 README「拠点間 (federation) ペアリング」)。requireTokenForPairing: true にすると、ペアリング開始リクエスト (bootstrap) にだけこのインスタンスの CCSERVER_TOKEN の提示を必須にする (既定 false)。あくまでスパム対策で、トークンが合っていても双方向の人間承認は省略されない。機能自体の有効/無効はここではなく CCSERVER_FEDERATION_PORT 環境変数で制御する。",
+  "federation": {
+    "requireTokenForPairing": false
   }
 }
