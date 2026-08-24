@@ -220,3 +220,36 @@ test('flag turned off after the modal opened refuses at submit time', async ({ p
   expect(dialogs[0]).toMatch(/無効/);
   expect(inits.length).toBe(0);
 });
+
+test('requested but ungranted meta MCP warns inside the terminal', async ({ page }) => {
+  const dialogs = [];
+  const inits = [];
+  page.on('dialog', async (d) => {
+    dialogs.push(d.message());
+    await d.accept();
+  });
+
+  await page.addInitScript(() => {
+    localStorage.setItem('ccserver-last-dir', '/tmp/opencode');
+  });
+
+  await stubDirsHome(page, { ...HOME_RESPONSE_BASE, metaAgentEnabled: true });
+  await stubSessions(page);
+  // echoMeta=false: the session reply carries no isMetaAgent -- what a
+  // broker-less / feature-disabled server produces behind a privileged
+  // request. The downgrade must be written to the terminal, not stay silent.
+  await stubTerminalWs(page, inits, { echoMeta: false });
+
+  await page.goto('/');
+  await page.getByRole('button', { name: '起動方法を選択' }).click();
+  const metaBtn = page.locator('.resume-dialog .launch-mode-btn', { hasText: 'メタエージェント' });
+  await expect(metaBtn).not.toHaveClass(/open-menu-item-disabled/);
+  await metaBtn.click();
+  await page.locator('.resume-dialog .btn-primary', { hasText: 'メタエージェントを起動' }).click();
+
+  await expect.poll(() => inits.length).toBe(1);
+  expect(inits[0].isMetaAgent).toBe(true);
+
+  const rows = page.locator('.terminal-container .xterm-rows');
+  await expect(rows).toContainText(/ccserver-meta は注入されませんでした/, { timeout: 15_000 });
+});

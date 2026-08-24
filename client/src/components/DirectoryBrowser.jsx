@@ -344,15 +344,17 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
     saveSandboxOpts(path, next);
   }, []);
 
-  // Meta-agent launch. Three gates before the tab opens, in order:
+  // Meta-agent launch. Four gates before the tab opens, in order:
   // 1) a fresh /api/dirs/home re-check -- the modal may have been open while
   //    the server config changed, and createSession silently ignores
   //    isMetaAgent when the feature is off, which must never look like a
   //    successful privileged launch;
-  // 2) double-launch guard: multiple meta agents CAN run (per-connection
+  // 2) an effective-app sanity check: copilot can structurally never carry
+  //    the meta MCP, so refuse before any dialog promises a launch;
+  // 3) double-launch guard: multiple meta agents CAN run (per-connection
   //    identity), but the README assumes one trusted agent -- allow a second
   //    only behind an explicit confirmation (zombie cleanup etc.);
-  // 3) privilege confirmation on EVERY launch, no "don't ask again".
+  // 4) privilege confirmation on EVERY launch, no "don't ask again".
   const handleMetaLaunch = useCallback(async () => {
     let enabled = false;
     try {
@@ -361,6 +363,14 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
     } catch { /* unreachable server -> treat as disabled */ }
     if (!enabled) {
       window.alert('メタエージェントは現在サーバー設定で無効です (sandbox.config.json の "metaAgentMcp": true で有効化できます)。');
+      return;
+    }
+    const app = metaApp || appDefault;
+    // Belt-and-braces (the picker already omits copilot): a server whose
+    // defaultApp is copilot would otherwise launch through the whole confirm
+    // chain into a session that can never carry the meta MCP.
+    if (app === 'copilot') {
+      window.alert('GitHub Copilot はMCP注入に対応していないため、メタエージェントでは起動できません。アプリを選択してください。');
       return;
     }
     try {
@@ -372,14 +382,6 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
       }
     } catch { /* session list unavailable -> fall through to the confirm below */ }
     if (!window.confirm('メタエージェントを起動しますか?\nサーバー全体(全プロジェクト/サンドボックス/セッション)を操作できる特権 MCP (ccserver-meta) がこのセッションに付与されます。')) {
-      return;
-    }
-    const app = metaApp || appDefault;
-    // Belt-and-braces (the picker already omits copilot): a server whose
-    // defaultApp is copilot would otherwise launch through the whole confirm
-    // chain into a session that can never carry the meta MCP.
-    if (app === 'copilot') {
-      window.alert('GitHub Copilot はMCP注入に対応していないため、メタエージェントでは起動できません。アプリを選択してください。');
       return;
     }
     closeOpenMenu();
@@ -455,9 +457,7 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
         }
         // Same rule for the meta mode's remembered pick: an explicit app that
         // is no longer installed falls back to following the single default.
-        if (data.availableApps) {
-          setMetaApp((m) => (m && data.availableApps[m] ? m : null));
-        }
+        setMetaApp((m) => (m && data.availableApps[m] ? m : null));
         // Same rule for the combo modal's role selections: workerA and the
         // orchestrator start as claude, workerB as opencode -- a role whose
         // default points at a missing CLI must not stay selected-active (the

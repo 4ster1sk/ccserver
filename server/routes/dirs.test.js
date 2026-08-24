@@ -98,6 +98,7 @@ test('POST /dirs keeps the directory but reports failure when git init cannot ru
 // every call), and a missing file / missing key means false.
 test('GET /dirs/home exposes metaAgentEnabled following sandbox.config.json', async () => {
   const cfg = join(runtimeDir, 'sandbox.config.json');
+  const savedConfigEnv = process.env.CCSERVER_SANDBOX_CONFIG;
   process.env.CCSERVER_SANDBOX_CONFIG = cfg;
   try {
     // No config file at all -> default off.
@@ -117,7 +118,8 @@ test('GET /dirs/home exposes metaAgentEnabled following sandbox.config.json', as
     res = await app.inject({ method: 'GET', url: '/api/dirs/home' });
     assert.equal(res.json().metaAgentEnabled, false);
   } finally {
-    delete process.env.CCSERVER_SANDBOX_CONFIG;
+    if (savedConfigEnv === undefined) delete process.env.CCSERVER_SANDBOX_CONFIG;
+    else process.env.CCSERVER_SANDBOX_CONFIG = savedConfigEnv;
     try { rmSync(cfg, { force: true }); } catch {}
   }
 });
