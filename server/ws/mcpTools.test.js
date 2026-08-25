@@ -1071,6 +1071,174 @@ test('closeTab: destroying a member removes it from the group', async () => {
   assert.equal(groupManager.isSessionInGroup(g, 'sess-o'), true);
 });
 
+// --- new_session (fresh PTY replacement of a worker) -------------------------
+// Regression contract (real-machine Codex incident): `/new\n\n<body>` sent as
+// ONE send_input executes the slash command immediately and the body is
+// swallowed (Codex consumed it as its session title and never answered).
+// new_session therefore returns the fresh sessionId FIRST and accepts no
+// instruction text -- the task body travels only through a LATER, separate
+// send_input call.
+
+test('newSession: replaces a worker via addMember({}) and reports the fresh launch (instruction text never accepted)', async () => {
+  const g = await makeGroupAsync();
+  groupManager.registerMember(g, 'workerA', 'sess-old');
+  let seenOpts = null;
+  const destroyed = [];
+  const fake = {
+    getSession: () => null,
+    createSession: (opts) => { seenOpts = opts; return { sessionId: 'sess-new', session: {} }; },
+    destroySession: (id) => destroyed.push(id),
+    writeToSession: () => false,
+  };
+  groupManager.setSessionApiForTests(fake);
+  try {
+    groupManager.setMemberPrefs(g, 'workerA', { app: 'opencode', model: 'gpt-5', sandboxOpts: { gpg: false, sshAgent: true } });
+
+    const r = await tools.newSession(controlDeps(g), { sessionId: 'sess-old' });
+    assert.equal(r.error, undefined, r.message || '');
+    assert.equal(r.ok, true);
+    assert.equal(r.previousSessionId, 'sess-old');
+    assert.equal(r.sessionId, 'sess-new');
+    assert.equal(r.role, 'workerA');
+    assert.equal(r.app, 'opencode', 'the role\'s persisted app preference is reused');
+    assert.equal(r.model, 'gpt-5', 'the role\'s persisted model preference is reused');
+    assert.equal(r.cwd, seenOpts.cwd, 'the reported cwd is the one actually launched');
+    assert.deepEqual(r.sandboxOpts, { gpg: false, sshAgent: true });
+
+    // Fresh CLI launch: NO resume option may reach createSession.
+    assert.ok(!('resumeLast' in seenOpts), 'resumeLast must not be passed (fresh conversation)');
+    assert.ok(!('claudeSessionId' in seenOpts), 'no resume id may be passed');
+    assert.equal(seenOpts.groupRole, 'workerA');
+
+    // The old session is retired only after the replacement exists.
+    assert.deepEqual(destroyed, ['sess-old']);
+    assert.equal(groupManager.isSessionInGroup(g, 'sess-old'), false);
+    assert.equal(groupManager.isSessionInGroup(g, 'sess-new'), true);
+    // Mirrors sendInput: the turn moves to the (fresh) worker.
+    assert.equal(groupManager.getGroup(g).currentTurn, 'workerA');
+  } finally {
+    groupManager.setSessionApiForTests(null);
+    groupManager.destroyGroup(g);
+  }
+});
+
+test('newSession: other-group and unregistered session ids are refused without touching addMember', async () => {
+  const a = await makeGroupAsync();
+  const b = await makeGroupAsync();
+  groupManager.registerMember(a, 'workerA', 'sess-a1');
+  groupManager.registerMember(b, 'workerA', 'sess-b1');
+
+  const neverSpawns = {
+    getSession: () => null,
+    createSession: () => { throw new Error('addMember must not be reached'); },
+    destroySession: () => {},
+    writeToSession: () => false,
+  };
+  groupManager.setSessionApiForTests(neverSpawns);
+  try {
+    const cross = await tools.newSession(controlDeps(a), { sessionId: 'sess-b1' });
+    assert.equal(cross.error, 'unauthorized');
+
+    const unknown = await tools.newSession(controlDeps(a), { sessionId: 'sess-a1-gone' });
+    assert.equal(unknown.error, 'unauthorized');
+  } finally {
+    groupManager.setSessionApiForTests(null);
+    groupManager.destroyGroup(a);
+    groupManager.destroyGroup(b);
+  }
+});
+
+// A prompt-injected orchestrator must not be able to replace itself.
+test('newSession: the orchestrator session is refused before addMember runs', async () => {
+  const g = await makeGroupAsync();
+  groupManager.registerMember(g, 'orchestrator', 'sess-o');
+  groupManager.registerMember(g, 'workerA', 'sess-a1');
+
+  const neverSpawns = {
+    getSession: () => null,
+    createSession: () => { throw new Error('addMember must not be reached'); },
+    destroySession: () => {},
+    writeToSession: () => false,
+  };
+  groupManager.setSessionApiForTests(neverSpawns);
+  try {
+    const r = await tools.newSession(controlDeps(g), { sessionId: 'sess-o' });
+    assert.equal(r.error, 'invalid-role');
+    assert.equal(r.message.includes('orchestrator'), true, 'the refusal names the orchestrator guard');
+    // Both members untouched.
+    assert.equal(groupManager.isSessionInGroup(g, 'sess-o'), true);
+    assert.equal(groupManager.isSessionInGroup(g, 'sess-a1'), true);
+  } finally {
+    groupManager.setSessionApiForTests(null);
+    groupManager.destroyGroup(g);
+  }
+});
+
+test('newSession: an addMember spawn failure propagates and leaves the old member live', async () => {
+  const g = await makeGroupAsync();
+  groupManager.registerMember(g, 'workerA', 'sess-old');
+  const failing = {
+    getSession: () => null,
+    createSession: () => ({ error: 'pty failed', session: null }),
+    destroySession: () => {},
+    writeToSession: () => false,
+  };
+  groupManager.setSessionApiForTests(failing);
+  try {
+    const r = await tools.newSession(controlDeps(g), { sessionId: 'sess-old' });
+    assert.equal(r.error, 'spawn-failed', 'the stable addMember error code passes through');
+    assert.equal(r.message, 'pty failed');
+    // Not treated as success: the old session was never retired.
+    assert.equal(groupManager.isSessionInGroup(g, 'sess-old'), true);
+    assert.equal(groupManager.getGroup(g).currentTurn, null);
+  } finally {
+    groupManager.setSessionApiForTests(null);
+    groupManager.destroyGroup(g);
+  }
+});
+
+// --- send_key (escape-only confirmation-modal recovery) ----------------------
+
+test('sendKey: escape is forwarded to the pty immediately, without the settle gate', async () => {
+  const g = await makeGroupAsync();
+  groupManager.registerMember(g, 'workerA', 'sess-a1');
+  const seen = [];
+  const deps = {
+    groupId: g,
+    groupManager: groupManager.getGroupManagerApi(),
+    sessionManager: {
+      // No waitUntilSettled at all: if sendKey ever grew a gate, this would throw.
+      writeKeyToSession: (id, key) => { seen.push([id, key]); return true; },
+    },
+  };
+  const r = tools.sendKey(deps, { sessionId: 'sess-a1', key: 'escape' });
+  assert.deepEqual(r, { ok: true }, 'no settled field -- the modal closes on the key itself');
+  assert.deepEqual(seen, [['sess-a1', 'escape']]);
+});
+
+test('sendKey: group-bound authorization (cross-group/unregistered refused) and dead sessions yield not-found', async () => {
+  const a = await makeGroupAsync();
+  const b = await makeGroupAsync();
+  groupManager.registerMember(a, 'workerA', 'sess-a1');
+  groupManager.registerMember(b, 'workerA', 'sess-b1');
+
+  const cross = tools.sendKey(controlDeps(a), { sessionId: 'sess-b1', key: 'escape' });
+  assert.equal(cross.error, 'unauthorized');
+
+  const unknown = tools.sendKey(controlDeps(a), { sessionId: 'sess-a1-gone', key: 'escape' });
+  assert.equal(unknown.error, 'unauthorized');
+
+  // Authorized but the pty is gone/exited -> the existing not-found shape.
+  const deps = {
+    groupId: a,
+    groupManager: groupManager.getGroupManagerApi(),
+    sessionManager: { writeKeyToSession: () => false },
+  };
+  const dead = tools.sendKey(deps, { sessionId: 'sess-a1', key: 'escape' });
+  assert.equal(dead.error, 'not-found');
+  groupManager.destroyGroup(b);
+});
+
 test('stripAnsi: removes common escape sequences', () => {
   assert.equal(tools.stripAnsi('\x1b[31mred\x1b[0m text'), 'red text');
   assert.equal(tools.stripAnsi('\x1b]0;title\x07hi'), 'hi');

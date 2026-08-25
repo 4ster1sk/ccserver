@@ -280,6 +280,67 @@ export function closeTab(deps, { sessionId }) {
   return { ok: true };
 }
 
+// Replace a worker's current session with a fresh one (new_session): same
+// role, same git worktree, same persisted launch preferences (app/model/
+// sandboxOpts), but a brand-new CLI process with clean conversation context.
+// This never types anything into the old terminal -- no `/new` keystroke,
+// whose meaning depends on the app's slash-command surface -- it reuses
+// groupManager.addMember's atomic role replacement: the new handoff channel
+// and PTY are created first and the old session is retired only after they
+// exist, so any failure leaves the old member untouched.
+//
+// Takes no instruction text by design: after a success, send the first
+// instruction to the RETURNED sessionId with a separate send_input call (the
+// fresh TUI may still be initializing; send_input's settle gate waits for
+// it). Only worker sessions can be replaced -- the orchestrator session is
+// refused here without ever reaching addMember.
+export async function newSession(deps, { sessionId }) {
+  if (!deps.groupManager.isSessionInGroup(deps.groupId, sessionId)) {
+    return { error: 'unauthorized', message: 'session is not a member of this group' };
+  }
+  const role = deps.groupManager.getRoleForSession(deps.groupId, sessionId);
+  // Same worker-role shape the wire layer (open_tab) enforces; roles are
+  // registered server-side, so this only ever fires for the orchestrator.
+  if (!role || role === 'orchestrator' || !/^worker[A-Za-z0-9_-]+$/.test(role)) {
+    return { error: 'invalid-role', message: 'only worker sessions can be replaced, never the orchestrator' };
+  }
+  // Empty options: addMember falls back to the role's persisted preferences
+  // (app/model/sandboxOpts) and its own worktree, and passes no resume id /
+  // resumeLast to createSession -- a guaranteed fresh CLI launch.
+  const res = await deps.groupManager.addMember(deps.groupId, role, {});
+  if (res.error) return { error: res.error, message: res.message };
+  // The turn moves to the fresh member, mirroring sendInput.
+  deps.groupManager.setCurrentTurn(deps.groupId, role);
+  return {
+    ok: true,
+    previousSessionId: sessionId,
+    sessionId: res.sessionId,
+    role,
+    app: res.app,
+    model: res.model,
+    cwd: res.cwd,
+    sandboxOpts: res.sandboxOpts || null,
+  };
+}
+
+// Send ONE whitelisted control key to a group member terminal (send_key).
+// Recovery tool for agent TUI confirmation modals -- e.g. Codex's
+// "Create a plan?" prompt, observed on real sessions after a long
+// multi-line/bulleted instruction, which stalls the worker until dismissed.
+// The key set lives in sessionManager (currently only 'escape' -> ESC) and is
+// never a generic raw-byte channel: text input belongs to send_input. Unlike
+// sendInput there is no settle gate -- the modal must be closed immediately,
+// and the caller confirms the modal with a single read_output BEFORE calling.
+export function sendKey(deps, { sessionId, key }) {
+  if (!deps.groupManager.isSessionInGroup(deps.groupId, sessionId)) {
+    return { error: 'unauthorized', message: 'session is not a member of this group' };
+  }
+  const ok = deps.sessionManager.writeKeyToSession(sessionId, key);
+  return ok
+    ? { ok: true }
+    : { error: 'not-found', message: 'session not found or exited' };
+}
+
 export function getTabStatus(deps, { sessionId }) {
   if (!deps.groupManager.isSessionInGroup(deps.groupId, sessionId)) {
     return { error: 'unauthorized', message: 'session is not a member of this group' };

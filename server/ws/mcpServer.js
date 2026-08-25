@@ -114,6 +114,20 @@ export function buildControlMcpServer(deps) {
   );
 
   server.tool(
+    'new_session',
+    'Atomically replace a worker\'s current session with a fresh process of the same role: same git worktree and same persisted launch preferences (app/model/sandboxOpts), but a brand-new CLI conversation with clean context. This is THE way to give a worker a fresh start -- never type `/new` or similar reset commands via send_input (their meaning depends on each app\'s slash commands). It takes no instruction text and accepts only the target worker\'s current sessionId; the orchestrator session itself can never be replaced. The old session stays live until the replacement is up (a failure leaves it untouched), and the result reports previousSessionId plus the NEW sessionId, role, app, model, cwd and sandboxOpts. Send your first instruction to the RETURNED sessionId in a SEPARATE send_input call afterwards -- do not combine a reset and an instruction into one text.',
+    { sessionId: z.string() },
+    async (args) => ({ content: [{ type: 'text', text: JSON.stringify(await tools.newSession(deps, args)) }] }),
+  );
+
+  server.tool(
+    'send_key',
+    'Send ONE whitelisted control key to a group member terminal. Currently the only key is "escape", which dismisses an agent TUI\'s confirmation modal -- e.g. Codex\'s "Create a plan? esc dismiss" prompt that can appear after a long multi-line/bulleted instruction and stalls the worker until dismissed. This is a narrowly-scoped recovery tool, NOT an input channel: no other key, raw byte, or ANSI sequence exists here, and normal text belongs to send_input. Confirm the modal with a single read_output first, then send escape exactly once; never spam it or poll with repeated keys.',
+    { sessionId: z.string(), key: z.enum(['escape']) },
+    async (args) => ({ content: [{ type: 'text', text: JSON.stringify(tools.sendKey(deps, args)) }] }),
+  );
+
+  server.tool(
     'open_tab',
     'Open a new worker session inside this group (with its own handoff channel) and return its sessionId. role must be a worker role (workerA, workerB, ...) -- never orchestrator. cwd is no longer read: the server always assigns each role its own dedicated git worktree automatically (or the shared project directory when the project isn\'t a git repo) -- the returned cwd tells you what was actually assigned; the argument is still accepted on the wire but has no effect and any value works. app (claude, opencode, or codex) is optional: omitted values fall back to the role\'s persisted preferences, then to the group defaults. copilot is not supported in groups because its MCP configuration is file-based and cannot be injected per session. For a genuinely new member, sandboxOpts.gpg / sandboxOpts.sshAgent cannot exceed what the calling orchestrator session itself currently has enabled -- a request for a flag the orchestrator does not hold is silently downgraded to false; check the returned sandboxOpts to see what was actually granted. Restarting an already-registered role (role currently has a member) always keeps that member\'s existing sandboxOpts regardless of what this call requests.',
     {

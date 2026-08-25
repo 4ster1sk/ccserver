@@ -78,6 +78,26 @@ export function appModelArgs(app, model) {
   return ['--model', model];
 }
 
+// The keystroke that submits the current prompt in each app's TUI, sent by
+// sessionManager.writeToSession({ submit: true }) after the typed text.
+// Every supported CLI accepts CR today (verified against all four TUIs; CR
+// is also what a terminal's Enter key emits), so the table is uniform -- it
+// exists so a future app needing a different submit key changes only its
+// row here instead of a literal buried in the write path. LF is never a
+// submit key: several TUIs treat it as a soft newline / continuation.
+const APP_SUBMIT_KEYS = {
+  claude: '\r',
+  opencode: '\r',
+  copilot: '\r',
+  codex: '\r',
+};
+
+export function appSubmitKey(app) {
+  // Unknown apps (and plain shells, whose sessions carry no app id) fall
+  // back to CR -- the same byte this path has always sent.
+  return APP_SUBMIT_KEYS[app] || '\r';
+}
+
 // Try to recover a conversation id from recent (ANSI-stripped) terminal
 // output, so an exiting session can be resumed later. claude prints
 // `claude --resume <id>`; opencode's and copilot's TUIs never expose their
