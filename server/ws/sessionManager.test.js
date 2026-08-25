@@ -360,6 +360,86 @@ test('writeToSession on an exited session returns false', async () => {
   assert.equal(sessionManager.writeToSession('no-such-session', 'ls'), false);
 });
 
+// The delayed submit after the typed text must be the app's submit key from
+// appLaunch.appSubmitKey -- CR for every current CLI (Codex included) -- and
+// never a bare LF. A stub pty records every write so the exact byte sequence
+// is asserted.
+test('writeToSession submit writes the body then the app submit key (CR), never LF', async () => {
+  const res = sessionManager.createSession({ cwd: '/tmp', cols: 80, rows: 24, shell: true, sandbox: false });
+  const id = res.sessionId;
+  const s = res.session;
+  try {
+    const writes = [];
+    s.app = 'codex'; // stand in for any agent TUI
+    // Recording shim around the REAL pty: teardown must still reach it, or
+    // the orphaned process/fd keeps the test runner's event loop alive.
+    const realPty = s.ptyProcess;
+    s.ptyProcess = {
+      write: (data) => { writes.push(data); return realPty.write(data); },
+      kill: () => realPty.kill(),
+      destroy: () => realPty.destroy(),
+    };
+    assert.equal(sessionManager.writeToSession(id, 'review the diff', { submit: true }), true);
+    assert.deepEqual(writes, ['review the diff'], 'only the body is written synchronously');
+    await sleep(350); // past the 200ms delayed submit
+    assert.deepEqual(writes, ['review the diff', '\r'], 'the delayed submit must be exactly CR');
+    assert.ok(!writes.includes('\n'), 'LF must never be sent as a submit key');
+  } finally {
+    sessionManager.destroySession(id, { keepSchedule: false });
+  }
+});
+
+// send_key backend (Codex "Create a plan?" modal recovery): the whitelisted
+// escape key writes exactly one ESC byte -- no delayed CR, no extra bytes --
+// and nothing outside the whitelist is writable at all.
+test('writeKeyToSession: escape writes exactly one ESC, never a CR', async () => {
+  const res = sessionManager.createSession({ cwd: '/tmp', cols: 80, rows: 24, shell: true, sandbox: false });
+  const id = res.sessionId;
+  const s = res.session;
+  try {
+    await sleep(150);
+    const writes = [];
+    const realPty = s.ptyProcess; // teardown must reach the real pty (see above)
+    s.ptyProcess = {
+      write: (data) => writes.push(data),
+      kill: () => realPty.kill(),
+      destroy: () => realPty.destroy(),
+    };
+    assert.equal(sessionManager.writeKeyToSession(id, 'escape'), true);
+    assert.deepEqual(writes, ['\x1b'], 'exactly one ESC byte');
+    // No delayed submit follows (wait past writeToSession's 200ms delay).
+    await sleep(300);
+    assert.deepEqual(writes, ['\x1b']);
+  } finally {
+    sessionManager.destroySession(id, { keepSchedule: false });
+  }
+});
+
+test('writeKeyToSession: unknown keys are refused and write nothing; dead/missing sessions return false', async () => {
+  const res = sessionManager.createSession({ cwd: '/tmp', cols: 80, rows: 24, shell: true, sandbox: false });
+  const id = res.sessionId;
+  const s = res.session;
+  try {
+    const writes = [];
+    const realPty = s.ptyProcess; // teardown must reach the real pty (see above)
+    s.ptyProcess = {
+      write: (data) => writes.push(data),
+      kill: () => realPty.kill(),
+      destroy: () => realPty.destroy(),
+    };
+    // No raw bytes / control chars / other keys beyond 'escape'.
+    for (const bad of ['ctrl-c', 'enter', '\x03', '\x1b[A', '{"raw":true}', 'ESC', undefined]) {
+      assert.equal(sessionManager.writeKeyToSession(id, bad), false, `key ${JSON.stringify(bad)} must be refused`);
+    }
+    assert.deepEqual(writes, [], 'a refused key must never reach the pty');
+  } finally {
+    sessionManager.destroySession(id, { keepSchedule: false });
+  }
+
+  assert.equal(sessionManager.writeKeyToSession('no-such-session', 'escape'), false);
+  assert.equal(sessionManager.writeKeyToSession(id, 'escape'), false, 'an exited/destroyed session refuses keys too');
+});
+
 // Issue #15 settle gate: waitUntilSettled resolves immediately for sessions
 // that can never settle (plain shells have no idle timer, unknown ids, and
 // already-settled sessions short-circuit to their current state).

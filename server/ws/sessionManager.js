@@ -16,6 +16,7 @@ import {
   isValidApp,
   appResumeArgs,
   appModelArgs,
+  appSubmitKey,
   extractResumeSessionId,
   detectPermissionPrompt,
 } from './appLaunch.js';
@@ -751,16 +752,48 @@ export function writeToSession(id, text, { submit = false } = {}) {
     }
     if (submit) {
       // Delay the Enter so the TUI registers the text first (same pattern as
-      // injectIntoLiveSession).
+      // injectIntoLiveSession). The key resolves through the per-app submit
+      // table (appLaunch.appSubmitKey) -- never a literal here -- so an app
+      // that ever needs a different submit byte changes only that table.
       setTimeout(() => {
         if (!session.exited && session.ptyProcess) {
           try {
-            session.ptyProcess.write('\r');
+            session.ptyProcess.write(appSubmitKey(session.app));
           } catch {
             // pty may have died between writes
           }
         }
       }, 200);
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// Named control keys writable via writeKeyToSession (MCP send_key). This is
+// deliberately a WHITELIST of exact byte sequences, never a generic raw-input
+// API: arbitrary strings, ANSI sequences, Ctrl-C/Ctrl-D or arrow keys are not
+// exposed, so this path can dismiss an agent TUI's confirmation modal but can
+// never stop/kill the worker's shell or drive its UI beyond that.
+const SESSION_KEYS = {
+  escape: '\x1b',
+};
+
+// Write ONE whitelisted control key into a live session's pty. Liveness check
+// and idle-timer handling mirror writeToSession; unlike writeToSession there
+// is no delayed submit -- a confirmation modal must close on the key itself,
+// so no CR is appended.
+export function writeKeyToSession(id, key) {
+  const bytes = SESSION_KEYS[key];
+  if (!bytes) return false;
+  const session = sessions.get(id);
+  if (!session?.ptyProcess || session.exited) return false;
+  try {
+    session.ptyProcess.write(bytes);
+    if (session.idleTimer) {
+      clearTimeout(session.idleTimer);
+      session.idleTimer = null;
     }
     return true;
   } catch {

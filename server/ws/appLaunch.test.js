@@ -7,6 +7,7 @@ import {
   appResumeArgs,
   appModelArgs,
   appSupportsModelFlag,
+  appSubmitKey,
   extractResumeSessionId,
   detectPermissionPrompt,
 } from './appLaunch.js';
@@ -173,6 +174,23 @@ test('appModelArgs: claude never emits --model unless the capability is enabled'
     if (before === undefined) delete process.env.CCSERVER_CLAUDE_MODEL;
     else process.env.CCSERVER_CLAUDE_MODEL = before;
   }
+});
+
+test('appSubmitKey: every agent CLI submits with CR, Codex included (regression lock)', () => {
+  // The submit byte sent by sessionManager.writeToSession({ submit: true })
+  // after the typed text. All four CLIs accept CR today; this pins the table
+  // so a future edit that flips any app to LF (a soft newline in several
+  // TUIs) is a deliberate, reviewed change rather than an accident.
+  for (const app of APPS) {
+    assert.equal(appSubmitKey(app), '\r', `${app} must submit with CR`);
+    assert.notEqual(appSubmitKey(app), '\n', `${app} must never submit with LF`);
+  }
+});
+
+test('appSubmitKey: unknown apps and plain shells fall back to CR', () => {
+  assert.equal(appSubmitKey(undefined), '\r');
+  assert.equal(appSubmitKey(null), '\r');
+  assert.equal(appSubmitKey('bogus'), '\r');
 });
 
 test('extractResumeSessionId: claude extracts the last resume id', () => {

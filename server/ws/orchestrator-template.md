@@ -17,6 +17,16 @@ Each worker is a full terminal session you can inspect and control:
   member is idle even if its byte stream is noisy; a small screenIdleMs
   means it is actively redrawing (spinner or progress).
 - send_input -- type text into a member's terminal (submit defaults to true).
+  This sends keystrokes only; it is never a session-control primitive.
+- new_session -- replace a worker's session with a fresh process of the same
+  role (same git worktree and launch preferences, clean conversation
+  context). Takes the worker's current sessionId and returns the NEW
+  sessionId; it accepts no instruction text. Never type `/new` as text to
+  reset a worker.
+- send_key -- send ONE whitelisted control key to a member terminal, currently
+  only `key: "escape"`, to dismiss an agent TUI confirmation modal (e.g.
+  Codex's "Create a plan? esc dismiss" prompt). A recovery tool, not an input
+  channel -- no other key or raw byte exists here; normal text is send_input.
 - open_tab / close_tab -- add or terminate worker sessions.
 - get_tab_status -- quick status of a member (including screenIdleMs, the
   screen-change-based idle signal).
@@ -132,16 +142,22 @@ Do not hand a freshly implemented change straight to workerA for review --
 that makes workerA do all the quality gatekeeping. Instead, make workerB
 raise the quality bar on its own first:
 
-1. When workerB hands off reporting the implementation done, send `/new`
-   to workerB to start a fresh session (a clean context avoids the bias of
-   reviewing its own just-written reasoning).
-2. In that new session, have it review the diff it just produced against:
+1. When workerB hands off reporting the implementation done, call
+   `new_session({ sessionId: <workerB's current sessionId> })` to start a
+   fresh session for workerB (a clean context avoids the bias of reviewing
+   its own just-written reasoning). Do NOT type `/new` via send_input and do
+   NOT combine the reset with your first instruction in one text --
+   `new_session` takes no instruction text.
+2. Take the NEW `sessionId` returned by `new_session` and send the review
+   request to it with a separate `send_input` call. The fresh process may
+   still be initializing; send_input's settle gate waits for it.
+3. In that new session, have it review the diff it just produced against:
    plan compliance, correctness/bugs, and unnecessary complexity/verbosity.
-3. If it finds issues, have it fix and commit them, then repeat from step 1.
-4. Cap this loop at 3 rounds. If issues remain after 3 rounds, hand off to
+4. If it finds issues, have it fix and commit them, then repeat from step 1.
+5. Cap this loop at 3 rounds. If issues remain after 3 rounds, hand off to
    workerA anyway with the outstanding issues noted, rather than looping
    forever.
-5. Once the self-review comes back clean (or the cap is hit), hand off to
+6. Once the self-review comes back clean (or the cap is hit), hand off to
    workerA for the final review -> push -> PR stage.
 
 ## Handoff discipline
@@ -186,6 +202,25 @@ orchestrator should catch this itself.
   signals above, will tell you when to look. Don't invent a
   polling loop (e.g. `ScheduleWakeup`) just to check sooner -- that
   mechanism belongs to the `/loop` skill, not ad hoc waiting here.
+
+### Confirmation-modal recovery (send_key escape)
+
+Confirmed on real Codex sessions: after a long or bulleted instruction, the
+TUI may show its own confirmation modal -- `Create a plan? shift + tab use
+Plan mode / esc dismiss` -- instead of processing the message as chat, and
+the worker then sits stalled with no spinner and no response.
+
+- This applies ONLY when there is a concrete stall anomaly (a static screen,
+  a large idleForMs/screenIdleMs on a member that should be working) shortly
+  after you sent a long/multi-line instruction -- that justifies the single
+  `read_output`. If that read shows the confirmation modal, send
+  `send_key({ sessionId: ..., key: "escape" })` exactly ONCE to dismiss it.
+- After escaping, verify the worker actually received your original request;
+  if it did not (or the input was consumed by the modal), resend the task in
+  a short, single-line form via a separate `send_input`.
+- Escape is a one-shot recovery, never a control channel: do not spam it,
+  do not pair it with blind Enter submissions, and do not poll keys. If the
+  modal returns repeatedly, shorten the instructions instead of looping.
 
 ## Notification discipline
 

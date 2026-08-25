@@ -111,12 +111,51 @@ test('control socket: tools/list exposes all control tools', async () => {
   await c.connected;
   const { tools } = await c.call('tools/list');
   const names = tools.map((t) => t.name);
-  for (const expected of ['list_group_sessions', 'read_output', 'send_input', 'open_tab', 'close_tab', 'get_tab_status', 'wait_for_handoff']) {
+  for (const expected of ['list_group_sessions', 'read_output', 'send_input', 'new_session', 'send_key', 'open_tab', 'close_tab', 'get_tab_status', 'wait_for_handoff']) {
     assert.ok(names.includes(expected), `missing ${expected}`);
   }
   // Tool schemas must not expose groupId/sessionId/role as identity inputs.
   const waitTool = tools.find((t) => t.name === 'wait_for_handoff');
   assert.ok(!('groupId' in waitTool.inputSchema.properties));
+  c.close();
+});
+
+// new_session must take ONLY the target sessionId (role/app/model/cwd are
+// resolved server-side from the closure-bound group); send_key must expose
+// nothing beyond sessionId + the escape enum -- the wire can never carry a
+// raw byte, another key, or an ANSI sequence (no generic keystroke channel).
+test('new_session and send_key schemas: minimal inputs, no raw-key channel', async () => {
+  const c = mcpClient(control.sockPath);
+  await c.connected;
+  const { tools } = await c.call('tools/list');
+
+  const newSession = tools.find((t) => t.name === 'new_session');
+  assert.ok(newSession, 'new_session is exposed');
+  const newProps = newSession.inputSchema.properties;
+  assert.ok('sessionId' in newProps, 'sessionId is the only target input');
+  for (const forbidden of ['groupId', 'role', 'app', 'model', 'cwd', 'sandboxOpts']) {
+    assert.ok(!(forbidden in newProps), `new_session must never take ${forbidden} from the wire`);
+  }
+
+  const sendKey = tools.find((t) => t.name === 'send_key');
+  assert.ok(sendKey, 'send_key is exposed');
+  const keyProps = sendKey.inputSchema.properties;
+  assert.ok('sessionId' in keyProps);
+  assert.deepEqual(keyProps.key.enum, ['escape'], 'the whitelist is exactly escape');
+  for (const forbidden of ['groupId', 'text', 'bytes', 'sequence']) {
+    assert.ok(!(forbidden in keyProps), `send_key must never take ${forbidden} from the wire`);
+  }
+
+  // The enum is enforced at the protocol layer: anything beyond it -- a named
+  // key like ctrl-c or a literal control byte -- is rejected before any tool
+  // code runs (the SDK surfaces zod failures as isError results).
+  const namedKey = await callToolRaw(c, 'send_key', { sessionId: 'wire-sess-a', key: 'ctrl-c' });
+  assert.equal(namedKey.isError, true, 'named non-whitelisted keys are rejected on the wire');
+  assert.match(namedKey.content[0].text, /Invalid arguments for tool send_key/);
+  const rawBytes = await callToolRaw(c, 'send_key', { sessionId: 'wire-sess-a', key: '\x1b' });
+  assert.equal(rawBytes.isError, true, 'raw control bytes are rejected on the wire');
+  const ctrlCByte = await callToolRaw(c, 'send_key', { sessionId: 'wire-sess-a', key: '\x03' });
+  assert.equal(ctrlCByte.isError, true, 'Ctrl-C as a raw byte is not a whitelisted key either');
   c.close();
 });
 
