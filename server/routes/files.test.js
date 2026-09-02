@@ -4,10 +4,13 @@
 // Also pins the existing GET /api/files download route to `attachment` so
 // adding the preview route can never change download behaviour.
 
-import { test, before, after } from 'node:test';
+import { test, before, after, mock } from 'node:test';
 import assert from 'node:assert/strict';
 import Fastify from 'fastify';
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync, symlinkSync, chmodSync, readdirSync } from 'node:fs';
+import { open } from 'node:fs/promises';
+import { createServer } from 'node:net';
+import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { filesRoute, previewKind, PREVIEW_EXTS, PREVIEW_MAX_BYTES, SNIFF_BYTES } from './files.js';
@@ -344,4 +347,112 @@ test('GET /files/content does not leak file descriptors on any path', { skip: pr
   }
   const after = fds();
   assert.ok(after - before <= 1, `descriptors grew from ${before} to ${after}`);
+});
+
+// ---------------------------------------------------------------------------
+// TOCTOU guard: the route must open the file first and make every decision
+// (type check, size, sniff, read) through that one FileHandle. A path-based
+// stat() followed by open() would re-resolve the name and could validate one
+// file but serve another. FileHandle is not exported, so spy on its prototype
+// obtained from a real handle.
+
+async function fileHandleProto() {
+  const p = join(dir, 'proto-probe.txt');
+  writeFileSync(p, 'probe');
+  const h = await open(p, 'r');
+  const proto = Object.getPrototypeOf(h);
+  await h.close();
+  return proto;
+}
+
+test('GET /files/content validates and reads through the same opened FileHandle', async () => {
+  const p = join(dir, 'handle-check.txt');
+  writeFileSync(p, 'real file');
+  const proto = await fileHandleProto();
+  const realStat = proto.stat;
+  const realRead = proto.read;
+  const seen = { statCalls: 0, statThis: null, readThis: null };
+  const statMock = mock.method(proto, 'stat', async function (...args) {
+    seen.statCalls++;
+    seen.statThis = this;
+    return realStat.apply(this, args);
+  });
+  const readMock = mock.method(proto, 'read', async function (...args) {
+    seen.readThis = this;
+    return realRead.apply(this, args);
+  });
+  try {
+    const res = await app.inject({ method: 'GET', url: contentUrl(p) });
+    assert.equal(res.statusCode, 200);
+    assert.equal(res.json().content, 'real file');
+    assert.equal(seen.statCalls, 1, 'exactly one stat, on the handle');
+    assert.ok(seen.statThis && typeof seen.statThis.fd === 'number', 'stat ran on an open FileHandle');
+    assert.equal(seen.readThis, seen.statThis, 'the read used the handle that was validated');
+  } finally {
+    statMock.mock.restore();
+    readMock.mock.restore();
+  }
+});
+
+test('GET /files/content trusts the handle stat for the type check (not-a-file from the handle -> 400)', async () => {
+  const p = join(dir, 'handle-type.txt');
+  writeFileSync(p, 'looks like a regular file on disk');
+  const proto = await fileHandleProto();
+  const statMock = mock.method(proto, 'stat', async function () {
+    return { isFile: () => false, size: 0, mtimeMs: 0 };
+  });
+  try {
+    const res = await app.inject({ method: 'GET', url: contentUrl(p) });
+    assert.equal(res.statusCode, 400);
+    assert.equal(res.json().error, 'Not a file');
+  } finally {
+    statMock.mock.restore();
+  }
+});
+
+test('GET /files/content maps errors raised by the handle stat like path errors (EACCES -> 403)', async () => {
+  const p = join(dir, 'handle-err.txt');
+  writeFileSync(p, 'x');
+  const proto = await fileHandleProto();
+  const statMock = mock.method(proto, 'stat', async function () {
+    const err = new Error('mocked');
+    err.code = 'EACCES';
+    throw err;
+  });
+  try {
+    const res = await app.inject({ method: 'GET', url: contentUrl(p) });
+    assert.equal(res.statusCode, 403);
+    assert.equal(res.json().error, 'Permission denied');
+  } finally {
+    statMock.mock.restore();
+  }
+});
+
+// Opening first must not turn special files into a hang: a FIFO with no
+// writer blocks a plain open() forever (and pins a libuv thread), which is
+// why the route opens with O_NONBLOCK and then rejects it via stat().
+test('GET /files/content answers 400 for a FIFO instead of blocking in open()', { timeout: 5000, skip: process.platform === 'win32' }, async (t) => {
+  const p = join(dir, 'pipe.txt');
+  try {
+    execFileSync('mkfifo', [p]);
+  } catch {
+    t.skip('mkfifo unavailable');
+    return;
+  }
+  const res = await app.inject({ method: 'GET', url: contentUrl(p) });
+  assert.equal(res.statusCode, 400);
+  assert.equal(res.json().error, 'Not a file');
+});
+
+test('GET /files/content answers 400 for a unix domain socket', { skip: process.platform === 'win32' }, async () => {
+  const p = join(dir, 'sock.txt');
+  const srv = createServer();
+  await new Promise((resolve, reject) => srv.once('error', reject).listen(p, resolve));
+  try {
+    const res = await app.inject({ method: 'GET', url: contentUrl(p) });
+    assert.equal(res.statusCode, 400);
+    assert.equal(res.json().error, 'Not a file');
+  } finally {
+    await new Promise((resolve) => srv.close(resolve));
+  }
 });

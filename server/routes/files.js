@@ -1,4 +1,4 @@
-import { createReadStream } from 'node:fs';
+import { createReadStream, constants } from 'node:fs';
 import { stat, writeFile, open } from 'node:fs/promises';
 import { resolve, basename, join, extname } from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
@@ -95,12 +95,19 @@ export async function filesRoute(fastify, opts) {
     let handle = null;
 
     try {
-      const st = await stat(filePath);
+      // Open first, validate through the handle. A stat() on the path followed
+      // by a separate open() re-resolves the name, so a rename or symlink swap
+      // in between would make us serve a file we never checked (TOCTOU).
+      // Everything below -- type check, size, sniff, read -- goes through this
+      // one FileHandle. O_NONBLOCK keeps a FIFO (or another blocking special
+      // file) from parking the request and a libuv thread forever; it has no
+      // effect on regular files.
+      handle = await open(filePath, constants.O_RDONLY | constants.O_NONBLOCK);
+      const st = await handle.stat();
       if (!st.isFile()) {
         return reply.code(400).send({ error: 'Not a file' });
       }
 
-      handle = await open(filePath, 'r');
       const { data, truncated } = await readHead(handle, PREVIEW_MAX_BYTES);
 
       if (data.subarray(0, SNIFF_BYTES).includes(0)) {
@@ -132,6 +139,11 @@ export async function filesRoute(fastify, opts) {
       }
       if (err.code === 'EACCES') {
         return reply.code(403).send({ error: 'Permission denied' });
+      }
+      // open() itself refuses some non-files before stat() gets a say:
+      // directories on platforms that reject O_RDONLY on them, sockets (ENXIO).
+      if (err.code === 'EISDIR' || err.code === 'ENXIO') {
+        return reply.code(400).send({ error: 'Not a file' });
       }
       throw err;
     } finally {

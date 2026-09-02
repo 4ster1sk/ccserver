@@ -1661,7 +1661,7 @@ body {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 8px 12px;
+  padding: 0 12px 0 0;
   border-bottom: 1px solid var(--border);
   transition: background 0.1s;
 }
@@ -1670,8 +1670,32 @@ body {
   background: var(--bg-surface);
 }
 
-.file-item-previewable {
+/* The name/size block is a real <button> for previewable files (Enter, Space
+   and focus come from the element itself) and a plain span otherwise. Both
+   carry the row padding so the click target spans the row. */
+.file-open-btn,
+.file-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+  padding: 8px 12px;
+}
+
+.file-open-btn {
+  background: none;
+  border: none;
+  border-radius: 4px;
+  color: inherit;
+  font: inherit;
+  text-align: left;
   cursor: pointer;
+}
+
+.file-open-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
 }
 
 .file-download-btn {
@@ -3342,17 +3366,32 @@ body {
   white-space: normal;
 }
 
-/* File preview dialog (Files tab). Stacks on .resume-overlay (z-index: 100)
-   like every other fullscreen dialog; .file-preview-dialog only reshapes the
-   box into a tall scrollable viewer. */
-.resume-dialog.file-preview-dialog {
-  max-width: 960px;
+/* File preview dialog (Files tab): a native <dialog> opened with showModal(),
+   so it lives in the top layer (no z-index games), the page behind it is
+   inert, and the browser handles Escape and focus restore. */
+.file-preview-dialog {
   width: 92%;
+  max-width: 960px;
   height: 85vh;
+  max-height: 85vh;
+  /* The global `* { margin: 0 }` reset kills the UA's `dialog { margin: auto }`,
+     which is what centres a modal dialog inside its fixed inset: 0 box. */
+  margin: auto;
   padding: 0;
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  overflow: hidden;
+}
+
+.file-preview-dialog[open] {
   display: flex;
   flex-direction: column;
-  overflow: hidden;
+}
+
+.file-preview-dialog::backdrop {
+  background: rgba(0, 0, 0, 0.6);
 }
 
 .file-preview-header {
@@ -3432,6 +3471,12 @@ body {
   -webkit-overflow-scrolling: touch;
 }
 
+/* The body is focusable so keyboard users can scroll long content. */
+.file-preview-body:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
 .file-preview-text {
   font-family: 'JetBrains Mono', 'Fira Code', monospace;
   font-size: 13px;
@@ -3442,10 +3487,11 @@ body {
 }
 
 @media (max-width: 600px) {
-  .resume-dialog.file-preview-dialog {
-    width: 100%;
-    height: 100%;
-    max-width: none;
+  .file-preview-dialog {
+    width: 100vw;
+    height: 100vh;
+    max-width: 100vw;
+    max-height: 100vh;
     border-radius: 0;
     border: none;
   }
@@ -3571,8 +3617,14 @@ body {
   font-weight: 600;
 }
 
-.markdown-body img {
-  max-width: 100%;
+/* Images are not fetched; this stands in for them (see FilePreview.jsx). */
+.md-image-placeholder {
+  display: inline-block;
+  padding: 2px 6px;
+  border: 1px dashed var(--border);
+  border-radius: 4px;
+  color: var(--text-muted);
+  font-size: 0.85em;
 }
 
 .markdown-body hr {

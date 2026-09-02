@@ -4,10 +4,12 @@ import { join } from 'node:path';
 import { test, expect } from '@playwright/test';
 
 // The Files tab opens .md / .txt files inline instead of forcing a download:
-// clicking such a row opens a dialog that renders markdown (with a Source
-// toggle) or shows plain text in a <pre>. Everything else on the row keeps
-// download as its only action. Markdown goes through DOMPurify in the real
-// browser, so the sanitiser is exercised here rather than in a unit test.
+// the file name is a button that opens a native modal <dialog> rendering
+// markdown (with a Source toggle) or showing plain text in a <pre>. The
+// download button on the row stays a separate sibling button. Markdown goes
+// through DOMPurify in the real browser, so the sanitiser -- including the
+// "opening a preview fetches nothing" policy -- is exercised here rather than
+// in a unit test.
 
 const ONE_MIB = 1024 * 1024;
 
@@ -42,6 +44,32 @@ test.beforeAll(() => {
       '[same tab](https://example.com/page)',
       '',
       '<a href="https://example.com/self" target="_self">explicit self</a>',
+      '',
+    ].join('\n')
+  );
+  // Everything here would make the browser fetch a URL just by rendering.
+  writeFileSync(
+    join(dir, 'remote.md'),
+    [
+      '# Remote',
+      '',
+      '![pic](https://example.invalid/track.png)',
+      '',
+      '<img src="https://example.invalid/raw.png" alt="raw">',
+      '<img srcset="https://example.invalid/set.png 1x">',
+      '<picture><source srcset="https://example.invalid/pic.png"><img src="https://example.invalid/pic-fallback.png"></picture>',
+      '<video src="https://example.invalid/v.mp4" poster="https://example.invalid/p.png"></video>',
+      '<audio src="https://example.invalid/a.mp3"></audio>',
+      '<iframe src="https://example.invalid/frame"></iframe>',
+      '<embed src="https://example.invalid/e.swf">',
+      '<object data="https://example.invalid/o.pdf"></object>',
+      '<link rel="stylesheet" href="https://example.invalid/s.css">',
+      '<meta http-equiv="refresh" content="0;url=https://example.invalid/">',
+      '<input type="image" src="https://example.invalid/btn.png">',
+      '<table background="https://example.invalid/bg.png"><tr><td id="bgcell" background="http://127.0.0.1:9/cell.png">cell</td></tr></table>',
+      '<img src="http://127.0.0.1:9/lan.png">',
+      '',
+      '[still a link](https://example.invalid/page)',
       '',
     ].join('\n')
   );
@@ -84,6 +112,13 @@ test.afterAll(() => {
 
 const dialog = (page) => page.locator('.file-preview-dialog');
 const row = (page, name) => page.locator('.file-item', { hasText: name });
+const openBtn = (page, name) => row(page, name).locator('.file-open-btn');
+
+// Whether keyboard focus currently sits inside the preview dialog.
+const focusInsideDialog = (page) => page.evaluate(() => {
+  const a = document.activeElement;
+  return !!(a && a.closest('.file-preview-dialog'));
+});
 
 async function gotoDir(page) {
   await page.goto('/');
@@ -96,7 +131,7 @@ async function gotoDir(page) {
 
 test('markdown file renders sanitized HTML, toggles to source, and Escape closes', async ({ page }) => {
   await gotoDir(page);
-  await row(page, 'README.md').click();
+  await openBtn(page, 'README.md').click();
   await expect(dialog(page)).toBeVisible();
   await expect(dialog(page).locator('.file-preview-title')).toHaveText('README.md');
 
@@ -124,7 +159,7 @@ test('markdown file renders sanitized HTML, toggles to source, and Escape closes
 
 test('text file shows as preformatted text without a view toggle; close button closes', async ({ page }) => {
   await gotoDir(page);
-  await row(page, 'notes.txt').click();
+  await openBtn(page, 'notes.txt').click();
   await expect(dialog(page)).toBeVisible();
   await expect(dialog(page).locator('.file-preview-text')).toContainText('plain line two');
   await expect(dialog(page).locator('.markdown-body')).toHaveCount(0);
@@ -138,24 +173,24 @@ test('text file shows as preformatted text without a view toggle; close button c
 
 test('reopening a markdown file starts in Rendered view even if Source was chosen before', async ({ page }) => {
   await gotoDir(page);
-  await row(page, 'README.md').click();
+  await openBtn(page, 'README.md').click();
   await page.getByRole('button', { name: 'Source' }).click();
   await expect(dialog(page).locator('.file-preview-text')).toBeVisible();
   await page.keyboard.press('Escape');
   await expect(dialog(page)).toBeHidden();
 
-  await row(page, 'README.md').click();
+  await openBtn(page, 'README.md').click();
   await expect(dialog(page).locator('.markdown-body h1')).toHaveText('Preview Heading');
   await expect(dialog(page).locator('.file-preview-text')).toHaveCount(0);
 });
 
 test('opening a different file replaces the dialog content', async ({ page }) => {
   await gotoDir(page);
-  await row(page, 'README.md').click();
+  await openBtn(page, 'README.md').click();
   await expect(dialog(page).locator('.markdown-body h1')).toHaveText('Preview Heading');
   await page.keyboard.press('Escape');
 
-  await row(page, 'notes.txt').click();
+  await openBtn(page, 'notes.txt').click();
   await expect(dialog(page).locator('.file-preview-title')).toHaveText('notes.txt');
   await expect(dialog(page).locator('.file-preview-text')).toContainText('plain line one');
   await expect(dialog(page).locator('.markdown-body')).toHaveCount(0);
@@ -163,25 +198,22 @@ test('opening a different file replaces the dialog content', async ({ page }) =>
 
 // Sanitiser and GFM ------------------------------------------------------------
 
-test('hostile markdown is neutralised: no script/iframe/style, no inline handlers, no javascript: links', async ({ page }) => {
+test('hostile markdown is neutralised: no script/iframe/style/img, no inline handlers, no javascript: links', async ({ page }) => {
   await gotoDir(page);
-  await row(page, 'xss.md').click();
+  await openBtn(page, 'xss.md').click();
   const body = dialog(page).locator('.markdown-body');
   await expect(body.locator('h1')).toHaveText('Unsafe');
 
   await expect(body.locator('script')).toHaveCount(0);
   await expect(body.locator('iframe')).toHaveCount(0);
   await expect(body.locator('style')).toHaveCount(0);
+  // Raw <img> is dropped outright (it would fetch, and it carried onerror).
+  await expect(body.locator('img')).toHaveCount(0);
 
   // Inline style attributes are dropped too (a fixed overlay would cover the UI).
   const styled = body.locator('#styled');
   await expect(styled).toHaveText('covering');
   await expect(styled).not.toHaveAttribute('style', /.*/);
-
-  // <img> survives but its onerror handler must not.
-  const img = body.locator('img');
-  await expect(img).toHaveCount(1);
-  await expect(img).not.toHaveAttribute('onerror', /.*/);
 
   // Inline handlers are stripped from any element; clicking is inert.
   const clicky = body.locator('#clicky');
@@ -208,9 +240,48 @@ test('hostile markdown is neutralised: no script/iframe/style, no inline handler
   await expect(dialog(page)).toBeVisible();
 });
 
+test('opening a markdown preview fetches nothing from the file: no images, media, frames or stylesheets', async ({ page }) => {
+  // Anything that reaches the network for the file's hosts is a failure.
+  const external = [];
+  await page.route(/example\.invalid|127\.0\.0\.1:9\//, (route) => {
+    external.push(route.request().url());
+    route.abort();
+  });
+  await gotoDir(page);
+  const origin = new URL(page.url()).origin;
+  const requests = [];
+  page.on('request', (r) => requests.push({ url: r.url(), type: r.resourceType() }));
+
+  await openBtn(page, 'remote.md').click();
+  const body = dialog(page).locator('.markdown-body');
+  await expect(body.locator('h1')).toHaveText('Remote');
+
+  // Markdown image syntax becomes an inert placeholder that still tells the
+  // reader what was there; raw fetching elements vanish.
+  const placeholder = body.locator('.md-image-placeholder');
+  await expect(placeholder).toHaveText('[image: pic]');
+  await expect(placeholder).toHaveAttribute('title', 'https://example.invalid/track.png');
+  for (const sel of ['img', 'picture', 'source', 'video', 'audio', 'iframe', 'embed', 'object', 'link', 'meta', 'input[type="image"]']) {
+    await expect(body.locator(sel), sel).toHaveCount(0);
+  }
+  await expect(body.locator('table')).not.toHaveAttribute('background', /.*/);
+  await expect(body.locator('#bgcell')).not.toHaveAttribute('background', /.*/);
+  // Plain links survive: they only load on an explicit click.
+  await expect(body.locator('a', { hasText: 'still a link' })).toHaveAttribute('href', 'https://example.invalid/page');
+
+  // Give any stray subresource load a moment to show up, then check the wire:
+  // nothing left the app origin, and nothing image/media/style-like was
+  // requested at all while the preview was open.
+  await page.waitForTimeout(500);
+  expect(external).toEqual([]);
+  expect(requests.filter((r) => !r.url.startsWith(origin))).toEqual([]);
+  expect(requests.filter((r) => ['image', 'media', 'stylesheet', 'font'].includes(r.type))).toEqual([]);
+  expect(page.url().startsWith(origin)).toBe(true);
+});
+
 test('GFM tables, task lists, fenced code, autolinks and strikethrough render', async ({ page }) => {
   await gotoDir(page);
-  await row(page, 'gfm.md').click();
+  await openBtn(page, 'gfm.md').click();
   const body = dialog(page).locator('.markdown-body');
 
   await expect(body.locator('table th')).toHaveCount(2);
@@ -230,7 +301,7 @@ test('GFM tables, task lists, fenced code, autolinks and strikethrough render', 
 
 test('a file over 1 MiB shows only the head plus a truncation notice', async ({ page }) => {
   await gotoDir(page);
-  await row(page, 'big.txt').click();
+  await openBtn(page, 'big.txt').click();
   await expect(dialog(page)).toBeVisible();
   await expect(dialog(page).locator('.file-preview-notice')).toContainText('first 1.0 MB');
   await expect(dialog(page).locator('.file-preview-meta')).toHaveText('1.0 MB');
@@ -238,14 +309,14 @@ test('a file over 1 MiB shows only the head plus a truncation notice', async ({ 
   expect(shown).toBe(ONE_MIB);
 });
 
-test('binary content behind a .txt name reports an error inside the dialog; overlay click closes', async ({ page }) => {
+test('binary content behind a .txt name reports an error inside the dialog; backdrop click closes', async ({ page }) => {
   await gotoDir(page);
-  await row(page, 'fake.txt').click();
+  await openBtn(page, 'fake.txt').click();
   await expect(dialog(page)).toBeVisible();
   await expect(dialog(page).locator('.error')).toContainText('Binary file');
 
-  // Click the overlay outside the dialog.
-  await page.locator('.resume-overlay').click({ position: { x: 5, y: 5 } });
+  // Click the backdrop outside the dialog box.
+  await page.mouse.click(5, 5);
   await expect(dialog(page)).toBeHidden();
 });
 
@@ -253,21 +324,21 @@ test('a file deleted after the listing reports "File not found" in the dialog', 
   await gotoDir(page);
   await expect(row(page, 'gone.txt')).toBeVisible();
   rmSync(join(dir, 'gone.txt'));
-  await row(page, 'gone.txt').click();
+  await openBtn(page, 'gone.txt').click();
   await expect(dialog(page).locator('.error')).toContainText('File not found');
   await page.keyboard.press('Escape');
   await expect(dialog(page)).toBeHidden();
 });
 
-test('rows for other extensions are not clickable and keep only the download button', async ({ page }) => {
+test('rows for other extensions have no preview button and keep only the download button', async ({ page }) => {
   await gotoDir(page);
   const json = row(page, 'config.json');
   await expect(json).toBeVisible();
-  await expect(json).not.toHaveAttribute('role', 'button');
-  await expect(json).not.toHaveClass(/file-item-previewable/);
-  await expect(row(page, 'notes.txt')).toHaveClass(/file-item-previewable/);
+  await expect(json.locator('.file-open-btn')).toHaveCount(0);
+  await expect(json.locator('.file-label')).toHaveCount(1);
+  await expect(openBtn(page, 'notes.txt')).toHaveCount(1);
 
-  await json.click();
+  await json.locator('.file-label').click();
   await expect(dialog(page)).toHaveCount(0);
   await expect(json.locator('.file-download-btn')).toBeVisible();
 });
@@ -286,7 +357,7 @@ test('the download button on a row downloads without opening the preview', async
 
 test('the Download button inside the dialog downloads the same file and keeps the dialog open', async ({ page }) => {
   await gotoDir(page);
-  await row(page, 'README.md').click();
+  await openBtn(page, 'README.md').click();
   await expect(dialog(page)).toBeVisible();
   const [download] = await Promise.all([
     page.waitForEvent('download'),
@@ -296,24 +367,98 @@ test('the Download button inside the dialog downloads the same file and keeps th
   await expect(dialog(page)).toBeVisible();
 });
 
-// Keyboard -----------------------------------------------------------------------
+// Keyboard and accessibility -----------------------------------------------------
 
-test('Enter on a focused row opens the preview; Enter on its download button only downloads', async ({ page }) => {
+test('file rows are two sibling buttons (preview, download): nothing nests and no div plays button', async ({ page }) => {
   await gotoDir(page);
-  const notes = row(page, 'notes.txt');
-  await notes.focus();
+  const r = row(page, 'notes.txt');
+  await expect(r.locator('button.file-open-btn')).toHaveCount(1);
+  await expect(r.locator('button.file-download-btn')).toHaveCount(1);
+  await expect(r.locator('.file-open-btn .file-download-btn')).toHaveCount(0);
+  await expect(page.locator('.file-item[role="button"], .file-item [role="button"]')).toHaveCount(0);
+  await expect(r.locator('.file-open-btn')).toHaveAccessibleName(/notes\.txt/);
+  await expect(r.getByRole('button', { name: 'Download notes.txt' })).toBeVisible();
+});
+
+test('Enter and Space on the preview button open the dialog; Enter on the download button only downloads', async ({ page }) => {
+  await gotoDir(page);
+  const btn = openBtn(page, 'notes.txt');
+  await btn.focus();
   await page.keyboard.press('Enter');
   await expect(dialog(page)).toBeVisible();
   await page.keyboard.press('Escape');
   await expect(dialog(page)).toBeHidden();
 
-  await notes.locator('.file-download-btn').focus();
+  await btn.focus();
+  await page.keyboard.press('Space');
+  await expect(dialog(page)).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(dialog(page)).toBeHidden();
+
+  await row(page, 'notes.txt').locator('.file-download-btn').focus();
   const [download] = await Promise.all([
     page.waitForEvent('download'),
     page.keyboard.press('Enter'),
   ]);
   expect(download.suggestedFilename()).toBe('notes.txt');
   await expect(dialog(page)).toHaveCount(0);
+});
+
+test('closing the dialog returns focus to the preview button that opened it', async ({ page }) => {
+  await gotoDir(page);
+  const btn = openBtn(page, 'notes.txt');
+  await btn.focus();
+  await page.keyboard.press('Enter');
+  await expect(dialog(page)).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(dialog(page)).toBeHidden();
+  await expect(btn).toBeFocused();
+
+  // Same via the Close button and via the backdrop.
+  await btn.click();
+  await expect(dialog(page)).toBeVisible();
+  await dialog(page).getByRole('button', { name: 'Close' }).click();
+  await expect(dialog(page)).toBeHidden();
+  await expect(btn).toBeFocused();
+
+  await btn.click();
+  await expect(dialog(page)).toBeVisible();
+  await page.mouse.click(5, 5);
+  await expect(dialog(page)).toBeHidden();
+  await expect(btn).toBeFocused();
+});
+
+test('the dialog is modal: aria-modal, initial focus inside, Tab and Shift+Tab cycle within it, page behind is inert', async ({ page }) => {
+  await gotoDir(page);
+  await openBtn(page, 'README.md').click();
+  const d = dialog(page);
+  await expect(d).toBeVisible();
+  await expect(d).toHaveAttribute('aria-modal', 'true');
+  await expect(d).toHaveAttribute('aria-labelledby', /.+/);
+  await expect(d).toHaveAccessibleName('README.md');
+  expect(await focusInsideDialog(page)).toBe(true);
+
+  // Forward: more presses than there are controls, so we wrap at least once.
+  const seen = new Set();
+  for (let i = 0; i < 12; i++) {
+    await page.keyboard.press('Tab');
+    expect(await focusInsideDialog(page), `Tab #${i + 1}`).toBe(true);
+    seen.add(await page.evaluate(() => document.activeElement.getAttribute('aria-label') || document.activeElement.textContent.trim()));
+  }
+  expect([...seen]).toEqual(expect.arrayContaining(['Rendered', 'Source', 'Download', 'Close', 'File content']));
+
+  for (let i = 0; i < 12; i++) {
+    await page.keyboard.press('Shift+Tab');
+    expect(await focusInsideDialog(page), `Shift+Tab #${i + 1}`).toBe(true);
+  }
+
+  // The page behind the modal cannot take focus.
+  const toolbarTookFocus = await page.evaluate(() => {
+    const b = document.querySelector('.browser-toolbar button');
+    b.focus();
+    return document.activeElement === b;
+  });
+  expect(toolbarTookFocus).toBe(false);
 });
 
 // Narrow viewport ------------------------------------------------------------------
@@ -324,7 +469,7 @@ test.describe('narrow viewport', () => {
   test('the dialog stays inside a 375px viewport and wide content scrolls within it', async ({ page }) => {
     await gotoDir(page);
     const pageWidthBefore = await page.evaluate(() => document.documentElement.scrollWidth);
-    await row(page, 'wide.md').click();
+    await openBtn(page, 'wide.md').click();
     await expect(dialog(page).locator('.markdown-body h1')).toHaveText('Wide');
 
     const box = await dialog(page).boundingBox();

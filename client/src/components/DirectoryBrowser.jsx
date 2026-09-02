@@ -1423,25 +1423,33 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
         {!loading &&
           !error &&
           files.map((file) => (
-            <div
-              key={file.path}
-              className={`file-item${isPreviewable(file.name) ? ' file-item-previewable' : ''}`}
-              {...(isPreviewable(file.name) ? {
-                onClick: () => setPreviewFile(file),
-                role: 'button',
-                tabIndex: 0,
-                onKeyDown: (e) => {
-                  if (e.key === 'Enter' && e.target === e.currentTarget) setPreviewFile(file);
-                },
-              } : {})}
-            >
-              <span className="file-icon">&#128196;</span>
-              <span className="file-name">{file.name}</span>
-              <span className="file-size">{formatSize(file.size)}</span>
+            <div key={file.path} className="file-item">
+              {isPreviewable(file.name) ? (
+                // Preview and download are sibling <button>s: real buttons get
+                // Enter/Space and focus for free, and nothing interactive nests.
+                <button
+                  type="button"
+                  className="file-open-btn"
+                  onClick={() => setPreviewFile(file)}
+                  title={`Preview ${file.name}`}
+                >
+                  <span className="file-icon">&#128196;</span>
+                  <span className="file-name">{file.name}</span>
+                  <span className="file-size">{formatSize(file.size)}</span>
+                </button>
+              ) : (
+                <span className="file-label">
+                  <span className="file-icon">&#128196;</span>
+                  <span className="file-name">{file.name}</span>
+                  <span className="file-size">{formatSize(file.size)}</span>
+                </span>
+              )}
               <button
+                type="button"
                 className="btn btn-secondary file-download-btn"
-                onClick={(e) => { e.stopPropagation(); handleDownload(file); }}
+                onClick={() => handleDownload(file)}
                 title="Download"
+                aria-label={`Download ${file.name}`}
               >
                 &#8595;
               </button>
