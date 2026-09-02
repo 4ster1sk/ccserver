@@ -1,7 +1,13 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback, useRef, lazy, Suspense } from 'react';
 import { authFetch, getToken } from '../auth.js';
 import { displayPath } from '../displayPath.js';
+import { formatSize } from '../formatSize.js';
+import { isPreviewable } from '../previewExts.js';
 import MetaLaunchDialog from './MetaLaunchDialog.jsx';
+
+// marked + DOMPurify only matter once someone opens a preview, so keep them
+// out of the initial bundle (same split as TerminalView in App.jsx).
+const FilePreview = lazy(() => import('./FilePreview.jsx'));
 
 const LAST_DIR_KEY = 'ccserver-last-dir';
 const SANDBOX_KEY = 'ccserver-sandbox-default';
@@ -61,14 +67,6 @@ function saveSandboxOpts(path, opts) {
   } catch { /* ignore */ }
 }
 
-function formatSize(bytes) {
-  if (bytes === 0) return '0 B';
-  const units = ['B', 'KB', 'MB', 'GB'];
-  const i = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
-  const val = bytes / Math.pow(1024, i);
-  return `${i === 0 ? val : val.toFixed(1)} ${units[i]}`;
-}
-
 export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onOpenGroup, onSessionClick, onOpenSettings, initialPath, groupsVersion, metaAgentDir, onOpenMeta }) {
   const [currentPath, setCurrentPath] = useState(initialPath || localStorage.getItem(LAST_DIR_KEY) || '/');
   const [homeDir, setHomeDir] = useState(null);
@@ -88,6 +86,7 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
   const [dragOver, setDragOver] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState('');
+  const [previewFile, setPreviewFile] = useState(null);
   const fileInputRef = useRef(null);
   const dragCountRef = useRef(0);
   const [sandboxDefault, setSandboxDefault] = useState(() => localStorage.getItem(SANDBOX_KEY) === '1');
@@ -496,6 +495,8 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
     }
     fetchSessions();
   }, [fetchSessions, homeDir]);
+
+  const closePreview = useCallback(() => setPreviewFile(null), []);
 
   const handleDownload = useCallback((file) => {
     const a = document.createElement('a');
@@ -1423,19 +1424,44 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
           !error &&
           files.map((file) => (
             <div key={file.path} className="file-item">
-              <span className="file-icon">&#128196;</span>
-              <span className="file-name">{file.name}</span>
-              <span className="file-size">{formatSize(file.size)}</span>
+              {isPreviewable(file.name) ? (
+                // Preview and download are sibling <button>s: real buttons get
+                // Enter/Space and focus for free, and nothing interactive nests.
+                <button
+                  type="button"
+                  className="file-open-btn"
+                  onClick={() => setPreviewFile(file)}
+                  title={`Preview ${file.name}`}
+                >
+                  <span className="file-icon">&#128196;</span>
+                  <span className="file-name">{file.name}</span>
+                  <span className="file-size">{formatSize(file.size)}</span>
+                </button>
+              ) : (
+                <span className="file-label">
+                  <span className="file-icon">&#128196;</span>
+                  <span className="file-name">{file.name}</span>
+                  <span className="file-size">{formatSize(file.size)}</span>
+                </span>
+              )}
               <button
+                type="button"
                 className="btn btn-secondary file-download-btn"
                 onClick={() => handleDownload(file)}
                 title="Download"
+                aria-label={`Download ${file.name}`}
               >
                 &#8595;
               </button>
             </div>
           ))}
       </div>
+
+      {previewFile && (
+        <Suspense fallback={null}>
+          <FilePreview file={previewFile} onClose={closePreview} onDownload={handleDownload} />
+        </Suspense>
+      )}
 
       {dragOver && (
         <div className="drag-overlay">

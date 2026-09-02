@@ -1661,13 +1661,41 @@ body {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 8px 12px;
+  padding: 0 12px 0 0;
   border-bottom: 1px solid var(--border);
   transition: background 0.1s;
 }
 
 .file-item:hover {
   background: var(--bg-surface);
+}
+
+/* The name/size block is a real <button> for previewable files (Enter, Space
+   and focus come from the element itself) and a plain span otherwise. Both
+   carry the row padding so the click target spans the row. */
+.file-open-btn,
+.file-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+  padding: 8px 12px;
+}
+
+.file-open-btn {
+  background: none;
+  border: none;
+  border-radius: 4px;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.file-open-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
 }
 
 .file-download-btn {
@@ -3336,4 +3364,275 @@ body {
   border: 1px solid var(--danger, #e5534b);
   border-radius: 4px;
   white-space: normal;
+}
+
+/* File preview dialog (Files tab): a native <dialog> opened with showModal(),
+   so it lives in the top layer (no z-index games), the page behind it is
+   inert, and the browser handles Escape and focus restore. */
+.file-preview-dialog {
+  width: 92%;
+  max-width: 960px;
+  height: 85vh;
+  max-height: 85vh;
+  /* The global `* { margin: 0 }` reset kills the UA's `dialog { margin: auto }`,
+     which is what centres a modal dialog inside its fixed inset: 0 box. */
+  margin: auto;
+  padding: 0;
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  overflow: hidden;
+}
+
+.file-preview-dialog[open] {
+  display: flex;
+  flex-direction: column;
+}
+
+.file-preview-dialog::backdrop {
+  background: rgba(0, 0, 0, 0.6);
+}
+
+.file-preview-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+  flex-wrap: wrap;
+}
+
+.file-preview-title {
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  font-size: 14px;
+  font-weight: 600;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.file-preview-meta {
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  font-size: 12px;
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+
+.file-preview-toggle {
+  display: flex;
+  flex-shrink: 0;
+}
+
+.file-preview-toggle .btn {
+  padding: 4px 10px;
+  font-size: 12px;
+}
+
+.file-preview-toggle .btn:first-child {
+  border-radius: 4px 0 0 4px;
+}
+
+.file-preview-toggle .btn:last-child {
+  border-radius: 0 4px 4px 0;
+  margin-left: -1px;
+}
+
+.file-preview-toggle .btn.active {
+  background: var(--accent);
+  color: var(--bg-primary);
+  border-color: var(--accent);
+}
+
+.file-preview-icon-btn {
+  padding: 4px 8px;
+  font-size: 14px;
+  line-height: 1;
+  flex-shrink: 0;
+}
+
+.file-preview-notice {
+  padding: 6px 12px;
+  font-size: 12px;
+  color: var(--warning);
+  background: rgba(249, 226, 175, 0.08);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.file-preview-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 16px;
+  -webkit-overflow-scrolling: touch;
+}
+
+/* The body is focusable so keyboard users can scroll long content. */
+.file-preview-body:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.file-preview-text {
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  font-size: 13px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+  margin: 0;
+}
+
+@media (max-width: 600px) {
+  .file-preview-dialog {
+    width: 100vw;
+    height: 100vh;
+    max-width: 100vw;
+    max-height: 100vh;
+    border-radius: 0;
+    border: none;
+  }
+}
+
+/* Rendered markdown inside the preview. Minimal GitHub-like typography on
+   the theme variables; no library stylesheet. */
+.markdown-body {
+  font-size: 14px;
+  line-height: 1.6;
+  word-break: break-word;
+}
+
+.markdown-body > :first-child {
+  margin-top: 0;
+}
+
+.markdown-body h1,
+.markdown-body h2,
+.markdown-body h3,
+.markdown-body h4,
+.markdown-body h5,
+.markdown-body h6 {
+  margin: 1.4em 0 0.6em;
+  line-height: 1.3;
+  font-weight: 600;
+}
+
+.markdown-body h1 {
+  font-size: 1.7em;
+  padding-bottom: 0.3em;
+  border-bottom: 1px solid var(--border);
+}
+
+.markdown-body h2 {
+  font-size: 1.4em;
+  padding-bottom: 0.3em;
+  border-bottom: 1px solid var(--border);
+}
+
+.markdown-body h3 {
+  font-size: 1.2em;
+}
+
+.markdown-body h4 {
+  font-size: 1.05em;
+}
+
+.markdown-body p,
+.markdown-body ul,
+.markdown-body ol,
+.markdown-body blockquote,
+.markdown-body pre,
+.markdown-body table {
+  margin: 0 0 1em;
+}
+
+.markdown-body ul,
+.markdown-body ol {
+  padding-left: 1.8em;
+}
+
+.markdown-body li + li {
+  margin-top: 0.25em;
+}
+
+.markdown-body li > p {
+  margin-bottom: 0.5em;
+}
+
+.markdown-body a {
+  color: var(--accent);
+}
+
+.markdown-body a:hover {
+  color: var(--accent-hover);
+}
+
+.markdown-body code {
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  font-size: 0.9em;
+  background: var(--bg-surface);
+  padding: 2px 5px;
+  border-radius: 3px;
+}
+
+.markdown-body pre {
+  background: var(--bg-surface);
+  padding: 12px;
+  border-radius: 6px;
+  overflow-x: auto;
+  line-height: 1.45;
+}
+
+.markdown-body pre code {
+  background: none;
+  padding: 0;
+  font-size: 13px;
+}
+
+.markdown-body blockquote {
+  border-left: 3px solid var(--border);
+  padding: 0 0 0 12px;
+  color: var(--text-secondary);
+}
+
+.markdown-body table {
+  border-collapse: collapse;
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+.markdown-body th,
+.markdown-body td {
+  border: 1px solid var(--border);
+  padding: 6px 10px;
+  text-align: left;
+}
+
+.markdown-body th {
+  background: var(--bg-surface);
+  font-weight: 600;
+}
+
+/* Images are not fetched; this stands in for them (see FilePreview.jsx). */
+.md-image-placeholder {
+  display: inline-block;
+  padding: 2px 6px;
+  border: 1px dashed var(--border);
+  border-radius: 4px;
+  color: var(--text-muted);
+  font-size: 0.85em;
+}
+
+.markdown-body hr {
+  border: 0;
+  border-top: 1px solid var(--border);
+  margin: 1.5em 0;
+}
+
+.markdown-body input[type="checkbox"] {
+  margin-right: 6px;
 }

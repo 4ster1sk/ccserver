@@ -138,6 +138,7 @@ Les endpoints REST principaux sont :
 | POST | `/api/dirs` | Créer un dossier |
 | GET / DELETE | `/api/sessions[/:id]` | Lister ou arrêter des sessions |
 | GET / POST | `/api/files` | Télécharger ou envoyer des fichiers |
+| GET | `/api/files/content?path=<path>` | Aperçu en ligne d'un fichier `.md` / `.txt` en JSON (`{ path, name, size, mtime, kind, content, truncated }` ; premier Mio ; autres extensions et binaires refusés avec 415) |
 | GET | `/api/system-stats` | Statistiques CPU, mémoire, température, GPU et stockage |
 | GET | `/api/usage?force=1` | Instantané d'utilisation de Claude Code |
 | GET / POST | `/api/worker-presets` | Lister / créer des préréglages de workers (`{ name, role, app, model }`, `model` peut être null) |
