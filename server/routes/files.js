@@ -1,9 +1,55 @@
 import { createReadStream } from 'node:fs';
-import { stat, writeFile } from 'node:fs/promises';
-import { resolve, basename, join } from 'node:path';
+import { stat, writeFile, open } from 'node:fs/promises';
+import { resolve, basename, join, extname } from 'node:path';
+import { StringDecoder } from 'node:string_decoder';
 
 function safePath(requestedPath) {
   return resolve('/', requestedPath || '/');
+}
+
+// Inline preview cap. The file browser's viewer only needs the head of a huge
+// file to be useful, and slurping a multi-GB log into memory just to show it
+// would be a self-inflicted DoS. Anything past this is cut and reported via
+// `truncated: true` so the client can point at the download button instead.
+export const PREVIEW_MAX_BYTES = 1024 * 1024;
+
+// Binary sniff window: a NUL byte inside the first 8 KiB is the classic
+// "this is not text" signal (the same heuristic git's diff uses). Images,
+// executables and archives all trip it; UTF-8 text never contains NUL.
+export const SNIFF_BYTES = 8 * 1024;
+
+// Only these extensions are served by the preview route. The client mirrors
+// this list (client/src/previewExts.js) to decide which rows are clickable;
+// files.test.js asserts the two lists agree.
+export const PREVIEW_EXTS = { '.md': 'markdown', '.txt': 'text' };
+
+/**
+ * Classify a file name for the preview viewer.
+ * @param {string} name File name or path.
+ * @returns {'markdown' | 'text' | null} null when the file is not previewable.
+ */
+export function previewKind(name) {
+  return PREVIEW_EXTS[extname(String(name || '')).toLowerCase()] || null;
+}
+
+/**
+ * Read at most `limit` bytes from the start of a file plus one extra byte so
+ * the caller can tell "exactly limit bytes" from "more than limit bytes"
+ * without trusting the stat() size (the file may be growing).
+ * @param {import('node:fs/promises').FileHandle} handle Open read handle.
+ * @param {number} limit Maximum number of bytes to return.
+ * @returns {Promise<{ data: Buffer, truncated: boolean }>}
+ */
+async function readHead(handle, limit) {
+  const buf = Buffer.alloc(limit + 1);
+  let offset = 0;
+  while (offset < buf.length) {
+    const { bytesRead } = await handle.read(buf, offset, buf.length - offset, offset);
+    if (bytesRead === 0) break;
+    offset += bytesRead;
+  }
+  const truncated = offset > limit;
+  return { data: buf.subarray(0, Math.min(offset, limit)), truncated };
 }
 
 export async function filesRoute(fastify, opts) {
@@ -30,6 +76,66 @@ export async function filesRoute(fastify, opts) {
         return reply.code(403).send({ error: 'Permission denied' });
       }
       throw err;
+    }
+  });
+
+  // Inline preview for the file browser (text / markdown). Kept separate from
+  // the download route above so its `Content-Disposition: attachment`
+  // behaviour, which existing clients rely on, stays untouched.
+  fastify.get('/files/content', async (request, reply) => {
+    const requested = request.query.path;
+    if (typeof requested !== 'string' || requested === '') {
+      return reply.code(400).send({ error: 'path is required' });
+    }
+    const filePath = safePath(requested);
+    const kind = previewKind(filePath);
+    if (!kind) {
+      return reply.code(415).send({ error: 'Unsupported file type' });
+    }
+    let handle = null;
+
+    try {
+      const st = await stat(filePath);
+      if (!st.isFile()) {
+        return reply.code(400).send({ error: 'Not a file' });
+      }
+
+      handle = await open(filePath, 'r');
+      const { data, truncated } = await readHead(handle, PREVIEW_MAX_BYTES);
+
+      if (data.subarray(0, SNIFF_BYTES).includes(0)) {
+        return reply.code(415).send({ error: 'Binary file' });
+      }
+
+      // 切り詰めた場合、末尾にUTF-8のマルチバイト列の途中が残り得る。
+      // StringDecoderはその不完全な末尾を保持するので、end()を呼ばずに捨てる。
+      // 切り詰めていない場合はend()で残りを吐き出す(不正なUTF-8ならU+FFFDになる)。
+      const decoder = new StringDecoder('utf8');
+      let content = decoder.write(data);
+      if (!truncated) content += decoder.end();
+      // 先頭のBOM(U+FEFF)は表示上見えないが、Markdownでは`#`の前に居座って
+      // 見出しとして解釈されなくなる(Windows製エディタのファイルで起きる)ので落とす。
+      if (content.charCodeAt(0) === 0xfeff) content = content.slice(1);
+
+      return {
+        path: filePath,
+        name: basename(filePath),
+        size: st.size,
+        mtime: st.mtimeMs,
+        kind,
+        content,
+        truncated,
+      };
+    } catch (err) {
+      if (err.code === 'ENOENT') {
+        return reply.code(404).send({ error: 'File not found' });
+      }
+      if (err.code === 'EACCES') {
+        return reply.code(403).send({ error: 'Permission denied' });
+      }
+      throw err;
+    } finally {
+      if (handle) await handle.close().catch(() => {});
     }
   });
 

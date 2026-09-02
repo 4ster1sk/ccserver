@@ -70,6 +70,7 @@ NODE_ENV=production node server/index.js
    - **シングルクリック** → フォルダ内に移動
    - **ダブルクリック** → そのフォルダで (既定の設定のまま) 起動
    - **Back** ボタン → ディレクトリ選択に戻る
+   - **`.md` / `.txt` のファイル名クリック** → その場でプレビュー (ダウンロード不要)。Markdown はレンダリング表示と Source 表示を切替可。先頭 1 MiB まで表示、中身がバイナリならエラー表示。他の拡張子は右端の ↓ でダウンロードのみ
 2. ブラウザ内ターミナルで操作
 
 ### 起動 (アプリ・サンドボックス)
@@ -507,7 +508,7 @@ ccserver/
 │   │   ├── approvals.js            # GET /api/approvals, POST /api/approvals/:id/decision (メタエージェント承認)
 │   │   ├── projects.js             # GET /api/projects, PUT /api/projects/:id/label
 │   │   ├── launchPresets.js        # GET/POST/PUT/DELETE /api/launch-presets (コンボ起動プリセット)
-│   │   ├── files.js                # GET/POST /api/files (アップロード/ダウンロード)
+│   │   ├── files.js                # GET/POST /api/files (アップロード/ダウンロード), GET /api/files/content (プレビュー)
 │   │   ├── system.js               # GET /api/system-stats (CPU/メモリ/温度/GPU/IPMI/ストレージ)
 │   │   └── usage.js                # GET /api/usage (?app=claude|codex)
 │   └── ws/
@@ -574,6 +575,7 @@ CCSERVER_TOKEN=some-secret NODE_ENV=production node server/index.js
 | GET | `/api/sessions` | 実行中セッションの一覧 |
 | DELETE | `/api/sessions/:id` | セッションを終了する (予約プロンプトも解除) |
 | GET | `/api/files?path=<path>` | ファイルをダウンロード |
+| GET | `/api/files/content?path=<path>` | ファイルブラウザのプレビュー用。`.md` / `.txt` のみ対象で、UTF-8 テキストを JSON (`{ path, name, size, mtime, kind, content, truncated }`) で返す。`kind` は `.md` なら `markdown`、`.txt` なら `text` (レンダリングはクライアント側で DOMPurify を通して行う)。先頭 1 MiB を超える分は切り捨てて `truncated: true`。他の拡張子、および先頭 8 KiB に NUL バイトを含むバイナリは 415 |
 | POST | `/api/files` | multipart アップロード (`destination` フィールド + ファイルパート) |
 | GET | `/api/system-stats?ipmi=1` | CPU/メモリ/温度/GPU (`nvidia-smi`)/IPMI (要 `ENABLE_IPMI=1`)・load average |
 | GET | `/api/usage?force=1` | Claude Code `/usage` のキャッシュ済みスナップショット (`force=1` で即時再取得) |

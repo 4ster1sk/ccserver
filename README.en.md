@@ -140,6 +140,7 @@ Available REST endpoints include:
 | POST | `/api/dirs` | Create a folder |
 | GET / DELETE | `/api/sessions[/:id]` | List or stop sessions |
 | GET / POST | `/api/files` | Download or upload files |
+| GET | `/api/files/content?path=<path>` | Inline preview of a `.md` / `.txt` file as JSON (`{ path, name, size, mtime, kind, content, truncated }`; first 1 MiB; other extensions and binaries rejected with 415) |
 | GET | `/api/system-stats` | CPU, memory, temperature, GPU, and storage stats |
 | GET | `/api/usage?force=1` | Claude Code usage snapshot |
 | GET / POST | `/api/worker-presets` | List / create worker presets (`{ name, role, app, model }`, `model` may be null) |
