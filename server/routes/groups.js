@@ -220,7 +220,10 @@ export async function launchGroupFromSpec(body) {
   const invalidApp = (spec) => Object.prototype.hasOwnProperty.call(spec || {}, 'app')
     && (!spec.app || spec.app === 'copilot' || spec.app === 'commandcode');
   if (workers.some(({ spec }) => invalidApp(spec)) || invalidApp(orchestrator)) {
-    return { ok: false, code: 'validation', message: 'worker app must be claude, opencode, or codex (copilot/commandcode are not supported in groups)' };
+    // Keep "copilot is not supported in groups" verbatim: the E2E suite
+    // matches on that substring for the long-standing contract (see
+    // tests/copilot-launch.spec.js).
+    return { ok: false, code: 'validation', message: 'worker app must be claude, opencode, or codex (copilot is not supported in groups; commandcode neither)' };
   }
   const badModel = (spec) => Object.prototype.hasOwnProperty.call(spec || {}, 'model') && spec.model === undefined;
   if (workers.some(({ spec }) => badModel(spec)) || badModel(orchestrator)) {

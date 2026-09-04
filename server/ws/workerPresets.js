@@ -94,9 +94,10 @@ export function normalizePresetInput(input, opts = {}) {
 
   if (has('app') && source.app !== null && source.app !== undefined && source.app !== '') {
     if (!PRESET_APPS.includes(source.app)) {
-      // Lowercase "copilot" here on purpose: this string flows into the REST
-      // 400s whose long-standing contract the E2E suite matches on.
-      errors.push('app must be claude, opencode, or codex (copilot/commandcode are not supported in groups)');
+      // Keep "copilot is not supported in groups" verbatim: this string flows
+      // into the REST 400s whose long-standing contract the E2E suite matches
+      // on (see tests/copilot-launch.spec.js).
+      errors.push('app must be claude, opencode, or codex (copilot is not supported in groups; commandcode neither)');
     } else {
       value.app = source.app;
     }
