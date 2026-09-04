@@ -25,6 +25,13 @@
 //               does not touch ~/.codex/config.toml).
 //   copilot  -> nothing. copilot has no CLI-arg/env MCP injection (its config
 //               is file-based only), so no injection is assembled for it.
+//   commandcode -> nothing. No CLI-arg/env MCP injection is verified for the
+//               command-code CLI, so assembling one would risk an "unknown
+//               option" launch failure like copilot's.
+//
+// The function is the single assembly point, so refusing here guarantees
+// no copilot/commandcode launch path ever injects (group launches already
+// refuse these at normalizeWorkers / addMember).
 //
 // The optional `{ notify }` descriptor adds the ccserver-notify MCP server:
 //   { mode, sockPath, identity? }
@@ -103,7 +110,7 @@ export function buildMcpConfigArgsAndEnv(app, { groupMcp = true, notify, usage, 
   const metaSockEnv = meta ? { CCSANDBOX_META_MCP_SOCK: meta.sockPath } : {};
   const metaIdentityEnv = meta?.identity ? { CCSERVER_META_IDENTITY: JSON.stringify(meta.identity) } : {};
 
-  if (app === 'copilot') {
+  if (app === 'copilot' || app === 'commandcode') {
     return { args: [], env: {} };
   }
 

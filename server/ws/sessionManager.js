@@ -213,6 +213,7 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox
       opencode: "PATH, the server's node bin directory, ~/.local/bin, ~/.opencode/bin",
       copilot: "PATH, the server's node bin directory, ~/.local/bin",
       codex: "PATH, the server's node bin directory, ~/.local/bin",
+      commandcode: "PATH, the server's node bin directory, ~/.local/bin, project .tools/bin",
     }[sessionApp];
     return {
       sessionId: id,
@@ -649,7 +650,7 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox
             // Extract a meaningful description from the buffer
             const noSpace = cleanBuf.replace(/\s/g, '');
             let promptLine = 'permission prompt';
-            if (session.app === 'opencode' || session.app === 'copilot' || session.app === 'codex') {
+            if (session.app === 'opencode' || session.app === 'copilot' || session.app === 'codex' || session.app === 'commandcode') {
               // Neither TUI's byte stream exposes which tool is being approved,
               // so the label stays generic (claude's does carry tool names).
               promptLine = 'Permission prompt (auto-approved)';
@@ -1137,8 +1138,9 @@ async function fireSchedule(scheduleId) {
   }
 
   // 3) No live session — auto-resume the conversation, then inject once ready.
-  // opencode and copilot expose no session id in their TUI output, so resume
-  // the last session of the project instead of a specific one.
+  // opencode, copilot, codex and commandcode expose no session id in their
+  // TUI output, so resume the last session of the project instead of a
+  // specific one.
   // A group member gets its role's MCP socket re-created (handoff channel or
   // control broker) so the resumed session can actually reach the group --
   // otherwise the orchestrator's wait_for_handoff would wait on a worker that
@@ -1197,7 +1199,7 @@ async function fireSchedule(scheduleId) {
     sandboxOpts: entry.sandboxOpts,
     app: entry.app,
     model: entry.model,
-    resumeLast: entry.app === 'opencode' || entry.app === 'copilot' || entry.app === 'codex',
+    resumeLast: entry.app === 'opencode' || entry.app === 'copilot' || entry.app === 'codex' || entry.app === 'commandcode',
     // A group member keeps its membership across the resume: groupManager's
     // session-create listener re-binds the role to the new sessionId.
     groupId: entry.groupId,
@@ -1534,9 +1536,10 @@ export function gracefulShutdown() {
       for (const [, session] of sessions) {
         const claudeId = session.claudeSessionId || extractResumeId(session);
         // claude sessions are saved when their resume id is known; opencode
-        // and copilot sessions are always saved (resume happens via
-        // `opencode -c` / `copilot --continue`).
-        if (claudeId || session.app === 'opencode' || session.app === 'copilot' || session.app === 'codex') {
+        // / copilot / codex / commandcode sessions are always saved (resume
+        // happens via `opencode -c` / `copilot --continue` /
+        // `codex resume --last` / `commandcode -c`).
+        if (claudeId || session.app === 'opencode' || session.app === 'copilot' || session.app === 'codex' || session.app === 'commandcode') {
           savedSessions.push(savedSessionPublic(session, claudeId));
         }
       }

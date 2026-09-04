@@ -211,15 +211,16 @@ export async function launchGroupFromSpec(body) {
   }
   const { workers } = workersNorm;
   const orchestrator = memberSpecFromBody(input.orchestrator);
-  // copilot has no CLI-arg/env MCP injection (config-file only), so combo
-  // members can never use the group's broker tools -- refuse it explicitly
-  // here. Codex supports process-scoped -c MCP overrides. (The canonical
-  // path's whitelist already refused copilot inside normalizeWorkers; this
-  // also covers the legacy specs' "present but not a known app" shape.)
+  // copilot/commandcode have no CLI-arg/env MCP injection (config-file only
+  // / unverified), so combo members can never use the group's broker tools --
+  // refuse them explicitly here. Codex supports process-scoped -c MCP
+  // overrides. (The canonical path's whitelist already refused copilot inside
+  // normalizeWorkers; this also covers the legacy specs' "present but not a
+  // known app" shape.)
   const invalidApp = (spec) => Object.prototype.hasOwnProperty.call(spec || {}, 'app')
-    && (!spec.app || spec.app === 'copilot');
+    && (!spec.app || spec.app === 'copilot' || spec.app === 'commandcode');
   if (workers.some(({ spec }) => invalidApp(spec)) || invalidApp(orchestrator)) {
-    return { ok: false, code: 'validation', message: 'worker app must be claude, opencode, or codex (copilot is not supported in groups)' };
+    return { ok: false, code: 'validation', message: 'worker app must be claude, opencode, or codex (copilot/commandcode are not supported in groups)' };
   }
   const badModel = (spec) => Object.prototype.hasOwnProperty.call(spec || {}, 'model') && spec.model === undefined;
   if (workers.some(({ spec }) => badModel(spec)) || badModel(orchestrator)) {
