@@ -1,8 +1,9 @@
-// Opt-in tool provisioning (rtk / code-review-graph) for sandboxed sessions:
-//   - resolveTools merges sandbox.config.json's `tools` (server default, off
-//     unless enabled) with the client's per-session sandboxOpts.tools, like the
-//     gpg/sshAgent opt-in flow. True enables a pinned default spec; the object
-//     form can override version/url/sha256.
+// Tool provisioning (rtk / code-review-graph) for sandboxed sessions:
+//   - resolveTools merges sandbox.config.json's `tools` (server fallback, off
+//     unless enabled there) with the client's per-session sandboxOpts.tools --
+//     the launch menu defaults these tools to ON per directory (see
+//     DirectoryBrowser), and that choice overrides the fallback. True enables
+//     a pinned default spec; the object form can override version/url/sha256.
 //   - buildSandboxSpawn, when any tool is enabled, ro-binds the provisioner at
 //     /ccserver-sandbox-provision.sh and passes the tool specs via env. With no
 //     tool enabled nothing is added.
@@ -12,12 +13,16 @@
 
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { spawnSync } from 'node:child_process';
 import { buildSandboxSpawn, buildMinimalSandboxSpawn, resolveTools } from './sandbox.js';
 
+const __dirname = dirname(fileURLToPath(import.meta.url));
 const PROVISION_PATH = '/ccserver-sandbox-provision.sh';
+const PROVISION_SCRIPT = join(__dirname, 'sandbox-provision.sh');
 
 let cfgPath;
 let tmpRoot;
@@ -123,4 +128,102 @@ test('buildMinimalSandboxSpawn (usage capture) never provisions tools', () => {
   const spawn = buildMinimalSandboxSpawn({ cwd: join(tmpRoot, 'proj4'), targetCommand: ['claude'] });
   assert.ok(!spawn.args.includes(PROVISION_PATH), 'throwaway sandbox stays lean');
   assert.equal(provisionEnv(spawn.args).CCSANDBOX_PROVISION_RTK, undefined);
+});
+
+// ---------------------------------------------------------------------------
+// Shell-level tests: run sandbox-provision.sh itself inside a stubbed HOME with
+// a fake `python3` on PATH. There is no real venv/bwrap here -- the fake
+// python3 materializes the $venv/bin/pip and $venv/bin/code-review-graph shims
+// (the latter records its argv to a file and exits 0 / CRG_BUILD_EXIT), so we
+// can verify the graph build step, the marker semantics, and the status lines
+// the CLI shows while installing.
+// ---------------------------------------------------------------------------
+
+// Create a fake `python3` that handles `-m venv <path>` by writing the pip and
+// code-review-graph shims the provisioner expects under the venv bin dir.
+function makeFakePython3(binDir) {
+  const py = join(binDir, 'python3');
+  writeFileSync(py, `#!/usr/bin/env bash
+if [ "$1" = "-m" ] && [ "$2" = "venv" ]; then
+  venv="$3"
+  mkdir -p "$venv/bin"
+  printf '#!/usr/bin/env bash\\nexit 0\\n' > "$venv/bin/pip"
+  chmod +x "$venv/bin/pip"
+  cat > "$venv/bin/code-review-graph" <<'SHIM'
+#!/usr/bin/env bash
+echo "$@" >> "\${CRG_BUILD_LOG:-/dev/null}"
+exit "\${CRG_BUILD_EXIT:-0}"
+SHIM
+  chmod +x "$venv/bin/code-review-graph"
+  exit 0
+fi
+echo "fake python3: unknown args: $*" >&2
+exit 1
+`);
+  chmodSync(py, 0o755);
+}
+
+function runCrgProvisioner({ home, cwd, buildLog, buildExit = 0 }) {
+  const binDir = join(tmpRoot, 'fakebin');
+  makeFakePython3(binDir);
+  return spawnSync('bash', [PROVISION_SCRIPT], {
+    cwd,
+    env: {
+      HOME: home,
+      PATH: `${binDir}:${process.env.PATH}`,
+      CCSANDBOX_PROVISION_RTK: '0',
+      CCSANDBOX_PROVISION_CRG: '1',
+      CCSANDBOX_CRG_VERSION: '9.9.9',
+      CRG_BUILD_LOG: buildLog,
+      CRG_BUILD_EXIT: String(buildExit),
+    },
+    encoding: 'utf8',
+  });
+}
+
+function provisionLog(home) {
+  return join(home, '.local', 'share', 'ccserver-tools', 'provision.log');
+}
+
+test('provisioner runs `code-review-graph build --repo "$PWD"` after install and only marks once both succeed', () => {
+  const home = join(tmpRoot, 'crg-home-ok');
+  const repo = join(tmpRoot, 'crg-repo-ok');
+  const buildLog = join(tmpRoot, 'crg-build-ok.log');
+  const marker = join(home, '.local', 'share', 'ccserver-tools', 'markers', 'code-review-graph-9.9.9');
+  const res = runCrgProvisioner({ home, cwd: repo, buildLog });
+
+  assert.equal(res.status, 0, `provisioner exited 0 (stderr: ${res.stderr})`);
+  const calls = readFileSync(buildLog, 'utf8').trim().split('\n');
+  assert.equal(calls.length, 1, 'build invoked exactly once');
+  assert.equal(calls[0], `build --repo ${repo} --quiet`);
+  assert.ok(existsSync(marker), 'marker written after install + build both succeed');
+  assert.match(res.stdout, /code-review-graph をインストール中…/);
+  assert.match(res.stdout, /code-review-graph のグラフを構築中…/);
+  assert.match(res.stdout, /code-review-graph 導入完了/);
+});
+
+test('provisioner: marker is not written when the graph build fails (retried next launch)', () => {
+  const home = join(tmpRoot, 'crg-home-fail');
+  const repo = join(tmpRoot, 'crg-repo-fail');
+  const buildLog = join(tmpRoot, 'crg-build-fail.log');
+  const marker = join(home, '.local', 'share', 'ccserver-tools', 'markers', 'code-review-graph-9.9.9');
+  const res = runCrgProvisioner({ home, cwd: repo, buildLog, buildExit: 7 });
+
+  assert.equal(res.status, 1, 'provisioner reports failure via exit code');
+  assert.ok(!existsSync(marker), 'no marker on build failure, so the next launch retries');
+  assert.match(readFileSync(provisionLog(home), 'utf8'), /graph build failed/);
+});
+
+test('provisioner: a matching marker short-circuits before any install/build work', () => {
+  const home = join(tmpRoot, 'crg-home-skip');
+  const repo = join(tmpRoot, 'crg-repo-skip');
+  const buildLog = join(tmpRoot, 'crg-build-skip.log');
+  const markers = join(home, '.local', 'share', 'ccserver-tools', 'markers');
+  mkdirSync(markers, { recursive: true });
+  writeFileSync(join(markers, 'code-review-graph-9.9.9'), '');
+  const res = runCrgProvisioner({ home, cwd: repo, buildLog });
+
+  assert.equal(res.status, 0);
+  assert.ok(!existsSync(buildLog), 'build never invoked when the marker matches');
+  assert.ok(!/インストール中/.test(res.stdout), 'no install status lines on the fast path');
 });

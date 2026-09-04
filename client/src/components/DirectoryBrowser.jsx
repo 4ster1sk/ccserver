@@ -51,7 +51,9 @@ function loadComboApps() {
 // separately per cwd rather than as one server-wide default -- see
 // server/sandbox.config.json's `gpg`/`sshAgent`/`tools` for the fallback these
 // override at launch. `tools` (rtk / code-review-graph) provisions the tool
-// into the sandbox HOME at launch instead of installing it on the host.
+// into the sandbox HOME at launch instead of installing it on the host. Unlike
+// gpg/sshAgent (opt-in), rtk / code-review-graph default to ON in the launch
+// menu; a stored explicit false turns them back off for that directory.
 function loadSandboxOpts(path) {
   try {
     const raw = localStorage.getItem(SANDBOX_OPTS_PREFIX + path);
@@ -61,13 +63,13 @@ function loadSandboxOpts(path) {
         gpg: !!parsed.gpg,
         sshAgent: !!parsed.sshAgent,
         tools: {
-          rtk: !!(parsed.tools && parsed.tools.rtk),
-          codeReviewGraph: !!(parsed.tools && parsed.tools.codeReviewGraph),
+          rtk: parsed.tools?.rtk !== false,
+          codeReviewGraph: parsed.tools?.codeReviewGraph !== false,
         },
       };
     }
   } catch { /* ignore */ }
-  return { gpg: false, sshAgent: false, tools: { rtk: false, codeReviewGraph: false } };
+  return { gpg: false, sshAgent: false, tools: { rtk: true, codeReviewGraph: true } };
 }
 
 function saveSandboxOpts(path, opts) {
