@@ -10,6 +10,7 @@ import { buildMcpConfigArgsAndEnv } from './mcpConfig.js';
 import { shouldInjectNotify, notifyEnabled, getNotifySockPath, notifyBrokerRunning } from './notify.js';
 import { shouldInjectUsage, usageEnabled, getUsageSockPath, usageBrokerRunning } from './usageMcp.js';
 import { shouldInjectMetaAgent, metaAgentEnabled, getMetaSockPath, metaBrokerRunning, ensureMetaAgentDir } from './metaAgent.js';
+import { shouldInjectReviewer, reviewerEnabled, getReviewerSockPath, reviewerBrokerRunning } from './reviewer.js';
 import { createScreenModel, SCREEN_ROWS } from './screenModel.js';
 import { bunTmpdirEnv } from './bunTmpdir.js';
 import { buildSessionEnv } from './sessionEnv.js';
@@ -165,7 +166,7 @@ function normalizeModel(model) {
   return typeof model === 'string' && model.length > 0 ? model : null;
 }
 
-export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox, sandboxOpts, app, model, resumeLast, groupId = null, groupRole = null, mcpSocketPath = null, projectName = null, reuseSandboxHome = true, orchestratorClaudeMdSrc = null, gitCommonDir = null, groupFilesDir = null, isMetaAgent = false, sandboxHomeCreatedBy = null }) {
+export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox, sandboxOpts, app, model, resumeLast, groupId = null, groupRole = null, mcpSocketPath = null, projectName = null, reuseSandboxHome = true, orchestratorClaudeMdSrc = null, gitCommonDir = null, groupFilesDir = null, isMetaAgent = false, isReviewJob = false, sandboxHomeCreatedBy = null }) {
   const id = randomUUID();
 
   // Invariant: meta-agent sessions (isMetaAgent:true, groupId-less) always
@@ -288,6 +289,37 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox
   });
   const metaSocketPath = useMeta ? getMetaSockPath() : null;
 
+  // ccserver-reviewer injection (see reviewer.js): unlike notify, ANY session
+  // -- worker or standalone -- gets it (issue #102 consensus point 4: "callable
+  // regardless of whether a group exists"). Shells, copilot and commandcode
+  // are excluded outright (see shouldInjectReviewer); the feature is off by default
+  // (sandbox.config.json's reviewerMcp) and requires the broker to actually be
+  // listening, same gating as notify/usage/meta.
+  //
+  // isReviewJob (true ONLY for the one session runReview() itself launches
+  // for a given job, see reviewer.js) bypasses reviewerEnabled() specifically
+  // -- never the broker-running check, there being no live broker means there
+  // is genuinely no socket to bind. Without this override, a live edit to
+  // sandbox.config.json flipping reviewerMcp to false after the broker
+  // already started (the broker itself is never torn down on a config edit,
+  // only at boot) would silently leave a review job's OWN session unable to
+  // reach finish_review -- the tool that must be its authoritative completion
+  // signal (see completeReviewJob) -- breaking the design for every job
+  // started after that edit until a restart. shell/app are structurally
+  // guaranteed sane for a review job already (VALID_APPS in reviewer.js
+  // excludes copilot/commandcode, and a review job is never a shell), so this never
+  // actually bypasses those two checks in practice.
+  const useReviewer = reviewerBrokerRunning() && (isReviewJob === true || shouldInjectReviewer({
+    shell: !!shell,
+    app: sessionApp,
+    reviewerEnabled: reviewerEnabled(),
+  }));
+  const reviewerSocketPath = useReviewer ? getReviewerSockPath() : null;
+  // Per-connection identity for finish_review's caller verification (see
+  // reviewer.js's finishReview): only the sessionId matters here, unlike
+  // notify/meta's richer identity objects.
+  const reviewerIdentity = useReviewer ? { sessionId: id } : null;
+
   // Server-only variables (NODE_ENV, PORT, CCSERVER_*, forwarded ssh-agent)
   // must not reach the session; see sessionEnv.js.
   const cleanEnv = buildSessionEnv();
@@ -322,7 +354,7 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox
   // host node+bridge). The args must be in the target command before
   // buildSandboxSpawn runs, so the mode is derived from sandboxRequested.
   let mcpEnv = {};
-  if (sessionApp && (mcpSocketPath || useNotify || useUsage || useMeta)) {
+  if (sessionApp && (mcpSocketPath || useNotify || useUsage || useMeta || useReviewer)) {
     const injected = buildMcpConfigArgsAndEnv(sessionApp, {
       // ccserver (the group broker) only when the session has a group socket:
       // standalone notify sessions must not get a broken ccserver entry (its
@@ -348,6 +380,11 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox
           projectName: projectName ?? basename(cwd),
           app: sessionApp,
         },
+      } : undefined,
+      reviewer: useReviewer ? {
+        mode: sandboxRequested ? 'sandbox' : 'host',
+        sockPath: reviewerSocketPath,
+        identity: reviewerIdentity,
       } : undefined,
     });
     mcpEnv = injected.env;
@@ -388,7 +425,7 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox
       } catch { resolvedGroupFilesDir = null; }
     }
     try {
-      const spawn = buildSandboxSpawn({ cwd, targetCommand: [command, ...args], app: sessionApp, sandboxOpts, mcpSocketPath, notifySocketPath, usageSocketPath, metaSocketPath, reuseSandboxHome, orchestratorClaudeMdSrc, gitCommonDir, groupFilesDir: resolvedGroupFilesDir, sandboxHomeCreatedBy });
+      const spawn = buildSandboxSpawn({ cwd, targetCommand: [command, ...args], app: sessionApp, sandboxOpts, mcpSocketPath, notifySocketPath, usageSocketPath, metaSocketPath, reviewerSocketPath, reuseSandboxHome, orchestratorClaudeMdSrc, gitCommonDir, groupFilesDir: resolvedGroupFilesDir, sandboxHomeCreatedBy });
       command = spawn.command;
       args = spawn.args;
       sandboxDocker = !!spawn.docker;

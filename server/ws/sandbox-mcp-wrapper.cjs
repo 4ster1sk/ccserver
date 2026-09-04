@@ -6,11 +6,12 @@
 // byte pipe with no protocol logic.
 //
 // Which broker this reaches is decided by argv + which host socket was bound
-// in (see mcpBroker.js / notify.js / usageMcp.js / metaAgent.js):
-//   plain    -> CCSANDBOX_MCP_SOCK  (the group's control / handoff socket)
-//   'notify' -> CCSANDBOX_NOTIFY_MCP_SOCK (the process-global notify socket)
-//   'usage'  -> CCSANDBOX_USAGE_MCP_SOCK (the process-global usage socket)
-//   'meta'   -> CCSANDBOX_META_MCP_SOCK (the process-global meta-agent socket)
+// in (see mcpBroker.js / notify.js / usageMcp.js / metaAgent.js / reviewer.js):
+//   plain      -> CCSANDBOX_MCP_SOCK  (the group's control / handoff socket)
+//   'notify'   -> CCSANDBOX_NOTIFY_MCP_SOCK (the process-global notify socket)
+//   'usage'    -> CCSANDBOX_USAGE_MCP_SOCK (the process-global usage socket)
+//   'meta'     -> CCSANDBOX_META_MCP_SOCK (the process-global meta-agent socket)
+//   'reviewer' -> CCSANDBOX_REVIEWER_MCP_SOCK (the process-global reviewer socket)
 // The wrapper itself is role-agnostic.
 //
 // In notify mode the wrapper additionally writes a single JSON line
@@ -20,21 +21,25 @@
 // env set by mcpConfig.js; absent or unparseable it sends an empty object
 // (host-only attribution). Meta mode writes the same kind of frame from
 // CCSERVER_META_IDENTITY: the per-connection sessionId/groupId there power
-// the meta tools' self-target guards and approval attribution. Usage mode
-// carries no identity at all (get_usage answers the same regardless of
-// caller).
+// the meta tools' self-target guards and approval attribution. Reviewer mode
+// writes the same kind of frame from CCSERVER_REVIEWER_IDENTITY: the
+// per-connection sessionId there is how finish_review verifies the caller IS
+// the review job it claims to be (see reviewer.js). Usage mode carries no
+// identity at all (get_usage answers the same regardless of caller).
 'use strict';
 const net = require('net');
 const mode = process.argv[2];
 const IDENTITY_ENV = {
   notify: 'CCSERVER_NOTIFY_IDENTITY',
   meta: 'CCSERVER_META_IDENTITY',
+  reviewer: 'CCSERVER_REVIEWER_IDENTITY',
 };
 const wantsIdentityFrame = !!IDENTITY_ENV[mode];
 const MODE_SOCK_ENV = {
   notify: 'CCSANDBOX_NOTIFY_MCP_SOCK',
   usage: 'CCSANDBOX_USAGE_MCP_SOCK',
   meta: 'CCSANDBOX_META_MCP_SOCK',
+  reviewer: 'CCSANDBOX_REVIEWER_MCP_SOCK',
 };
 const sockPath = process.env[MODE_SOCK_ENV[mode] || 'CCSANDBOX_MCP_SOCK'];
 if (!sockPath) {

@@ -61,11 +61,14 @@ const SANDBOX_KNOWN_HOSTS_DEFAULT_PATH = '/ccserver-sandbox-known-hosts-default'
 // usageMcp.js) is bound at a third fixed path, reached with the 'usage'
 // argument. The process-global meta-agent socket (ccserver-meta, see
 // metaAgent.js) is bound at a fourth fixed path, reached with the 'meta'
+// argument. The process-global reviewer socket (ccserver-reviewer, see
+// reviewer.js) is bound at a fifth fixed path, reached with the 'reviewer'
 // argument.
 const SANDBOX_MCP_SOCK_PATH = '/ccserver-sandbox-mcp.sock';
 const SANDBOX_NOTIFY_SOCK_PATH = '/ccserver-sandbox-notify.sock';
 const SANDBOX_USAGE_SOCK_PATH = '/ccserver-sandbox-usage.sock';
 const SANDBOX_META_SOCK_PATH = '/ccserver-sandbox-meta.sock';
+const SANDBOX_REVIEWER_SOCK_PATH = '/ccserver-sandbox-reviewer.sock';
 const SANDBOX_MCP_BRIDGE_PATH = '/ccserver-sandbox-mcp-bridge';
 const MCP_BRIDGE_SCRIPT = join(__dirname, 'sandbox-mcp-wrapper.cjs');
 
@@ -593,8 +596,13 @@ export function loadSandboxConfig() {
   // stronger reason: this toolset spans every project/group/session/sandbox,
   // and its destructive tools kill real running work.
   const metaAgentMcp = raw.metaAgentMcp === true;
+  // ccserver-reviewer (see reviewer.js): launches disposable headless review
+  // sessions on request. Opt-in like usageMcp/metaAgentMcp -- it spawns real
+  // sandboxed sessions (resource-consuming) on any caller's say-so, so it
+  // must not exist unless explicitly enabled.
+  const reviewerMcp = raw.reviewerMcp === true;
   return {
-    docker, persistentHome, gpg, sshAgent, gitBroker, forceSandbox, binds, env, claudeBin, defaultApp, showUsage, usageMcp, metaAgentMcp,
+    docker, persistentHome, gpg, sshAgent, gitBroker, forceSandbox, binds, env, claudeBin, defaultApp, showUsage, usageMcp, metaAgentMcp, reviewerMcp,
     notify: {
       discordWebhook, subscriptions, hostname: notifyHostname, attribution: notifyAttribution,
       vikunja: {
@@ -903,7 +911,7 @@ export function sandboxAvailable() {
 //   homeDir - host path of the persistent per-project HOME to bind at HOME
 //             (see persistentHomeDir), or null for a fresh tmpfs HOME.
 //   app     - which agent is being launched (used to bind node for command-code's wrapper)
-function buildBwrapArgs({ cwd, docker, gpg, extraBinds, extraEnv, authSock, stateDir, claudeDir, gitBroker, mcpSocketPath, notifySocketPath, usageSocketPath, metaSocketPath, homeDir = null, orchestratorClaudeMdSrc = null, gitCommonDir = null, groupFilesDir = null, app = null }) {
+function buildBwrapArgs({ cwd, docker, gpg, extraBinds, extraEnv, authSock, stateDir, claudeDir, gitBroker, mcpSocketPath, notifySocketPath, usageSocketPath, metaSocketPath, reviewerSocketPath, homeDir = null, orchestratorClaudeMdSrc = null, gitCommonDir = null, groupFilesDir = null, app = null }) {
   const args = [
     '--die-with-parent',
     // Own PID namespace so the whole sandbox tree is reaped as a unit. Without
@@ -1035,11 +1043,23 @@ function buildBwrapArgs({ cwd, docker, gpg, extraBinds, extraEnv, authSock, stat
     args.push('--setenv', 'CCSANDBOX_META_MCP_SOCK', SANDBOX_META_SOCK_PATH);
   }
 
+  // ccserver-reviewer: same wrapper once more, reached with the 'reviewer'
+  // argv so it reads CCSANDBOX_REVIEWER_MCP_SOCK (bound here). Unlike meta,
+  // this one is available to any session (see reviewer.js's
+  // shouldInjectReviewer) -- the trust boundary is the run_review job itself
+  // only ever touching a disposable worktree it created, never the caller's
+  // own cwd.
+  if (reviewerSocketPath) {
+    args.push('--bind-try', reviewerSocketPath, SANDBOX_REVIEWER_SOCK_PATH);
+    args.push('--setenv', 'CCSANDBOX_REVIEWER_MCP_SOCK', SANDBOX_REVIEWER_SOCK_PATH);
+  }
+
   // The bridge wrapper is shared by the group socket, the notify socket, the
-  // usage socket and the meta socket (bound once -- a combo orchestrator may
-  // have all three of the first kind) and its node shebang lives at
-  // SANDBOX_NODE_PATH (ro-bound with the git-broker branch below).
-  if (mcpSocketPath || notifySocketPath || usageSocketPath || metaSocketPath) {
+  // usage socket, the meta socket and the reviewer socket (bound once -- a
+  // combo orchestrator may have several of these at once) and its node
+  // shebang lives at SANDBOX_NODE_PATH (ro-bound with the git-broker branch
+  // below).
+  if (mcpSocketPath || notifySocketPath || usageSocketPath || metaSocketPath || reviewerSocketPath) {
     args.push('--ro-bind', MCP_BRIDGE_SCRIPT, SANDBOX_MCP_BRIDGE_PATH);
   }
 
@@ -1159,7 +1179,7 @@ function buildBwrapArgs({ cwd, docker, gpg, extraBinds, extraEnv, authSock, stat
   // agent binary instead of assuming a host layout. Shared between the
   // git-broker machinery and the MCP bridge wrapper. command-code's launcher
   // is also a Node script (#!/usr/bin/env node), so it needs node too.
-  if (gitBroker || mcpSocketPath || notifySocketPath || usageSocketPath || metaSocketPath || app === 'commandcode') {
+  if (gitBroker || mcpSocketPath || notifySocketPath || usageSocketPath || metaSocketPath || reviewerSocketPath || app === 'commandcode') {
     const nodeBin = realpathSync(process.execPath);
     args.push('--ro-bind', nodeBin, SANDBOX_NODE_PATH);
   }
@@ -1305,6 +1325,7 @@ export function buildMinimalSandboxSpawn({ cwd, targetCommand, app = 'claude' })
     notifySocketPath: null,
     usageSocketPath: null,
     metaSocketPath: null,
+    reviewerSocketPath: null,
     // The /usage capture is a throwaway read: it must not create (or depend
     // on) a persistent per-project HOME.
     homeDir: null,
@@ -1341,6 +1362,9 @@ export function buildMinimalSandboxSpawn({ cwd, targetCommand, app = 'claude' })
 //                 bind into the sandbox at a fixed path. Only set for the
 //                 single isMetaAgent session (see metaAgent.js); null
 //                 otherwise.
+//   reviewerSocketPath - host path of the process-global ccserver-reviewer
+//                 socket to bind into the sandbox at a fixed path. null when
+//                 the session gets no reviewer MCP injection.
 //   reuseSandboxHome - false to start a *fresh* persistent HOME for this
 //                 launch: the previous per-project HOME is wiped (via the same
 //                 escalated removeTree as deleteSandboxHome) and recreated
@@ -1359,7 +1383,7 @@ export function buildMinimalSandboxSpawn({ cwd, targetCommand, app = 'claude' })
 //   sandboxHomeCreatedBy - optional attribution stored on the sandbox HOME's
 //                 bookkeeping row ('user' | 'meta-agent:<sessionId>' | ...).
 //                 Display only; never an authorization input.
-export function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, mcpSocketPath = null, notifySocketPath = null, usageSocketPath = null, metaSocketPath = null, reuseSandboxHome = true, orchestratorClaudeMdSrc = null, gitCommonDir = null, groupFilesDir = null, sandboxHomeCreatedBy = null }) {
+export function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, mcpSocketPath = null, notifySocketPath = null, usageSocketPath = null, metaSocketPath = null, reviewerSocketPath = null, reuseSandboxHome = true, orchestratorClaudeMdSrc = null, gitCommonDir = null, groupFilesDir = null, sandboxHomeCreatedBy = null }) {
   const { docker: cfgDocker, persistentHome, gpg: cfgGpg, sshAgent: cfgSshAgent, gitBroker: gitBrokerEnabled, binds, env, claudeBin } = loadSandboxConfig();
   const docker = cfgDocker && dockerSandboxAvailable();
   const gpg = sandboxOpts?.gpg ?? cfgGpg;
@@ -1430,7 +1454,7 @@ export function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, mcpSoc
   }
 
   const { command, installDir } = resolveApp(app, claudeBin);
-  const bwrapArgs = buildBwrapArgs({ cwd, docker, gpg, extraBinds: binds, extraEnv: env, authSock, stateDir, claudeDir: installDir, gitBroker, mcpSocketPath, notifySocketPath, usageSocketPath, metaSocketPath, homeDir, orchestratorClaudeMdSrc, gitCommonDir, groupFilesDir, app });
+  const bwrapArgs = buildBwrapArgs({ cwd, docker, gpg, extraBinds: binds, extraEnv: env, authSock, stateDir, claudeDir: installDir, gitBroker, mcpSocketPath, notifySocketPath, usageSocketPath, metaSocketPath, reviewerSocketPath, homeDir, orchestratorClaudeMdSrc, gitCommonDir, groupFilesDir, app });
   // command-code's launcher is a Node script. Run it explicitly via the
   // sandbox's node binary, bypassing the #!/usr/bin/env shebang which would
   // otherwise require /usr/bin/node to be present inside the sandbox's PATH.

@@ -321,6 +321,64 @@ export function buildUsageMcpServer({ usageApi }) {
   return server;
 }
 
+// Process-global reviewer server (ccserver-reviewer, see reviewer.js): not
+// group-scoped (one socket for the whole server), but -- unlike
+// ccserver-usage -- DOES carry a per-connection identity (CCSERVER_REVIEWER_
+// IDENTITY, `{ sessionId }`), because finish_review needs to verify its
+// caller really is the session the job launched. run_review/list_reviews/
+// get_review ignore it; their attribution (if any) still rides in
+// run_review's own `requestedBy` argument.
+//
+// reviewerApi: { runReview, listReviews, getReview, finishReview }
+export function buildReviewerMcpServer({ reviewerApi, identity }) {
+  const server = new McpServer({ name: 'ccserver-reviewer', version: '1.0.0' });
+  const text = (result) => ({ content: [{ type: 'text', text: JSON.stringify(result) }] });
+
+  server.tool(
+    'run_review',
+    'Launch a disposable headless review session against a local git ref/branch/PR/uncommitted diff and run /code-review on it. Does NOT require a GitHub PR to exist -- unlike PR-only reviewers, this uses a real local git worktree, so it can review an unpushed local branch, a pushed-but-PR-less branch, or even uncommitted (dirty) changes. If number is given, the target is checked out via `gh pr checkout` and results are posted as a PR comment; otherwise results are only recorded in ccserver (see list_reviews/get_review) and delivered via notify when configured. Returns immediately with the job id and status "running" -- poll get_review (or list_reviews) for completion, this tool never blocks until the review finishes. focus is an optional free-form note on what to pay extra attention to (e.g. "focus on security"), appended to the /code-review prompt as-is.',
+    {
+      cwd: z.string(),
+      headRef: z.string().optional(),
+      baseRef: z.string().optional(),
+      number: z.number().int().positive().optional(),
+      includeUncommitted: z.boolean().optional(),
+      app: z.enum(['claude', 'opencode', 'codex']).optional(),
+      model: z.string().nullable().optional(),
+      requestedBy: z.string().optional(),
+      focus: z.string().optional(),
+    },
+    async (args) => text(await reviewerApi.runReview(args)),
+  );
+
+  server.tool(
+    'list_reviews',
+    'List past and in-progress review jobs for a project (id, mode, status, headRef/prNumber, createdAt, finishedAt) without full result text -- get_review for details.',
+    { cwd: z.string().optional(), limit: z.number().int().positive().max(100).optional() },
+    async (args) => text(reviewerApi.listReviews(args)),
+  );
+
+  server.tool(
+    'get_review',
+    'Fetch one review job by id, including its result_summary and whether it was posted to the PR.',
+    { id: z.string() },
+    async (args) => text(reviewerApi.getReview(args)),
+  );
+
+  server.tool(
+    'finish_review',
+    'Called by the review session ITSELF, once it is done, to report the outcome and trigger cleanup (worktree/sandbox teardown, DB record) -- this is the authoritative way a run_review job completes; ccserver only falls back to an idle/absolute-timeout guess if this is never called (e.g. the session crashes). Only the session that IS the job (its own connection identity must match the job\'s sessionId) may call it, and jobId must still be "running" -- calling it twice, from the wrong session, or for an unknown/already-finished job is refused. status is "done" (review completed normally) or "failed" (could not complete the review); summary is an optional free-form note on what was found -- omit it to fall back to the session\'s own recent output.',
+    {
+      jobId: z.string(),
+      status: z.enum(['done', 'failed']),
+      summary: z.string().optional(),
+    },
+    async (args) => text(await reviewerApi.finishReview({ ...args, callerSessionId: identity?.sessionId ?? null })),
+  );
+
+  return server;
+}
+
 // Process-global META server (ccserver-meta, see metaAgent.js): the single
 // privileged socket through which the meta agent manages the whole server --
 // every project, group, session and sandbox. This is the OPPOSITE trust
