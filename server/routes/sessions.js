@@ -53,19 +53,34 @@ export async function sessionsRoute(fastify, opts) {
   }
 }
 
-// Shared implementation for POST /api/sessions and the meta agent's
-// launch_session tool. body:
+// Shared implementation for POST /api/sessions, the meta agent's
+// launch_session tool, and the federation "sessions.create" RPC. body:
 //   { cwd?, app?, model?, shell?, sandbox?, sandboxOpts?, resume?,
 //     reuseSandboxHome?, isMetaAgent?, requestedBy? }
 // `cwd` is required for normal launches, but when `isMetaAgent:true` it is
 // optional/ignored: createSession forces the fixed meta-agent directory
 // server-side (see sessionManager.createSession), so a client-supplied cwd
 // (even a missing/non-existent one) is never used.
+//
+// `isReviewJob` (2nd param) is DELIBERATELY not part of `body`. It forces
+// reviewer MCP injection regardless of the live reviewerMcp config (see
+// sessionManager.js's useReviewer comment) -- a real privilege bypass, unlike
+// every field actually read from `body` (isMetaAgent included: it is inert
+// unless the metaAgentMcp config AND the broker are both already on). Every
+// caller of this function forwards a network- or IPC-facing request body more
+// or less as-is (REST route above, metaTools.launchSession, federationServer
+// .js's rpcSessionsCreate) -- if isReviewJob were just another body key, each
+// of those boundaries would have to remember to strip it, and missing even
+// one (as the federation RPC did) hands a remote peer an MCP injection it was
+// never meant to have. Keeping it a separate parameter that only an
+// in-process caller can pass (reviewer.js's runReview -- the ONLY legitimate
+// setter) makes that whole class of boundary omission impossible instead of
+// relying on every boundary remembering to filter its input.
 // Returns { ok:true, body } or { ok:false, code:'validation'|'internal',
 // message }. Spawning happens synchronously inside createSession; a failed
 // spawn surfaces as validation-shaped 400 (the client-visible contract of
 // every other launch path).
-export async function createSessionViaApi(body) {
+export async function createSessionViaApi(body, { isReviewJob = false } = {}) {
   const isMetaAgent = body.isMetaAgent === true;
   const cwd = typeof body.cwd === 'string' && body.cwd ? body.cwd : null;
   // Normal launches require an existing directory. Meta-agent launches skip
@@ -88,6 +103,8 @@ export async function createSessionViaApi(body) {
   // isMetaAgent is only meaningful through this REST boundary's meta callers;
   // a plain HTTP client may set it, but it has no effect unless the config
   // enables the feature AND the broker is listening (see shouldInjectMetaAgent).
+  // isReviewJob is deliberately NOT read from `body` here -- see this
+  // function's header comment. It comes only from the trusted 2nd parameter.
   const result = createSession({
     cwd,
     cols: 80,
@@ -101,6 +118,7 @@ export async function createSessionViaApi(body) {
     resumeLast: !!body.resume,
     reuseSandboxHome: body.reuseSandboxHome !== false,
     isMetaAgent: !!body.isMetaAgent,
+    isReviewJob: isReviewJob === true,
     // Attribution for the sandbox HOME bookkeeping row ('user' |
     // 'meta-agent:<sessionId>' | ...). Display only.
     sandboxHomeCreatedBy: typeof body.requestedBy === 'string' && body.requestedBy ? body.requestedBy : 'user',

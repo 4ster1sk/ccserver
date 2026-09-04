@@ -605,6 +605,110 @@ test('usage broker: startUsageBroker + stopBroker lifecycle on a supplied socket
   }
 });
 
+// The process-global reviewer broker (ccserver-reviewer, see reviewer.js /
+// mcpServer.js's buildReviewerMcpServer): startReviewerBroker hosts it at the
+// caller-supplied socket and exposes run_review/list_reviews/get_review/
+// finish_review. run_review/list_reviews/get_review carry no identity
+// (attribution, if any, rides in run_review's own requestedBy argument);
+// finish_review's caller-verification identity is covered separately below.
+test('reviewer broker: startReviewerBroker + stopBroker lifecycle on a supplied socket path', async () => {
+  const calls = [];
+  const reviewerApi = {
+    runReview: async (args) => {
+      calls.push(['runReview', args]);
+      return { ok: true, id: 'job-1', status: 'running', sessionId: 'sess-1', worktreePath: '/tmp/wt', mode: 'branch', resolvedRef: 'deadbeef' };
+    },
+    listReviews: (args) => {
+      calls.push(['listReviews', args]);
+      return { ok: true, reviews: [] };
+    },
+    getReview: (args) => {
+      calls.push(['getReview', args]);
+      return { ok: true, review: { id: args.id, status: 'done' } };
+    },
+    finishReview: async (args) => {
+      calls.push(['finishReview', args]);
+      return { ok: true, id: args.jobId, status: args.status };
+    },
+  };
+  const reviewer = await broker.startReviewerBroker({
+    reviewerApi,
+    sockPath: join(runtimeDir, 'ccserver-reviewer.sock'),
+  });
+  try {
+    const c = mcpClient(reviewer.sockPath);
+    await c.connected;
+    const init = await c.call('initialize', {
+      protocolVersion: '2024-11-05',
+      capabilities: {},
+      clientInfo: { name: 'wire-test', version: '1' },
+    });
+    assert.equal(init.serverInfo.name, 'ccserver-reviewer');
+    const { tools } = await c.call('tools/list');
+    assert.deepEqual(tools.map((t) => t.name).sort(), ['finish_review', 'get_review', 'list_reviews', 'run_review']);
+
+    const runOut = await callTool(c, 'run_review', { cwd: '/srv/proj', headRef: 'feature', focus: 'security' });
+    assert.equal(runOut.id, 'job-1');
+    assert.deepEqual(calls[0], ['runReview', { cwd: '/srv/proj', headRef: 'feature', focus: 'security' }]);
+
+    await callTool(c, 'list_reviews', {});
+    assert.deepEqual(calls[1], ['listReviews', {}]);
+
+    const getOut = await callTool(c, 'get_review', { id: 'job-1' });
+    assert.equal(getOut.review.status, 'done');
+    assert.deepEqual(calls[2], ['getReview', { id: 'job-1' }]);
+
+    // No identity frame on this connection -> callerSessionId is null.
+    const finishOut = await callTool(c, 'finish_review', { jobId: 'job-1', status: 'done', summary: 'looks fine' });
+    assert.equal(finishOut.id, 'job-1');
+    assert.deepEqual(calls[3], ['finishReview', { jobId: 'job-1', status: 'done', summary: 'looks fine', callerSessionId: null }]);
+    c.close();
+  } finally {
+    broker.stopBroker(reviewer);
+    assert.equal(existsSync(reviewer.sockPath), false, 'stopBroker removes the socket file');
+  }
+});
+
+// finish_review's whole authorization model rests on the per-connection
+// identity frame (CCSERVER_REVIEWER_IDENTITY via the bridge, same mechanism
+// as notify -- see mcpBroker.js) actually reaching reviewerApi.finishReview
+// as callerSessionId. This is the wire-level half of that guarantee;
+// reviewer.test.js covers the authorization logic itself once callerSessionId
+// arrives.
+test('reviewer broker: an identity frame on connect reaches finish_review as callerSessionId', async () => {
+  const seen = [];
+  const reviewerApi = {
+    runReview: async () => ({ ok: false, error: 'unused' }),
+    listReviews: () => ({ ok: true, reviews: [] }),
+    getReview: () => ({ ok: false, error: 'unused' }),
+    finishReview: async (args) => {
+      seen.push(args.callerSessionId);
+      return { ok: true, id: args.jobId, status: args.status };
+    },
+  };
+  const reviewer = await broker.startReviewerBroker({
+    reviewerApi,
+    sockPath: join(runtimeDir, 'ccserver-reviewer-identity.sock'),
+  });
+  try {
+    const c = mcpClient(reviewer.sockPath);
+    await c.connected;
+    // Same as the sandbox bridge: the identity frame goes out BEFORE the MCP
+    // initialize handshake.
+    c.raw.write(`${JSON.stringify({ ccserver: { sessionId: 'sess-review-job-1' } })}\n`);
+    await c.call('initialize', {
+      protocolVersion: '2024-11-05',
+      capabilities: {},
+      clientInfo: { name: 'wire-test', version: '1' },
+    });
+    await callTool(c, 'finish_review', { jobId: 'job-1', status: 'done' });
+    assert.deepEqual(seen, ['sess-review-job-1']);
+    c.close();
+  } finally {
+    broker.stopBroker(reviewer);
+  }
+});
+
 // --- handoff reliability: events survive a dead wait (Issue: handoff loss)
 // ---------------------------------------------------------------------------
 
