@@ -564,6 +564,14 @@ export function loadSandboxConfig() {
   const vikunjaVerifyTls = !(vikunjaVerifyTlsRaw === false || vikunjaVerifyTlsRaw === 'false');
   const vikunjaStatusLabelPrefix = process.env.CCSERVER_VIKUNJA_STATUS_LABEL_PREFIX
     || (typeof rawVikunja.statusLabelPrefix === 'string' && rawVikunja.statusLabelPrefix ? rawVikunja.statusLabelPrefix : 'status-');
+  // Kanban bucket titles for the Doing/To-Do "whose turn" distinction (see
+  // vikunjaClient.js's swapStatusBucket) -- same env > config > default
+  // precedence as statusLabelPrefix above.
+  const rawVikunjaBuckets = (rawVikunja.buckets && typeof rawVikunja.buckets === 'object') ? rawVikunja.buckets : {};
+  const vikunjaBucketDoing = process.env.CCSERVER_VIKUNJA_BUCKET_DOING
+    || (typeof rawVikunjaBuckets.doing === 'string' && rawVikunjaBuckets.doing ? rawVikunjaBuckets.doing : 'Doing');
+  const vikunjaBucketTodo = process.env.CCSERVER_VIKUNJA_BUCKET_TODO
+    || (typeof rawVikunjaBuckets.todo === 'string' && rawVikunjaBuckets.todo ? rawVikunjaBuckets.todo : 'To-Do');
   const binds = Array.isArray(raw.binds) ? raw.binds : [];
   const env = (raw.env && typeof raw.env === 'object') ? raw.env : {};
   // How to launch claude. Overridable because the install location is
@@ -596,6 +604,7 @@ export function loadSandboxConfig() {
         timeoutSeconds: vikunjaTimeoutSeconds,
         verifyTls: vikunjaVerifyTls,
         statusLabelPrefix: vikunjaStatusLabelPrefix,
+        buckets: { doing: vikunjaBucketDoing, todo: vikunjaBucketTodo },
       },
     },
     configPath,

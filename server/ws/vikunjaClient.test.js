@@ -18,6 +18,8 @@ const VIKUNJA_ENV_KEYS = [
   'CCSERVER_VIKUNJA_TIMEOUT_SECONDS',
   'CCSERVER_VIKUNJA_VERIFY_TLS',
   'CCSERVER_VIKUNJA_STATUS_LABEL_PREFIX',
+  'CCSERVER_VIKUNJA_BUCKET_DOING',
+  'CCSERVER_VIKUNJA_BUCKET_TODO',
 ];
 
 // Points CCSERVER_SANDBOX_CONFIG + CCSERVER_VIKUNJA_TASKS_PATH at temp files
@@ -61,6 +63,8 @@ function makeMock({ onRequest } = {}) {
   const calls = [];
   let nextTaskId = 100;
   let nextLabelId = 1;
+  let nextBucketId = 1;
+  const KANBAN_VIEW_ID = 900;
   const fn = async (url, opts) => {
     const u = String(url);
     const method = opts.method;
@@ -77,10 +81,19 @@ function makeMock({ onRequest } = {}) {
     if (method === 'PUT' && /^\/api\/v1\/tasks\/\d+\/comments$/.test(path)) return fakeRes(201, { id: 1 });
     if (method === 'PUT' && /^\/api\/v1\/tasks\/\d+\/labels$/.test(path)) return fakeRes(201, {});
     if (method === 'DELETE' && /^\/api\/v1\/tasks\/\d+\/labels\/\d+$/.test(path)) return fakeRes(200, {});
-    if (method === 'POST' && /^\/api\/v1\/tasks\/\d+$/.test(path)) return fakeRes(200, { id: Number(path.split('/').pop()), done: true });
+    if (method === 'GET' && /^\/api\/v1\/projects\/\d+\/views$/.test(path)) return fakeRes(200, [{ id: KANBAN_VIEW_ID, view_kind: 'kanban' }]);
+    if (method === 'GET' && new RegExp(`^/api/v1/projects/\\d+/views/${KANBAN_VIEW_ID}/buckets$`).test(path)) return fakeRes(200, []);
+    if (method === 'PUT' && new RegExp(`^/api/v1/projects/\\d+/views/${KANBAN_VIEW_ID}/buckets$`).test(path)) {
+      return fakeRes(201, { id: nextBucketId++, title: record.body.title });
+    }
+    if (method === 'POST' && new RegExp(`^/api/v1/projects/\\d+/views/${KANBAN_VIEW_ID}/buckets/\\d+/tasks$`).test(path)) return fakeRes(200, {});
     throw new Error(`unexpected fetch: ${method} ${path}`);
   };
   return { fn, calls };
+}
+
+function bucketMoveCalls(calls) {
+  return calls.filter((c) => c.method === 'POST' && /\/buckets\/\d+\/tasks$/.test(c.path));
 }
 
 test('vikunjaEnabled: baseUrl and apiToken both/one/neither', async () => {
@@ -119,7 +132,7 @@ test('vikunja env vars override the config file (same precedence as CCSERVER_DIS
   });
 });
 
-test('createOrUpdateTask: create -> comment update -> success terminates tracking -> next call re-creates', async () => {
+test('createOrUpdateTask: create -> comment update -> success keeps the card tracked -> next call reuses it', async () => {
   await withVikunjaConfig({ baseUrl: 'https://vikunja.example', apiToken: 'tok', projectId: 7 }, async (tasksPath) => {
     const { fn, calls } = makeMock();
     const realFetch = global.fetch;
@@ -140,6 +153,10 @@ test('createOrUpdateTask: create -> comment update -> success terminates trackin
       assert.equal(saved1['sess-1'].taskId, firstTaskId);
       assert.equal(saved1['sess-1'].lastLevel, 'info');
 
+      assert.equal(bucketMoveCalls(calls).length, 1, 'info on a brand-new task moves it into the Doing bucket');
+      const doingBucketCreate = calls.find((c) => c.method === 'PUT' && /\/buckets$/.test(c.path));
+      assert.equal(doingBucketCreate.body.title, 'Doing');
+
       const r2 = await createOrUpdateTask({ key: 'sess-1', title: 'Still going', body: 'more', level: 'warning', identity });
       assert.equal(r2.ok, true);
       assert.equal(r2.action, 'updated');
@@ -149,21 +166,39 @@ test('createOrUpdateTask: create -> comment update -> success terminates trackin
       assert.ok(commentCall.body.comment.includes('Still going'));
       assert.ok(commentCall.body.comment.includes('more'));
 
+      assert.equal(bucketMoveCalls(calls).length, 2, 'info -> warning changes bucket kind (Doing -> To-Do), so it moves again');
+      const todoBucketCreate = calls.filter((c) => c.method === 'PUT' && /\/buckets$/.test(c.path))[1];
+      assert.equal(todoBucketCreate.body.title, 'To-Do');
+
       const r3 = await createOrUpdateTask({ key: 'sess-1', title: 'Done', body: 'finished', level: 'success', identity });
       assert.equal(r3.ok, true);
       assert.equal(r3.action, 'updated');
       assert.equal(r3.taskId, firstTaskId);
 
-      const markDoneCall = calls.find((c) => c.method === 'POST' && c.path === `/api/v1/tasks/${firstTaskId}`);
-      assert.ok(markDoneCall, 'a terminal (success) level marks the underlying task done');
-      assert.equal(markDoneCall.body.done, true);
+      assert.equal(
+        calls.filter((c) => c.method === 'POST' && c.path === `/api/v1/tasks/${firstTaskId}`).length,
+        0,
+        'a terminal (success) level must never mark the underlying task done',
+      );
+      assert.equal(
+        bucketMoveCalls(calls).length,
+        2,
+        'warning -> success stays in the same bucket kind (To-Do), so no additional move happens',
+      );
 
       const saved3 = JSON.parse(readFileSync(tasksPath, 'utf-8'));
-      assert.equal(saved3['sess-1'], undefined, 'a terminal (success) level clears the tracked entry');
+      assert.equal(saved3['sess-1'].taskId, firstTaskId, 'success keeps the same card tracked, it is not cleared');
+      assert.equal(saved3['sess-1'].lastLevel, 'success');
 
       const r4 = await createOrUpdateTask({ key: 'sess-1', title: 'New round', body: 'again', level: 'info', identity });
-      assert.equal(r4.action, 'created');
-      assert.notEqual(r4.taskId, firstTaskId, 'tracking was cleared, so a fresh task is created');
+      assert.equal(r4.action, 'updated');
+      assert.equal(r4.taskId, firstTaskId, 'the next round reuses the same card rather than creating a new one');
+
+      assert.equal(
+        bucketMoveCalls(calls).length,
+        3,
+        'success -> info changes bucket kind back (To-Do -> Doing), so it moves a third time',
+      );
     } finally {
       global.fetch = realFetch;
     }
@@ -315,7 +350,7 @@ test('failures never log the API token or the base URL', async () => {
   });
 });
 
-test('createOrUpdateTask: a first notify that is already "success" marks the task done and leaves no tracking entry, so the next notify for the same key starts fresh', async () => {
+test('createOrUpdateTask: a first notify that is already "success" moves the task straight to To-Do (never marks it done) and keeps it tracked, so the next notify for the same key reuses it', async () => {
   await withVikunjaConfig({ baseUrl: 'https://vikunja.example', apiToken: 'tok', projectId: 1 }, async (tasksPath) => {
     const { fn, calls } = makeMock();
     const realFetch = global.fetch;
@@ -325,24 +360,29 @@ test('createOrUpdateTask: a first notify that is already "success" marks the tas
       assert.equal(r1.ok, true);
       assert.equal(r1.action, 'created');
 
-      const markDoneCall = calls.find((c) => c.method === 'POST' && c.path === `/api/v1/tasks/${r1.taskId}`);
-      assert.ok(markDoneCall, 'a "success" level on the very first notify still marks the task done');
-      assert.equal(markDoneCall.body.done, true);
+      assert.equal(
+        calls.filter((c) => c.method === 'POST' && c.path === `/api/v1/tasks/${r1.taskId}`).length,
+        0,
+        'a "success" level must never mark the task done',
+      );
+      const bucketMove = bucketMoveCalls(calls);
+      assert.equal(bucketMove.length, 1, 'a "success" level on the very first notify still moves the task into a bucket');
+      const todoBucketCreate = calls.find((c) => c.method === 'PUT' && /\/buckets$/.test(c.path));
+      assert.equal(todoBucketCreate.body.title, 'To-Do', 'success resolves to the To-Do bucket, not Doing');
 
-      let saved;
-      try { saved = JSON.parse(readFileSync(tasksPath, 'utf-8')); } catch { saved = {}; }
-      assert.equal(saved['k-fresh-success'], undefined, 'no tracking entry is left for an immediately-successful key');
+      const saved = JSON.parse(readFileSync(tasksPath, 'utf-8'));
+      assert.equal(saved['k-fresh-success'].taskId, r1.taskId, 'a tracking entry is kept even for an immediately-successful key');
 
       const r2 = await createOrUpdateTask({ key: 'k-fresh-success', title: 't2', body: 'b2', level: 'info', identity: {} });
-      assert.equal(r2.action, 'created', 'no tracking entry -> treated as a brand new task, not reopening the done one');
-      assert.notEqual(r2.taskId, r1.taskId);
+      assert.equal(r2.action, 'updated', 'the tracking entry is kept -> the next notify reuses the same card');
+      assert.equal(r2.taskId, r1.taskId);
     } finally {
       global.fetch = realFetch;
     }
   });
 });
 
-test('createOrUpdateTask: info/warning/error levels never mark the task done', async () => {
+test('createOrUpdateTask: info/warning/error levels never mark the task done, and a transition within the same bucket kind (warning -> error) does not move the bucket again', async () => {
   await withVikunjaConfig({ baseUrl: 'https://vikunja.example', apiToken: 'tok', projectId: 1 }, async () => {
     const { fn, calls } = makeMock();
     const realFetch = global.fetch;
@@ -351,32 +391,13 @@ test('createOrUpdateTask: info/warning/error levels never mark the task done', a
       await createOrUpdateTask({ key: 'k-non-terminal', title: 't', body: 'b', level: 'info', identity: {} });
       await createOrUpdateTask({ key: 'k-non-terminal', title: 't', body: 'b', level: 'warning', identity: {} });
       await createOrUpdateTask({ key: 'k-non-terminal', title: 't', body: 'b', level: 'error', identity: {} });
-      const markDoneCalls = calls.filter((c) => c.method === 'POST');
-      assert.equal(markDoneCalls.length, 0, 'only a terminal (success) level should ever POST to mark a task done');
-    } finally {
-      global.fetch = realFetch;
-    }
-  });
-});
-
-test('createOrUpdateTask: a failed mark-done does not affect the overall result (existing-task path)', async () => {
-  await withVikunjaConfig({ baseUrl: 'https://vikunja.example', apiToken: 'tok', projectId: 1 }, async (tasksPath) => {
-    const { fn } = makeMock({
-      onRequest: (record) => (record.method === 'POST' ? fakeRes(400, { message: 'cannot mark done' }) : null),
-    });
-    const realFetch = global.fetch;
-    global.fetch = fn;
-    try {
-      const r1 = await createOrUpdateTask({ key: 'k-markdone-fails', title: 't', body: 'b', level: 'info', identity: {} });
-      assert.equal(r1.action, 'created');
-
-      const r2 = await createOrUpdateTask({ key: 'k-markdone-fails', title: 't2', body: 'b2', level: 'success', identity: {} });
-      assert.equal(r2.ok, true, 'the add-comment succeeded, so ok is true regardless of the mark-done failure');
-      assert.equal(r2.action, 'updated');
-
-      let saved;
-      try { saved = JSON.parse(readFileSync(tasksPath, 'utf-8')); } catch { saved = {}; }
-      assert.equal(saved['k-markdone-fails'], undefined, 'tracking is still cleared even though mark-done failed');
+      const markDoneCalls = calls.filter((c) => c.method === 'POST' && /^\/api\/v1\/tasks\/\d+$/.test(c.path));
+      assert.equal(markDoneCalls.length, 0, 'no level should ever POST to mark a task done');
+      assert.equal(
+        bucketMoveCalls(calls).length,
+        2,
+        'info->warning changes bucket kind (Doing->To-Do, moves); warning->error stays To-Do->To-Do (no move)',
+      );
     } finally {
       global.fetch = realFetch;
     }
@@ -407,16 +428,18 @@ test('a 4xx failure log includes the response body', async () => {
   });
 });
 
-test('createOrUpdateTask: a failed mark-done does not affect the overall result (new-task path)', async () => {
+test('createOrUpdateTask: a failed bucket move does not affect the overall result (new-task path)', async () => {
   await withVikunjaConfig({ baseUrl: 'https://vikunja.example', apiToken: 'tok', projectId: 1 }, async () => {
     const { fn } = makeMock({
-      onRequest: (record) => (record.method === 'POST' ? fakeRes(400, { message: 'cannot mark done' }) : null),
+      onRequest: (record) => (
+        record.method === 'GET' && /\/views$/.test(record.path) ? fakeRes(500, { message: 'kanban unavailable' }) : null
+      ),
     });
     const realFetch = global.fetch;
     global.fetch = fn;
     try {
-      const r = await createOrUpdateTask({ key: 'k-markdone-fails-fresh', title: 't', body: 'b', level: 'success', identity: {} });
-      assert.equal(r.ok, true, 'task creation succeeded, so ok is true regardless of the mark-done failure');
+      const r = await createOrUpdateTask({ key: 'k-bucket-fails-fresh', title: 't', body: 'b', level: 'success', identity: {} });
+      assert.equal(r.ok, true, 'task creation succeeded, so ok is true regardless of the bucket-move failure');
       assert.equal(r.action, 'created');
     } finally {
       global.fetch = realFetch;

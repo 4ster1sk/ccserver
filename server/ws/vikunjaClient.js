@@ -16,16 +16,45 @@
 //   PUT    /labels                     create a label { title, hex_color }
 //   PUT    /tasks/{id}/labels          attach a label { label_id }
 //   DELETE /tasks/{id}/labels/{label}  detach a label
-//   POST   /tasks/{id}                 mark done      { done: true } (v1
-//                                      updates use POST, not PUT -- see
-//                                      markDone())
+//
+// The bucket (Kanban column) calls below were NOT verified against a live
+// instance's docs.json (no notify.vikunja.baseUrl/apiToken was configured in
+// this environment) -- they're assembled from community.vikunja.io threads
+// and the go-vikunja security advisories for the move-task endpoint
+// (GHSA-5pg6-m483-7vrg, GHSA-569v-q83c-3j3g). Re-verify against the live
+// instance's /api/v1/docs.json before relying on this in production, per the
+// plan this was implemented from (~/.claude/plans/indexed-wondering-owl.md):
+//   GET  /projects/{id}/views                         list views, find
+//                                                      view_kind: 'kanban'
+//   GET  /projects/{id}/views/{view}/buckets           list buckets
+//   PUT  /projects/{id}/views/{view}/buckets           create a bucket
+//                                                      { title }
+//   POST /projects/{id}/views/{view}/buckets/{bucket}/tasks
+//                                                      move a task into the
+//                                                      bucket { task_id }
 //
 // Deliberately not implemented (see plan 2.3 / section 5): deleting a task,
-// or re-checking its live labels before updating it -- tracking state lives
-// purely in .saved-vikunja-tasks.json, so a task a human completed by hand in
-// Vikunja can still get a stray comment on the next notify (an accepted
-// tradeoff, not a bug). Marking a task done on level 'success' *is*
-// implemented -- see markDone() / tmp/vikunja-mark-done-plan.md.
+// or re-checking its live labels/bucket before updating it -- tracking state
+// lives purely in .saved-vikunja-tasks.json, so a task a human completed by
+// hand in Vikunja can still get a stray comment on the next notify (an
+// accepted tradeoff, not a bug).
+//
+// Marking a task `done: true` on level 'success' was implemented and then
+// *removed* (see tmp/vikunja-mark-done-plan.md for the original rationale,
+// and ~/.claude/plans/indexed-wondering-owl.md for why it was reverted): a
+// human reported that Vikunja's own "moving a task into the done bucket sets
+// done, and vice versa" behavior made a Claude-reported success vanish from
+// the board's open-task view at exactly the moment a human needed to see it
+// and hand over the next prompt. `done` is now left entirely to the human;
+// the Doing/To-Do bucket below stands in for "whose turn is it".
+//
+// The .saved-vikunja-tasks.json tracking entry for a key is never dropped on
+// `success` either (it used to be, back when success also meant "done" --
+// see above): one Vikunja card is reused for the whole lifetime of a
+// tracking key (a combo's groupId, or a standalone sessionId), its bucket
+// swinging Doing/To-Do with every notify, rather than a fresh card being
+// created each time the key reports success. A new key (new combo/session)
+// still starts a fresh card.
 
 import { readFileSync, writeFileSync } from 'node:fs';
 import { hostname as osHostname } from 'node:os';
@@ -55,7 +84,15 @@ const LEVEL_STATUS = {
   warning: { suffix: 'blocked', color: 'f39c12' },
   error: { suffix: 'needs-input', color: 'e74c3c' },
 };
-const TERMINAL_LEVELS = new Set(['success']);
+// notify level -> which Kanban bucket "turn" the task belongs in. `info` is
+// the only level where Claude is actively working (Doing); every other
+// level means Claude has stopped and it's the human's turn (To-Do) --
+// including `success`, since finishing is exactly when a human needs to
+// check in and hand over the next prompt, not when the card should look
+// finished. warning/error don't get a bucket of their own: the distinction
+// between "done", "blocked" and "needs input" is left to the status label
+// above -- the bucket only answers "whose turn is it".
+const LEVEL_BUCKET_KIND = { info: 'doing', success: 'todo', warning: 'todo', error: 'todo' };
 
 // baseUrl/apiToken/projectId/etc are already resolved (env > config file >
 // default) by loadSandboxConfig -- see sandbox.js's rawVikunja parsing.
@@ -236,14 +273,64 @@ async function swapStatusLabel(config, taskId, prevLevel, nextLevel) {
   }
 }
 
-// Mark the Vikunja task done via a task-update POST (v1 API updates use
-// POST, not PUT -- see the header comment / vikunja.io's v1-vs-v2 verb
-// docs). Partial update: only `done` is sent, so title/description/etc are
-// left untouched by Vikunja. Best-effort like swapStatusLabel -- a failure
-// here must not affect the overall createOrUpdateTask result (the
-// status-completed label already reflects completion either way).
-async function markDone(config, taskId) {
-  await vikunjaFetch(config, 'POST', `/tasks/${taskId}`, { done: true }, 'mark-done');
+// The project's Kanban view id, memoized per baseUrl+projectId (a project's
+// views rarely change). Only a successful lookup is cached -- a request
+// failure (network blip, instance down) must not wedge every later notify
+// into skipping the bucket move for the rest of the process lifetime.
+const kanbanViewIdCache = new Map();
+
+async function findKanbanViewId(config) {
+  const cacheKey = `${config.baseUrl}::${config.projectId}`;
+  if (kanbanViewIdCache.has(cacheKey)) return kanbanViewIdCache.get(cacheKey);
+  const res = await vikunjaFetch(config, 'GET', `/projects/${config.projectId}/views`, undefined, 'list-views');
+  if (!res.ok || !Array.isArray(res.body)) return null;
+  const kanban = res.body.find((v) => v && v.view_kind === 'kanban');
+  const viewId = kanban ? kanban.id : null;
+  kanbanViewIdCache.set(cacheKey, viewId);
+  return viewId;
+}
+
+async function findBucketId(config, viewId, title) {
+  const res = await vikunjaFetch(config, 'GET', `/projects/${config.projectId}/views/${viewId}/buckets`, undefined, 'list-buckets');
+  if (!res.ok || !Array.isArray(res.body)) return null;
+  const exact = res.body.find((b) => b && b.title === title);
+  return exact ? exact.id : null;
+}
+
+async function findOrCreateBucketId(config, viewId, title) {
+  const existing = await findBucketId(config, viewId, title);
+  if (existing != null) return existing;
+  const created = await vikunjaFetch(config, 'PUT', `/projects/${config.projectId}/views/${viewId}/buckets`, { title }, 'create-bucket');
+  return created.ok && created.body ? created.body.id : null;
+}
+
+// Move the task into the bucket, best-effort like swapStatusLabel -- a
+// failure here must not affect the overall createOrUpdateTask result (the
+// status label already reflects the level either way).
+async function moveTaskToBucket(config, viewId, bucketId, taskId) {
+  await vikunjaFetch(config, 'POST', `/projects/${config.projectId}/views/${viewId}/buckets/${bucketId}/tasks`, { task_id: taskId }, 'move-bucket');
+}
+
+// Move the task into the Doing/To-Do bucket matching nextLevel's "turn" (see
+// LEVEL_BUCKET_KIND), skipping the move entirely when prev/next resolve to
+// the same bucket kind -- unlike labels, a bucket move is exclusive (a task
+// only ever sits in one bucket), so there's no separate detach step.
+// Resolving the view/bucket ids costs a few extra requests; any failure
+// along the way (no Kanban view configured, a transient error) just skips
+// the move rather than blocking the notify.
+async function swapStatusBucket(config, taskId, prevLevel, nextLevel) {
+  const nextKind = LEVEL_BUCKET_KIND[nextLevel] || LEVEL_BUCKET_KIND.info;
+  if (prevLevel) {
+    const prevKind = LEVEL_BUCKET_KIND[prevLevel] || LEVEL_BUCKET_KIND.info;
+    if (prevKind === nextKind) return;
+  }
+  const viewId = await findKanbanViewId(config);
+  if (viewId == null) return;
+  const buckets = config.buckets || {};
+  const title = nextKind === 'doing' ? (buckets.doing || 'Doing') : (buckets.todo || 'To-Do');
+  const bucketId = await findOrCreateBucketId(config, viewId, title);
+  if (bucketId == null) return;
+  await moveTaskToBucket(config, viewId, bucketId, taskId);
 }
 
 function commentText(title, body, level) {
@@ -279,15 +366,11 @@ export async function createOrUpdateTask({ key, title, body, level, identity }) 
     if (!created.ok || !created.body?.id) return { ok: false, action: 'error', taskId: null };
     const taskId = created.body.id;
     await swapStatusLabel(config, taskId, null, lvl);
-    if (TERMINAL_LEVELS.has(lvl)) {
-      // success on the very first notify for this key -- no tracking entry
-      // to write, so the next notify for this key is treated as a fresh
-      // task rather than reopening this (already done) one.
-      await markDone(config, taskId);
-    } else {
-      tasks[key] = { taskId, lastLevel: lvl, createdAt: Date.now() };
-      writeTasks(tasks);
-    }
+    await swapStatusBucket(config, taskId, null, lvl);
+    // The card is kept tracked regardless of level (including 'success') --
+    // it's reused for the whole lifetime of this key, see the header comment.
+    tasks[key] = { taskId, lastLevel: lvl, createdAt: Date.now() };
+    writeTasks(tasks);
     return { ok: true, action: 'created', taskId };
   }
 
@@ -298,12 +381,8 @@ export async function createOrUpdateTask({ key, title, body, level, identity }) 
     'add-comment',
   );
   await swapStatusLabel(config, taskId, existing.lastLevel, lvl);
-  if (TERMINAL_LEVELS.has(lvl)) {
-    await markDone(config, taskId);
-    delete tasks[key];
-  } else {
-    tasks[key] = { ...existing, lastLevel: lvl };
-  }
+  await swapStatusBucket(config, taskId, existing.lastLevel, lvl);
+  tasks[key] = { ...existing, lastLevel: lvl };
   writeTasks(tasks);
   return { ok: comment.ok, action: 'updated', taskId };
 }
