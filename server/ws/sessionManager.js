@@ -152,7 +152,7 @@ function extractResumeId(session) {
 // Prefixes marking a createSession() failure as a server-side infrastructure
 // fault rather than a rejection of the request as given. Exported so HTTP
 // layers (routes/groups.js) classify without re-typing the strings.
-export const INFRA_ERROR_PREFIXES = ['Failed to build sandbox', 'Failed to spawn'];
+export const INFRA_ERROR_PREFIXES = ['Failed to build sandbox', 'Failed to spawn', 'Cannot launch: sandbox.config.json sets "forceSandbox"'];
 
 /**
  * Whether a createSession() error message reports infrastructure failure

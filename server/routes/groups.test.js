@@ -45,6 +45,7 @@ test('isInfrastructureError: infra failures surface as 500, request rejections s
   // if those messages change, this test forces INFRA_ERROR_PREFIXES to follow.
   assert.equal(isInfrastructureError('Failed to build sandbox: bwrap not found'), true);
   assert.equal(isInfrastructureError('Failed to spawn "claude": spawn ENOENT'), true);
+  assert.equal(isInfrastructureError('Cannot launch: sandbox.config.json sets "forceSandbox": true, but bwrap is not available on this host. Install bwrap (bubblewrap) or disable forceSandbox.'), true);
   // Request-as-given rejections must keep mapping to 400.
   assert.equal(isInfrastructureError('Cannot launch: copilot is hidden on this server (sandbox.config.json\'s "hiddenApps"). Remove it from hiddenApps to allow launches.'), false);
   assert.equal(isInfrastructureError('Cannot launch: codex is not installed on this server (searched /usr/bin).'), false);

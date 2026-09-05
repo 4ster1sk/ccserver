@@ -110,6 +110,12 @@ export default function RightSidebar({ usageProps = {}, prefs }) {
 
   const showMonitorStatus = shownWidgets.some((w) => MONITOR_WIDGET_IDS.includes(w.id));
 
+  // 描画可能な本体を持つウィジェットのみ枠を作る。取得済みで0件の場合は
+  // 下の空メッセージで空白回避する。
+  const renderedWidgets = shownWidgets
+    .map((w) => ({ w, body: renderWidgetBody(w.id) }))
+    .filter(({ body }) => body !== null);
+
   return (
     <aside className="right-sidebar">
       <div className="sidebar-header">
@@ -158,20 +164,20 @@ export default function RightSidebar({ usageProps = {}, prefs }) {
         {showMonitorStatus && !stats?.error && !stats?.data && (
           <div className="loading">Loading system stats...</div>
         )}
-        {shownWidgets
-          .map((w) => ({ w, body: renderWidgetBody(w.id) }))
-          .filter(({ body }) => body !== null)
-          .map(({ w, body }) => (
-            <WidgetShell
-              key={w.id}
-              title={w.title}
-              onHide={() => setWidgetVisible(w.id, false)}
-              onMoveUp={() => moveWidget(w.id, 'up')}
-              onMoveDown={() => moveWidget(w.id, 'down')}
-            >
-              {body}
-            </WidgetShell>
-          ))}
+        {renderedWidgets.map(({ w, body }) => (
+          <WidgetShell
+            key={w.id}
+            title={w.title}
+            onHide={() => setWidgetVisible(w.id, false)}
+            onMoveUp={() => moveWidget(w.id, 'up')}
+            onMoveDown={() => moveWidget(w.id, 'down')}
+          >
+            {body}
+          </WidgetShell>
+        ))}
+        {renderedWidgets.length === 0 && stats?.data && (
+          <div className="sidebar-empty">表示できるデータがありません。＋から追加してください。</div>
+        )}
         {shownWidgets.length === 0 && (
           <div className="sidebar-empty">表示中のウィジェットがありません。＋から追加してください。</div>
         )}
