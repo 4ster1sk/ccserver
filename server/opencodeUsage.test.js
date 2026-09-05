@@ -80,13 +80,47 @@ test('extractGoKey: api entry yields its key', () => {
   assert.equal(extractGoKey({ 'opencode-go': { type: 'api', key: 'k123' } }), 'k123');
 });
 
-test('extractGoKey: missing entry, wrong type, empty key, null input -> null', () => {
+test('extractGoKey: missing entry, empty key, null input -> null', () => {
   assert.equal(extractGoKey({}), null);
-  assert.equal(extractGoKey({ 'opencode-go': { type: 'oauth', key: 'k' } }), null);
   assert.equal(extractGoKey({ 'opencode-go': { type: 'api', key: '' } }), null);
   assert.equal(extractGoKey({ 'opencode-go': { type: 'api' } }), null);
   assert.equal(extractGoKey(null), null);
   assert.equal(extractGoKey('nope'), null);
+});
+
+// type: 'oauth' -- an OAuth access token, not a static API key (see the
+// comment above extractGoKey for the auth.json union shape). expires may be
+// epoch-ms or epoch-seconds; the >1e12 heuristic tells them apart.
+test('extractGoKey: oauth entry with a future expires (ms) -> the access token', () => {
+  const future = Date.now() + 3600_000;
+  assert.equal(extractGoKey({ 'opencode-go': { type: 'oauth', access: 'tok123', refresh: 'r', expires: future } }), 'tok123');
+});
+
+test('extractGoKey: oauth entry with a future expires in seconds -> still valid via the unit heuristic', () => {
+  const futureSeconds = Math.floor((Date.now() + 3600_000) / 1000);
+  assert.ok(futureSeconds < 1e12, 'sanity: this is really a seconds-since-epoch value');
+  assert.equal(extractGoKey({ 'opencode-go': { type: 'oauth', access: 'tok123', expires: futureSeconds } }), 'tok123');
+});
+
+test('extractGoKey: oauth entry with a past expires -> null (expired, no refresh attempted)', () => {
+  const past = Date.now() - 3600_000;
+  assert.equal(extractGoKey({ 'opencode-go': { type: 'oauth', access: 'tok123', expires: past } }), null);
+});
+
+test('extractGoKey: oauth entry missing access -> null', () => {
+  assert.equal(extractGoKey({ 'opencode-go': { type: 'oauth', refresh: 'r', expires: Date.now() + 3600_000 } }), null);
+});
+
+test('extractGoKey: oauth entry with a non-numeric/missing expires -> skips the expiry check, returns access', () => {
+  assert.equal(extractGoKey({ 'opencode-go': { type: 'oauth', access: 'tok123' } }), 'tok123');
+  assert.equal(extractGoKey({ 'opencode-go': { type: 'oauth', access: 'tok123', expires: 'not-a-number' } }), 'tok123');
+});
+
+// type: 'wellknown' -- intentionally unsupported (see the comment above
+// extractGoKey): which of key/token is the bearer credential is unconfirmed.
+// This is a regression guard, not an endorsement of the current behavior.
+test('extractGoKey: wellknown entry -> null (not implemented)', () => {
+  assert.equal(extractGoKey({ 'opencode-go': { type: 'wellknown', key: 'k', token: 't' } }), null);
 });
 
 test('mapGoUsage: three windows map to the shared shape', () => {

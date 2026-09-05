@@ -52,15 +52,42 @@ function authFilePath() {
   return join(dataHome, 'opencode', 'auth.json');
 }
 
-// Pull the Go API key out of an auth.json-shaped object ({ providerId:
-// { type: 'api', key } }). Returns the key string or null. Pure (no I/O),
-// so tests can cover the shape without touching the real file.
+// Pull a usable bearer credential out of the "opencode-go" auth.json entry.
+// opencode's auth.json entries are a type-discriminated union (per opencode's
+// source, dev branch as of 2026-09 -- NOT verified against a real
+// /connect-signed-in installation):
+//   - type: 'api'      -> { key, metadata? }                    (static API key)
+//   - type: 'oauth'    -> { refresh, access, expires, accountId?, enterpriseUrl? }
+//                         (OAuth access token; expires is presumed epoch-ms, but a
+//                         seconds-since-epoch value is tolerated too via the >1e12
+//                         heuristic below -- no refresh is attempted here: that
+//                         needs the refresh endpoint's contract, which is
+//                         unconfirmed, so an expired access token is simply
+//                         treated as absent)
+//   - type: 'wellknown' -> { key, token }                       (enterprise SSO)
+// wellknown's bearer field is intentionally NOT handled: which of key/token
+// opencode itself sends as the bearer credential is unconfirmed, and guessing
+// wrong would ship a silently-wrong mapping disguised as support. Treated as
+// absent (same as before this change) until a real wellknown/enterprise
+// account confirms the mapping.
+// Pure (no I/O), so tests can cover the shape without touching the real file.
 export function extractGoKey(authObj) {
   if (!authObj || typeof authObj !== 'object') return null;
   const entry = authObj[AUTH_PROVIDER_ID];
   if (!entry || typeof entry !== 'object') return null;
-  if (entry.type !== 'api') return null;
-  return typeof entry.key === 'string' && entry.key.length > 0 ? entry.key : null;
+  if (entry.type === 'api') {
+    return typeof entry.key === 'string' && entry.key.length > 0 ? entry.key : null;
+  }
+  if (entry.type === 'oauth') {
+    if (typeof entry.access !== 'string' || entry.access.length === 0) return null;
+    if (typeof entry.expires === 'number' && Number.isFinite(entry.expires)) {
+      const expiresAtMs = entry.expires > 1e12 ? entry.expires : entry.expires * 1000;
+      if (Date.now() >= expiresAtMs) return null; // expired; no refresh attempted (see above)
+    }
+    return entry.access;
+  }
+  // type: 'wellknown' (or anything else) -- not implemented, see comment above.
+  return null;
 }
 
 function readAuthFile() {
