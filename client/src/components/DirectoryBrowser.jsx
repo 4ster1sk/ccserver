@@ -114,6 +114,21 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
     return null;
   };
   const modelInputForApp = (app) => app === 'codex' || app === 'commandcode';
+  // commandcode の許可モード (standard / auto-accept / yolo)。OFF(=standard)
+  // も含めて記憶する (単なる既定値ではなくユーザーの明示選択として保持)。
+  const PERMISSION_MODES = ['standard', 'auto-accept', 'yolo'];
+  const PERMISSION_MODE_LABELS = { standard: '標準', 'auto-accept': '自動承認', yolo: 'yolo' };
+  const [commandcodePermissionMode, setCommandcodePermissionMode] = useState(() => {
+    const saved = localStorage.getItem('ccserver-commandcode-permission-mode');
+    return PERMISSION_MODES.includes(saved) ? saved : 'standard';
+  });
+  const choosePermissionMode = (val) => {
+    if (!PERMISSION_MODES.includes(val)) return;
+    setCommandcodePermissionMode(val);
+    localStorage.setItem('ccserver-commandcode-permission-mode', val);
+  };
+  // 許可モードは commandcode 起動にだけ付与する (他アプリは常に standard)。
+  const permissionModeForApp = (app) => (app === 'commandcode' ? commandcodePermissionMode : 'standard');
   const [openMenuOpen, setOpenMenuOpen] = useState(false);
   const [launchMode, setLaunchMode] = useState('single'); // 'single' | 'combo'
   // Whether the privileged ccserver-meta feature is on (sandbox.config.json's
@@ -736,7 +751,7 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
           <div className="open-split">
             <button
               className="btn btn-primary open-split-main"
-              onClick={() => onOpen(currentPath, { sandbox: sandboxDefault, sandboxOpts, app: appDefault, model: modelForApp(appDefault) })}
+              onClick={() => onOpen(currentPath, { sandbox: sandboxDefault, sandboxOpts, app: appDefault, model: modelForApp(appDefault), permissionMode: permissionModeForApp(appDefault) })}
               title={sandboxDefault ? 'サンドボックスで起動' : '通常起動'}
             >
               {sandboxDefault ? '🔒 ' : ''}{appDefault === 'claude' ? 'Claude Code' : appDefault === 'copilot' ? 'GitHub Copilot' : appDefault === 'codex' ? 'OpenAI Codex' : appDefault === 'commandcode' ? 'Command Code' : 'opencode'}
@@ -846,6 +861,28 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
                       spellCheck={false}
                     />
                   </div>
+                )}
+                {appDefault === 'commandcode' && (
+                  <>
+                    <div className="open-menu-label">許可モード</div>
+                    <div className="open-menu-app-row">
+                      {PERMISSION_MODES.map((mode) => (
+                        <button
+                          key={mode}
+                          className={`open-menu-app-btn${commandcodePermissionMode === mode ? ' active' : ''}`}
+                          onClick={() => choosePermissionMode(mode)}
+                          title={mode === 'yolo' ? '--yolo: 全ての許可プロンプトを回避' : mode === 'auto-accept' ? '--auto-accept: 自動承認モードで開始' : '既定の許可プロンプト動作'}
+                        >
+                          {PERMISSION_MODE_LABELS[mode]}
+                        </button>
+                      ))}
+                    </div>
+                    {commandcodePermissionMode === 'yolo' && (
+                      <p className="open-menu-note">
+                        yolo モード: 全ての許可プロンプトを回避します。破壊的なコマンドも確認なしに実行されるため、信頼できる作業でのみ使ってください。
+                      </p>
+                    )}
+                  </>
                 )}
                 {sandboxPicker}
               </>
@@ -1174,7 +1211,7 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
               ) : (
                 <button
                   className="btn btn-primary"
-                  onClick={() => { closeOpenMenu(); onOpen(currentPath, { sandbox: sandboxDefault, sandboxOpts, app: appDefault, model: modelForApp(appDefault) }); }}
+                  onClick={() => { closeOpenMenu(); onOpen(currentPath, { sandbox: sandboxDefault, sandboxOpts, app: appDefault, model: modelForApp(appDefault), permissionMode: permissionModeForApp(appDefault) }); }}
                 >
                   起動
                 </button>
@@ -1367,6 +1404,9 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
                       ? 'shell'
                       : `${session.app === 'claude' ? 'claude' : session.app === 'copilot' ? 'copilot' : session.app === 'codex' ? 'codex' : session.app === 'commandcode' ? 'command-code' : 'opencode'} · ${session.connected ? 'connected' : 'idle'}`}
                   </span>
+                  {!session.shell && session.app === 'commandcode' && (session.permissionMode === 'yolo' || session.permissionMode === 'auto-accept') && (
+                    <span className={`session-badge permission-${session.permissionMode}`} title={session.permissionMode === 'yolo' ? 'yolo モード (--yolo) で実行中' : '自動承認モード (--auto-accept) で実行中'}>{session.permissionMode}</span>
+                  )}
                 </div>
                 <span className="session-cwd" title={session.cwd}>{displayPath(session.cwd, homeDir)}</span>
               </div>
@@ -1429,6 +1469,7 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
                 sandboxOpts: loadSandboxOpts(dir.path),
                 app: appDefault,
                 model: modelForApp(appDefault),
+                permissionMode: permissionModeForApp(appDefault),
               })}
               role="button"
               tabIndex={0}

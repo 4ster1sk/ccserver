@@ -154,6 +154,37 @@ test('createSession stores the effective model (normalized); shells never carry 
   }
 });
 
+// Permission mode state on sessions: any value normalizes to one of
+// 'standard' | 'auto-accept' | 'yolo' (unknown -> 'standard'); shells always
+// carry 'standard'. The CLI flag itself is commandcode-only (see
+// appLaunch.test.js) -- storage here is app-agnostic, mirroring model.
+test('createSession stores the normalized permissionMode; shells are always standard', async () => {
+  const shell = sessionManager.createSession({ cwd: '/tmp', cols: 80, rows: 24, shell: true, sandbox: false, permissionMode: 'yolo' });
+  assert.ok(shell.session, 'shell session should spawn');
+  try {
+    assert.equal(shell.session.permissionMode, 'standard', 'shell sessions never carry a permission mode');
+    assert.equal(sessionManager.listSessions().find((s) => s.id === shell.sessionId).permissionMode, 'standard');
+    assert.equal(sessionManager.savedSessionPublic(shell.session, null).permissionMode, 'standard');
+  } finally {
+    sessionManager.destroySession(shell.sessionId, { keepSchedule: false });
+  }
+
+  const res = sessionManager.createSession({ cwd: '/tmp', cols: 80, rows: 24, shell: true, sandbox: false });
+  assert.ok(res.session);
+  try {
+    res.session.permissionMode = 'bogus';
+    assert.equal(
+      sessionManager.listSessions().find((s) => s.id === res.sessionId).permissionMode,
+      'standard',
+      'invalid permission modes normalize to standard in listSessions',
+    );
+    res.session.permissionMode = 'yolo';
+    assert.equal(sessionManager.savedSessionPublic(res.session, null).permissionMode, 'yolo');
+  } finally {
+    sessionManager.destroySession(res.sessionId, { keepSchedule: false });
+  }
+});
+
 // A configured claudeBin that resolves nowhere (a bare name on no searched
 // dir) must be refused with the clear not-installed error instead of reaching
 // pty.spawn (opaque execvp ENOENT / exit 127 right after "起動しました").
@@ -195,6 +226,25 @@ test('setScheduledPrompt persists the session model into the schedule file', asy
     const entry = saved.find((e) => e.text === 'MARKER_MODEL');
     assert.ok(entry, 'schedule persisted');
     assert.equal(entry.model, 'anthropic/claude-sonnet-4', 'the launch model survives into the persisted schedule');
+  } finally {
+    sessionManager.destroySession(res.sessionId, { keepSchedule: false });
+  }
+});
+
+// setScheduledPrompt captures the session's permission mode into the persisted
+// schedule entry so the auto-resume path replays it (persistSchedules).
+test('setScheduledPrompt persists the session permissionMode into the schedule file', async () => {
+  const res = sessionManager.createSession({ cwd: '/tmp', cols: 80, rows: 24, shell: true, sandbox: false });
+  assert.ok(res.session, 'shell session should spawn');
+  try {
+    // Shells always carry 'standard'; fabricate the commandcode mode the way
+    // the model test above fabricates a model.
+    res.session.permissionMode = 'yolo';
+    assert.ok(sessionManager.setScheduledPrompt(res.sessionId, Date.now() + 5000, 'MARKER_PERMMODE'));
+    const saved = JSON.parse(readFileSync(schedulePath(), 'utf-8'));
+    const entry = saved.find((e) => e.text === 'MARKER_PERMMODE');
+    assert.ok(entry, 'schedule persisted');
+    assert.equal(entry.permissionMode, 'yolo', 'the permission mode survives into the persisted schedule');
   } finally {
     sessionManager.destroySession(res.sessionId, { keepSchedule: false });
   }
@@ -647,6 +697,36 @@ test('matchesScheduleTarget is model-scoped (no cross-model injection)', () => {
     true,
     'same model and same group+role matches',
   );
+});
+
+// A permission-mode-annotated schedule must only inject into a live session
+// launched with the SAME mode -- never into a standard or differently-moded
+// one (a yolo schedule replaying into a standard session would silently
+// escalate its privileges, and vice versa). Legacy entries without the field
+// count as 'standard' on both sides.
+test('matchesScheduleTarget is permission-mode-scoped (no cross-mode injection)', () => {
+  const live = (over = {}) => ({
+    cwd: '/srv/proj', shell: false, app: 'commandcode',
+    model: null, permissionMode: 'standard', groupId: null, groupRole: null,
+    exited: false, ptyProcess: {},
+    ...over,
+  });
+  const entry = {
+    cwd: '/srv/proj', shell: false, app: 'commandcode', model: null,
+    permissionMode: 'yolo', groupId: null, groupRole: null,
+  };
+
+  assert.equal(sessionManager.matchesScheduleTarget(live(), entry), false);
+  assert.equal(sessionManager.matchesScheduleTarget(live({ permissionMode: 'auto-accept' }), entry), false);
+  assert.equal(sessionManager.matchesScheduleTarget(live({ permissionMode: 'yolo' }), entry), true);
+
+  // Legacy entries (no permissionMode field) keep matching standard sessions only.
+  const legacy = {
+    cwd: '/srv/proj', shell: false, app: 'commandcode', model: null,
+    groupId: null, groupRole: null,
+  };
+  assert.equal(sessionManager.matchesScheduleTarget(live(), legacy), true);
+  assert.equal(sessionManager.matchesScheduleTarget(live({ permissionMode: 'yolo' }), legacy), false);
 });
 
 // Fix 3: auto-resume of a dead group member recreates its handoff channel,

@@ -7,6 +7,9 @@ import {
   appResumeArgs,
   appModelArgs,
   appSupportsModelFlag,
+  PERMISSION_MODES,
+  normalizePermissionMode,
+  appPermissionArgs,
   appSubmitKey,
   extractResumeSessionId,
   detectPermissionPrompt,
@@ -184,6 +187,47 @@ test('appModelArgs: claude never emits --model unless the capability is enabled'
     if (before === undefined) delete process.env.CCSERVER_CLAUDE_MODEL;
     else process.env.CCSERVER_CLAUDE_MODEL = before;
   }
+});
+
+test('normalizePermissionMode: known modes pass through, everything else is standard', () => {
+  assert.deepEqual(PERMISSION_MODES, ['standard', 'auto-accept', 'yolo']);
+  assert.equal(normalizePermissionMode('standard'), 'standard');
+  assert.equal(normalizePermissionMode('auto-accept'), 'auto-accept');
+  assert.equal(normalizePermissionMode('yolo'), 'yolo');
+  assert.equal(normalizePermissionMode(null), 'standard');
+  assert.equal(normalizePermissionMode(undefined), 'standard');
+  assert.equal(normalizePermissionMode(''), 'standard');
+  assert.equal(normalizePermissionMode('YOLO'), 'standard', 'matching is case-sensitive');
+  assert.equal(normalizePermissionMode('plan'), 'standard', 'plan is not a ccserver permission mode');
+  assert.equal(normalizePermissionMode(42), 'standard');
+});
+
+test('appPermissionArgs: commandcode maps each mode to its CLI flag', () => {
+  assert.deepEqual(appPermissionArgs('commandcode', 'standard'), []);
+  assert.deepEqual(appPermissionArgs('commandcode', 'auto-accept'), ['--auto-accept']);
+  assert.deepEqual(appPermissionArgs('commandcode', 'yolo'), ['--yolo']);
+  assert.deepEqual(appPermissionArgs('commandcode', null), [], 'null must be omitted');
+  assert.deepEqual(appPermissionArgs('commandcode', undefined), [], 'absent must be omitted');
+  assert.deepEqual(appPermissionArgs('commandcode', 'bogus'), [], 'unknown modes must never become a flag');
+});
+
+test('appPermissionArgs: every other app ignores the mode (commandcode-only flag)', () => {
+  for (const app of ['claude', 'opencode', 'copilot', 'codex', 'bogus', null, undefined]) {
+    assert.deepEqual(appPermissionArgs(app, 'yolo'), [], `${app} must never receive --yolo`);
+    assert.deepEqual(appPermissionArgs(app, 'auto-accept'), [], `${app} must never receive --auto-accept`);
+  }
+});
+
+test('commandcode launch argv keeps resume + model + permission flags together', () => {
+  const launchArgs = (resumeId, resumeLast, model, permissionMode) => [
+    ...appResumeArgs('commandcode', resumeId, { resumeLast }),
+    ...appModelArgs('commandcode', model),
+    ...appPermissionArgs('commandcode', permissionMode),
+  ];
+  assert.deepEqual(launchArgs(null, false, null, 'standard'), []);
+  assert.deepEqual(launchArgs(null, false, 'gpt-5', 'yolo'), ['--model', 'gpt-5', '--yolo']);
+  assert.deepEqual(launchArgs('abc123', false, null, 'auto-accept'), ['--resume', 'abc123', '--auto-accept']);
+  assert.deepEqual(launchArgs(null, true, null, 'yolo'), ['-c', '--yolo']);
 });
 
 test('appSubmitKey: every agent CLI submits with CR, Codex included (regression lock)', () => {

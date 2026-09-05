@@ -237,7 +237,7 @@ function osc52Response(text) {
 
 const themeIds = getThemeIds();
 
-export default function TerminalView({ cwd, onClose, claudeSessionId, shell, sandbox, sandboxOpts, reuseSandboxHome = true, app = 'claude', model = null, resume = false, isMetaAgent = false, notify, notifyEnabled, notifyPermission, onToggleNotify, visible, onSessionId, onExited, attachSessionId, xtermTheme, themeId, onThemeChange, tabId, onFocusTab, groupId, groupRole, projectCwd = null, remoteInstanceId = null, remoteInstanceLabel = null }) {
+export default function TerminalView({ cwd, onClose, claudeSessionId, shell, sandbox, sandboxOpts, reuseSandboxHome = true, app = 'claude', model = null, permissionMode = 'standard', resume = false, isMetaAgent = false, notify, notifyEnabled, notifyPermission, onToggleNotify, visible, onSessionId, onExited, attachSessionId, xtermTheme, themeId, onThemeChange, tabId, onFocusTab, groupId, groupRole, projectCwd = null, remoteInstanceId = null, remoteInstanceLabel = null }) {
   const isMobile = useMemo(() => 'ontouchstart' in window, []);
   const terminalRef = useRef(null);
   const terminalViewRef = useRef(null);
@@ -255,6 +255,10 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
   const reuseSandboxHomeRef = useRef(reuseSandboxHome);
   const appRef = useRef(app);
   const modelRef = useRef(model);
+  // commandcode permission mode ('standard' | 'auto-accept' | 'yolo'): must
+  // ride along on EVERY init like isMetaAgent -- dropping it on the
+  // SESSION_NOT_FOUND re-init would resurrect a yolo session as standard.
+  const permissionModeRef = useRef(permissionMode);
   const resumeRef = useRef(resume);
   // Set once per tab (a terminal tab never switches between local/remote
   // mid-life -- App.jsx always creates a fresh tab id for that), so a plain
@@ -716,6 +720,7 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
             reuseSandboxHome: reuseSandboxHomeRef.current !== false,
             app: appRef.current,
             model: shellRef.current ? null : modelRef.current,
+            permissionMode: shellRef.current ? 'standard' : (permissionModeRef.current || 'standard'),
             isMetaAgent: !!isMetaAgentRef.current,
             // Group membership is carried into a re-launch so the server can
             // re-create the member's MCP channel and register it to the role.
@@ -841,6 +846,7 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
                 reuseSandboxHome: reuseSandboxHomeRef.current !== false,
                 app: appRef.current,
                 model: shellRef.current ? null : modelRef.current,
+                permissionMode: shellRef.current ? 'standard' : (permissionModeRef.current || 'standard'),
                 isMetaAgent: !!isMetaAgentRef.current,
                 groupId: groupId || null,
                 groupRole: groupRole || null,
@@ -1272,7 +1278,7 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
         <span
           className="terminal-title"
           title={projectCwd && projectCwd !== cwd ? `Project: ${projectCwd}\nWorktree: ${cwd}` : cwd}
-        >{sandbox ? '🔒 ' : (!shell ? '⚠️ ' : '')}{shell ? 'Terminal' : appLabel(app)}{!shell && model ? ` · ${model}` : ''} &mdash; {displayPath(cwd, homeDir)}</span>
+        >{sandbox ? '🔒 ' : (!shell ? '⚠️ ' : '')}{shell ? 'Terminal' : appLabel(app)}{!shell && model ? ` · ${model}` : ''}{!shell && app === 'commandcode' && (permissionMode === 'yolo' || permissionMode === 'auto-accept') ? ` · ${permissionMode}` : ''} &mdash; {displayPath(cwd, homeDir)}</span>
         <div className="header-actions">
           <div className="theme-picker" ref={themeMenuRef}>
             <button
