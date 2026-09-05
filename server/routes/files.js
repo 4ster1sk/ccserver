@@ -1,7 +1,8 @@
 import { createReadStream, constants } from 'node:fs';
 import { stat, writeFile, open } from 'node:fs/promises';
-import { resolve, basename, join, extname } from 'node:path';
+import { resolve, basename, join } from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
+import mime from 'mime';
 
 function safePath(requestedPath) {
   return resolve('/', requestedPath || '/');
@@ -18,18 +19,76 @@ export const PREVIEW_MAX_BYTES = 1024 * 1024;
 // executables and archives all trip it; UTF-8 text never contains NUL.
 export const SNIFF_BYTES = 8 * 1024;
 
-// Only these extensions are served by the preview route. The client mirrors
-// this list (client/src/previewExts.js) to decide which rows are clickable;
-// files.test.js asserts the two lists agree.
-export const PREVIEW_EXTS = { '.md': 'markdown', '.txt': 'text' };
+// MIME overrides for extensions where the `mime` database returns the wrong
+// answer (or none) for a plain-text source file. The keys are bare lowercase
+// extensions without the dot; values feed the same text/* + json rule below.
+//   .ts/.mts -> video/mp2t, model/vnd.mts: registered media types that would
+//     hide TypeScript sources behind "unsupported".
+//   .cts/.tsx/.py/.go/.rb/.vue and friends -> unregistered (null): languages
+//     the mime db simply does not know as file extensions.
+//   .sql -> application/sql, .toml -> application/toml: registered
+//     non-text types for plain-text sources, pinned back to text/*.
+//   .md/.markdown -> pinned to text/markdown so the markdown renderer is
+//     driven by this table, not by whatever the library happens to return.
+//   .jsonc -> unregistered: JSON with comments, viewable as JSON.
+export const MIME_OVERRIDES = {
+  md: 'text/markdown',
+  markdown: 'text/markdown',
+  ts: 'text/typescript',
+  mts: 'text/typescript',
+  cts: 'text/typescript',
+  tsx: 'text/tsx',
+  jsx: 'text/jsx',
+  vue: 'text/x-vue',
+  svelte: 'text/x-svelte',
+  astro: 'text/x-astro',
+  py: 'text/x-python',
+  rb: 'text/x-ruby',
+  go: 'text/x-go',
+  rs: 'text/x-rust',
+  graphql: 'text/x-graphql',
+  sql: 'text/x-sql',
+  diff: 'text/x-diff',
+  patch: 'text/x-diff',
+  toml: 'text/x-toml',
+  jsonc: 'application/jsonc',
+};
+
+// Extensions the Files tab opens inline, decided by MIME type: text/* plus
+// application/json and application/jsonc. Extension-less names and dotfiles
+// (".md" alone) stay unsupported, matching the old extname() behaviour.
+// Unknown extensions fall back to application/octet-stream (unsupported).
+export function mimeForPreview(name) {
+  const base = basename(String(name || ''));
+  const dot = base.lastIndexOf('.');
+  if (dot <= 0 || dot === base.length - 1) return 'application/octet-stream';
+  const ext = base.slice(dot + 1).toLowerCase();
+  return MIME_OVERRIDES[ext] || mime.getType(ext) || 'application/octet-stream';
+}
+
+/**
+ * Whether a MIME type is viewable inline as text.
+ * @param {string} mt MIME type.
+ * @returns {boolean}
+ */
+export function isPreviewableMime(mt) {
+  return mt === 'text/markdown'
+    || mt === 'application/json'
+    || mt === 'application/jsonc'
+    || String(mt).startsWith('text/');
+}
 
 /**
  * Classify a file name for the preview viewer.
  * @param {string} name File name or path.
- * @returns {'markdown' | 'text' | null} null when the file is not previewable.
+ * @returns {'markdown' | 'json' | 'text' | null} null when the file is not previewable.
  */
 export function previewKind(name) {
-  return PREVIEW_EXTS[extname(String(name || '')).toLowerCase()] || null;
+  const mt = mimeForPreview(name);
+  if (mt === 'text/markdown') return 'markdown';
+  if (mt === 'application/json' || mt === 'application/jsonc') return 'json';
+  if (String(mt).startsWith('text/')) return 'text';
+  return null;
 }
 
 /**

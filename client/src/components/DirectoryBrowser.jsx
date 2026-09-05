@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useRef, lazy, Suspense } from 'react'
 import { authFetch, getToken } from '../auth.js';
 import { displayPath } from '../displayPath.js';
 import { formatSize } from '../formatSize.js';
-import { isPreviewable } from '../previewExts.js';
+import { isPreviewable, PREVIEW_CONFIRM_BYTES } from '../previewExts.js';
 import { isAppSelectable } from '../appAvailability.js';
 import MetaLaunchDialog from './MetaLaunchDialog.jsx';
 
@@ -545,6 +545,15 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
   }, [fetchSessions, homeDir]);
 
   const closePreview = useCallback(() => setPreviewFile(null), []);
+
+  // Files over PREVIEW_CONFIRM_BYTES ask first, before any fetch: the listing
+  // already carries the size, so cancelling avoids the /files/content read.
+  const requestPreview = useCallback((file) => {
+    if (typeof file.size === 'number' && file.size > PREVIEW_CONFIRM_BYTES) {
+      if (!window.confirm(`このファイルは ${formatSize(file.size)} あります。本当に開きますか?`)) return;
+    }
+    setPreviewFile(file);
+  }, []);
 
   const handleDownload = useCallback((file) => {
     const a = document.createElement('a');
@@ -1494,7 +1503,7 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
                 <button
                   type="button"
                   className="file-open-btn"
-                  onClick={() => setPreviewFile(file)}
+                  onClick={() => requestPreview(file)}
                   title={`Preview ${file.name}`}
                 >
                   <span className="file-icon">&#128196;</span>

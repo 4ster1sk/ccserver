@@ -10,10 +10,10 @@ function utf8ByteLength(str) {
 }
 
 /**
- * Modal viewer for a text or markdown file in the directory browser. Fetches
- * `/api/files/content` and renders the result through PreviewDialog (dialog
- * chrome, focus trap, Rendered/Source toggle, sanitized markdown all live
- * there).
+ * Modal viewer for a text, JSON or markdown file in the directory browser.
+ * Fetches `/api/files/content` and renders the result through PreviewDialog
+ * (dialog chrome, focus trap, Rendered/Source and Pretty/Source toggles,
+ * sanitized markdown all live there).
  * @param {{ file: { name: string, path: string, size?: number }, onClose: () => void, onDownload: (file: object) => void }} props
  */
 export default function FilePreview({ file, onClose, onDownload }) {
@@ -43,6 +43,7 @@ export default function FilePreview({ file, onClose, onDownload }) {
 
   const data = state.data;
   const isMarkdown = data?.kind === 'markdown';
+  const isJson = data?.kind === 'json';
   const size = data?.size ?? file.size;
 
   return (
@@ -54,6 +55,7 @@ export default function FilePreview({ file, onClose, onDownload }) {
       error={state.error}
       content={data?.content}
       isMarkdown={isMarkdown}
+      isJson={isJson}
       showSource={showSource}
       onToggleSource={setShowSource}
       contentLabel="File content"

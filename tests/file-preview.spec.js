@@ -3,15 +3,16 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test, expect } from '@playwright/test';
 
-// The Files tab opens .md / .txt files inline instead of forcing a download:
-// the file name is a button that opens a native modal <dialog> rendering
-// markdown (with a Source toggle) or showing plain text in a <pre>. The
-// download button on the row stays a separate sibling button. Markdown goes
-// through DOMPurify in the real browser, so the sanitiser -- including the
-// "opening a preview fetches nothing" policy -- is exercised here rather than
-// in a unit test.
+// The Files tab opens text files inline instead of forcing a download: the
+// file name is a button that opens a native modal <dialog> rendering markdown
+// (with a Source toggle), pretty-printing JSON (with a Source toggle), or
+// showing other text in a <pre>. The download button on the row stays a
+// separate sibling button. Markdown goes through DOMPurify in the real
+// browser, so the sanitiser -- including the "opening a preview fetches
+// nothing" policy -- is exercised here rather than in a unit test.
 
 const ONE_MIB = 1024 * 1024;
+const HUNDRED_KIB = 100 * 1024;
 
 let dir;
 
@@ -24,8 +25,16 @@ test.beforeAll(() => {
   writeFileSync(join(dir, 'notes.txt'), 'plain line one\nplain line two\n');
   // .txt in name only: exercises the server's NUL-byte binary guard.
   writeFileSync(join(dir, 'fake.txt'), Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x00, 0x01, 0x02]));
-  // Not an allow-listed extension: the row must not open a preview at all.
-  writeFileSync(join(dir, 'config.json'), '{"a":1}\n');
+  // application/json: pretty-printed with a Source toggle.
+  writeFileSync(join(dir, 'config.json'), '{"b":2,"a":1}\n');
+  // Invalid JSON: no toggle, raw source only.
+  writeFileSync(join(dir, 'broken.json'), '{"a":1,\n');
+  // JSONC with a comment: not valid JSON, so raw source only.
+  writeFileSync(join(dir, 'app.jsonc'), '{\n// comment\n"a": 1\n}\n');
+  // Non-text MIME: the row must not open a preview at all.
+  writeFileSync(join(dir, 'image.png'), Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00]));
+  // Over the 100 KiB confirm threshold but small enough to open quickly.
+  writeFileSync(join(dir, 'medium.txt'), 'm'.repeat(HUNDRED_KIB + 100));
   // Hostile markdown: every payload here must be neutralised by DOMPurify.
   writeFileSync(
     join(dir, 'xss.md'),
@@ -164,6 +173,7 @@ test('text file shows as preformatted text without a view toggle; close button c
   await expect(dialog(page).locator('.file-preview-text')).toContainText('plain line two');
   await expect(dialog(page).locator('.markdown-body')).toHaveCount(0);
   await expect(page.getByRole('button', { name: 'Source' })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Pretty' })).toHaveCount(0);
   // No truncation notice for a small file.
   await expect(dialog(page).locator('.file-preview-notice')).toHaveCount(0);
 
@@ -194,6 +204,43 @@ test('opening a different file replaces the dialog content', async ({ page }) =>
   await expect(dialog(page).locator('.file-preview-title')).toHaveText('notes.txt');
   await expect(dialog(page).locator('.file-preview-text')).toContainText('plain line one');
   await expect(dialog(page).locator('.markdown-body')).toHaveCount(0);
+});
+
+// JSON ---------------------------------------------------------------------
+
+test('json file pretty-prints by default and toggles to source', async ({ page }) => {
+  await gotoDir(page);
+  await openBtn(page, 'config.json').click();
+  await expect(dialog(page)).toBeVisible();
+  await expect(dialog(page).locator('.file-preview-title')).toHaveText('config.json');
+  await expect(dialog(page).locator('.markdown-body')).toHaveCount(0);
+
+  // 2-space pretty view, not the single-line source.
+  await expect(dialog(page).locator('.file-preview-text')).toHaveText('{\n  "b": 2,\n  "a": 1\n}');
+  await expect(page.getByRole('button', { name: 'Pretty' })).toHaveCount(1);
+
+  await page.getByRole('button', { name: 'Source' }).click();
+  await expect(dialog(page).locator('.file-preview-text')).toHaveText('{"b":2,"a":1}');
+  await page.getByRole('button', { name: 'Pretty' }).click();
+  await expect(dialog(page).locator('.file-preview-text')).toHaveText('{\n  "b": 2,\n  "a": 1\n}');
+
+  await page.keyboard.press('Escape');
+  await expect(dialog(page)).toBeHidden();
+});
+
+test('invalid JSON and JSONC with comments show raw source without a toggle', async ({ page }) => {
+  await gotoDir(page);
+  await openBtn(page, 'broken.json').click();
+  await expect(dialog(page).locator('.file-preview-text')).toContainText('{"a":1,');
+  await expect(page.getByRole('button', { name: 'Pretty' })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Source' })).toHaveCount(0);
+  await page.keyboard.press('Escape');
+
+  await openBtn(page, 'app.jsonc').click();
+  await expect(dialog(page).locator('.file-preview-text')).toContainText('// comment');
+  await expect(page.getByRole('button', { name: 'Pretty' })).toHaveCount(0);
+  await page.keyboard.press('Escape');
+  await expect(dialog(page)).toBeHidden();
 });
 
 // Sanitiser and GFM ------------------------------------------------------------
@@ -299,6 +346,12 @@ test('GFM tables, task lists, fenced code, autolinks and strikethrough render', 
 
 // Limits and errors ------------------------------------------------------------
 
+// Auto-accept the 100 KiB "really open?" confirm when the test intends to
+// open a big file; the dismiss path has its own test below.
+test.beforeEach(async ({ page }) => {
+  page.on('dialog', (d) => d.accept().catch(() => {}));
+});
+
 test('a file over 1 MiB shows only the head plus a truncation notice', async ({ page }) => {
   await gotoDir(page);
   await openBtn(page, 'big.txt').click();
@@ -330,17 +383,45 @@ test('a file deleted after the listing reports "File not found" in the dialog', 
   await expect(dialog(page)).toBeHidden();
 });
 
-test('rows for other extensions have no preview button and keep only the download button', async ({ page }) => {
+test('a file over 100 KiB asks for confirmation: dismiss keeps it closed, accept opens it', async ({ page }) => {
   await gotoDir(page);
-  const json = row(page, 'config.json');
-  await expect(json).toBeVisible();
-  await expect(json.locator('.file-open-btn')).toHaveCount(0);
-  await expect(json.locator('.file-label')).toHaveCount(1);
-  await expect(openBtn(page, 'notes.txt')).toHaveCount(1);
+  await expect(row(page, 'medium.txt')).toBeVisible();
 
-  await json.locator('.file-label').click();
+  // Dismiss: no dialog opens. The auto-accept hook only fires when accept is
+  // wanted, so remove it here and handle the confirm manually.
+  page.removeAllListeners('dialog');
+  page.once('dialog', (d) => d.dismiss().catch(() => {}));
+  await openBtn(page, 'medium.txt').click();
   await expect(dialog(page)).toHaveCount(0);
-  await expect(json.locator('.file-download-btn')).toBeVisible();
+
+  // Accept: the preview opens normally.
+  page.once('dialog', (d) => d.accept().catch(() => {}));
+  await openBtn(page, 'medium.txt').click();
+  await expect(dialog(page)).toBeVisible();
+  await expect(dialog(page).locator('.file-preview-text')).toContainText('m');
+  await page.keyboard.press('Escape');
+  await expect(dialog(page)).toBeHidden();
+
+  // Keyboard (Enter on the focused button) goes through the same confirm.
+  page.once('dialog', (d) => d.dismiss().catch(() => {}));
+  await openBtn(page, 'medium.txt').focus();
+  await page.keyboard.press('Enter');
+  await expect(dialog(page)).toHaveCount(0);
+});
+
+test('rows for non-text extensions have no preview button and keep only the download button', async ({ page }) => {
+  await gotoDir(page);
+  const img = row(page, 'image.png');
+  await expect(img).toBeVisible();
+  await expect(img.locator('.file-open-btn')).toHaveCount(0);
+  await expect(img.locator('.file-label')).toHaveCount(1);
+  await expect(openBtn(page, 'notes.txt')).toHaveCount(1);
+  // A MIME-text extension now opens inline: json rows have a preview button.
+  await expect(openBtn(page, 'config.json')).toHaveCount(1);
+
+  await img.locator('.file-label').click();
+  await expect(dialog(page)).toHaveCount(0);
+  await expect(img.locator('.file-download-btn')).toBeVisible();
 });
 
 // Download paths ---------------------------------------------------------------

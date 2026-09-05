@@ -1,8 +1,9 @@
 // Route-level tests for GET /api/files/content, the file browser's inline
-// preview: text vs markdown classification, the NUL-byte binary guard, the
-// 1 MiB cap with UTF-8-safe truncation, and the usual 404 / 400 error shapes.
-// Also pins the existing GET /api/files download route to `attachment` so
-// adding the preview route can never change download behaviour.
+// preview: MIME-based markdown/json/text classification, the NUL-byte binary
+// guard, the 1 MiB cap with UTF-8-safe truncation, and the usual 404 / 400
+// error shapes. Also pins the existing GET /api/files download route to
+// `attachment` so adding the preview route can never change download
+// behaviour.
 
 import { test, before, after, mock } from 'node:test';
 import assert from 'node:assert/strict';
@@ -13,8 +14,9 @@ import { createServer } from 'node:net';
 import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { filesRoute, previewKind, PREVIEW_EXTS, PREVIEW_MAX_BYTES, SNIFF_BYTES } from './files.js';
-import { PREVIEW_EXTS as CLIENT_PREVIEW_EXTS, isPreviewable } from '../../client/src/previewExts.js';
+import { filesRoute, previewKind, mimeForPreview, isPreviewableMime, MIME_OVERRIDES, PREVIEW_MAX_BYTES, SNIFF_BYTES } from './files.js';
+import { MIME_OVERRIDES as CLIENT_MIME_OVERRIDES, mimeForPreview as clientMimeForPreview, isPreviewableMime as clientIsPreviewableMime, previewKind as clientPreviewKind, isPreviewable } from '../../client/src/previewExts.js';
+import { formatJson } from '../../client/src/formatJson.js';
 
 // Characters that must not appear literally in this source file.
 const BOM = String.fromCharCode(0xfeff);
@@ -39,21 +41,58 @@ after(async () => {
   try { rmSync(dir, { recursive: true, force: true }); } catch {}
 });
 
-test('previewKind allows only .md (markdown) and .txt (text), case-insensitively', () => {
-  for (const name of ['README.md', 'notes.MD', '/x/y/z.Md']) {
+test('previewKind classifies by MIME type: markdown, json, text, case-insensitively', () => {
+  for (const name of ['README.md', 'notes.MD', '/x/y/z.Md', 'doc.markdown']) {
     assert.equal(previewKind(name), 'markdown', name);
   }
-  for (const name of ['notes.txt', 'NOTES.TXT', '/a/b/c.Txt']) {
+  for (const name of ['config.json', 'APP.JSON', 'app.jsonc', 'settings.JSONC']) {
+    assert.equal(previewKind(name), 'json', name);
+  }
+  for (const name of ['notes.txt', 'NOTES.TXT', '/a/b/c.Txt', 'script.js', 'app.TS', 'a.tsx', 'page.html', 'style.css', 'app.yaml', 'app.yml', 'c.toml', 'app.py', 'main.go', 'x.log', 'y.csv']) {
     assert.equal(previewKind(name), 'text', name);
   }
-  for (const name of ['data.json', 'script.js', 'Makefile', 'md', 'txt', 'file.md.bak', 'a.markdown', '']) {
+  for (const name of ['image.png', 'doc.pdf', 'a.zip', 'font.woff2', 'x.mp4', 'Makefile', 'md', 'txt', '.md', '.txt', 'file.md.bak', 'a.markdown.bak', 'unknown123', 'noext.', '']) {
     assert.equal(previewKind(name), null, name || '(empty)');
   }
 });
 
-test('GET /files/content rejects non-.md/.txt files with 415 before touching the disk', async () => {
-  const p = join(dir, 'config.json');
-  writeFileSync(p, '{"plain": "json"}\n');
+test('MIME overrides keep text sources out of media/unknown types', () => {
+  // Without the override these resolve to video/mp2t, model/vnd.mts, or null.
+  assert.equal(mimeForPreview('app.ts'), 'text/typescript');
+  assert.equal(mimeForPreview('app.mts'), 'text/typescript');
+  assert.equal(mimeForPreview('app.cts'), 'text/typescript');
+  assert.equal(mimeForPreview('x.tsx'), 'text/tsx');
+  assert.equal(mimeForPreview('app.py'), 'text/x-python');
+  assert.equal(mimeForPreview('main.go'), 'text/x-go');
+  assert.equal(mimeForPreview('app.jsonc'), 'application/jsonc');
+  assert.equal(previewKind('app.ts'), 'text');
+  assert.equal(previewKind('app.jsonc'), 'json');
+  // application/* text sources pinned back to text/*.
+  assert.equal(mimeForPreview('s.sql'), 'text/x-sql');
+  assert.equal(mimeForPreview('c.toml'), 'text/x-toml');
+});
+
+test('isPreviewableMime accepts text/*, json and jsonc only', () => {
+  for (const mt of ['text/plain', 'text/markdown', 'text/javascript', 'text/x-go', 'application/json', 'application/jsonc']) {
+    assert.equal(isPreviewableMime(mt), true, mt);
+  }
+  for (const mt of ['application/octet-stream', 'image/png', 'image/svg+xml', 'application/pdf', 'application/zip', 'video/mp4', 'video/mp2t']) {
+    assert.equal(isPreviewableMime(mt), false, mt);
+  }
+});
+
+test('formatJson pretty-prints valid JSON and returns null otherwise', () => {
+  assert.equal(formatJson('{"b":2,"a":1}'), '{\n  "b": 2,\n  "a": 1\n}');
+  assert.equal(formatJson('[1,2]'), '[\n  1,\n  2\n]');
+  assert.equal(formatJson('not json'), null);
+  assert.equal(formatJson('{"a":1,}'), null);
+  assert.equal(formatJson('{"a":1} // comment'), null);
+  assert.equal(formatJson(''), null);
+});
+
+test('GET /files/content rejects non-text files with 415 before touching the disk', async () => {
+  const p = join(dir, 'image.png');
+  writeFileSync(p, Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
   const res = await app.inject({ method: 'GET', url: contentUrl(p) });
   assert.equal(res.statusCode, 415);
   assert.equal(res.json().error, 'Unsupported file type');
@@ -89,6 +128,18 @@ test('GET /files/content flags .md files as kind=markdown and returns the raw so
   assert.equal(res.statusCode, 200);
   assert.equal(res.json().kind, 'markdown');
   // The server never renders; the client sanitizes and renders.
+  assert.equal(res.json().content, body);
+});
+
+test('GET /files/content flags .json files as kind=json and returns the raw source', async () => {
+  const p = join(dir, 'data.json');
+  const body = '{"b":2,"a":1}\n';
+  writeFileSync(p, body);
+
+  const res = await app.inject({ method: 'GET', url: contentUrl(p) });
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.json().kind, 'json');
+  // The server never formats; the client pretty-prints.
   assert.equal(res.json().content, body);
 });
 
@@ -181,14 +232,16 @@ test('GET /files (download) still serves attachments after the preview route was
 
 // ---------------------------------------------------------------------------
 // Client/server agreement: the Files tab decides which rows are clickable
-// from client/src/previewExts.js, the route from PREVIEW_EXTS here. If they
+// from client/src/previewExts.js, the route from mimeForPreview here. If they
 // drift, users either get dead clicks or 415s. Pin them together.
 
-test('client PREVIEW_EXTS matches the server allow-list, and isPreviewable agrees with previewKind', () => {
-  assert.deepEqual([...CLIENT_PREVIEW_EXTS].sort(), Object.keys(PREVIEW_EXTS).sort());
-  const names = ['README.md', 'a.MD', 'notes.txt', 'X.TXT', 'data.json', 'Makefile', 'md', 'txt', '.md', '.txt', 'file.md.bak', 'a.markdown', '', 'dir/deep/x.txt'];
-  for (const name of names) {
+test('client MIME table and rule match the server, and isPreviewable agrees with previewKind', () => {
+  assert.deepEqual(CLIENT_MIME_OVERRIDES, MIME_OVERRIDES);
+  for (const name of ['README.md', 'a.MD', 'doc.markdown', 'notes.txt', 'X.TXT', 'config.json', 'APP.JSON', 'app.jsonc', 'server.js', 'app.ts', 'x.tsx', 'app.py', 'main.go', 'a.yaml', 'x.log', 'image.png', 'doc.pdf', 'a.zip', 'Makefile', 'md', 'txt', '.md', '.txt', 'file.md.bak', 'a.markdown', '', 'dir/deep/x.txt', 'dir/deep/app.json']) {
+    assert.equal(clientPreviewKind(name), previewKind(name), `kind disagree on ${JSON.stringify(name)}`);
     assert.equal(isPreviewable(name), previewKind(name) !== null, `disagree on ${JSON.stringify(name)}`);
+    assert.equal(clientIsPreviewableMime(clientMimeForPreview(name)), isPreviewableMime(mimeForPreview(name)), `rule disagree on ${JSON.stringify(name)}`);
+    assert.equal(clientMimeForPreview(name), mimeForPreview(name), `mime disagree on ${JSON.stringify(name)}`);
   }
 });
 

@@ -1,6 +1,7 @@
 import { useMemo, useRef, useCallback, useId, useEffect } from 'react';
 import { marked } from 'marked';
 import DOMPurify from 'dompurify';
+import { formatJson } from '../formatJson.js';
 
 function escapeHtml(value) {
   return String(value).replace(/[&<>"']/g, (c) => (
@@ -66,10 +67,10 @@ export function renderMarkdown(src) {
 const FOCUSABLE = 'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
 
 /**
- * Presentational modal dialog for viewing text/markdown content: dialog
+ * Presentational modal dialog for viewing text/markdown/JSON content: dialog
  * chrome, focus trap, Escape/click-outside close, and the Rendered/Source
- * toggle. Fetching and content-type decisions belong to the caller
- * (FilePreview.jsx / DocPreview.jsx).
+ * (markdown) or Pretty/Source (JSON) toggle. Fetching and content-type
+ * decisions belong to the caller (FilePreview.jsx / DocPreview.jsx).
  * @param {{
  *   title: string,
  *   titleHint?: string,
@@ -78,6 +79,7 @@ const FOCUSABLE = 'a[href], button:not([disabled]), input:not([disabled]), selec
  *   error?: string,
  *   content?: string,
  *   isMarkdown: boolean,
+ *   isJson?: boolean,
  *   truncatedNotice?: import('react').ReactNode,
  *   actions?: import('react').ReactNode,
  *   showSource: boolean,
@@ -94,6 +96,7 @@ export default function PreviewDialog({
   error,
   content,
   isMarkdown,
+  isJson = false,
   truncatedNotice,
   actions,
   showSource,
@@ -143,6 +146,15 @@ export default function PreviewDialog({
     [isMarkdown, showSource, status, content]
   );
 
+  // JSON pretty view: null when the source is not valid JSON (malformed,
+  // JSONC comments, or cut off by truncation), in which case the toggle stays
+  // hidden and only the raw source shows.
+  const prettyJson = useMemo(
+    () => (isJson && status === 'ready' ? formatJson(content) : null),
+    [isJson, status, content]
+  );
+  const showFormatted = isMarkdown || prettyJson !== null;
+
   return (
     <dialog
       ref={dialogRef}
@@ -156,7 +168,7 @@ export default function PreviewDialog({
       <div className="file-preview-header">
         <span id={titleId} className="file-preview-title" title={titleHint}>{title}</span>
         {meta}
-        {isMarkdown && (
+        {showFormatted && (
           <div className="file-preview-toggle" role="group" aria-label="View mode">
             <button
               type="button"
@@ -164,7 +176,7 @@ export default function PreviewDialog({
               onClick={() => onToggleSource(false)}
               aria-pressed={!showSource}
             >
-              Rendered
+              {isMarkdown ? 'Rendered' : 'Pretty'}
             </button>
             <button
               type="button"
@@ -198,7 +210,9 @@ export default function PreviewDialog({
         {status === 'ready' && (
           html !== null
             ? <div className="markdown-body" dangerouslySetInnerHTML={{ __html: html }} />
-            : <pre className="file-preview-text">{content}</pre>
+            : prettyJson !== null && !showSource
+              ? <pre className="file-preview-text">{prettyJson}</pre>
+              : <pre className="file-preview-text">{content}</pre>
         )}
       </div>
     </dialog>
