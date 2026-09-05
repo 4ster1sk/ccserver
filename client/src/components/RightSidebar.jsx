@@ -56,31 +56,37 @@ export default function RightSidebar({ usageProps = {}, prefs }) {
 
   if (!open) return null;
 
+  // Usage機能が無効な環境では Usage を表示対象から除外する
+  // (枠だけの「データがありません」を出さない。＋メニューにも出ない)。
+  const shownWidgets = usageProps?.hidden
+    ? visibleWidgets.filter((w) => w.id !== 'usage')
+    : visibleWidgets;
+
   const renderWidgetBody = (id) => {
     if (id === 'usage') {
-      if (usageProps?.hidden) return <div className="usage-empty">データがありません</div>;
       return <UsageWidget {...usageProps} />;
     }
     const data = stats?.data;
     const showIpmi = stats?.showIpmi;
-    if (stats?.error && !data) return <div className="error">Failed to load system stats: {stats.error}</div>;
-    if (!data) return <div className="loading">Loading system stats...</div>;
+    // 未取得時は枠を作らない。ローディング／エラー表示は
+    // リスト上部の単一バナーに集約する。
+    if (!data) return null;
     switch (id) {
       case 'cpu':
-        return <CpuCard data={data} />;
+        return <CpuCard data={data} hideTitle />;
       case 'memory-storage':
         return (
           <>
-            <MemoryCard data={data} />
-            <StorageCard data={data} />
+            <MemoryCard data={data} hideTitle />
+            <StorageCard data={data} hideTitle />
           </>
         );
       case 'temps':
-        return <TempCard data={data} />;
+        return <TempCard data={data} hideTitle />;
       case 'gpu':
-        return <GpuCard data={data} />;
+        return <GpuCard data={data} hideTitle />;
       case 'ipmi':
-        return <IpmiCards data={data} showIpmi={showIpmi} />;
+        return <IpmiCards data={data} showIpmi={showIpmi} hideTitle />;
       default:
         return null;
     }
@@ -128,18 +134,27 @@ export default function RightSidebar({ usageProps = {}, prefs }) {
         </span>
       </div>
       <div className="sidebar-widgets">
-        {visibleWidgets.map((w) => (
-          <WidgetShell
-            key={w.id}
-            title={w.title}
-            onHide={() => setWidgetVisible(w.id, false)}
-            onMoveUp={() => moveWidget(w.id, 'up')}
-            onMoveDown={() => moveWidget(w.id, 'down')}
-          >
-            {renderWidgetBody(w.id)}
-          </WidgetShell>
-        ))}
-        {visibleWidgets.length === 0 && (
+        {stats?.error && !stats?.data && (
+          <div className="error">Failed to load system stats: {stats.error}</div>
+        )}
+        {!stats?.error && !stats?.data && (
+          <div className="loading">Loading system stats...</div>
+        )}
+        {shownWidgets
+          .map((w) => ({ w, body: renderWidgetBody(w.id) }))
+          .filter(({ body }) => body !== null)
+          .map(({ w, body }) => (
+            <WidgetShell
+              key={w.id}
+              title={w.title}
+              onHide={() => setWidgetVisible(w.id, false)}
+              onMoveUp={() => moveWidget(w.id, 'up')}
+              onMoveDown={() => moveWidget(w.id, 'down')}
+            >
+              {body}
+            </WidgetShell>
+          ))}
+        {shownWidgets.length === 0 && (
           <div className="sidebar-empty">表示中のウィジェットがありません。＋から追加してください。</div>
         )}
       </div>

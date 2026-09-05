@@ -52,11 +52,11 @@ export function TempItem({ label, value }) {
   );
 }
 
-export function CpuCard({ data }) {
+export function CpuCard({ data, hideTitle = false }) {
   if (!data?.cpu) return null;
   return (
     <div className="monitor-card">
-      <div className="monitor-card-title">CPU</div>
+      {!hideTitle && <div className="monitor-card-title">CPU</div>}
       <div className="monitor-card-subtitle">{data.cpu.model}</div>
       <Bar
         value={data.cpu.usage.total}
@@ -80,11 +80,11 @@ export function CpuCard({ data }) {
   );
 }
 
-export function MemoryCard({ data }) {
+export function MemoryCard({ data, hideTitle = false }) {
   if (!data?.memory) return null;
   return (
     <div className="monitor-card">
-      <div className="monitor-card-title">Memory</div>
+      {!hideTitle && <div className="monitor-card-title">Memory</div>}
       <Bar
         value={data.memory.used}
         max={data.memory.total}
@@ -107,11 +107,11 @@ export function MemoryCard({ data }) {
   );
 }
 
-export function StorageCard({ data }) {
+export function StorageCard({ data, hideTitle = false }) {
   if (!data?.storage || data.storage.length === 0) return null;
   return (
     <div className="monitor-card">
-      <div className="monitor-card-title">Storage</div>
+      {!hideTitle && <div className="monitor-card-title">Storage</div>}
       {data.storage.map((s) => (
         <Bar
           key={s.mount}
@@ -127,13 +127,13 @@ export function StorageCard({ data }) {
   );
 }
 
-export function TempCard({ data }) {
+export function TempCard({ data, hideTitle = false }) {
   if (!data?.temperatures) return null;
   const t = data.temperatures;
   if (!t.cpu && !t.pch && !t.other) return null;
   return (
     <div className="monitor-card">
-      <div className="monitor-card-title">Temperatures</div>
+      {!hideTitle && <div className="monitor-card-title">Temperatures</div>}
       {t.cpu && (
         <div className="monitor-temp-group">
           <div className="monitor-temp-group-label">CPU</div>
@@ -162,11 +162,11 @@ export function TempCard({ data }) {
   );
 }
 
-export function GpuCard({ data }) {
+export function GpuCard({ data, hideTitle = false }) {
   if (!data?.gpu) return null;
   return (
     <div className="monitor-card">
-      <div className="monitor-card-title">GPU</div>
+      {!hideTitle && <div className="monitor-card-title">GPU</div>}
       <div className="monitor-card-subtitle">{data.gpu.name}</div>
       <TempItem label="Temperature" value={data.gpu.temp} />
       <Bar
@@ -189,11 +189,11 @@ export function GpuCard({ data }) {
   );
 }
 
-function IpmiPowerCard({ data }) {
+function IpmiPowerCard({ data, hideTitle = false }) {
   if (!data?.ipmi || data.ipmi.power.length === 0) return null;
   return (
     <div className="monitor-card">
-      <div className="monitor-card-title">Power (IPMI)</div>
+      {!hideTitle && <div className="monitor-card-title">Power (IPMI)</div>}
       {data.ipmi.power.map((p) => (
         <div key={p.label} className="monitor-ipmi-row">
           <span className="monitor-ipmi-label">{p.label}</span>
@@ -204,11 +204,11 @@ function IpmiPowerCard({ data }) {
   );
 }
 
-function IpmiVoltageCard({ data }) {
+function IpmiVoltageCard({ data, hideTitle = false }) {
   if (!data?.ipmi || data.ipmi.voltage.length === 0) return null;
   return (
     <div className="monitor-card">
-      <div className="monitor-card-title">Voltage (IPMI)</div>
+      {!hideTitle && <div className="monitor-card-title">Voltage (IPMI)</div>}
       <div className="monitor-voltage-grid">
         {data.ipmi.voltage.map((v) => (
           <div key={v.label} className="monitor-ipmi-row">
@@ -221,11 +221,11 @@ function IpmiVoltageCard({ data }) {
   );
 }
 
-function IpmiFansCard({ data }) {
+function IpmiFansCard({ data, hideTitle = false }) {
   if (!data?.ipmi || data.ipmi.fans.length === 0) return null;
   return (
     <div className="monitor-card">
-      <div className="monitor-card-title">Fans (IPMI)</div>
+      {!hideTitle && <div className="monitor-card-title">Fans (IPMI)</div>}
       {data.ipmi.fans.map((f) => (
         <div key={f.label} className="monitor-ipmi-row">
           <span className="monitor-ipmi-label">{f.label}</span>
@@ -236,11 +236,11 @@ function IpmiFansCard({ data }) {
   );
 }
 
-function IpmiTempsCard({ data }) {
+function IpmiTempsCard({ data, hideTitle = false }) {
   if (!data?.ipmi || data.ipmi.temps.length === 0) return null;
   return (
     <div className="monitor-card">
-      <div className="monitor-card-title">Temperatures (IPMI)</div>
+      {!hideTitle && <div className="monitor-card-title">Temperatures (IPMI)</div>}
       {data.ipmi.temps.map((t) => (
         <TempItem key={t.label} label={t.label} value={t.value} />
       ))}
@@ -248,14 +248,14 @@ function IpmiTempsCard({ data }) {
   );
 }
 
-export function IpmiCards({ data, showIpmi }) {
+export function IpmiCards({ data, showIpmi, hideTitle = false }) {
   if (!showIpmi || !data?.ipmi) return null;
   return (
     <>
-      <IpmiPowerCard data={data} />
-      <IpmiVoltageCard data={data} />
-      <IpmiFansCard data={data} />
-      <IpmiTempsCard data={data} />
+      <IpmiPowerCard data={data} hideTitle={hideTitle} />
+      <IpmiVoltageCard data={data} hideTitle={hideTitle} />
+      <IpmiFansCard data={data} hideTitle={hideTitle} />
+      <IpmiTempsCard data={data} hideTitle={hideTitle} />
     </>
   );
 }
