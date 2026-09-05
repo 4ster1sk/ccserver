@@ -1,147 +1,16 @@
-import { useState, useRef, useEffect, useCallback } from 'react';
-import { authFetch } from '../auth.js';
-import { isAppVisible } from '../appAvailability.js';
-
-function pctClass(pct) {
-  if (pct >= 80) return 'usage-bar-fill high';
-  if (pct >= 50) return 'usage-bar-fill mid';
-  return 'usage-bar-fill low';
-}
-
-// Where an "even" pace would put you right now: the fraction of the current
-// session/week window that has already elapsed, as a 0–100 position on the bar.
-function paceMark(l, now) {
-  if (!l.resetAt || !l.windowMs) return null;
-  const frac = 1 - (l.resetAt - now) / l.windowMs;
-  return Math.max(0, Math.min(100, frac * 100));
-}
-
-function fmtAge(updatedAt) {
-  if (!updatedAt) return '';
-  const s = Math.max(0, Math.round((Date.now() - updatedAt) / 1000));
-  if (s < 60) return `${s}秒前`;
-  const m = Math.round(s / 60);
-  if (m < 60) return `${m}分前`;
-  return `${Math.round(m / 60)}時間前`;
-}
-
-// Last app the user picked in the popover, remembered per browser so opening
-// or focusing an OpenCode (or any) terminal no longer resets the view back to
-// claude. Same per-browser convention as DirectoryBrowser's keys.
-const USAGE_APP_KEY = 'ccserver-usage-app';
-
-const USAGE_APPS = ['claude', 'codex', 'opencode'];
-
-const USAGE_APP_LABELS = {
-  claude: 'Claude 使用量',
-  codex: 'Codex 使用量',
-  opencode: 'OpenCode Go 使用量',
-};
-
-const USAGE_TAB_LABELS = {
-  claude: 'Claude',
-  codex: 'Codex',
-  opencode: 'OpenCode',
-};
-
-function loadSavedUsageApp() {
-  try {
-    const v = window.localStorage.getItem(USAGE_APP_KEY);
-    return USAGE_APPS.includes(v) ? v : null;
-  } catch {
-    return null;
-  }
-}
-
-function saveUsageApp(app) {
-  try {
-    window.localStorage.setItem(USAGE_APP_KEY, app);
-  } catch {
-    // Storage unavailable (private mode etc.) -- selection just won't persist.
-  }
-}
+import { useState, useRef, useEffect } from 'react';
+import { pctClass, paceMark, fmtAge, useUsageTab, useUsageData, USAGE_APP_LABELS, USAGE_TAB_LABELS } from './widgets/useUsage.js';
 
 export default function UsageButton({ hidden = false, defaultApp = 'claude', availableApps = null, hiddenApps = [] }) {
   const [open, setOpen] = useState(false);
-  const [data, setData] = useState(null);   // { usage, updatedAt, error, ... }
-  const [loading, setLoading] = useState(false);
   const [, setTick] = useState(0);   // re-render so pace/age stay live while open
-  // Selectable = installed (availableApps !== false; opencode Go = toggle on
-  // + Go key present) AND not hidden via sandbox.config.json's hiddenApps
-  // (issue #105). isAppVisible is shared with App.jsx's button visibility
-  // (see appAvailability.js) so the two definitions can't drift.
-  const isSelectable = useCallback(
-    (app) => isAppVisible(app, availableApps, hiddenApps),
-    [availableApps, hiddenApps]
-  );
   // Which app the popover is currently showing. The persisted choice wins:
   // defaultApp (the active terminal tab's app) only seeds the very first view
   // when nothing valid has been saved yet. Availability is still respected --
   // a saved app that isn't installed or is hidden falls back below.
-  const [tab, setTab] = useState(() => {
-    const saved = loadSavedUsageApp();
-    if (saved && isSelectable(saved)) return saved;
-    if (USAGE_APPS.includes(defaultApp) && isSelectable(defaultApp)) return defaultApp;
-    return 'claude';
-  });
+  const { tab, setTab, visibleApps } = useUsageTab({ defaultApp, availableApps, hiddenApps });
+  const { data, loading, load } = useUsageData(tab, { enabled: !hidden });
   const wrapRef = useRef(null);
-
-  const visibleApps = USAGE_APPS.filter((a) => isSelectable(a));
-
-  // Tracks the tab actually showing right now, read inside load()'s async
-  // continuations below -- a plain closure over `tab` would freeze the value
-  // from when load() was created, which is exactly the stale value a race
-  // needs to detect.
-  const tabRef = useRef(tab);
-  useEffect(() => { tabRef.current = tab; }, [tab]);
-
-  // A slow response for a tab the user has since switched away from must not
-  // clobber whatever the now-current tab already displays -- opencode's
-  // external HTTPS round trip makes this race easy to hit in practice (an
-  // in-flight opencode fetch outlasting a quick switch to codex).
-  const load = useCallback(async (force = false) => {
-    const forTab = tab;
-    setLoading(true);
-    try {
-      const res = await authFetch(`/api/usage?app=${forTab}${force ? '&force=1' : ''}`);
-      const json = await res.json();
-      if (forTab !== tabRef.current) return;
-      setData(json);
-    } catch (err) {
-      if (forTab !== tabRef.current) return;
-      setData({ error: String(err?.message || err) });
-    } finally {
-      if (forTab === tabRef.current) setLoading(false);
-    }
-  }, [tab]);
-
-  // Do NOT follow defaultApp here anymore: switching to (or focusing) a
-  // terminal running another app used to reset the view and discard the
-  // user's pick. defaultApp is only the first-run seed above.
-  //
-  // Instead, reconcile against availability: when it becomes known (it starts
-  // as null while /api/dirs/home is in flight) or changes later, prefer the
-  // persisted choice if that app is still usable, and otherwise move to the
-  // other installed app -- persisting the fallback so it doesn't flap back.
-  useEffect(() => {
-    if (!availableApps) return;
-    const saved = loadSavedUsageApp();
-    setTab((cur) => {
-      if (saved && saved !== cur && isSelectable(saved)) return saved;
-      if (isSelectable(cur)) return cur;
-      const fallback = USAGE_APPS.find((a) => a !== cur && isSelectable(a));
-      if (fallback) {
-        saveUsageApp(fallback);
-        return fallback;
-      }
-      return cur;
-    });
-  }, [availableApps, hiddenApps, isSelectable]);
-
-  // Prime the button (session % badge) once on mount, using the cache, and
-  // again whenever the viewed app changes -- reset first so a tab switch
-  // never flashes the other app's stale numbers under the new label.
-  useEffect(() => { setData(null); load(false); }, [tab, load]);
 
   // Fetch fresh-ish data whenever the popover opens.
   useEffect(() => {
@@ -208,7 +77,7 @@ export default function UsageButton({ hidden = false, defaultApp = 'claude', ava
                   key={a}
                   type="button"
                   className={`usage-tab${tab === a ? ' active' : ''}`}
-                  onClick={() => { saveUsageApp(a); setTab(a); }}
+                  onClick={() => setTab(a)}
                 >{USAGE_TAB_LABELS[a]}</button>
               ))}
             </div>

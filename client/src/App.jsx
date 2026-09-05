@@ -8,6 +8,9 @@ import UsageButton from './components/UsageButton.jsx';
 import TabIcon from './components/TabIcon.jsx';
 import GroupTabView from './components/GroupTabView.jsx';
 import RemoteInstanceView from './components/RemoteInstanceView.jsx';
+import RightSidebar, { WIDGET_DEFS, MONITOR_WIDGET_IDS } from './components/RightSidebar.jsx';
+import { SystemStatsProvider } from './components/widgets/SystemStatsProvider.jsx';
+import { useWidgetPrefs } from './hooks/useWidgetPrefs.js';
 import { useNotifications } from './hooks/useNotifications.js';
 import { authFetch } from './auth.js';
 import { getTheme, loadThemeId, saveThemeId, applyThemeCss } from './themes.js';
@@ -416,12 +419,6 @@ export default function App() {
 
   const handleTabClick = useCallback((tabId) => {
     setActiveTabId(tabId);
-    setAttentionTabs((prev) => {
-      if (!prev.has(tabId)) return prev;
-      const next = new Set(prev);
-      next.delete(tabId);
-      return next;
-    });
   }, []);
 
   const handleTabExited = useCallback((tabId, exited) => {
@@ -474,6 +471,11 @@ export default function App() {
   const usageDefaultApp = (activeTabApp === 'codex' && codexAvailable) ? 'codex'
     : (activeTabApp === 'opencode' && opencodeGoAvailable) ? 'opencode'
     : (claudeAvailable ? 'claude' : (codexAvailable ? 'codex' : (opencodeGoAvailable ? 'opencode' : 'claude')));
+  const sidebarPrefs = useWidgetPrefs(WIDGET_DEFS);
+  const monitorWidgetsVisible = sidebarPrefs.open
+    && sidebarPrefs.visibleWidgets.some((w) => MONITOR_WIDGET_IDS.includes(w.id));
+  const statsActive = monitorWidgetsVisible || activeTabId === 'monitor';
+  const usageWidgetProps = { hidden: usageHidden, defaultApp: usageDefaultApp, availableApps: usagePrefs.availableApps, hiddenApps: usagePrefs.hiddenApps };
 
   return (
     <div className="app">
@@ -520,7 +522,17 @@ export default function App() {
         <div className="tab-bar-spacer" />
         </div>
         <UsageButton hidden={usageHidden} defaultApp={usageDefaultApp} availableApps={usagePrefs.availableApps} hiddenApps={usagePrefs.hiddenApps} />
+        <button
+          type="button"
+          className="btn sidebar-toggle-btn"
+          onClick={() => sidebarPrefs.setOpen(!sidebarPrefs.open)}
+          title={sidebarPrefs.open ? 'サイドバーを閉じる' : 'サイドバーを開く'}
+        >
+          {sidebarPrefs.open ? '▶' : '◀'}
+        </button>
       </div>
+      <SystemStatsProvider active={statsActive}>
+      <div className={`main-row${sidebarPrefs.open ? ' sidebar-open' : ''}`}>
       <div className="tab-content">
         <div style={{ display: activeTabId === 'browser' ? 'flex' : 'none', height: '100%', flexDirection: 'column' }}>
           <DirectoryBrowser onOpen={handleOpen} onOpenShell={handleOpenShell} onOpenCombo={handleOpenCombo} onOpenGroup={handleOpenGroup} onSessionClick={handleSessionClick} onOpenSettings={openSettingsTab} initialPath={lastDir} groupsVersion={groupsVersion} metaAgentDir={metaAgentDir} onOpenMeta={handleOpenMeta} />
@@ -603,6 +615,9 @@ export default function App() {
             </div>
           ))}
       </div>
+      <RightSidebar usageProps={usageWidgetProps} prefs={sidebarPrefs} />
+      </div>
+      </SystemStatsProvider>
       {sandboxPrompt && (
         <div className="resume-overlay" onClick={cancelSandboxPrompt}>
           <div className="resume-dialog" onClick={(e) => e.stopPropagation()}>
