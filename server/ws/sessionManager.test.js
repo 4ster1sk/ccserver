@@ -214,6 +214,67 @@ test('createSession refuses an uninstalled agent with a clear error', () => {
   }
 });
 
+// Self-review (issue #105): sandbox.config.json's hiddenApps must not be
+// purely cosmetic. Every launch picker (single, combo, meta-agent, worker/
+// launch-preset expansion) funnels its choice through createSession -- if
+// this function doesn't itself refuse a hidden app, any direct WS/API call
+// (or a preset saved before the app was hidden) can still start a real
+// session for an app the operator hasn't contracted for, regardless of what
+// the client-side pickers show. Pin CCSERVER_CLAUDE_BIN at a real,
+// always-executable file (the running node binary) so claude reads as
+// INSTALLED -- the hidden check must fire even when the app is present,
+// unlike the "not installed" case above.
+test('createSession refuses a hidden (but installed) agent with a clear error', () => {
+  const cfgDir = mkdtempSync(join(tmpdir(), 'ccserver-sess-cfg-'));
+  const cfgPath = join(cfgDir, 'sandbox.config.json');
+  writeFileSync(cfgPath, JSON.stringify({ docker: false, gitBroker: false, hiddenApps: ['claude'] }));
+  const prevBin = process.env.CCSERVER_CLAUDE_BIN;
+  const prevCfg = process.env.CCSERVER_SANDBOX_CONFIG;
+  process.env.CCSERVER_CLAUDE_BIN = process.execPath;
+  process.env.CCSERVER_SANDBOX_CONFIG = cfgPath;
+  try {
+    const res = sessionManager.createSession({
+      cwd: '/tmp', cols: 80, rows: 24, shell: false, sandbox: false, app: 'claude',
+    });
+    assert.equal(res.session, null, 'no session may be created for a hidden app, even one that is installed');
+    assert.match(res.error, /claude is hidden on this server/);
+    assert.match(res.error, /hiddenApps/, 'the error names the config key responsible');
+  } finally {
+    if (prevBin === undefined) delete process.env.CCSERVER_CLAUDE_BIN;
+    else process.env.CCSERVER_CLAUDE_BIN = prevBin;
+    if (prevCfg === undefined) delete process.env.CCSERVER_SANDBOX_CONFIG;
+    else process.env.CCSERVER_SANDBOX_CONFIG = prevCfg;
+    try { rmSync(cfgDir, { recursive: true, force: true }); } catch { /* ignore */ }
+  }
+});
+
+// The hiddenApps check runs BEFORE resolveApp() (see createSession), so the
+// refusal reason must be "hidden", never "not installed", even for an app
+// this test machine genuinely doesn't have -- unlike claude, opencode/copilot/
+// codex have no CCSERVER_*_BIN override to fake an install with (see
+// sandbox-resolve.test.js's header comment), so this is the only way to
+// deterministically exercise the hidden check for them without depending on
+// what happens to be on the machine running the suite.
+test('createSession refuses a hidden agent even when it is not installed on this host', () => {
+  const cfgDir = mkdtempSync(join(tmpdir(), 'ccserver-sess-cfg-'));
+  const cfgPath = join(cfgDir, 'sandbox.config.json');
+  writeFileSync(cfgPath, JSON.stringify({ docker: false, gitBroker: false, hiddenApps: ['codex'] }));
+  const prevCfg = process.env.CCSERVER_SANDBOX_CONFIG;
+  process.env.CCSERVER_SANDBOX_CONFIG = cfgPath;
+  try {
+    const res = sessionManager.createSession({
+      cwd: '/tmp', cols: 80, rows: 24, shell: false, sandbox: false, app: 'codex',
+    });
+    assert.equal(res.session, null, 'no session may be created for a hidden app');
+    assert.match(res.error, /codex is hidden on this server/);
+    assert.doesNotMatch(res.error, /not installed/, 'hidden must win over install status, not the reverse');
+  } finally {
+    if (prevCfg === undefined) delete process.env.CCSERVER_SANDBOX_CONFIG;
+    else process.env.CCSERVER_SANDBOX_CONFIG = prevCfg;
+    try { rmSync(cfgDir, { recursive: true, force: true }); } catch { /* ignore */ }
+  }
+});
+
 // setScheduledPrompt captures the session's launch model into the persisted
 // schedule entry so the auto-resume path replays it (persistSchedules).
 test('setScheduledPrompt persists the session model into the schedule file', async () => {

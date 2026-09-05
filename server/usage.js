@@ -15,7 +15,7 @@ import * as pty from 'node-pty';
 import { homedir } from 'node:os';
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { buildMinimalSandboxSpawn, resolveClaude, sandboxAvailable, loadSandboxConfig } from './ws/sandbox.js';
+import { buildMinimalSandboxSpawn, resolveClaude, sandboxAvailable, loadSandboxConfig, isAppHidden } from './ws/sandbox.js';
 import { recordSessionLimitReset } from './sessionLimitState.js';
 import { buildSessionEnv } from './ws/sessionEnv.js';
 
@@ -161,6 +161,19 @@ function looksReady(parsed) {
 
 function capture() {
   return new Promise((resolve) => {
+    // Self-review (issue #105): sandbox.config.json's hiddenApps hides claude
+    // from every launch picker, but GET /api/usage has no launch picker to
+    // guard -- a direct call (any authenticated client, or warmUsage() at
+    // boot) would otherwise still spawn a real `claude` process even when the
+    // operator listed it in hiddenApps specifically because they haven't
+    // contracted for it. Refuse the same way the not-installed check below
+    // does, mirroring createSession's hiddenApps guard (sessionManager.js).
+    // Checked BEFORE resolveClaude() below: once claude is hidden, whether it
+    // happens to be installed is irrelevant.
+    if (isAppHidden('claude')) {
+      resolve({ error: 'claude is hidden on this server (sandbox.config.json\'s "hiddenApps")' });
+      return;
+    }
     // claude not installed on this host (or claudeBin pointing at a missing
     // path): a pty.spawn would just fail with execvp/ENOENT. Report the real
     // cause up front -- this also backs the client's automatic Usage-button

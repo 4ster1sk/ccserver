@@ -17,7 +17,7 @@ import { spawn } from 'node:child_process';
 import { homedir } from 'node:os';
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { buildMinimalSandboxSpawn, resolveApp, sandboxAvailable, loadSandboxConfig } from './ws/sandbox.js';
+import { buildMinimalSandboxSpawn, resolveApp, sandboxAvailable, loadSandboxConfig, isAppHidden } from './ws/sandbox.js';
 import { buildSessionEnv } from './ws/sessionEnv.js';
 
 const CACHE_TTL_MS = 60 * 1000;       // serve cache without re-capturing
@@ -83,6 +83,21 @@ export function mapRateLimits(rateLimits) {
 // account/rateLimits/read response (matched by id) arrives.
 function capture() {
   return new Promise((resolve) => {
+    // Self-review (issue #105): sandbox.config.json's hiddenApps hides codex
+    // from every launch picker, but GET /api/usage?app=codex has no launch
+    // picker to guard -- a direct call (any authenticated client, or
+    // warmCodexUsage() at boot) would otherwise still spawn a real `codex`
+    // process even when the operator listed it in hiddenApps specifically
+    // because they haven't contracted for it. Refuse the same way the
+    // not-installed check below does, mirroring server/usage.js's twin guard.
+    // Checked BEFORE resolveApp() below: once codex is hidden, whether it
+    // happens to be installed is irrelevant -- and unlike claude, codex has no
+    // CCSERVER_*_BIN override to deterministically fake an install with in
+    // tests, so this ordering is what makes the guard testable at all.
+    if (isAppHidden('codex')) {
+      resolve({ error: 'codex is hidden on this server (sandbox.config.json\'s "hiddenApps")' });
+      return;
+    }
     // codex not installed on this host (or resolveApp pointing at a missing
     // path): a spawn would just fail with execvp/ENOENT. Report the real
     // cause up front -- this also backs the client's automatic Usage-button

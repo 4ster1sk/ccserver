@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { authFetch } from '../auth.js';
+import { isAppSelectable } from '../appAvailability.js';
 
 const META_APP_KEY = 'ccserver-meta-app';
 const META_APPS = ['claude', 'opencode', 'codex'];
@@ -13,7 +14,7 @@ function loadMetaApp() {
   return null;
 }
 
-export default function MetaLaunchDialog({ open, onClose, onLaunch, availableApps, defaultApp, metaAgentDir }) {
+export default function MetaLaunchDialog({ open, onClose, onLaunch, availableApps, hiddenApps = [], defaultApp, metaAgentDir }) {
   const [metaApp, setMetaApp] = useState(loadMetaApp);
   const [metaModel, setMetaModel] = useState('');
 
@@ -23,16 +24,30 @@ export default function MetaLaunchDialog({ open, onClose, onLaunch, availableApp
   }, [open]);
 
   const chooseMetaApp = (val) => {
-    if (availableApps && !availableApps[val]) return;
+    if (!isAppSelectable(val, availableApps, hiddenApps)) return;
     setMetaApp(val);
     try { localStorage.setItem(META_APP_KEY, val); } catch { /* ignore */ }
   };
 
+  // Apps hidden via sandbox.config.json's hiddenApps (issue #105): removed
+  // from this picker entirely, unlike a not-installed app (still shown
+  // greyed out below).
+  const visibleMetaApps = META_APPS.filter((app) => !hiddenApps.includes(app));
+
   const handleLaunch = async () => {
     let enabled = false;
+    // Fetch fresh hiddenApps here rather than trusting the hiddenApps prop
+    // (fetched once when DirectoryBrowser mounted, and not necessarily
+    // current if the operator edited sandbox.config.json since): otherwise
+    // the backstop check below would re-check the exact same possibly-stale
+    // value the picker's disabled state already checked, protecting against
+    // nothing new. Falls back to the prop only if this fetch fails.
+    let freshHiddenApps = hiddenApps;
     try {
       const res = await authFetch('/api/dirs/home');
-      enabled = (await res.json()).metaAgentEnabled === true;
+      const data = await res.json();
+      enabled = data.metaAgentEnabled === true;
+      if (Array.isArray(data.hiddenApps)) freshHiddenApps = data.hiddenApps;
     } catch { /* unreachable -> disabled */ }
     if (!enabled) {
       window.alert('メタエージェントは現在サーバー設定で無効です (sandbox.config.json の "metaAgentMcp": true で有効化できます)。');
@@ -41,6 +56,18 @@ export default function MetaLaunchDialog({ open, onClose, onLaunch, availableApp
     const app = metaApp || defaultApp;
     if (app === 'copilot') {
       window.alert('GitHub Copilot はMCP注入に対応していないため、メタエージェントでは起動できません。アプリを選択してください。');
+      return;
+    }
+    // Self-review (issue #105): metaApp is persisted under its own
+    // localStorage key (META_APP_KEY) and loaded on every dialog open
+    // regardless of hiddenApps -- if the operator hides an app the user had
+    // previously picked here, the picker correctly stops offering it (no
+    // button renders as active) but metaApp itself is never corrected. The
+    // launch button below is disabled for this same condition using the
+    // (possibly stale) prop; this check uses the config just fetched above
+    // so it actually catches a hide that happened after the picker rendered.
+    if (freshHiddenApps.includes(app)) {
+      window.alert('このアプリは非表示に設定されているため、メタエージェントでは起動できません。アプリを選び直してください。');
       return;
     }
     try {
@@ -61,6 +88,12 @@ export default function MetaLaunchDialog({ open, onClose, onLaunch, availableApp
   if (!open) return null;
 
   const effectiveApp = metaApp || defaultApp;
+  // metaApp survives a hide (its own localStorage key isn't reconciled
+  // against hiddenApps anywhere -- see the handleLaunch comment above), so
+  // the picker can show no button checked at all when it holds a since-hidden
+  // value. Disable the launch button in that case rather than silently
+  // launching the hidden app it still points at.
+  const effectiveAppHidden = hiddenApps.includes(effectiveApp);
 
   return (
     <div className="resume-overlay" onClick={onClose}>
@@ -73,7 +106,7 @@ export default function MetaLaunchDialog({ open, onClose, onLaunch, availableApp
           {metaAgentDir ? ` プロジェクト外の専用ディレクトリ (${metaAgentDir}) で起動されます。` : ''}
         </p>
         <div className="open-menu-label">アプリ</div>
-        {META_APPS.map((appKey) => (
+        {visibleMetaApps.map((appKey) => (
           <div
             key={appKey}
             className={`open-menu-item${availableApps && !availableApps[appKey] ? ' open-menu-item-disabled' : ''}`}
@@ -100,7 +133,12 @@ export default function MetaLaunchDialog({ open, onClose, onLaunch, availableApp
         )}
         <div className="resume-actions">
           <button className="btn btn-secondary" onClick={onClose}>キャンセル</button>
-          <button className="btn btn-primary" onClick={handleLaunch}>
+          <button
+            className="btn btn-primary"
+            onClick={handleLaunch}
+            disabled={effectiveAppHidden}
+            title={effectiveAppHidden ? '非表示に設定されたアプリが選択されています。アプリを選び直してください。' : ''}
+          >
             メタエージェントを起動
           </button>
         </div>
