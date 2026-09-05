@@ -16,10 +16,8 @@ import { bunTmpdirEnv } from './bunTmpdir.js';
 import { buildSessionEnv } from './sessionEnv.js';
 import {
   isValidApp,
-  appResumeArgs,
-  appModelArgs,
+  appLaunchArgs,
   normalizePermissionMode,
-  appPermissionArgs,
   appSubmitKey,
   extractResumeSessionId,
   detectPermissionPrompt,
@@ -368,13 +366,15 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox
     args = [];
   } else {
     command = resolved.command;
-    args = appResumeArgs(sessionApp, claudeSessionId, { resumeLast });
-    // Model selection must accompany fresh launches and resume alike; the
-    // helper only emits the flag for apps whose CLI is verified to accept it.
-    args.push(...appModelArgs(sessionApp, sessionModel));
-    // Permission mode likewise accompanies every launch; the helper only
-    // emits a flag for commandcode with a non-standard mode.
-    args.push(...appPermissionArgs(sessionApp, sessionPermissionMode));
+    // appLaunchArgs combines resume + model + permission-mode args in this
+    // exact order; appLaunch.test.js exercises the same function so a
+    // reordering here can't drift away from what's tested (see PR#108 review).
+    args = appLaunchArgs(sessionApp, {
+      resumeId: claudeSessionId,
+      resumeLast,
+      model: sessionModel,
+      permissionMode: sessionPermissionMode,
+    });
   }
   command = resolveCommand(command);
 

@@ -110,6 +110,19 @@ export function appPermissionArgs(app, mode) {
   return [];
 }
 
+// Combines the three launch-arg helpers above in the exact order
+// sessionManager.createSession pushes them (resume, then model, then
+// permission). Shared by sessionManager and this file's own tests so a
+// reordering in the real launch path can't drift away from what's tested --
+// see PR#108 review.
+export function appLaunchArgs(app, { resumeId, resumeLast, model, permissionMode } = {}) {
+  return [
+    ...appResumeArgs(app, resumeId, { resumeLast }),
+    ...appModelArgs(app, model),
+    ...appPermissionArgs(app, permissionMode),
+  ];
+}
+
 // The keystroke that submits the current prompt in each app's TUI, sent by
 // sessionManager.writeToSession({ submit: true }) after the typed text.
 // Every supported CLI accepts CR today (verified against all four TUIs; CR

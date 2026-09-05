@@ -10,6 +10,7 @@ import {
   PERMISSION_MODES,
   normalizePermissionMode,
   appPermissionArgs,
+  appLaunchArgs,
   appSubmitKey,
   extractResumeSessionId,
   detectPermissionPrompt,
@@ -218,16 +219,15 @@ test('appPermissionArgs: every other app ignores the mode (commandcode-only flag
   }
 });
 
-test('commandcode launch argv keeps resume + model + permission flags together', () => {
-  const launchArgs = (resumeId, resumeLast, model, permissionMode) => [
-    ...appResumeArgs('commandcode', resumeId, { resumeLast }),
-    ...appModelArgs('commandcode', model),
-    ...appPermissionArgs('commandcode', permissionMode),
-  ];
-  assert.deepEqual(launchArgs(null, false, null, 'standard'), []);
-  assert.deepEqual(launchArgs(null, false, 'gpt-5', 'yolo'), ['--model', 'gpt-5', '--yolo']);
-  assert.deepEqual(launchArgs('abc123', false, null, 'auto-accept'), ['--resume', 'abc123', '--auto-accept']);
-  assert.deepEqual(launchArgs(null, true, null, 'yolo'), ['-c', '--yolo']);
+// Exercises appLaunchArgs directly -- the same function sessionManager.js's
+// createSession calls to build its argv -- instead of re-synthesizing the
+// resume+model+permission chain locally, so a push-order regression in the
+// real launch path is caught here too (see PR#108 review).
+test('appLaunchArgs: commandcode launch argv keeps resume + model + permission flags together', () => {
+  assert.deepEqual(appLaunchArgs('commandcode', { model: null, permissionMode: 'standard' }), []);
+  assert.deepEqual(appLaunchArgs('commandcode', { model: 'gpt-5', permissionMode: 'yolo' }), ['--model', 'gpt-5', '--yolo']);
+  assert.deepEqual(appLaunchArgs('commandcode', { resumeId: 'abc123', permissionMode: 'auto-accept' }), ['--resume', 'abc123', '--auto-accept']);
+  assert.deepEqual(appLaunchArgs('commandcode', { resumeLast: true, permissionMode: 'yolo' }), ['-c', '--yolo']);
 });
 
 test('appSubmitKey: every agent CLI submits with CR, Codex included (regression lock)', () => {
