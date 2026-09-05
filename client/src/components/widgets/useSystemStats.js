@@ -16,12 +16,20 @@ export function useSystemStats(active) {
   const [data, setData] = useState(null);
   const [error, setError] = useState(null);
   const [interval, setIntervalMs] = useState(() => {
-    const saved = localStorage.getItem('monitor-interval');
-    return saved ? normalizeInterval(saved) : DEFAULT_INTERVAL;
+    try {
+      const saved = localStorage.getItem('monitor-interval');
+      return saved ? normalizeInterval(saved) : DEFAULT_INTERVAL;
+    } catch {
+      return DEFAULT_INTERVAL;
+    }
   });
   const [showIpmi, setShowIpmi] = useState(() => {
-    const saved = localStorage.getItem('monitor-show-ipmi');
-    return saved !== null ? saved === 'true' : true;
+    try {
+      const saved = localStorage.getItem('monitor-show-ipmi');
+      return saved !== null ? saved === 'true' : true;
+    } catch {
+      return true;
+    }
   });
   const timerRef = useRef(null);
   const showIpmiRef = useRef(showIpmi);
@@ -56,12 +64,20 @@ export function useSystemStats(active) {
   const setIntervalAndSave = useCallback((v) => {
     const normalized = normalizeInterval(v);
     setIntervalMs(normalized);
-    localStorage.setItem('monitor-interval', normalized);
+    try {
+      localStorage.setItem('monitor-interval', String(normalized));
+    } catch {
+      // ignore (private mode etc.)
+    }
   }, []);
 
   const setShowIpmiAndSave = useCallback((v) => {
     setShowIpmi(v);
-    localStorage.setItem('monitor-show-ipmi', v);
+    try {
+      localStorage.setItem('monitor-show-ipmi', String(v));
+    } catch {
+      // ignore (private mode etc.)
+    }
   }, []);
 
   return { data, error, interval, setInterval: setIntervalAndSave, showIpmi, setShowIpmi: setShowIpmiAndSave, refresh: fetchStats };

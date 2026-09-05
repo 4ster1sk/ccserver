@@ -38,7 +38,7 @@ function WidgetShell({ title, onHide, onMoveUp, onMoveDown, children }) {
   );
 }
 
-export default function RightSidebar({ usageProps, prefs }) {
+export default function RightSidebar({ usageProps = {}, prefs }) {
   const internalPrefs = useWidgetPrefs(WIDGET_DEFS);
   const { open, setOpen, visibleWidgets, hiddenWidgets, setWidgetVisible, moveWidget } = prefs || internalPrefs;
   const [addOpen, setAddOpen] = useState(false);
@@ -58,7 +58,7 @@ export default function RightSidebar({ usageProps, prefs }) {
 
   const renderWidgetBody = (id) => {
     if (id === 'usage') {
-      if (usageProps.hidden) return <div className="usage-empty">データがありません</div>;
+      if (usageProps?.hidden) return <div className="usage-empty">データがありません</div>;
       return <UsageWidget {...usageProps} />;
     }
     const data = stats?.data;

@@ -20,7 +20,10 @@ function loadOrder(defaultIds) {
     const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed)) return defaultIds;
     const known = new Set(defaultIds);
-    const ordered = parsed.filter((id) => known.has(id));
+    const seen = new Set();
+    const ordered = parsed.filter(
+      (id) => known.has(id) && !seen.has(id) && (seen.add(id), true)
+    );
     for (const id of defaultIds) {
       if (!ordered.includes(id)) ordered.push(id);
     }
