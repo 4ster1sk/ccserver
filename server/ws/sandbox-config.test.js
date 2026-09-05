@@ -288,6 +288,64 @@ test('selectableAppIds keeps claude selectable when only the other apps are hidd
   }
 });
 
+// opencodeGoUsage (see opencodeUsage.js): the one resolveFlag() consumer, so
+// this doubles as coverage for resolveFlag()'s file-value word-form parsing
+// (issue: a quoted "false" in the config file used to be silently ignored,
+// since only a strict boolean fileVal was ever recognized -- see #6).
+test('opencodeGoUsage defaults to true when the key is absent', () => {
+  withConfig({}, () => {
+    assert.equal(loadSandboxConfig().opencodeGoUsage, true);
+  });
+});
+
+test('opencodeGoUsage is false for an explicit false value, or a recognized falsy word form', () => {
+  withConfig({ opencodeGoUsage: false }, () => {
+    assert.equal(loadSandboxConfig().opencodeGoUsage, false);
+  });
+  withConfig({ opencodeGoUsage: true }, () => {
+    assert.equal(loadSandboxConfig().opencodeGoUsage, true);
+  });
+  withConfig({ opencodeGoUsage: 'false' }, () => {
+    assert.equal(loadSandboxConfig().opencodeGoUsage, false, 'a quoted "false" in the file must disable it, not fall back to the default');
+  });
+  withConfig({ opencodeGoUsage: 'off' }, () => {
+    assert.equal(loadSandboxConfig().opencodeGoUsage, false);
+  });
+  withConfig({ opencodeGoUsage: '0' }, () => {
+    assert.equal(loadSandboxConfig().opencodeGoUsage, false);
+  });
+  withConfig({ opencodeGoUsage: 'nonsense' }, () => {
+    assert.equal(loadSandboxConfig().opencodeGoUsage, true, 'unrecognized file value falls back to the default (on)');
+  });
+});
+
+test('opencodeGoUsage: env override wins over the file both ways, unrecognized env falls back to the file', () => {
+  withConfig({ opencodeGoUsage: true }, () => {
+    process.env.CCSERVER_OPENCODE_GO_USAGE = '0';
+    try {
+      assert.equal(loadSandboxConfig().opencodeGoUsage, false, 'env override wins over a true file value');
+    } finally {
+      delete process.env.CCSERVER_OPENCODE_GO_USAGE;
+    }
+  });
+  withConfig({ opencodeGoUsage: false }, () => {
+    process.env.CCSERVER_OPENCODE_GO_USAGE = '1';
+    try {
+      assert.equal(loadSandboxConfig().opencodeGoUsage, true, 'env override wins over a false file value');
+    } finally {
+      delete process.env.CCSERVER_OPENCODE_GO_USAGE;
+    }
+  });
+  withConfig({ opencodeGoUsage: 'off' }, () => {
+    process.env.CCSERVER_OPENCODE_GO_USAGE = 'maybe';
+    try {
+      assert.equal(loadSandboxConfig().opencodeGoUsage, false, 'unrecognized env falls back to the (parsed) file value');
+    } finally {
+      delete process.env.CCSERVER_OPENCODE_GO_USAGE;
+    }
+  });
+});
+
 test('notify.vikunja defaults: timeoutSeconds=15, verifyTls=true, statusLabelPrefix=status-', () => {
   withConfig({}, () => {
     const v = loadSandboxConfig().notify.vikunja;

@@ -475,6 +475,36 @@ function slugify(p) {
   return p.replace(/[^a-zA-Z0-9]+/g, '_').replace(/^_+|_+$/g, '') || 'root';
 }
 
+// Parse a booleanish value (actual boolean, or the recognized word forms
+// 1/true/on/yes vs 0/false/off/no, case-insensitive) -- or undefined when it
+// doesn't match either. Shared by resolveFlag below so a config-file value
+// gets the same vocabulary an env var already did; this only widens what a
+// FILE value can express -- an unrecognized value still falls back the same
+// way it always has, one level further down resolveFlag's chain.
+function parseBoolish(v) {
+  if (typeof v === 'boolean') return v;
+  if (typeof v === 'string' && v.trim() !== '') {
+    const s = v.trim().toLowerCase();
+    if (['1', 'true', 'on', 'yes'].includes(s)) return true;
+    if (['0', 'false', 'off', 'no'].includes(s)) return false;
+  }
+  return undefined;
+}
+
+// Resolve a booleanish flag from an env override + a config-file value with
+// a default. Env wins when it is a recognized boolean word; an unrecognized
+// or empty env value falls back to the config file, which now accepts the
+// same word forms (not just a strict boolean) -- so e.g. a quoted
+// `"opencodeGoUsage": "false"` in the config file is honored instead of
+// silently falling back to the default as if unset.
+function resolveFlag(envVal, fileVal, def) {
+  const fromEnv = parseBoolish(envVal);
+  if (fromEnv !== undefined) return fromEnv;
+  const fromFile = parseBoolish(fileVal);
+  if (fromFile !== undefined) return fromFile;
+  return def;
+}
+
 // Every agent CLI the launch pickers know about (see resolveApp/installedApps
 // below, and issue #105's hiddenApps). Self-review: this used to redefine the
 // same literal appLaunch.js's APPS already exports, risking drift the next
@@ -601,6 +631,17 @@ export function loadSandboxConfig() {
   // for setups that don't want it; the client also hides the button on its
   // own when claude is not installed (the capture would never succeed).
   const showUsage = raw.showUsage !== false;
+  // OpenCode Go usage tab (GET /api/usage?app=opencode, backed by
+  // server/opencodeUsage.js). An opencode CLI install alone says nothing
+  // about a Go subscription, so this is a separate toggle: false hides the
+  // tab entirely (no key is read, no request is sent). Default on -- when on,
+  // visibility is still auto-gated on the Go API key actually existing
+  // (~/.local/share/opencode/auth.json's "opencode-go" entry, see
+  // opencodeGoAvailable()) and on the subscription being valid (a 403
+  // surfaces as an in-popover "no subscription" message, not a silent hide).
+  // Env var CCSERVER_OPENCODE_GO_USAGE wins over the config file (0/false/
+  // off/no = off, 1/true/on/yes = on).
+  const opencodeGoUsage = resolveFlag(process.env.CCSERVER_OPENCODE_GO_USAGE, raw.opencodeGoUsage, true);
   // The Usage MCP is exposed to every Claude session, so keep it opt-in
   // independently of the UI's showUsage setting.
   const usageMcp = raw.usageMcp === true;
@@ -624,7 +665,7 @@ export function loadSandboxConfig() {
     ? [...new Set(raw.hiddenApps.filter((a) => APP_IDS.includes(a)))]
     : [];
   return {
-    docker, persistentHome, gpg, sshAgent, gitBroker, forceSandbox, binds, env, claudeBin, defaultApp, showUsage, usageMcp, metaAgentMcp, reviewerMcp, hiddenApps,
+    docker, persistentHome, gpg, sshAgent, gitBroker, forceSandbox, binds, env, claudeBin, defaultApp, showUsage, opencodeGoUsage, usageMcp, metaAgentMcp, reviewerMcp, hiddenApps,
     notify: {
       discordWebhook, subscriptions, hostname: notifyHostname, attribution: notifyAttribution,
       vikunja: {

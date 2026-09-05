@@ -19,6 +19,7 @@ import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { buildMinimalSandboxSpawn, resolveApp, sandboxAvailable, loadSandboxConfig, isAppHidden } from './ws/sandbox.js';
 import { buildSessionEnv } from './ws/sessionEnv.js';
+import { formatResets } from './usageResetFormat.js';
 
 const CACHE_TTL_MS = 60 * 1000;       // serve cache without re-capturing
 const CAPTURE_TIMEOUT_MS = 10 * 1000; // hard cap on a single capture (real round trip is ~100ms)
@@ -43,12 +44,6 @@ function windowLabel(mins) {
   }
   if (mins % 60 === 0) return `${mins / 60}時間`;
   return `${mins}分`;
-}
-
-function formatResets(resetAtMs) {
-  if (resetAtMs == null) return null;
-  const d = new Date(resetAtMs);
-  return `${d.getMonth() + 1}/${d.getDate()} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
 }
 
 function mapWindow(win, mins) {

@@ -32,6 +32,7 @@ import { ensureFederationServer, stopFederationServer, federationEnabled } from 
 import { sweepExpiredPending } from './ws/federationPairing.js';
 import { warmUsage } from './usage.js';
 import { warmCodexUsage } from './codexUsage.js';
+import { warmOpencodeUsage } from './opencodeUsage.js';
 import { initDb, dbPath } from './db.js';
 import { selectableAppIds, installedApps } from './ws/sandbox.js';
 
@@ -260,8 +261,9 @@ try {
   fastify.log.error({ err }, 'Failed to restore scheduled prompts');
 }
 
-// Warm the Claude/Codex usage caches so the first click on the top-bar Usage
-// button is instant (best effort — a failed capture just leaves the cache
-// empty).
+// Warm the Claude/Codex/OpenCode Go usage caches so the first click on the
+// top-bar Usage button is instant (best effort — a failed capture just
+// leaves the cache empty; Go skips warming entirely when disabled/keyless).
 warmUsage();
 warmCodexUsage();
+warmOpencodeUsage();
