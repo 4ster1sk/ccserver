@@ -8,6 +8,7 @@ import { authWsUrl, authFetch } from '../auth.js';
 import { createOsc52Handler } from '../osc52.js';
 import { dewrapSelection } from '../dewrap.js';
 import { displayPath } from '../displayPath.js';
+import { isElevatedPermissionMode } from '../permissionMode.js';
 
 const ALL_SPECIAL_KEYS = [
   { id: 'bs', label: 'BS', data: '\x7f' },
@@ -1278,7 +1279,7 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
         <span
           className="terminal-title"
           title={projectCwd && projectCwd !== cwd ? `Project: ${projectCwd}\nWorktree: ${cwd}` : cwd}
-        >{sandbox ? '🔒 ' : (!shell ? '⚠️ ' : '')}{shell ? 'Terminal' : appLabel(app)}{!shell && model ? ` · ${model}` : ''}{!shell && app === 'commandcode' && (permissionMode === 'yolo' || permissionMode === 'auto-accept') ? ` · ${permissionMode}` : ''} &mdash; {displayPath(cwd, homeDir)}</span>
+        >{sandbox ? '🔒 ' : (!shell ? '⚠️ ' : '')}{shell ? 'Terminal' : appLabel(app)}{!shell && model ? ` · ${model}` : ''}{!shell && app === 'commandcode' && isElevatedPermissionMode(permissionMode) ? ` · ${permissionMode}` : ''} &mdash; {displayPath(cwd, homeDir)}</span>
         <div className="header-actions">
           <div className="theme-picker" ref={themeMenuRef}>
             <button

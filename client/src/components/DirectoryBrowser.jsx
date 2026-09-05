@@ -4,6 +4,7 @@ import { displayPath } from '../displayPath.js';
 import { formatSize } from '../formatSize.js';
 import { isPreviewable } from '../previewExts.js';
 import { isAppSelectable } from '../appAvailability.js';
+import { PERMISSION_MODES, PERMISSION_MODE_LABELS, isElevatedPermissionMode } from '../permissionMode.js';
 import MetaLaunchDialog from './MetaLaunchDialog.jsx';
 
 // marked + DOMPurify only matter once someone opens a preview, so keep them
@@ -124,8 +125,6 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
   const modelInputForApp = (app) => app === 'codex' || app === 'commandcode';
   // commandcode の許可モード (standard / auto-accept / yolo)。OFF(=standard)
   // も含めて記憶する (単なる既定値ではなくユーザーの明示選択として保持)。
-  const PERMISSION_MODES = ['standard', 'auto-accept', 'yolo'];
-  const PERMISSION_MODE_LABELS = { standard: '標準', 'auto-accept': '自動承認', yolo: 'yolo' };
   const [commandcodePermissionMode, setCommandcodePermissionMode] = useState(() => {
     const saved = localStorage.getItem('ccserver-commandcode-permission-mode');
     return PERMISSION_MODES.includes(saved) ? saved : 'standard';
@@ -1448,7 +1447,7 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
                       ? 'shell'
                       : `${session.app === 'claude' ? 'claude' : session.app === 'copilot' ? 'copilot' : session.app === 'codex' ? 'codex' : session.app === 'commandcode' ? 'command-code' : 'opencode'} · ${session.connected ? 'connected' : 'idle'}`}
                   </span>
-                  {!session.shell && session.app === 'commandcode' && (session.permissionMode === 'yolo' || session.permissionMode === 'auto-accept') && (
+                  {!session.shell && session.app === 'commandcode' && isElevatedPermissionMode(session.permissionMode) && (
                     <span className={`session-badge permission-${session.permissionMode}`} title={session.permissionMode === 'yolo' ? 'yolo モード (--yolo) で実行中' : '自動承認モード (--auto-accept) で実行中'}>{session.permissionMode}</span>
                   )}
                 </div>
