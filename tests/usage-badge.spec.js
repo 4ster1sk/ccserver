@@ -83,6 +83,45 @@ test('switching to the OpenCode tab flips the badge and the numbers', async () =
   await expect(page.locator('.usage-btn .usage-btn-pct')).toHaveText('77%');
 });
 
+test('a delayed response for a since-abandoned tab does not overwrite the current tab', async () => {
+  await page.unrouteAll({ behavior: 'wait' });
+  mockRoutes(page, { availableApps: { claude: true, codex: true, opencodeGo: true } });
+  // opencode's fetch resolves last, well after the user has already moved on
+  // to codex -- reproduces the external-network-latency race #8 describes.
+  await page.route('**/api/usage**', async (route) => {
+    const app = new URL(route.request().url()).searchParams.get('app') || 'claude';
+    if (app === 'opencode') await new Promise((r) => setTimeout(r, 300));
+    const pct = app === 'codex' ? 55 : app === 'opencode' ? 77 : 10;
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        usage: { plan: 'pro', limits: [{ label: 'Current session', pct, resets: '5h', resetAt: Date.now() + 5 * 3600_000, windowMs: 5 * 3600_000 }] },
+        updatedAt: Date.now(),
+        cached: true,
+      }),
+    });
+  }, { times: 999 });
+  await page.reload();
+
+  await page.locator('.usage-btn').click();
+  const menu = page.locator('.usage-menu');
+  await expect(menu).toBeVisible();
+
+  // Switch to opencode (kicks off its slow fetch), then immediately away to
+  // codex (whose own fetch resolves quickly) before opencode's response lands.
+  await menu.locator('.usage-tab', { hasText: 'OpenCode' }).click();
+  await menu.locator('.usage-tab', { hasText: 'Codex' }).click();
+  await expect(badge()).toHaveText('(codex)');
+  await expect(page.locator('.usage-btn .usage-btn-pct')).toHaveText('55%');
+
+  // Give opencode's delayed response time to arrive; it must be dropped, not
+  // shown under the still-active codex tab/badge.
+  await page.waitForTimeout(400);
+  await expect(badge()).toHaveText('(codex)');
+  await expect(page.locator('.usage-btn .usage-btn-pct')).toHaveText('55%');
+});
+
 test('the badge persists after the popover is closed', async () => {
   await page.locator('.usage-btn').click();
   await page.locator('.usage-menu').locator('.usage-tab', { hasText: 'Codex' }).click();

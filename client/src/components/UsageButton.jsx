@@ -88,16 +88,30 @@ export default function UsageButton({ hidden = false, defaultApp = 'claude', ava
 
   const visibleApps = USAGE_APPS.filter((a) => isSelectable(a));
 
+  // Tracks the tab actually showing right now, read inside load()'s async
+  // continuations below -- a plain closure over `tab` would freeze the value
+  // from when load() was created, which is exactly the stale value a race
+  // needs to detect.
+  const tabRef = useRef(tab);
+  useEffect(() => { tabRef.current = tab; }, [tab]);
+
+  // A slow response for a tab the user has since switched away from must not
+  // clobber whatever the now-current tab already displays -- opencode's
+  // external HTTPS round trip makes this race easy to hit in practice (an
+  // in-flight opencode fetch outlasting a quick switch to codex).
   const load = useCallback(async (force = false) => {
+    const forTab = tab;
     setLoading(true);
     try {
-      const res = await authFetch(`/api/usage?app=${tab}${force ? '&force=1' : ''}`);
+      const res = await authFetch(`/api/usage?app=${forTab}${force ? '&force=1' : ''}`);
       const json = await res.json();
+      if (forTab !== tabRef.current) return;
       setData(json);
     } catch (err) {
+      if (forTab !== tabRef.current) return;
       setData({ error: String(err?.message || err) });
     } finally {
-      setLoading(false);
+      if (forTab === tabRef.current) setLoading(false);
     }
   }, [tab]);
 
