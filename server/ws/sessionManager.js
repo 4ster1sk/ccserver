@@ -256,9 +256,14 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox
   // Permission mode for commandcode launches ('standard' by default -- no
   // flag; 'auto-accept' / 'yolo' add the corresponding CLI flag, see
   // appLaunch.js's appPermissionArgs). Unknown values normalize to
-  // 'standard'; shells and non-commandcode apps never emit a flag even when
-  // a non-standard value is stored.
-  const sessionPermissionMode = shell ? 'standard' : normalizePermissionMode(permissionMode);
+  // 'standard'. Shells and non-commandcode apps are forced to 'standard'
+  // here too, not just left un-flagged by appPermissionArgs -- otherwise a
+  // caller-supplied 'yolo'/'auto-accept' would sit in session.permissionMode
+  // (surfaced via listSessions/savedSessionPublic/federation) and could
+  // mislead a consumer that treats that field as an actual bypass signal.
+  const sessionPermissionMode = (shell || sessionApp !== 'commandcode')
+    ? 'standard'
+    : normalizePermissionMode(permissionMode);
 
   // ccserver-notify injection (see notify.js): standalone agent sessions and
   // combo orchestrators get the process-global notify MCP server when the

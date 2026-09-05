@@ -185,6 +185,44 @@ test('createSession stores the normalized permissionMode; shells are always stan
   }
 });
 
+// PR#108 review: permissionMode is a commandcode-only concept (appLaunch.js's
+// appPermissionArgs is a no-op for every other app), but before this test the
+// stored session.permissionMode itself wasn't forced back to 'standard' for
+// non-commandcode apps -- only shells were. A caller-supplied 'yolo' for
+// app: 'claude' would sit in session.permissionMode and surface via
+// listSessions/savedSessionPublic/federation, which could mislead a consumer
+// that treats that field as an actual bypass signal even though no CLI flag
+// was ever emitted. Pin CCSERVER_CLAUDE_BIN at a real, always-executable file
+// (the running node binary) so claude reads as INSTALLED.
+test('createSession forces permissionMode to standard for non-commandcode apps', () => {
+  const cfgDir = mkdtempSync(join(tmpdir(), 'ccserver-sess-cfg-'));
+  const cfgPath = join(cfgDir, 'sandbox.config.json');
+  writeFileSync(cfgPath, JSON.stringify({ docker: false, gitBroker: false }));
+  const prevBin = process.env.CCSERVER_CLAUDE_BIN;
+  const prevCfg = process.env.CCSERVER_SANDBOX_CONFIG;
+  process.env.CCSERVER_CLAUDE_BIN = process.execPath;
+  process.env.CCSERVER_SANDBOX_CONFIG = cfgPath;
+  try {
+    const res = sessionManager.createSession({
+      cwd: '/tmp', cols: 80, rows: 24, shell: false, sandbox: false, app: 'claude', permissionMode: 'yolo',
+    });
+    assert.ok(res.session, 'claude session should spawn');
+    try {
+      assert.equal(res.session.permissionMode, 'standard', 'non-commandcode apps never carry a non-standard permission mode');
+      assert.equal(sessionManager.listSessions().find((s) => s.id === res.sessionId).permissionMode, 'standard');
+      assert.equal(sessionManager.savedSessionPublic(res.session, null).permissionMode, 'standard');
+    } finally {
+      sessionManager.destroySession(res.sessionId, { keepSchedule: false });
+    }
+  } finally {
+    if (prevBin === undefined) delete process.env.CCSERVER_CLAUDE_BIN;
+    else process.env.CCSERVER_CLAUDE_BIN = prevBin;
+    if (prevCfg === undefined) delete process.env.CCSERVER_SANDBOX_CONFIG;
+    else process.env.CCSERVER_SANDBOX_CONFIG = prevCfg;
+    try { rmSync(cfgDir, { recursive: true, force: true }); } catch { /* ignore */ }
+  }
+});
+
 // A configured claudeBin that resolves nowhere (a bare name on no searched
 // dir) must be refused with the clear not-installed error instead of reaching
 // pty.spawn (opaque execvp ENOENT / exit 127 right after "起動しました").
