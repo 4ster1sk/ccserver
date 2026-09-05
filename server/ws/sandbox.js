@@ -25,6 +25,7 @@ import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { startGitBroker } from './git-broker.js';
 import { recordSandboxHome as recordSandboxHomeDb, listSandboxRowsBySlug, forgetSandboxHome } from './projects.js';
+import { APPS } from './appLaunch.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -474,6 +475,18 @@ function slugify(p) {
   return p.replace(/[^a-zA-Z0-9]+/g, '_').replace(/^_+|_+$/g, '') || 'root';
 }
 
+// Every agent CLI the launch pickers know about (see resolveApp/installedApps
+// below, and issue #105's hiddenApps). Self-review: this used to redefine the
+// same literal appLaunch.js's APPS already exports, risking drift the next
+// time an app is added -- re-exported under this module's existing name
+// instead, so existing importers (sandbox-config.test.js,
+// startup-hidden-apps.test.js) don't need to change. A defensive copy, not
+// the same array object: appLaunch.js's dispatch tables (isValidApp/
+// resolveApp) hold the original APPS binding, and an in-place mutation of
+// one (e.g. re-sorting APP_IDS for picker display order) must never corrupt
+// the other's shared state.
+export const APP_IDS = [...APPS];
+
 // Load the optional sandbox config. Path from CCSERVER_SANDBOX_CONFIG, else
 // server/sandbox.config.json (next to this module's parent). Shape:
 //   { "docker": true, "binds": [ { "src": "~/.ssh", "mode": "ro" }, ... ] }
@@ -601,8 +614,17 @@ export function loadSandboxConfig() {
   // sandboxed sessions (resource-consuming) on any caller's say-so, so it
   // must not exist unless explicitly enabled.
   const reviewerMcp = raw.reviewerMcp === true;
+  // Launch options to hide from every picker (issue #105): apps the operator
+  // hasn't contracted for. Server-side install detection alone can't tell
+  // "not installed" apart from "installed but not contracted", so this is a
+  // manual allowlist-style exclusion. Unknown entries are silently dropped
+  // (a typo degrades to "no effect" rather than refusing to boot -- see
+  // selectableAppIds() below for the one case that DOES refuse to boot).
+  const hiddenApps = Array.isArray(raw.hiddenApps)
+    ? [...new Set(raw.hiddenApps.filter((a) => APP_IDS.includes(a)))]
+    : [];
   return {
-    docker, persistentHome, gpg, sshAgent, gitBroker, forceSandbox, binds, env, claudeBin, defaultApp, showUsage, usageMcp, metaAgentMcp, reviewerMcp,
+    docker, persistentHome, gpg, sshAgent, gitBroker, forceSandbox, binds, env, claudeBin, defaultApp, showUsage, usageMcp, metaAgentMcp, reviewerMcp, hiddenApps,
     notify: {
       discordWebhook, subscriptions, hostname: notifyHostname, attribution: notifyAttribution,
       vikunja: {
@@ -788,6 +810,27 @@ export function installedApps() {
     codex: resolveApp('codex').found,
     commandcode: resolveApp('commandcode').found,
   };
+}
+
+// The app ids actually offered by the launch pickers: installed on this host
+// AND not hidden via sandbox.config.json's hiddenApps (issue #105). Used by
+// the server-startup guard (index.js) to refuse to boot when hiddenApps has
+// hidden every installed CLI -- a silently empty picker across all 5 launch
+// screens would otherwise ship with no way to start a session at all.
+export function selectableAppIds() {
+  const installed = installedApps();
+  const { hiddenApps } = loadSandboxConfig();
+  return APP_IDS.filter((app) => installed[app] && !hiddenApps.includes(app));
+}
+
+// Whether `app` has been hidden via sandbox.config.json's hiddenApps (issue
+// #105). Every enforcement site that guards a real spawn against a hidden
+// app (createSession, the claude/codex usage captures) shares this instead
+// of re-deriving `loadSandboxConfig().hiddenApps.includes(...)` separately,
+// so the check itself can't drift between them even though each site's
+// error message and return shape stays its own.
+export function isAppHidden(app) {
+  return !!app && loadSandboxConfig().hiddenApps.includes(app);
 }
 
 // Backwards-compatible alias used by the claude-only /usage capture.
