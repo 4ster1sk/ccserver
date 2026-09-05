@@ -175,8 +175,12 @@ export default function RightSidebar({ usageProps = {}, prefs }) {
             {body}
           </WidgetShell>
         ))}
-        {renderedWidgets.length === 0 && stats?.data && (
-          <div className="sidebar-empty">表示できるデータがありません。＋から追加してください。</div>
+        {renderedWidgets.length === 0 && shownWidgets.length > 0 && stats?.data && (
+          <div className="sidebar-empty">
+            {addableWidgets.length > 0
+              ? '表示できるデータがありません。＋から追加してください。'
+              : '表示できるデータがありません。'}
+          </div>
         )}
         {shownWidgets.length === 0 && (
           <div className="sidebar-empty">表示中のウィジェットがありません。＋から追加してください。</div>
