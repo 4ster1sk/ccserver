@@ -1,4 +1,4 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 
 const SIDEBAR_OPEN_KEY = 'ccserver-sidebar-open';
 const ORDER_KEY = 'ccserver-widget-order';
@@ -78,23 +78,34 @@ export function useWidgetPrefs(widgetDefs) {
     }
   }, []);
 
-  const moveWidget = useCallback((id, dir) => {
+  const moveWidget = useCallback((id, dir, isSkippable) => {
     if (dir !== 'up' && dir !== 'down') return;
     setOrderState((prev) => {
       const idx = prev.indexOf(id);
-      if (dir === 'up' && idx <= 0) return prev;
-      if (dir === 'down' && (idx < 0 || idx >= prev.length - 1)) return prev;
+      if (idx < 0) return prev;
+      const step = dir === 'up' ? -1 : 1;
+      // 非表示ウィジェットを飛ばして可視同士を入れ替える。
+      // 隣が非表示だけの場合も可視順序が1つ動くため、無反応に見えない。
+      // 呼び出し側は「今回描画されていない可視ウィジェット」も飛ばせる。
+      const skip = isSkippable || ((x) => hiddenIds.has(x));
+      let j = idx + step;
+      while (j >= 0 && j < prev.length && skip(prev[j])) j += step;
+      if (j < 0 || j >= prev.length) return prev;
       const next = [...prev];
-      const j = dir === 'up' ? idx - 1 : idx + 1;
       [next[idx], next[j]] = [next[j], next[idx]];
-      try {
-        localStorage.setItem(ORDER_KEY, JSON.stringify(next));
-      } catch {
-        // ignore
-      }
       return next;
     });
-  }, []);
+  }, [hiddenIds]);
+
+  // updaterはpureに保ち、永続化はここに一本化する (setOpen /
+  // setWidgetVisible と同じ形。初回マウント時の書き込みは冪等)。
+  useEffect(() => {
+    try {
+      localStorage.setItem(ORDER_KEY, JSON.stringify(order));
+    } catch {
+      // ignore (private mode etc.)
+    }
+  }, [order]);
 
   const visibleWidgets = order
     .map((id) => widgetDefs.find((w) => w.id === id))

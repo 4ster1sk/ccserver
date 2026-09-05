@@ -57,6 +57,9 @@ export function saveUsageApp(app) {
   } catch {
     // Storage unavailable (private mode etc.) -- selection just won't persist.
   }
+  // 同一ドキュメント内の他インスタンス (UsageButton/UsageWidget) へ通知。
+  // storage イベントは同一ドキュメントに届かないため CustomEvent を使う。
+  window.dispatchEvent(new CustomEvent(USAGE_APP_KEY, { detail: app }));
 }
 
 export function useUsageTab({ defaultApp = 'claude', availableApps = null, hiddenApps = [], apps = USAGE_APPS } = {}) {
@@ -71,7 +74,7 @@ export function useUsageTab({ defaultApp = 'claude', availableApps = null, hidde
     const saved = loadSavedUsageApp(apps);
     if (saved && isAppVisible(saved, availableApps, hiddenApps)) return saved;
     if (apps.includes(defaultApp) && isAppVisible(defaultApp, availableApps, hiddenApps)) return defaultApp;
-    return apps[0];
+    return apps.find((a) => isAppVisible(a, availableApps, hiddenApps)) ?? apps[0];
   });
 
   useEffect(() => {
@@ -93,6 +96,22 @@ export function useUsageTab({ defaultApp = 'claude', availableApps = null, hidde
     saveUsageApp(app);
     setTabState(app);
   }, []);
+
+  // 他インスタンスでのタブ切替を反映する (同一ドキュメント内)。
+  // 発信元自身も受信するが同値 set のため React が bailout する。
+  useEffect(() => {
+    const onChange = (e) => {
+      const app = e?.detail;
+      if (typeof app !== 'string' || !apps.includes(app)) return;
+      setTabState((cur) => {
+        if (app === cur) return cur;
+        if (!isAppVisible(app, availableApps, hiddenApps)) return cur;
+        return app;
+      });
+    };
+    window.addEventListener(USAGE_APP_KEY, onChange);
+    return () => window.removeEventListener(USAGE_APP_KEY, onChange);
+  }, [apps, availableApps, hiddenApps]);
 
   const visibleApps = apps.filter((a) => isSelectable(a));
 
@@ -122,6 +141,7 @@ export function useUsageData(tab, { enabled = true } = {}) {
       if (!pending) {
         pending = (async () => {
           const res = await authFetch(`/api/usage?app=${app}${force ? '&force=1' : ''}`);
+          if (!res.ok) throw new Error(`HTTP ${res.status}`);
           return res.json();
         })();
         // force時は共有マップを汚さない (明示更新は常に新規取得)。

@@ -1,15 +1,31 @@
 export function formatUptime(seconds) {
-  const d = Math.floor(seconds / 86400);
-  const h = Math.floor((seconds % 86400) / 3600);
-  const m = Math.floor((seconds % 3600) / 60);
+  // 非有限値・負数は欠測として '—' 表示 (GpuCard の numOrNull 方針と一致)。
+  // SystemMonitor.jsx 側の呼び出しもこのガードで安全になる。
+  const n = numOrNull(seconds);
+  if (n == null || n < 0) return '—';
+  const s = Math.floor(n);
+  const d = Math.floor(s / 86400);
+  const h = Math.floor((s % 86400) / 3600);
+  const m = Math.floor((s % 3600) / 60);
   if (d > 0) return `${d}d ${h}h ${m}m`;
   if (h > 0) return `${h}h ${m}m`;
   return `${m}m`;
 }
 
+// 有効な load 値だけを "0.50 0.40" 形式にする。1つもなければ null。
+export function formatLoadAvg(loadAvg) {
+  if (!Array.isArray(loadAvg)) return null;
+  const vals = loadAvg.filter((v) => numOrNull(v) != null);
+  if (vals.length === 0) return null;
+  return vals.map((v) => Number(v).toFixed(2)).join(' ');
+}
+
 export function formatMb(mb) {
-  if (mb >= 1024) return `${(mb / 1024).toFixed(1)} GB`;
-  return `${mb} MB`;
+  // 非有限値 (欠測のnull/undefined、JSON化されたNaNなど) は'—'表示にする。
+  const n = numOrNull(mb);
+  if (n == null) return '—';
+  if (n >= 1024) return `${(n / 1024).toFixed(1)} GB`;
+  return `${n} MB`;
 }
 
 export function tempColor(temp) {
@@ -27,7 +43,7 @@ export function usageColor(pct) {
 }
 
 export function Bar({ value, max, label, sublabel, color, format }) {
-  const pct = max > 0 ? Math.min((value / max) * 100, 100) : 0;
+  const pct = max > 0 ? Math.max(0, Math.min((value / max) * 100, 100)) : 0;
   const barColor = color || usageColor(pct);
   return (
     <div className="monitor-bar-row">
@@ -44,82 +60,162 @@ export function Bar({ value, max, label, sublabel, color, format }) {
 }
 
 export function TempItem({ label, value }) {
+  // hwmonのparse失敗はwire上でnullになる。欠測行は描画しない
+  // (GpuCardのnumOrNull方針と一致。tempColor(null)はsuccessに倒れるため色も誤る)。
+  const temp = numOrNull(value);
+  if (temp == null) return null;
   return (
     <div className="monitor-temp-item">
       <span className="monitor-temp-label">{label}</span>
-      <span className="monitor-temp-value" style={{ color: tempColor(value) }}>{value}°C</span>
+      <span className="monitor-temp-value" style={{ color: tempColor(temp) }}>{temp}°C</span>
     </div>
   );
 }
 
+export function hasSystemMetrics(data) {
+  const uptime = numOrNull(data?.uptime);
+  const loadAvg = data?.loadAvg;
+  if (uptime == null && !Array.isArray(loadAvg)) return false;
+  if (uptime == null && loadAvg.length === 0) return false;
+  if (uptime == null && !loadAvg.some((v) => numOrNull(v) != null)) return false;
+  return true;
+}
+
+export function SystemCard({ data, hideTitle = false }) {
+  if (!hasSystemMetrics(data)) return null;
+  const uptime = numOrNull(data.uptime);
+  const load = formatLoadAvg(data.loadAvg);
+  return (
+    <div className="monitor-card">
+      {!hideTitle && <div className="monitor-card-title">System</div>}
+      {uptime != null && (
+        <div className="monitor-ipmi-row">
+          <span className="monitor-ipmi-label">Uptime</span>
+          <span className="monitor-ipmi-value">{formatUptime(uptime)}</span>
+        </div>
+      )}
+      {load != null && (
+        <div className="monitor-ipmi-row">
+          <span className="monitor-ipmi-label">Load Average</span>
+          <span className="monitor-ipmi-value">{load}</span>
+        </div>
+      )}
+    </div>
+  );
+}
+
+export function hasCpuUsage(data) {
+  const usage = data?.cpu?.usage;
+  // total は有限数値であること (NaN/Infinity・JSON化された欠測nullを弾く)。
+  // cores の要素は描画側で numOrNull フィルタするため配列であることだけ見る。
+  return !!data?.cpu && numOrNull(usage?.total) != null && Array.isArray(usage?.cores);
+}
+
 export function CpuCard({ data, hideTitle = false }) {
-  if (!data?.cpu) return null;
+  if (!hasCpuUsage(data)) return null;
+  const usage = data.cpu.usage;
+  const total = numOrNull(usage.total);
   return (
     <div className="monitor-card">
       {!hideTitle && <div className="monitor-card-title">CPU</div>}
       <div className="monitor-card-subtitle">{data.cpu.model}</div>
       <Bar
-        value={data.cpu.usage.total}
+        value={total}
         max={100}
         label="Total"
-        color={usageColor(data.cpu.usage.total)}
-        format={`${data.cpu.usage.total.toFixed(1)}%`}
+        color={usageColor(total)}
+        format={`${total.toFixed(1)}%`}
       />
       <div className="monitor-core-grid">
-        {data.cpu.usage.cores.map((usage, i) => (
-          <Bar
-            key={i}
-            value={usage}
-            max={100}
-            label={`Core ${i}`}
-            format={`${usage.toFixed(1)}%`}
-          />
-        ))}
+        {usage.cores.map((core, i) => {
+          // 欠測コア (null/非数値) は行ごと描画しない ("NaN%"/0%誤表示の防止)。
+          const v = numOrNull(core);
+          if (v == null) return null;
+          return (
+            <Bar
+              key={i}
+              value={v}
+              max={100}
+              label={`Core ${i}`}
+              format={`${v.toFixed(1)}%`}
+            />
+          );
+        })}
       </div>
     </div>
   );
 }
 
+// 正規化済みメモリ値。used/total のいずれかが欠測ならカード全体を出さない。
+function usableMemory(memory) {
+  if (!memory) return null;
+  const used = numOrNull(memory.used);
+  const total = numOrNull(memory.total);
+  if (used == null || total == null) return null;
+  return {
+    used,
+    total,
+    available: numOrNull(memory.available),
+    bufferCache: numOrNull(memory.bufferCache),
+    swapUsed: numOrNull(memory.swapUsed),
+    swapTotal: numOrNull(memory.swapTotal),
+  };
+}
+
+export function hasMemoryOrStorage(data) {
+  return usableMemory(data?.memory) != null || visibleStorageRows(data).length > 0;
+}
+
 export function MemoryCard({ data, hideTitle = false }) {
-  if (!data?.memory) return null;
+  const mem = usableMemory(data?.memory);
+  if (!mem) return null;
   return (
     <div className="monitor-card">
       {!hideTitle && <div className="monitor-card-title">Memory</div>}
       <Bar
-        value={data.memory.used}
-        max={data.memory.total}
+        value={mem.used}
+        max={mem.total}
         label="RAM"
-        format={`${formatMb(data.memory.used)} / ${formatMb(data.memory.total)}`}
+        format={`${formatMb(mem.used)} / ${formatMb(mem.total)}`}
       />
       <div className="monitor-mem-detail">
-        <span>Available: {formatMb(data.memory.available)}</span>
-        <span>Buffer/Cache: {formatMb(data.memory.bufferCache)}</span>
+        <span>Available: {formatMb(mem.available)}</span>
+        <span>Buffer/Cache: {formatMb(mem.bufferCache)}</span>
       </div>
-      {data.memory.swapTotal > 0 && (
+      {mem.swapTotal != null && mem.swapTotal > 0 && mem.swapUsed != null && (
         <Bar
-          value={data.memory.swapUsed}
-          max={data.memory.swapTotal}
+          value={mem.swapUsed}
+          max={mem.swapTotal}
           label="Swap"
-          format={`${formatMb(data.memory.swapUsed)} / ${formatMb(data.memory.swapTotal)}`}
+          format={`${formatMb(mem.swapUsed)} / ${formatMb(mem.swapTotal)}`}
         />
       )}
     </div>
   );
 }
 
+// used/total がともに有効数値のエントリだけを残す。Bar の pct が
+// NaN/負値になるのを防止する (CpuCard/GpuCard/MemoryCard と同一方針)。
+export function visibleStorageRows(data) {
+  if (!Array.isArray(data?.storage)) return [];
+  return data.storage.filter(
+    (s) => s && numOrNull(s.used) != null && numOrNull(s.total) != null && s.total > 0
+  );
+}
+
 export function StorageCard({ data, hideTitle = false }) {
-  if (!data?.storage || data.storage.length === 0) return null;
+  const rows = visibleStorageRows(data);
+  if (rows.length === 0) return null;
   return (
     <div className="monitor-card">
       {!hideTitle && <div className="monitor-card-title">Storage</div>}
-      {data.storage.map((s) => (
+      {rows.map((s, i) => (
         <Bar
-          key={s.mount}
+          key={`${s.mount}#${i}`}
           value={s.used}
           max={s.total}
           label={s.mount}
           sublabel={s.device}
-          color={usageColor(s.usedPct)}
           format={`${formatMb(s.used)} / ${formatMb(s.total)}`}
         />
       ))}
@@ -127,34 +223,49 @@ export function StorageCard({ data, hideTitle = false }) {
   );
 }
 
+function visibleTempItems(arr) {
+  if (!Array.isArray(arr)) return [];
+  return arr.filter((item) => numOrNull(item?.value) != null);
+}
+
+export function hasTemperatures(data) {
+  const t = data?.temperatures;
+  if (!t) return false;
+  return visibleTempItems(t.cpu).length > 0 || visibleTempItems(t.pch).length > 0 || visibleTempItems(t.other).length > 0;
+}
+
 export function TempCard({ data, hideTitle = false }) {
-  if (!data?.temperatures) return null;
+  if (!hasTemperatures(data)) return null;
   const t = data.temperatures;
-  if (!t.cpu && !t.pch && !t.other) return null;
+  // 欠測値 (null) の行は描画せず、全件欠測のグループは見出しごと出さない。
+  // hasTemperatures が有効行の存在を保証するため、ここでは空にならない。
+  const cpu = visibleTempItems(t.cpu);
+  const pch = visibleTempItems(t.pch);
+  const other = visibleTempItems(t.other);
   return (
     <div className="monitor-card">
       {!hideTitle && <div className="monitor-card-title">Temperatures</div>}
-      {t.cpu && (
+      {cpu.length > 0 && (
         <div className="monitor-temp-group">
           <div className="monitor-temp-group-label">CPU</div>
-          {t.cpu.map((item) => (
-            <TempItem key={item.label} label={item.label} value={item.value} />
+          {cpu.map((item, i) => (
+            <TempItem key={`${item.label}#${i}`} label={item.label} value={item.value} />
           ))}
         </div>
       )}
-      {t.pch && (
+      {pch.length > 0 && (
         <div className="monitor-temp-group">
           <div className="monitor-temp-group-label">Chipset (PCH)</div>
-          {t.pch.map((item) => (
-            <TempItem key={item.label} label={item.label} value={item.value} />
+          {pch.map((item, i) => (
+            <TempItem key={`${item.label}#${i}`} label={item.label} value={item.value} />
           ))}
         </div>
       )}
-      {t.other && (
+      {other.length > 0 && (
         <div className="monitor-temp-group">
           <div className="monitor-temp-group-label">Other</div>
-          {t.other.map((item) => (
-            <TempItem key={item.label} label={item.label} value={item.value} />
+          {other.map((item, i) => (
+            <TempItem key={`${item.label}#${i}`} label={item.label} value={item.value} />
           ))}
         </div>
       )}
@@ -162,94 +273,148 @@ export function TempCard({ data, hideTitle = false }) {
   );
 }
 
+function numOrNull(v) {
+  // Number(null)/Number('') は 0 になるため先に弾く。NaN は JSON 化で
+  // null になるので、ここでは null/undefined/''/非有限値を一律「欠測」とする。
+  if (v == null || v === '') return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+
+// nvidia-smi は数値でない項目 (例: ファンレス GPU の Fan Speed 'N/A') を
+// 返すことがあり、server はそれを NaN 混じりの gpu オブジェクトとして返す
+// (parts.length >= 8 を満たすため)。NaN のまま描画すると「NaN°C」表示や
+// バー崩れになるため、主要メトリクスで描画可否を判定し、各値は正規化する。
+export function hasGpuMetrics(data) {
+  const g = data?.gpu;
+  if (!g) return false;
+  return numOrNull(g.temp) != null || numOrNull(g.utilization) != null || numOrNull(g.memoryUsed) != null;
+}
+
 export function GpuCard({ data, hideTitle = false }) {
-  if (!data?.gpu) return null;
+  if (!hasGpuMetrics(data)) return null;
+  const g = data.gpu;
+  const temp = numOrNull(g.temp);
+  const utilization = numOrNull(g.utilization);
+  const memoryUsed = numOrNull(g.memoryUsed);
+  const memoryTotal = numOrNull(g.memoryTotal);
+  const fanSpeed = numOrNull(g.fanSpeed);
+  const powerUsage = numOrNull(g.powerUsage);
+  const powerCap = numOrNull(g.powerCap);
   return (
     <div className="monitor-card">
       {!hideTitle && <div className="monitor-card-title">GPU</div>}
-      <div className="monitor-card-subtitle">{data.gpu.name}</div>
-      <TempItem label="Temperature" value={data.gpu.temp} />
-      <Bar
-        value={data.gpu.utilization}
-        max={100}
-        label="Utilization"
-        format={`${data.gpu.utilization}%`}
-      />
-      <Bar
-        value={data.gpu.memoryUsed}
-        max={data.gpu.memoryTotal}
-        label="VRAM"
-        format={`${formatMb(data.gpu.memoryUsed)} / ${formatMb(data.gpu.memoryTotal)}`}
-      />
+      <div className="monitor-card-subtitle">{g.name}</div>
+      {temp != null && <TempItem label="Temperature" value={temp} />}
+      {utilization != null && (
+        <Bar
+          value={utilization}
+          max={100}
+          label="Utilization"
+          format={`${utilization.toFixed(1)}%`}
+        />
+      )}
+      {memoryUsed != null && memoryTotal != null && (
+        <Bar
+          value={memoryUsed}
+          max={memoryTotal}
+          label="VRAM"
+          format={`${formatMb(memoryUsed)} / ${formatMb(memoryTotal)}`}
+        />
+      )}
       <div className="monitor-gpu-detail">
-        <span>Fan: {data.gpu.fanSpeed}%</span>
-        <span>Power: {data.gpu.powerUsage}W / {data.gpu.powerCap}W</span>
+        <span>Fan: {fanSpeed != null ? `${fanSpeed}%` : '—'}</span>
+        <span>Power: {powerUsage != null ? `${powerUsage}W` : '—'} / {powerCap != null ? `${powerCap}W` : '—'}</span>
       </div>
+    </div>
+  );
+}
+
+// 有効な値を持つIPMI行だけを残す。要素自体のnull・値の欠測を除外する
+// (TempCardのvisibleTempItemsと同一方針)。
+function visibleIpmiRows(arr) {
+  if (!Array.isArray(arr)) return [];
+  return arr.filter((e) => e && numOrNull(e.value) != null);
+}
+
+function IpmiCard({ data, field, title, format, grid = false, valueClassName = 'monitor-ipmi-value', hideTitle = false }) {
+  const rows = visibleIpmiRows(data?.ipmi?.[field]);
+  if (rows.length === 0) return null;
+  const body = rows.map((r, i) => (
+    <div key={`${r.label}#${i}`} className="monitor-ipmi-row">
+      <span className="monitor-ipmi-label">{r.label}</span>
+      <span className={valueClassName}>{format(numOrNull(r.value))}</span>
+    </div>
+  ));
+  return (
+    <div className="monitor-card">
+      {!hideTitle && <div className="monitor-card-title">{title}</div>}
+      {grid ? <div className="monitor-voltage-grid">{body}</div> : body}
     </div>
   );
 }
 
 function IpmiPowerCard({ data, hideTitle = false }) {
-  if (!data?.ipmi || data.ipmi.power.length === 0) return null;
   return (
-    <div className="monitor-card">
-      {!hideTitle && <div className="monitor-card-title">Power (IPMI)</div>}
-      {data.ipmi.power.map((p) => (
-        <div key={p.label} className="monitor-ipmi-row">
-          <span className="monitor-ipmi-label">{p.label}</span>
-          <span className="monitor-ipmi-value monitor-power-value">{p.value} W</span>
-        </div>
-      ))}
-    </div>
+    <IpmiCard
+      data={data}
+      field="power"
+      title="Power (IPMI)"
+      format={(v) => `${v.toFixed(1)} W`}
+      valueClassName="monitor-ipmi-value monitor-power-value"
+      hideTitle={hideTitle}
+    />
   );
 }
 
 function IpmiVoltageCard({ data, hideTitle = false }) {
-  if (!data?.ipmi || data.ipmi.voltage.length === 0) return null;
   return (
-    <div className="monitor-card">
-      {!hideTitle && <div className="monitor-card-title">Voltage (IPMI)</div>}
-      <div className="monitor-voltage-grid">
-        {data.ipmi.voltage.map((v) => (
-          <div key={v.label} className="monitor-ipmi-row">
-            <span className="monitor-ipmi-label">{v.label}</span>
-            <span className="monitor-ipmi-value">{v.value.toFixed(3)} V</span>
-          </div>
-        ))}
-      </div>
-    </div>
+    <IpmiCard
+      data={data}
+      field="voltage"
+      title="Voltage (IPMI)"
+      grid
+      format={(v) => `${v.toFixed(3)} V`}
+      hideTitle={hideTitle}
+    />
   );
 }
 
 function IpmiFansCard({ data, hideTitle = false }) {
-  if (!data?.ipmi || data.ipmi.fans.length === 0) return null;
   return (
-    <div className="monitor-card">
-      {!hideTitle && <div className="monitor-card-title">Fans (IPMI)</div>}
-      {data.ipmi.fans.map((f) => (
-        <div key={f.label} className="monitor-ipmi-row">
-          <span className="monitor-ipmi-label">{f.label}</span>
-          <span className="monitor-ipmi-value">{Math.round(f.value)} RPM</span>
-        </div>
-      ))}
-    </div>
+    <IpmiCard
+      data={data}
+      field="fans"
+      title="Fans (IPMI)"
+      format={(v) => `${Math.round(v)} RPM`}
+      hideTitle={hideTitle}
+    />
   );
 }
 
 function IpmiTempsCard({ data, hideTitle = false }) {
-  if (!data?.ipmi || data.ipmi.temps.length === 0) return null;
+  // TempItem自体も欠測値を描画しないが、要素自体のnullはここで除外する。
+  const rows = visibleIpmiRows(data?.ipmi?.temps);
+  if (rows.length === 0) return null;
   return (
     <div className="monitor-card">
       {!hideTitle && <div className="monitor-card-title">Temperatures (IPMI)</div>}
-      {data.ipmi.temps.map((t) => (
-        <TempItem key={t.label} label={t.label} value={t.value} />
+      {rows.map((t, i) => (
+        <TempItem key={`${t.label}#${i}`} label={t.label} value={t.value} />
       ))}
     </div>
   );
 }
 
+export function hasIpmiData(data) {
+  const ipmi = data?.ipmi;
+  if (!ipmi) return false;
+  const valid = (arr) => visibleIpmiRows(arr).length > 0;
+  return valid(ipmi.power) || valid(ipmi.voltage) || valid(ipmi.fans) || valid(ipmi.temps);
+}
+
 export function IpmiCards({ data, showIpmi, hideTitle = false }) {
-  if (!showIpmi || !data?.ipmi) return null;
+  if (!showIpmi || !hasIpmiData(data)) return null;
   return (
     <>
       <IpmiPowerCard data={data} hideTitle={hideTitle} />
