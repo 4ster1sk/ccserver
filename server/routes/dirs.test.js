@@ -170,3 +170,31 @@ test('GET /dirs/home exposes availableApps.opencodeGo following toggle + key', a
     try { rmSync(dir, { recursive: true, force: true }); } catch {}
   }
 });
+
+// GET /dirs/home also exposes hiddenApps (issue #105) so every launch picker
+// can remove those apps entirely, regardless of install status. Same
+// live-following-sandbox.config.json contract as metaAgentEnabled above.
+test('GET /dirs/home exposes hiddenApps following sandbox.config.json', async () => {
+  const cfg = join(runtimeDir, 'sandbox.config.json');
+  const savedConfigEnv = process.env.CCSERVER_SANDBOX_CONFIG;
+  process.env.CCSERVER_SANDBOX_CONFIG = cfg;
+  try {
+    // No config file at all -> nothing hidden.
+    let res = await app.inject({ method: 'GET', url: '/api/dirs/home' });
+    assert.deepEqual(res.json().hiddenApps, []);
+
+    writeFileSync(cfg, JSON.stringify({ hiddenApps: ['copilot', 'codex'] }));
+    res = await app.inject({ method: 'GET', url: '/api/dirs/home' });
+    assert.deepEqual(res.json().hiddenApps, ['copilot', 'codex']);
+
+    // Unknown entries are dropped by loadSandboxConfig's own validation --
+    // the route just passes the already-validated array through.
+    writeFileSync(cfg, JSON.stringify({ hiddenApps: ['copilot', 'not-a-real-app'] }));
+    res = await app.inject({ method: 'GET', url: '/api/dirs/home' });
+    assert.deepEqual(res.json().hiddenApps, ['copilot']);
+  } finally {
+    if (savedConfigEnv === undefined) delete process.env.CCSERVER_SANDBOX_CONFIG;
+    else process.env.CCSERVER_SANDBOX_CONFIG = savedConfigEnv;
+    try { rmSync(cfg, { force: true }); } catch {}
+  }
+});

@@ -121,7 +121,7 @@ export async function createDirectory({ parent, name, gitInit }) {
 
 export async function dirsRoute(fastify, opts) {
   fastify.get('/dirs/home', async () => {
-    const { defaultApp, forceSandbox, showUsage } = loadSandboxConfig();
+    const { defaultApp, forceSandbox, showUsage, hiddenApps } = loadSandboxConfig();
     // hostname for the browser tab title ("<host> ccserver"): the same
     // resolution the notify footer uses, so the tab matches _from: <host>.
     // Extra field, so existing clients are unaffected.
@@ -133,10 +133,13 @@ export async function dirsRoute(fastify, opts) {
     // needs no opencode binary): toggle on AND a Go API key present, checked
     // synchronously without network -- see opencodeUsage.js. The
     // subscription itself (403) is only known after a fetch.
+    // hiddenApps (issue #105): apps the operator hasn't contracted for --
+    // every launch picker removes them entirely, unlike availableApps=false
+    // (not installed), which still shows greyed out with a tooltip.
     // metaAgentEnabled: the launch modal's メタエージェント mode is disabled
     // (with an explanation) unless the privileged ccserver-meta feature is
     // explicitly opted into via sandbox.config.json. Extra field as well.
-    return { home: homedir(), defaultApp, forceSandbox, hostname: resolvedHostname(), showUsage, availableApps: { ...installedApps(), opencodeGo: opencodeGoAvailable() }, metaAgentEnabled: metaAgentEnabled(), metaAgentDir: metaAgentDir() };
+    return { home: homedir(), defaultApp, forceSandbox, hostname: resolvedHostname(), showUsage, availableApps: { ...installedApps(), opencodeGo: opencodeGoAvailable() }, hiddenApps, metaAgentEnabled: metaAgentEnabled(), metaAgentDir: metaAgentDir() };
   });
 
   fastify.get('/dirs', async (request, reply) => {

@@ -11,6 +11,7 @@ import RemoteInstanceView from './components/RemoteInstanceView.jsx';
 import { useNotifications } from './hooks/useNotifications.js';
 import { authFetch } from './auth.js';
 import { getTheme, loadThemeId, saveThemeId, applyThemeCss } from './themes.js';
+import { isAppSelectable } from './appAvailability.js';
 
 const TerminalView = lazy(() => import('./components/TerminalView.jsx'));
 
@@ -45,7 +46,7 @@ export default function App() {
   // enabled (sandbox.config.json's "showUsage") and which agent CLIs are
   // installed here (availableApps). Usage is only meaningful when claude
   // exists, so a missing claude hides the button regardless of showUsage.
-  const [usagePrefs, setUsagePrefs] = useState({ showUsage: true, availableApps: null });
+  const [usagePrefs, setUsagePrefs] = useState({ showUsage: true, availableApps: null, hiddenApps: [] });
   const [metaAgentDir, setMetaAgentDir] = useState(null);
 
   useEffect(() => {
@@ -69,6 +70,7 @@ export default function App() {
         setUsagePrefs({
           showUsage: data.showUsage !== false,
           availableApps: data.availableApps || null,
+          hiddenApps: Array.isArray(data.hiddenApps) ? data.hiddenApps : [],
         });
         if (data.metaAgentDir) setMetaAgentDir(data.metaAgentDir);
       })
@@ -450,16 +452,20 @@ export default function App() {
   // visible on opencode/copilot terminals too, as long as at least one
   // source is usable. It's hidden only via sandbox.config.json's
   // "showUsage": false, or when the server reports nothing usable at all
-  // (no CLI installed AND no Go key). `availableApps` null/absent (fetch
-  // pending or failed, older server) means "unknown" -- every tab is
-  // assumed available in that case. Note `opencodeGo` is not the opencode
-  // CLI install flag: it means toggle on + Go API key present. Unlike
+  // (no CLI installed AND no Go key, accounting for hiddenApps).
+  // `availableApps` null/absent (fetch pending or failed, older server)
+  // means "unknown" -- every tab is assumed available in that case (unless
+  // hidden via hiddenApps). Note `opencodeGo` is not the opencode CLI
+  // install flag: it means toggle on + Go API key present. Unlike
   // claude/codex (whose keys predate this feature), a PRESENT object
   // without the opencodeGo key is an older server, so Go stays hidden
-  // there (see UsageButton's isAppVisible).
-  const claudeAvailable = !usagePrefs.availableApps || usagePrefs.availableApps.claude !== false;
-  const codexAvailable = !usagePrefs.availableApps || usagePrefs.availableApps.codex !== false;
-  const opencodeGoAvailable = !usagePrefs.availableApps || usagePrefs.availableApps.opencodeGo === true;
+  // there (see UsageButton's isAppVisible). hiddenApps 'opencode' hides
+  // the Go tab as well (issue #105).
+  const claudeAvailable = isAppSelectable('claude', usagePrefs.availableApps, usagePrefs.hiddenApps);
+  const codexAvailable = isAppSelectable('codex', usagePrefs.availableApps, usagePrefs.hiddenApps);
+  const opencodeGoAvailable = usagePrefs.hiddenApps?.includes('opencode')
+    ? false
+    : (!usagePrefs.availableApps || usagePrefs.availableApps.opencodeGo === true);
   const usageHidden = !usagePrefs.showUsage || (!claudeAvailable && !codexAvailable && !opencodeGoAvailable);
   // First-run seed only: UsageButton remembers the app the user last picked
   // (localStorage), so this active-tab-derived default is used just when
@@ -514,7 +520,7 @@ export default function App() {
         ))}
         <div className="tab-bar-spacer" />
         </div>
-        <UsageButton hidden={usageHidden} defaultApp={usageDefaultApp} availableApps={usagePrefs.availableApps} />
+        <UsageButton hidden={usageHidden} defaultApp={usageDefaultApp} availableApps={usagePrefs.availableApps} hiddenApps={usagePrefs.hiddenApps} />
       </div>
       <div className="tab-content">
         <div style={{ display: activeTabId === 'browser' ? 'flex' : 'none', height: '100%', flexDirection: 'column' }}>

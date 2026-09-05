@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { authFetch } from '../auth.js';
+import { isAppSelectable } from '../appAvailability.js';
 
 function pctClass(pct) {
   if (pct >= 80) return 'usage-bar-fill high';
@@ -59,16 +60,22 @@ function availableKey(app) {
   return app === 'opencode' ? 'opencodeGo' : app;
 }
 
-function isAppVisible(app, availableApps) {
+function isAppVisible(app, availableApps, hiddenApps) {
+  // opencode Go is NOT the opencode CLI install flag (a Go subscription
+  // needs no binary): hidden via hiddenApps 'opencode' (issue #105), else
+  // toggle on + Go API key present reported as availableApps.opencodeGo.
   // Whole object missing (fetch pending/failed) -> assume all visible, the
   // pre-existing loading convention. But a PRESENT object without the
   // opencodeGo key means an older server that predates Go support entirely:
   // the Go tab must stay hidden there (old servers ignore ?app=opencode and
   // would serve Claude data under the (opencode) badge). New servers always
   // send the key (see routes/dirs.js).
-  if (!availableApps) return true;
-  if (app === 'opencode') return availableApps.opencodeGo === true;
-  return availableApps[app] !== false;
+  if (app === 'opencode') {
+    if (hiddenApps?.includes('opencode')) return false;
+    if (!availableApps) return true;
+    return availableApps.opencodeGo === true;
+  }
+  return isAppSelectable(app, availableApps, hiddenApps);
 }
 
 function saveUsageApp(app) {
@@ -79,24 +86,32 @@ function saveUsageApp(app) {
   }
 }
 
-export default function UsageButton({ hidden = false, defaultApp = 'claude', availableApps = null }) {
+export default function UsageButton({ hidden = false, defaultApp = 'claude', availableApps = null, hiddenApps = [] }) {
   const [open, setOpen] = useState(false);
   const [data, setData] = useState(null);   // { usage, updatedAt, error, ... }
   const [loading, setLoading] = useState(false);
   const [, setTick] = useState(0);   // re-render so pace/age stay live while open
+  // Selectable = installed (availableApps !== false; opencode Go = toggle on
+  // + Go key present) AND not hidden via sandbox.config.json's hiddenApps
+  // (issue #105). Shared with App.jsx's button visibility via isAppSelectable
+  // for claude/codex; Go adds its own opencodeGo-key rule above.
+  const isSelectable = useCallback(
+    (app) => isAppVisible(app, availableApps, hiddenApps),
+    [availableApps, hiddenApps]
+  );
   // Which app the popover is currently showing. The persisted choice wins:
   // defaultApp (the active terminal tab's app) only seeds the very first view
   // when nothing valid has been saved yet. Availability is still respected --
-  // a saved app that isn't installed falls back below.
+  // a saved app that isn't installed or is hidden falls back below.
   const [tab, setTab] = useState(() => {
     const saved = loadSavedUsageApp();
-    if (saved && isAppVisible(saved, availableApps)) return saved;
-    if (USAGE_APPS.includes(defaultApp) && isAppVisible(defaultApp, availableApps)) return defaultApp;
+    if (saved && isSelectable(saved)) return saved;
+    if (USAGE_APPS.includes(defaultApp) && isSelectable(defaultApp)) return defaultApp;
     return 'claude';
   });
   const wrapRef = useRef(null);
 
-  const visibleApps = USAGE_APPS.filter((a) => isAppVisible(a, availableApps));
+  const visibleApps = USAGE_APPS.filter((a) => isSelectable(a));
 
   const load = useCallback(async (force = false) => {
     setLoading(true);
@@ -123,16 +138,16 @@ export default function UsageButton({ hidden = false, defaultApp = 'claude', ava
     if (!availableApps) return;
     const saved = loadSavedUsageApp();
     setTab((cur) => {
-      if (saved && saved !== cur && isAppVisible(saved, availableApps)) return saved;
-      if (isAppVisible(cur, availableApps)) return cur;
-      const fallback = USAGE_APPS.find((a) => a !== cur && isAppVisible(a, availableApps));
+      if (saved && saved !== cur && isSelectable(saved)) return saved;
+      if (isSelectable(cur)) return cur;
+      const fallback = USAGE_APPS.find((a) => a !== cur && isSelectable(a));
       if (fallback) {
         saveUsageApp(fallback);
         return fallback;
       }
       return cur;
     });
-  }, [availableApps]);
+  }, [availableApps, hiddenApps, isSelectable]);
 
   // Prime the button (session % badge) once on mount, using the cache, and
   // again whenever the viewed app changes -- reset first so a tab switch
