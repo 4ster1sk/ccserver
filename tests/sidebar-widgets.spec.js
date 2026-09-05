@@ -1,6 +1,6 @@
 import { test, expect } from '@playwright/test';
 
-function mockRoutes(page) {
+function mockRoutes(page, hooks = {}) {
   page.route('**/api/dirs/home*', async (route) => {
     await route.fulfill({
       status: 200,
@@ -34,6 +34,7 @@ function mockRoutes(page) {
     });
   });
   page.route('**/api/system-stats*', async (route) => {
+    hooks.onSystemStats?.();
     await route.fulfill({
       status: 200,
       contentType: 'application/json',
@@ -85,26 +86,9 @@ test('hiding a widget persists across a reload', async ({ page }) => {
   await expect(page.locator('.widget-card', { hasText: 'CPU' })).toBeVisible();
 });
 
-test('closing the sidebar and leaving the monitor tab stops system-stats polling', async ({ page }) => {
+test('closing the sidebar stops system-stats polling', async ({ page }) => {
   let systemStatsHits = 0;
-  mockRoutes(page);
-  await page.route('**/api/system-stats*', async (route) => {
-    systemStatsHits += 1;
-    await route.fulfill({
-      status: 200,
-      contentType: 'application/json',
-      body: JSON.stringify({
-        uptime: 3600,
-        loadAvg: [0.5, 0.4, 0.3],
-        cpu: { model: 'Test CPU', usage: { total: 25, cores: [20, 30] } },
-        memory: { total: 16000, used: 8000, available: 8000, bufferCache: 1000, swapTotal: 0, swapUsed: 0 },
-        storage: [],
-        temperatures: {},
-        gpu: null,
-        ipmi: null,
-      }),
-    });
-  });
+  mockRoutes(page, { onSystemStats: () => { systemStatsHits += 1; } });
   await page.goto('/');
 
   await expect(page.locator('.widget-card', { hasText: 'CPU' })).toBeVisible();
@@ -113,9 +97,10 @@ test('closing the sidebar and leaving the monitor tab stops system-stats polling
   await page.locator('.sidebar-toggle-btn').click();
   await expect(page.locator('.right-sidebar')).toBeHidden();
 
+  // 閉じる直前に発行済みのポーリングが到着する猶予を1回分おいてから基準値を取る
+  await page.waitForTimeout(2500);
   const hitsAfterClose = systemStatsHits;
   // Default 2s interval: 4.5s of silence proves the poll stopped
-  // (RemoteInstanceView's old always-poll behavior would keep hitting).
   await page.waitForTimeout(4500);
   expect(systemStatsHits).toBe(hitsAfterClose);
 });

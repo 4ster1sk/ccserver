@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useRef, useEffect } from 'react';
 import { useWidgetPrefs } from '../hooks/useWidgetPrefs.js';
 import { useSystemStatsContext } from './widgets/SystemStatsProvider.jsx';
 import { CpuCard, MemoryCard, StorageCard, TempCard, GpuCard, IpmiCards } from './widgets/MonitorCards.jsx';
@@ -42,7 +42,17 @@ export default function RightSidebar({ usageProps, prefs }) {
   const internalPrefs = useWidgetPrefs(WIDGET_DEFS);
   const { open, setOpen, visibleWidgets, hiddenWidgets, setWidgetVisible, moveWidget } = prefs || internalPrefs;
   const [addOpen, setAddOpen] = useState(false);
+  const addWrapRef = useRef(null);
   const stats = useSystemStatsContext();
+
+  useEffect(() => {
+    if (!addOpen) return;
+    const onClick = (e) => {
+      if (addWrapRef.current && !addWrapRef.current.contains(e.target)) setAddOpen(false);
+    };
+    document.addEventListener('mousedown', onClick);
+    return () => document.removeEventListener('mousedown', onClick);
+  }, [addOpen]);
 
   if (!open) return null;
 
@@ -82,7 +92,7 @@ export default function RightSidebar({ usageProps, prefs }) {
         <span className="sidebar-title">Widgets</span>
         <span className="sidebar-header-actions">
           {hiddenWidgets.length > 0 && (
-            <span className="sidebar-add-wrap">
+            <span className="sidebar-add-wrap" ref={addWrapRef}>
               <button
                 type="button"
                 className="btn btn-secondary btn-sm"

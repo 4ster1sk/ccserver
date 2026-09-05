@@ -83,19 +83,22 @@ export function useUsageData(tab) {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(false);
   const tabRef = useRef(tab);
-  tabRef.current = tab;
+  const requestIdRef = useRef(0);
+
+  useEffect(() => { tabRef.current = tab; });
 
   const load = useCallback(async (force = false) => {
     const app = tabRef.current;
+    const requestId = ++requestIdRef.current;
     setLoading(true);
     try {
       const res = await authFetch(`/api/usage?app=${app}${force ? '&force=1' : ''}`);
       const json = await res.json();
-      setData(json);
+      if (requestIdRef.current === requestId) setData(json);
     } catch (err) {
-      setData({ error: String(err?.message || err) });
+      if (requestIdRef.current === requestId) setData({ error: String(err?.message || err) });
     } finally {
-      setLoading(false);
+      if (requestIdRef.current === requestId) setLoading(false);
     }
   }, []);
 
