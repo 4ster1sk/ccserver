@@ -107,7 +107,7 @@ test('a saved codex choice falls back to claude when codex is unavailable', asyn
   await expect(pct()).toHaveText('10%');
 });
 
-test('an invalid saved value falls back to the defaultApp seed', async () => {
+test('a saved opencode choice falls back to the defaultApp seed without Go support', async () => {
   mockRoutes(page, { defaultApp: 'claude' });
   await page.addInitScript(() => {
     window.localStorage.setItem('ccserver-usage-app', 'opencode');
@@ -115,4 +115,14 @@ test('an invalid saved value falls back to the defaultApp seed', async () => {
   await page.goto('/');
 
   await expect(badge()).toHaveText('(claude)');
+});
+
+test('a saved opencode choice survives a reload when Go is available', async () => {
+  mockRoutes(page, { availableApps: { claude: true, codex: true, opencodeGo: true } });
+  await page.addInitScript(() => {
+    window.localStorage.setItem('ccserver-usage-app', 'opencode');
+  });
+  await page.goto('/');
+
+  await expect(badge()).toHaveText('(opencode)');
 });

@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { authFetch } from '../auth.js';
-import { isAppSelectable } from '../appAvailability.js';
+import { isAppVisible } from '../appAvailability.js';
 
 function pctClass(pct) {
   if (pct >= 80) return 'usage-bar-fill high';
@@ -30,10 +30,24 @@ function fmtAge(updatedAt) {
 // claude. Same per-browser convention as DirectoryBrowser's keys.
 const USAGE_APP_KEY = 'ccserver-usage-app';
 
+const USAGE_APPS = ['claude', 'codex', 'opencode'];
+
+const USAGE_APP_LABELS = {
+  claude: 'Claude 使用量',
+  codex: 'Codex 使用量',
+  opencode: 'OpenCode Go 使用量',
+};
+
+const USAGE_TAB_LABELS = {
+  claude: 'Claude',
+  codex: 'Codex',
+  opencode: 'OpenCode',
+};
+
 function loadSavedUsageApp() {
   try {
     const v = window.localStorage.getItem(USAGE_APP_KEY);
-    return v === 'claude' || v === 'codex' ? v : null;
+    return USAGE_APPS.includes(v) ? v : null;
   } catch {
     return null;
   }
@@ -52,10 +66,12 @@ export default function UsageButton({ hidden = false, defaultApp = 'claude', ava
   const [data, setData] = useState(null);   // { usage, updatedAt, error, ... }
   const [loading, setLoading] = useState(false);
   const [, setTick] = useState(0);   // re-render so pace/age stay live while open
-  // Selectable = installed (availableApps !== false) AND not hidden via
-  // sandbox.config.json's hiddenApps (issue #105).
+  // Selectable = installed (availableApps !== false; opencode Go = toggle on
+  // + Go key present) AND not hidden via sandbox.config.json's hiddenApps
+  // (issue #105). isAppVisible is shared with App.jsx's button visibility
+  // (see appAvailability.js) so the two definitions can't drift.
   const isSelectable = useCallback(
-    (app) => isAppSelectable(app, availableApps, hiddenApps),
+    (app) => isAppVisible(app, availableApps, hiddenApps),
     [availableApps, hiddenApps]
   );
   // Which app the popover is currently showing. The persisted choice wins:
@@ -65,23 +81,37 @@ export default function UsageButton({ hidden = false, defaultApp = 'claude', ava
   const [tab, setTab] = useState(() => {
     const saved = loadSavedUsageApp();
     if (saved && isSelectable(saved)) return saved;
-    return defaultApp === 'codex' ? 'codex' : 'claude';
+    if (USAGE_APPS.includes(defaultApp) && isSelectable(defaultApp)) return defaultApp;
+    return 'claude';
   });
   const wrapRef = useRef(null);
 
-  const claudeAvailable = isSelectable('claude');
-  const codexAvailable = isSelectable('codex');
+  const visibleApps = USAGE_APPS.filter((a) => isSelectable(a));
 
+  // Tracks the tab actually showing right now, read inside load()'s async
+  // continuations below -- a plain closure over `tab` would freeze the value
+  // from when load() was created, which is exactly the stale value a race
+  // needs to detect.
+  const tabRef = useRef(tab);
+  useEffect(() => { tabRef.current = tab; }, [tab]);
+
+  // A slow response for a tab the user has since switched away from must not
+  // clobber whatever the now-current tab already displays -- opencode's
+  // external HTTPS round trip makes this race easy to hit in practice (an
+  // in-flight opencode fetch outlasting a quick switch to codex).
   const load = useCallback(async (force = false) => {
+    const forTab = tab;
     setLoading(true);
     try {
-      const res = await authFetch(`/api/usage?app=${tab}${force ? '&force=1' : ''}`);
+      const res = await authFetch(`/api/usage?app=${forTab}${force ? '&force=1' : ''}`);
       const json = await res.json();
+      if (forTab !== tabRef.current) return;
       setData(json);
     } catch (err) {
+      if (forTab !== tabRef.current) return;
       setData({ error: String(err?.message || err) });
     } finally {
-      setLoading(false);
+      if (forTab === tabRef.current) setLoading(false);
     }
   }, [tab]);
 
@@ -99,14 +129,14 @@ export default function UsageButton({ hidden = false, defaultApp = 'claude', ava
     setTab((cur) => {
       if (saved && saved !== cur && isSelectable(saved)) return saved;
       if (isSelectable(cur)) return cur;
-      const other = cur === 'codex' ? 'claude' : 'codex';
-      if (isSelectable(other)) {
-        saveUsageApp(other);
-        return other;
+      const fallback = USAGE_APPS.find((a) => a !== cur && isSelectable(a));
+      if (fallback) {
+        saveUsageApp(fallback);
+        return fallback;
       }
       return cur;
     });
-  }, [availableApps, isSelectable]);
+  }, [availableApps, hiddenApps, isSelectable]);
 
   // Prime the button (session % badge) once on mount, using the cache, and
   // again whenever the viewed app changes -- reset first so a tab switch
@@ -134,9 +164,11 @@ export default function UsageButton({ hidden = false, defaultApp = 'claude', ava
   }, [open]);
 
   const limits = data?.usage?.limits || [];
+  // Claude's first limit is the session window; Codex/Go label their
+  // windows differently (5時間/週次/月次), so fall back to the first row.
   const session = limits.find((l) => /session/i.test(l.label)) || limits[0];
   const now = Date.now();
-  const appLabel = tab === 'codex' ? 'Codex 使用量' : 'Claude 使用量';
+  const appLabel = USAGE_APP_LABELS[tab] || USAGE_APP_LABELS.claude;
 
   // `hidden` is decided by the caller (showUsage pref / neither app installed).
   if (hidden) return null;
@@ -169,18 +201,16 @@ export default function UsageButton({ hidden = false, defaultApp = 'claude', ava
             </button>
           </div>
 
-          {claudeAvailable && codexAvailable && (
+          {visibleApps.length > 1 && (
             <div className="usage-tabs">
-              <button
-                type="button"
-                className={`usage-tab${tab === 'claude' ? ' active' : ''}`}
-                onClick={() => { saveUsageApp('claude'); setTab('claude'); }}
-              >Claude</button>
-              <button
-                type="button"
-                className={`usage-tab${tab === 'codex' ? ' active' : ''}`}
-                onClick={() => { saveUsageApp('codex'); setTab('codex'); }}
-              >Codex</button>
+              {visibleApps.map((a) => (
+                <button
+                  key={a}
+                  type="button"
+                  className={`usage-tab${tab === a ? ' active' : ''}`}
+                  onClick={() => { saveUsageApp(a); setTab(a); }}
+                >{USAGE_TAB_LABELS[a]}</button>
+              ))}
             </div>
           )}
 

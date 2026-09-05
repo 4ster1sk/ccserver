@@ -8,6 +8,7 @@ import { authWsUrl, authFetch } from '../auth.js';
 import { createOsc52Handler } from '../osc52.js';
 import { dewrapSelection } from '../dewrap.js';
 import { displayPath } from '../displayPath.js';
+import { isElevatedPermissionMode } from '../permissionMode.js';
 
 const ALL_SPECIAL_KEYS = [
   { id: 'bs', label: 'BS', data: '\x7f' },
@@ -237,7 +238,7 @@ function osc52Response(text) {
 
 const themeIds = getThemeIds();
 
-export default function TerminalView({ cwd, onClose, claudeSessionId, shell, sandbox, sandboxOpts, reuseSandboxHome = true, app = 'claude', model = null, resume = false, isMetaAgent = false, notify, notifyEnabled, notifyPermission, onToggleNotify, visible, onSessionId, onExited, attachSessionId, xtermTheme, themeId, onThemeChange, tabId, onFocusTab, groupId, groupRole, projectCwd = null, remoteInstanceId = null, remoteInstanceLabel = null }) {
+export default function TerminalView({ cwd, onClose, claudeSessionId, shell, sandbox, sandboxOpts, reuseSandboxHome = true, app = 'claude', model = null, permissionMode = 'standard', resume = false, isMetaAgent = false, notify, notifyEnabled, notifyPermission, onToggleNotify, visible, onSessionId, onExited, attachSessionId, xtermTheme, themeId, onThemeChange, tabId, onFocusTab, groupId, groupRole, projectCwd = null, remoteInstanceId = null, remoteInstanceLabel = null }) {
   const isMobile = useMemo(() => 'ontouchstart' in window, []);
   const terminalRef = useRef(null);
   const terminalViewRef = useRef(null);
@@ -255,6 +256,10 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
   const reuseSandboxHomeRef = useRef(reuseSandboxHome);
   const appRef = useRef(app);
   const modelRef = useRef(model);
+  // commandcode permission mode ('standard' | 'auto-accept' | 'yolo'): must
+  // ride along on EVERY init like isMetaAgent -- dropping it on the
+  // SESSION_NOT_FOUND re-init would resurrect a yolo session as standard.
+  const permissionModeRef = useRef(permissionMode);
   const resumeRef = useRef(resume);
   // Set once per tab (a terminal tab never switches between local/remote
   // mid-life -- App.jsx always creates a fresh tab id for that), so a plain
@@ -678,6 +683,30 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
       containerEl.addEventListener('touchend', handleTouchEnd);
     }
 
+    // Shared by the initial connect and the SESSION_NOT_FOUND re-init below
+    // so the two launch paths can't drift on how shell/permission/group state
+    // gets translated into the wire message.
+    function buildInitMsg(dims) {
+      return {
+        type: 'init',
+        cwd,
+        cols: dims?.cols || 80,
+        rows: dims?.rows || 24,
+        shell: !!shellRef.current,
+        sandbox: !!sandboxRef.current,
+        sandboxOpts: sandboxOptsRef.current || null,
+        reuseSandboxHome: reuseSandboxHomeRef.current !== false,
+        app: appRef.current,
+        model: shellRef.current ? null : modelRef.current,
+        permissionMode: shellRef.current ? 'standard' : (permissionModeRef.current || 'standard'),
+        isMetaAgent: !!isMetaAgentRef.current,
+        // Group membership is carried into a re-launch so the server can
+        // re-create the member's MCP channel and register it to the role.
+        groupId: groupId || null,
+        groupRole: groupRole || null,
+      };
+    }
+
     function connect() {
       const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
       // A remote (federated) tab talks to /ws/remote-terminal instead, which
@@ -705,24 +734,8 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
             })
           );
         } else {
-          const initMsg = {
-            type: 'init',
-            cwd,
-            cols: dims?.cols || 80,
-            rows: dims?.rows || 24,
-            shell: !!shellRef.current,
-            sandbox: !!sandboxRef.current,
-            sandboxOpts: sandboxOptsRef.current || null,
-            reuseSandboxHome: reuseSandboxHomeRef.current !== false,
-            app: appRef.current,
-            model: shellRef.current ? null : modelRef.current,
-            isMetaAgent: !!isMetaAgentRef.current,
-            // Group membership is carried into a re-launch so the server can
-            // re-create the member's MCP channel and register it to the role.
-            groupId: groupId || null,
-            groupRole: groupRole || null,
-            instanceId: remoteInstanceIdRef.current || undefined,
-          };
+          const initMsg = buildInitMsg(dims);
+          initMsg.instanceId = remoteInstanceIdRef.current || undefined;
           if (!shellRef.current && claudeResumeIdRef.current) {
             initMsg.claudeSessionId = claudeResumeIdRef.current;
             claudeResumeIdRef.current = null;
@@ -830,21 +843,7 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
               sessionIdRef.current = null;
               sessionStorage.removeItem(storageKey);
               const dims = fitAddon.proposeDimensions();
-              const initMsg = {
-                type: 'init',
-                cwd,
-                cols: dims?.cols || 80,
-                rows: dims?.rows || 24,
-                shell: !!shellRef.current,
-                sandbox: !!sandboxRef.current,
-                sandboxOpts: sandboxOptsRef.current || null,
-                reuseSandboxHome: reuseSandboxHomeRef.current !== false,
-                app: appRef.current,
-                model: shellRef.current ? null : modelRef.current,
-                isMetaAgent: !!isMetaAgentRef.current,
-                groupId: groupId || null,
-                groupRole: groupRole || null,
-              };
+              const initMsg = buildInitMsg(dims);
               if (!shellRef.current) {
                 const app = appRef.current;
                 const savedClaudeId = claudeResumeIdRef.current
@@ -1272,7 +1271,7 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
         <span
           className="terminal-title"
           title={projectCwd && projectCwd !== cwd ? `Project: ${projectCwd}\nWorktree: ${cwd}` : cwd}
-        >{sandbox ? '🔒 ' : (!shell ? '⚠️ ' : '')}{shell ? 'Terminal' : appLabel(app)}{!shell && model ? ` · ${model}` : ''} &mdash; {displayPath(cwd, homeDir)}</span>
+        >{sandbox ? '🔒 ' : (!shell ? '⚠️ ' : '')}{shell ? 'Terminal' : appLabel(app)}{!shell && model ? ` · ${model}` : ''}{!shell && app === 'commandcode' && isElevatedPermissionMode(permissionMode) ? ` · ${permissionMode}` : ''} &mdash; {displayPath(cwd, homeDir)}</span>
         <div className="header-actions">
           <div className="theme-picker" ref={themeMenuRef}>
             <button
