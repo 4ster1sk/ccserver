@@ -34,8 +34,12 @@ export function useSystemStats(active) {
   const timerRef = useRef(null);
   const showIpmiRef = useRef(showIpmi);
   useEffect(() => { showIpmiRef.current = showIpmi; }, [showIpmi]);
+  // 応答が周期を超えた際の多重発行・逆転を防ぐ (遅延時は1周期分古くなる)。
+  const inflightRef = useRef(false);
 
   const fetchStats = useCallback(async () => {
+    if (inflightRef.current) return;
+    inflightRef.current = true;
     try {
       const params = showIpmiRef.current ? '?ipmi=1' : '';
       const res = await authFetch(`/api/system-stats${params}`);
@@ -45,6 +49,8 @@ export function useSystemStats(active) {
       setError(null);
     } catch (e) {
       setError(e.message);
+    } finally {
+      inflightRef.current = false;
     }
   }, []);
 

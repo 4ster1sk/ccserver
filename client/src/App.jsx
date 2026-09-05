@@ -527,6 +527,8 @@ export default function App() {
           className="btn sidebar-toggle-btn"
           onClick={() => sidebarPrefs.setOpen(!sidebarPrefs.open)}
           title={sidebarPrefs.open ? 'サイドバーを閉じる' : 'サイドバーを開く'}
+          aria-label={sidebarPrefs.open ? 'サイドバーを閉じる' : 'サイドバーを開く'}
+          aria-expanded={sidebarPrefs.open}
         >
           {sidebarPrefs.open ? '▶' : '◀'}
         </button>
@@ -615,6 +617,15 @@ export default function App() {
             </div>
           ))}
       </div>
+      {sidebarPrefs.open && (
+        <button
+          type="button"
+          className="sidebar-backdrop"
+          aria-label="サイドバーを閉じる"
+          tabIndex={-1}
+          onClick={() => sidebarPrefs.setOpen(false)}
+        />
+      )}
       <RightSidebar usageProps={usageWidgetProps} prefs={sidebarPrefs} />
       </div>
       </SystemStatsProvider>

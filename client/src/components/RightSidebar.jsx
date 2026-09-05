@@ -1,11 +1,12 @@
 import { useState, useRef, useEffect } from 'react';
 import { useWidgetPrefs } from '../hooks/useWidgetPrefs.js';
 import { useSystemStatsContext } from './widgets/SystemStatsProvider.jsx';
-import { CpuCard, MemoryCard, StorageCard, TempCard, GpuCard, IpmiCards } from './widgets/MonitorCards.jsx';
+import { CpuCard, MemoryCard, StorageCard, TempCard, GpuCard, IpmiCards, SystemCard, hasCpuUsage, hasGpuMetrics, hasSystemMetrics, hasMemoryOrStorage, hasTemperatures, hasIpmiData } from './widgets/MonitorCards.jsx';
 import UsageWidget from './widgets/UsageWidget.jsx';
 
 const WIDGET_DEFS = [
   { id: 'usage', title: 'Usage', defaultVisible: true },
+  { id: 'system', title: 'System', defaultVisible: true },
   { id: 'cpu', title: 'CPU', defaultVisible: true },
   { id: 'memory-storage', title: 'Memory / Storage', defaultVisible: true },
   { id: 'temps', title: 'Temperatures', defaultVisible: false },
@@ -13,7 +14,14 @@ const WIDGET_DEFS = [
   { id: 'ipmi', title: 'IPMI', defaultVisible: false },
 ];
 
-function WidgetShell({ title, onHide, onMoveUp, onMoveDown, children }) {
+const INTERVAL_OPTIONS = [
+  { value: 1000, label: '1秒' },
+  { value: 2000, label: '2秒' },
+  { value: 5000, label: '5秒' },
+  { value: 10000, label: '10秒' },
+];
+
+function WidgetShell({ title, onHide, onMoveUp, onMoveDown, canMoveUp = true, canMoveDown = true, children }) {
   const [collapsed, setCollapsed] = useState(false);
   return (
     <section className="widget-card">
@@ -23,14 +31,15 @@ function WidgetShell({ title, onHide, onMoveUp, onMoveDown, children }) {
           className="widget-card-title"
           onClick={() => setCollapsed((v) => !v)}
           title={collapsed ? '展開' : '折りたたみ'}
+          aria-expanded={!collapsed}
         >
           <span className="widget-collapse-mark">{collapsed ? '▸' : '▾'}</span>
           {title}
         </button>
         <span className="widget-card-actions">
-          <button type="button" className="widget-icon-btn" onClick={onMoveUp} title="上へ">↑</button>
-          <button type="button" className="widget-icon-btn" onClick={onMoveDown} title="下へ">↓</button>
-          <button type="button" className="widget-icon-btn" onClick={onHide} title="非表示">✕</button>
+          <button type="button" className="widget-icon-btn" onClick={onMoveUp} title="上へ" aria-label={`${title}を上へ移動`} disabled={!canMoveUp}>↑</button>
+          <button type="button" className="widget-icon-btn" onClick={onMoveDown} title="下へ" aria-label={`${title}を下へ移動`} disabled={!canMoveDown}>↓</button>
+          <button type="button" className="widget-icon-btn" onClick={onHide} title="非表示" aria-label={`${title}を非表示`}>✕</button>
         </span>
       </header>
       {!collapsed && <div className="widget-card-body">{children}</div>}
@@ -38,21 +47,35 @@ function WidgetShell({ title, onHide, onMoveUp, onMoveDown, children }) {
   );
 }
 
-export default function RightSidebar({ usageProps = {}, prefs }) {
-  const internalPrefs = useWidgetPrefs(WIDGET_DEFS);
-  const { open, setOpen, visibleWidgets, hiddenWidgets, setWidgetVisible, moveWidget } = prefs || internalPrefs;
+function RightSidebarInner({ usageProps = {}, prefs }) {
+  const { open, visibleWidgets, hiddenWidgets, setWidgetVisible, moveWidget } = prefs;
   const [addOpen, setAddOpen] = useState(false);
+  const [intervalOpen, setIntervalOpen] = useState(false);
   const addWrapRef = useRef(null);
+  const intervalWrapRef = useRef(null);
   const stats = useSystemStatsContext();
 
   useEffect(() => {
-    if (!addOpen) return;
+    if (!addOpen && !intervalOpen) return;
     const onClick = (e) => {
-      if (addWrapRef.current && !addWrapRef.current.contains(e.target)) setAddOpen(false);
+      if (addWrapRef.current && addWrapRef.current.contains(e.target)) return;
+      if (intervalWrapRef.current && intervalWrapRef.current.contains(e.target)) return;
+      setAddOpen(false);
+      setIntervalOpen(false);
+    };
+    const onKey = (e) => {
+      if (e.key === 'Escape') {
+        setAddOpen(false);
+        setIntervalOpen(false);
+      }
     };
     document.addEventListener('mousedown', onClick);
-    return () => document.removeEventListener('mousedown', onClick);
-  }, [addOpen]);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('mousedown', onClick);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [addOpen, intervalOpen]);
 
   if (!open) return null;
 
@@ -78,11 +101,15 @@ export default function RightSidebar({ usageProps = {}, prefs }) {
     // 自体は null にならないため、下流の `.filter(body !== null)` では除外
     // できない。空の WidgetShell を作らないよう、ここで描画可否を判定する。
     switch (id) {
+      case 'system': {
+        if (!hasSystemMetrics(data)) return null;
+        return <SystemCard data={data} hideTitle />;
+      }
       case 'cpu':
-        if (!data.cpu) return null;
+        if (!hasCpuUsage(data)) return null;
         return <CpuCard data={data} hideTitle />;
       case 'memory-storage':
-        if (!data.memory && !(data.storage?.length)) return null;
+        if (!hasMemoryOrStorage(data)) return null;
         return (
           <>
             <MemoryCard data={data} hideTitle />
@@ -90,17 +117,14 @@ export default function RightSidebar({ usageProps = {}, prefs }) {
           </>
         );
       case 'temps': {
-        const t = data.temperatures;
-        if (!t?.cpu && !t?.pch && !t?.other) return null;
+        if (!hasTemperatures(data)) return null;
         return <TempCard data={data} hideTitle />;
       }
       case 'gpu':
-        if (!data.gpu) return null;
+        if (!hasGpuMetrics(data)) return null;
         return <GpuCard data={data} hideTitle />;
       case 'ipmi': {
-        if (!showIpmi || !data.ipmi) return null;
-        const ipmi = data.ipmi;
-        if (!ipmi.power?.length && !ipmi.voltage?.length && !ipmi.fans?.length && !ipmi.temps?.length) return null;
+        if (!showIpmi || !hasIpmiData(data)) return null;
         return <IpmiCards data={data} showIpmi={showIpmi} hideTitle />;
       }
       default:
@@ -116,27 +140,71 @@ export default function RightSidebar({ usageProps = {}, prefs }) {
     .map((w) => ({ w, body: renderWidgetBody(w.id) }))
     .filter(({ body }) => body !== null);
 
+  // 描画されなかった可視ウィジェットを挟んだ移動も無反応に見えるため、
+  // moveWidget には「非表示 or 今回非描画」を飛ばす述語を渡す。
+  const renderedIds = new Set(renderedWidgets.map(({ w }) => w.id));
+  const usageHidden = !!usageProps?.hidden;
+  const skipMoveIds = new Set([
+    ...hiddenWidgets.map((w) => w.id),
+    ...shownWidgets.filter((w) => !renderedIds.has(w.id)).map((w) => w.id),
+    ...(usageHidden ? ['usage'] : []),
+  ]);
+
   return (
     <aside className="right-sidebar">
       <div className="sidebar-header">
         <span className="sidebar-title">Widgets</span>
         <span className="sidebar-header-actions">
+          {stats?.setInterval && (
+            <span className="sidebar-add-wrap" ref={intervalWrapRef}>
+              <button
+                type="button"
+                className="btn btn-secondary btn-sm"
+                onClick={() => { setIntervalOpen((v) => !v); setAddOpen(false); }}
+                title="更新頻度"
+                aria-label="更新頻度"
+                aria-haspopup="menu"
+                aria-expanded={intervalOpen}
+              >
+                {INTERVAL_OPTIONS.find((o) => o.value === stats.interval)?.label ?? `${stats.interval / 1000}s`}
+              </button>
+              {intervalOpen && (
+                <span className="sidebar-add-menu" role="menu">
+                  {INTERVAL_OPTIONS.map((o) => (
+                    <button
+                      key={o.value}
+                      type="button"
+                      role="menuitem"
+                      className="sidebar-add-item"
+                      onClick={() => { stats.setInterval(o.value); setIntervalOpen(false); }}
+                    >
+                      {o.value === stats.interval ? '✓ ' : ''}{o.label}
+                    </button>
+                  ))}
+                </span>
+              )}
+            </span>
+          )}
           {addableWidgets.length > 0 && (
             <span className="sidebar-add-wrap" ref={addWrapRef}>
               <button
                 type="button"
                 className="btn btn-secondary btn-sm"
-                onClick={() => setAddOpen((v) => !v)}
+                onClick={() => { setAddOpen((v) => !v); setIntervalOpen(false); }}
                 title="非表示のウィジェットを追加"
+                aria-label="非表示のウィジェットを追加"
+                aria-haspopup="menu"
+                aria-expanded={addOpen}
               >
                 ＋
               </button>
               {addOpen && (
-                <span className="sidebar-add-menu">
+                <span className="sidebar-add-menu" role="menu">
                   {addableWidgets.map((w) => (
                     <button
                       key={w.id}
                       type="button"
+                      role="menuitem"
                       className="sidebar-add-item"
                       onClick={() => { setWidgetVisible(w.id, true); setAddOpen(false); }}
                     >
@@ -147,14 +215,6 @@ export default function RightSidebar({ usageProps = {}, prefs }) {
               )}
             </span>
           )}
-          <button
-            type="button"
-            className="btn btn-secondary btn-sm"
-            onClick={() => setOpen(false)}
-            title="サイドバーを閉じる"
-          >
-            ▶
-          </button>
         </span>
       </div>
       <div className="sidebar-widgets">
@@ -164,13 +224,15 @@ export default function RightSidebar({ usageProps = {}, prefs }) {
         {showMonitorStatus && !stats?.error && !stats?.data && (
           <div className="loading">Loading system stats...</div>
         )}
-        {renderedWidgets.map(({ w, body }) => (
+        {renderedWidgets.map(({ w, body }, i) => (
           <WidgetShell
             key={w.id}
             title={w.title}
             onHide={() => setWidgetVisible(w.id, false)}
-            onMoveUp={() => moveWidget(w.id, 'up')}
-            onMoveDown={() => moveWidget(w.id, 'down')}
+            onMoveUp={() => moveWidget(w.id, 'up', (x) => skipMoveIds.has(x))}
+            onMoveDown={() => moveWidget(w.id, 'down', (x) => skipMoveIds.has(x))}
+            canMoveUp={i > 0}
+            canMoveDown={i < renderedWidgets.length - 1}
           >
             {body}
           </WidgetShell>
@@ -192,4 +254,14 @@ export default function RightSidebar({ usageProps = {}, prefs }) {
 
 export { WIDGET_DEFS };
 
-export const MONITOR_WIDGET_IDS = ['cpu', 'memory-storage', 'temps', 'gpu', 'ipmi'];
+export const MONITOR_WIDGET_IDS = ['system', 'cpu', 'memory-storage', 'temps', 'gpu', 'ipmi'];
+
+function RightSidebarWithInternalPrefs({ usageProps }) {
+  const prefs = useWidgetPrefs(WIDGET_DEFS);
+  return <RightSidebarInner usageProps={usageProps} prefs={prefs} />;
+}
+
+export default function RightSidebar({ usageProps = {}, prefs }) {
+  if (prefs) return <RightSidebarInner usageProps={usageProps} prefs={prefs} />;
+  return <RightSidebarWithInternalPrefs usageProps={usageProps} />;
+}

@@ -1,5 +1,6 @@
 import {
   formatUptime,
+  formatLoadAvg,
   CpuCard,
   MemoryCard,
   StorageCard,
@@ -37,12 +38,16 @@ export default function SystemMonitor({ visible }) {
         <h2>System Monitor</h2>
         <div className="monitor-meta">
           <span>Uptime: {formatUptime(data.uptime)}</span>
-          <span>Load: {data.loadAvg.map((v) => v.toFixed(2)).join(' ')}</span>
+          <span>Load: {formatLoadAvg(data.loadAvg) ?? '—'}</span>
           <select
             className="monitor-interval-select"
             value={interval}
             onChange={(e) => setIntervalMs(Number(e.target.value))}
           >
+            {/* 選択肢外の値 (localStorageの旧値・手編集値) でも空白にしない */}
+            {![1000, 2000, 5000, 10000].includes(interval) && (
+              <option value={interval}>{interval / 1000}s</option>
+            )}
             <option value={1000}>1s</option>
             <option value={2000}>2s</option>
             <option value={5000}>5s</option>
