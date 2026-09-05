@@ -153,11 +153,15 @@ async function fetchOnce(key) {
   } catch (err) {
     return { error: `Could not reach opencode.ai: ${err?.message || err}` };
   }
+  // 401/403 are definitive (retrying with the same key won't fix them), so
+  // they're marked final: getOpencodeUsage() must not paper over a revoked
+  // key or a lapsed subscription with a stale cached percentage -- the
+  // file's header comment on layer 3 promises this surfaces, not hides.
   if (res.status === 401) {
-    return { error: 'Invalid opencode Go API key (rejected by opencode.ai)' };
+    return { error: 'Invalid opencode Go API key (rejected by opencode.ai)', final: true };
   }
   if (res.status === 403) {
-    return { error: 'No OpenCode Go subscription on this key' };
+    return { error: 'No OpenCode Go subscription on this key', final: true };
   }
   if (!res.ok) {
     return { error: `opencode.ai returned HTTP ${res.status}` };
@@ -196,6 +200,15 @@ function capture() {
 // Return the latest OpenCode Go usage, fetching if the cache is
 // missing/stale (or forced). Concurrent callers share one in-flight fetch.
 export async function getOpencodeUsage({ force = false } = {}) {
+  // Toggle OFF must win even over a fresh cache: without this, flipping
+  // opencodeGoUsage to false mid-TTL kept serving the cached percentage for
+  // up to CACHE_TTL_MS, contradicting the config comment that false disables
+  // everything immediately.
+  if (!opencodeGoEnabled()) {
+    cache = null;
+    return { usage: null, error: 'opencode Go usage is disabled by config (opencodeGoUsage: false)' };
+  }
+
   const fresh = cache && Date.now() - cache.updatedAt < CACHE_TTL_MS;
   if (!force && fresh) {
     return { usage: cache.usage, updatedAt: cache.updatedAt, cached: true };
@@ -226,8 +239,10 @@ export async function getOpencodeUsage({ force = false } = {}) {
     };
   }
 
-  // Fetch failed; fall back to a stale cache if we have one.
-  if (cache) {
+  // Fetch failed; fall back to a stale cache if we have one -- unless the
+  // failure is final (401/403), which means the cached percentage is no
+  // longer trustworthy and must not mask the error (see fetchOnce above).
+  if (cache && !res.final) {
     return { usage: cache.usage, updatedAt: cache.updatedAt, cached: true, error: res.error };
   }
   return { usage: null, error: res.error || 'Could not read opencode Go usage' };

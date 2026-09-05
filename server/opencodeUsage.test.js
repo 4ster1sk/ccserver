@@ -275,3 +275,35 @@ test('getOpencodeUsage: 200 maps through and sends the Bearer key', async () => 
   assert.equal(res.usage.limits.length, 3);
   assert.equal(typeof res.updatedAt, 'number');
 });
+
+// These two run after the success case above (each primes its own cache
+// explicitly before exercising the behavior under test), and must stay last:
+// they deliberately leave a stale cache behind, which any later `usage: null`
+// assertion elsewhere in this file would misread as a cache hit.
+
+test('getOpencodeUsage: toggle OFF wins over a fresh cache, no force needed', async () => {
+  writeAuthKey('k123');
+  globalThis.fetch = async () => ({ status: 200, ok: true, json: async () => VALID_PAYLOAD });
+  const primed = await getOpencodeUsage({ force: true });
+  assert.ok(primed.usage, 'sanity: cache is populated before disabling');
+
+  writeConfig({ opencodeGoUsage: false });
+  let fetched = false;
+  globalThis.fetch = async () => { fetched = true; throw new Error('must not fetch'); };
+  const res = await getOpencodeUsage(); // no force: the fresh cache alone must not win
+  assert.equal(res.usage, null);
+  assert.match(res.error, /disabled by config/);
+  assert.equal(fetched, false);
+});
+
+test('getOpencodeUsage: 403 with an existing cache still returns usage:null (no stale fallback)', async () => {
+  writeAuthKey('k123');
+  globalThis.fetch = async () => ({ status: 200, ok: true, json: async () => VALID_PAYLOAD });
+  const primed = await getOpencodeUsage({ force: true });
+  assert.ok(primed.usage, 'sanity: cache is populated before the 403');
+
+  globalThis.fetch = async () => ({ status: 403, ok: false });
+  const res = await getOpencodeUsage({ force: true });
+  assert.equal(res.usage, null, 'a 403 is final: it must not fall back to the stale cached usage');
+  assert.match(res.error, /No OpenCode Go subscription/);
+});
