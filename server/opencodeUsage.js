@@ -27,6 +27,7 @@ import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { loadSandboxConfig, isAppHidden } from './ws/sandbox.js';
+import { formatResets } from './usageResetFormat.js';
 
 const CACHE_TTL_MS = 60 * 1000;        // serve cache without re-fetching
 const FETCH_TIMEOUT_MS = 10 * 1000;    // hard cap on a single fetch
@@ -96,12 +97,6 @@ export function readOpencodeGoKey() {
 export function opencodeGoAvailable(cfg = loadSandboxConfig()) {
   if (isAppHidden('opencode')) return false;
   return opencodeGoEnabled(cfg) && readOpencodeGoKey() != null;
-}
-
-function formatResets(resetAtMs) {
-  if (resetAtMs == null) return null;
-  const d = new Date(resetAtMs);
-  return `${d.getMonth() + 1}/${d.getDate()} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
 }
 
 // Window descriptors: rolling = the 5-hour limit, weekly = 7d. monthly
