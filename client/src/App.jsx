@@ -443,25 +443,29 @@ export default function App() {
   }, []);
 
   const activeTab = tabs.find((t) => t.id === activeTabId);
-  // Usage covers claude (Claude Code's /usage) and codex (Codex's rate-limit
-  // read); the popover itself now has tabs to switch between them, so the
-  // button is no longer tied to whichever app the active terminal tab
-  // happens to be running -- it stays visible on opencode/copilot terminals
-  // too, as long as at least one of claude/codex is usable. It's hidden only
-  // via sandbox.config.json's "showUsage": false, or when the server reports
-  // neither CLI installed at all (the capture would never succeed for either).
-  // `availableApps` null/absent (fetch pending or failed, older server) means
-  // "unknown" -- both apps are assumed available in that case.
+  // Usage covers claude (Claude Code's /usage), codex (Codex's rate-limit
+  // read) and opencode Go (the zen/go quota API); the popover itself has
+  // tabs to switch between them, so the button is no longer tied to
+  // whichever app the active terminal tab happens to be running -- it stays
+  // visible on opencode/copilot terminals too, as long as at least one
+  // source is usable. It's hidden only via sandbox.config.json's
+  // "showUsage": false, or when the server reports nothing usable at all
+  // (no CLI installed AND no Go key). `availableApps` null/absent (fetch
+  // pending or failed, older server) means "unknown" -- every tab is
+  // assumed available in that case. Note `opencodeGo` is not the opencode
+  // CLI install flag: it means toggle on + Go API key present.
   const claudeAvailable = !usagePrefs.availableApps || usagePrefs.availableApps.claude !== false;
   const codexAvailable = !usagePrefs.availableApps || usagePrefs.availableApps.codex !== false;
-  const usageHidden = !usagePrefs.showUsage || (!claudeAvailable && !codexAvailable);
+  const opencodeGoAvailable = !usagePrefs.availableApps || usagePrefs.availableApps.opencodeGo !== false;
+  const usageHidden = !usagePrefs.showUsage || (!claudeAvailable && !codexAvailable && !opencodeGoAvailable);
   // First-run seed only: UsageButton remembers the app the user last picked
   // (localStorage), so this active-tab-derived default is used just when
-  // nothing has been saved yet. codex wins over claude when the active tab is
-  // a codex terminal and codex is actually installed.
+  // nothing has been saved yet. The active tab's app wins when that source
+  // is actually usable, else claude, else whichever of codex/Go is usable.
   const activeTabApp = activeTab?.type === 'group' ? groupActiveApp : activeTab?.app;
   const usageDefaultApp = (activeTabApp === 'codex' && codexAvailable) ? 'codex'
-    : (claudeAvailable ? 'claude' : 'codex');
+    : (activeTabApp === 'opencode' && opencodeGoAvailable) ? 'opencode'
+    : (claudeAvailable ? 'claude' : (codexAvailable ? 'codex' : 'opencode'));
 
   return (
     <div className="app">

@@ -474,6 +474,21 @@ function slugify(p) {
   return p.replace(/[^a-zA-Z0-9]+/g, '_').replace(/^_+|_+$/g, '') || 'root';
 }
 
+// Resolve a booleanish flag from an env override + a config-file value with
+// a default. Env wins when it is a recognized boolean word
+// (1/true/on/yes vs 0/false/off/no, case-insensitive); an unrecognized or
+// empty env value falls back to the config file, which itself is only
+// on/off by strict boolean (anything else -> the default).
+function resolveFlag(envVal, fileVal, def) {
+  if (typeof envVal === 'string' && envVal.trim() !== '') {
+    const v = envVal.trim().toLowerCase();
+    if (['1', 'true', 'on', 'yes'].includes(v)) return true;
+    if (['0', 'false', 'off', 'no'].includes(v)) return false;
+  }
+  if (typeof fileVal === 'boolean') return fileVal;
+  return def;
+}
+
 // Load the optional sandbox config. Path from CCSERVER_SANDBOX_CONFIG, else
 // server/sandbox.config.json (next to this module's parent). Shape:
 //   { "docker": true, "binds": [ { "src": "~/.ssh", "mode": "ro" }, ... ] }
@@ -588,6 +603,17 @@ export function loadSandboxConfig() {
   // for setups that don't want it; the client also hides the button on its
   // own when claude is not installed (the capture would never succeed).
   const showUsage = raw.showUsage !== false;
+  // OpenCode Go usage tab (GET /api/usage?app=opencode, backed by
+  // server/opencodeUsage.js). An opencode CLI install alone says nothing
+  // about a Go subscription, so this is a separate toggle: false hides the
+  // tab entirely (no key is read, no request is sent). Default on -- when on,
+  // visibility is still auto-gated on the Go API key actually existing
+  // (~/.local/share/opencode/auth.json's "opencode-go" entry, see
+  // opencodeGoAvailable()) and on the subscription being valid (a 403
+  // surfaces as an in-popover "no subscription" message, not a silent hide).
+  // Env var CCSERVER_OPENCODE_GO_USAGE wins over the config file (0/false/
+  // off/no = off, 1/true/on/yes = on).
+  const opencodeGoUsage = resolveFlag(process.env.CCSERVER_OPENCODE_GO_USAGE, raw.opencodeGoUsage, true);
   // The Usage MCP is exposed to every Claude session, so keep it opt-in
   // independently of the UI's showUsage setting.
   const usageMcp = raw.usageMcp === true;
@@ -602,7 +628,7 @@ export function loadSandboxConfig() {
   // must not exist unless explicitly enabled.
   const reviewerMcp = raw.reviewerMcp === true;
   return {
-    docker, persistentHome, gpg, sshAgent, gitBroker, forceSandbox, binds, env, claudeBin, defaultApp, showUsage, usageMcp, metaAgentMcp, reviewerMcp,
+    docker, persistentHome, gpg, sshAgent, gitBroker, forceSandbox, binds, env, claudeBin, defaultApp, showUsage, opencodeGoUsage, usageMcp, metaAgentMcp, reviewerMcp,
     notify: {
       discordWebhook, subscriptions, hostname: notifyHostname, attribution: notifyAttribution,
       vikunja: {

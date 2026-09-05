@@ -6,7 +6,7 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import Fastify from 'fastify';
-import { mkdtempSync, rmSync, existsSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, existsSync, writeFileSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { dirsRoute } from './dirs.js';
@@ -121,5 +121,52 @@ test('GET /dirs/home exposes metaAgentEnabled following sandbox.config.json', as
     if (savedConfigEnv === undefined) delete process.env.CCSERVER_SANDBOX_CONFIG;
     else process.env.CCSERVER_SANDBOX_CONFIG = savedConfigEnv;
     try { rmSync(cfg, { force: true }); } catch {}
+  }
+});
+
+// GET /dirs/home reports availableApps.opencodeGo: toggle on + Go API key
+// present. Sync and network-free. Pinned to a temp config + temp,
+// initially keyless XDG_DATA_HOME so the host's real auth.json never leaks
+// in (an opencode-go key exists on dev hosts).
+test('GET /dirs/home exposes availableApps.opencodeGo following toggle + key', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ccserver-dirs-opencodego-'));
+  const cfg = join(dir, 'sandbox.config.json');
+  const savedConfigEnv = process.env.CCSERVER_SANDBOX_CONFIG;
+  const savedDataHome = process.env.XDG_DATA_HOME;
+  const savedAuthContent = process.env.OPENCODE_AUTH_CONTENT;
+  const savedGoUsageEnv = process.env.CCSERVER_OPENCODE_GO_USAGE;
+  process.env.CCSERVER_SANDBOX_CONFIG = cfg;
+  process.env.XDG_DATA_HOME = join(dir, 'data-home');
+  delete process.env.OPENCODE_AUTH_CONTENT;
+  delete process.env.CCSERVER_OPENCODE_GO_USAGE;
+  try {
+    writeFileSync(cfg, JSON.stringify({}));
+    // No key file -> not available (toggle defaults on).
+    let res = await app.inject({ method: 'GET', url: '/api/dirs/home' });
+    assert.equal(res.json().availableApps.opencodeGo, false);
+
+    // Key present -> available.
+    mkdirSync(join(dir, 'data-home', 'opencode'), { recursive: true });
+    writeFileSync(
+      join(dir, 'data-home', 'opencode', 'auth.json'),
+      JSON.stringify({ 'opencode-go': { type: 'api', key: 'k123' } }),
+    );
+    res = await app.inject({ method: 'GET', url: '/api/dirs/home' });
+    assert.equal(res.json().availableApps.opencodeGo, true);
+
+    // Disabled toggle wins over the key.
+    writeFileSync(cfg, JSON.stringify({ opencodeGoUsage: false }));
+    res = await app.inject({ method: 'GET', url: '/api/dirs/home' });
+    assert.equal(res.json().availableApps.opencodeGo, false);
+  } finally {
+    if (savedConfigEnv === undefined) delete process.env.CCSERVER_SANDBOX_CONFIG;
+    else process.env.CCSERVER_SANDBOX_CONFIG = savedConfigEnv;
+    if (savedDataHome === undefined) delete process.env.XDG_DATA_HOME;
+    else process.env.XDG_DATA_HOME = savedDataHome;
+    if (savedAuthContent === undefined) delete process.env.OPENCODE_AUTH_CONTENT;
+    else process.env.OPENCODE_AUTH_CONTENT = savedAuthContent;
+    if (savedGoUsageEnv === undefined) delete process.env.CCSERVER_OPENCODE_GO_USAGE;
+    else process.env.CCSERVER_OPENCODE_GO_USAGE = savedGoUsageEnv;
+    try { rmSync(dir, { recursive: true, force: true }); } catch {}
   }
 });

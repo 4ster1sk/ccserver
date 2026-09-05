@@ -29,13 +29,38 @@ function fmtAge(updatedAt) {
 // claude. Same per-browser convention as DirectoryBrowser's keys.
 const USAGE_APP_KEY = 'ccserver-usage-app';
 
+const USAGE_APPS = ['claude', 'codex', 'opencode'];
+
+const USAGE_APP_LABELS = {
+  claude: 'Claude 使用量',
+  codex: 'Codex 使用量',
+  opencode: 'OpenCode Go 使用量',
+};
+
+const USAGE_TAB_LABELS = {
+  claude: 'Claude',
+  codex: 'Codex',
+  opencode: 'OpenCode',
+};
+
 function loadSavedUsageApp() {
   try {
     const v = window.localStorage.getItem(USAGE_APP_KEY);
-    return v === 'claude' || v === 'codex' ? v : null;
+    return USAGE_APPS.includes(v) ? v : null;
   } catch {
     return null;
   }
+}
+
+// availableApps key for a usage tab. opencode Go is NOT the opencode CLI
+// install flag (a Go subscription needs no binary): the server reports it
+// separately as `opencodeGo` (toggle on + Go API key present).
+function availableKey(app) {
+  return app === 'opencode' ? 'opencodeGo' : app;
+}
+
+function isAppVisible(app, availableApps) {
+  return !availableApps || availableApps[availableKey(app)] !== false;
 }
 
 function saveUsageApp(app) {
@@ -57,13 +82,13 @@ export default function UsageButton({ hidden = false, defaultApp = 'claude', ava
   // a saved app that isn't installed falls back below.
   const [tab, setTab] = useState(() => {
     const saved = loadSavedUsageApp();
-    if (saved && (!availableApps || availableApps[saved] !== false)) return saved;
-    return defaultApp === 'codex' ? 'codex' : 'claude';
+    if (saved && isAppVisible(saved, availableApps)) return saved;
+    if (USAGE_APPS.includes(defaultApp) && isAppVisible(defaultApp, availableApps)) return defaultApp;
+    return 'claude';
   });
   const wrapRef = useRef(null);
 
-  const claudeAvailable = !availableApps || availableApps.claude !== false;
-  const codexAvailable = !availableApps || availableApps.codex !== false;
+  const visibleApps = USAGE_APPS.filter((a) => isAppVisible(a, availableApps));
 
   const load = useCallback(async (force = false) => {
     setLoading(true);
@@ -90,12 +115,12 @@ export default function UsageButton({ hidden = false, defaultApp = 'claude', ava
     if (!availableApps) return;
     const saved = loadSavedUsageApp();
     setTab((cur) => {
-      if (saved && saved !== cur && availableApps[saved] !== false) return saved;
-      if (availableApps[cur] !== false) return cur;
-      const other = cur === 'codex' ? 'claude' : 'codex';
-      if (availableApps[other] !== false) {
-        saveUsageApp(other);
-        return other;
+      if (saved && saved !== cur && isAppVisible(saved, availableApps)) return saved;
+      if (isAppVisible(cur, availableApps)) return cur;
+      const fallback = USAGE_APPS.find((a) => a !== cur && isAppVisible(a, availableApps));
+      if (fallback) {
+        saveUsageApp(fallback);
+        return fallback;
       }
       return cur;
     });
@@ -127,9 +152,11 @@ export default function UsageButton({ hidden = false, defaultApp = 'claude', ava
   }, [open]);
 
   const limits = data?.usage?.limits || [];
+  // Claude's first limit is the session window; Codex/Go label their
+  // windows differently (5時間/週次/月次), so fall back to the first row.
   const session = limits.find((l) => /session/i.test(l.label)) || limits[0];
   const now = Date.now();
-  const appLabel = tab === 'codex' ? 'Codex 使用量' : 'Claude 使用量';
+  const appLabel = USAGE_APP_LABELS[tab] || USAGE_APP_LABELS.claude;
 
   // `hidden` is decided by the caller (showUsage pref / neither app installed).
   if (hidden) return null;
@@ -162,18 +189,16 @@ export default function UsageButton({ hidden = false, defaultApp = 'claude', ava
             </button>
           </div>
 
-          {claudeAvailable && codexAvailable && (
+          {visibleApps.length > 1 && (
             <div className="usage-tabs">
-              <button
-                type="button"
-                className={`usage-tab${tab === 'claude' ? ' active' : ''}`}
-                onClick={() => { saveUsageApp('claude'); setTab('claude'); }}
-              >Claude</button>
-              <button
-                type="button"
-                className={`usage-tab${tab === 'codex' ? ' active' : ''}`}
-                onClick={() => { saveUsageApp('codex'); setTab('codex'); }}
-              >Codex</button>
+              {visibleApps.map((a) => (
+                <button
+                  key={a}
+                  type="button"
+                  className={`usage-tab${tab === a ? ' active' : ''}`}
+                  onClick={() => { saveUsageApp(a); setTab(a); }}
+                >{USAGE_TAB_LABELS[a]}</button>
+              ))}
             </div>
           )}
 
