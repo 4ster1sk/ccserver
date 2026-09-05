@@ -149,13 +149,19 @@ function extractResumeId(session) {
   return extractResumeSessionId(session.app, session.outputBuffer.slice(-50).join(''));
 }
 
-// Which agent new sessions launch when the client doesn't request one
-// (legacy scheduled prompts, or a client that predates app selection).
-// Config-driven rather than a hardcoded constant, per sandbox.config.json's
-// gitignored-real-file / committed-.example.json pattern -- so the default
-// lives in the (untracked) config, not in committed source.
-function defaultApp() {
-  return loadSandboxConfig().defaultApp;
+// Prefixes marking a createSession() failure as a server-side infrastructure
+// fault rather than a rejection of the request as given. Exported so HTTP
+// layers (routes/groups.js) classify without re-typing the strings.
+export const INFRA_ERROR_PREFIXES = ['Failed to build sandbox', 'Failed to spawn'];
+
+/**
+ * Whether a createSession() error message reports infrastructure failure
+ * (sandbox build / process spawn) as opposed to a bad request.
+ * @param {string} msg Error message from createSession().
+ * @returns {boolean}
+ */
+export function isInfrastructureError(msg) {
+  return INFRA_ERROR_PREFIXES.some((p) => String(msg || '').startsWith(p));
 }
 
 // Model normalization for storage/serialization: `model` is an optional

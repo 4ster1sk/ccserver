@@ -26,7 +26,7 @@ import { mkdirSync, statSync, rmSync, existsSync } from 'node:fs';
 import { basename, join, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import * as groupManager from '../ws/groupManager.js';
-import { createSession, getSession } from '../ws/sessionManager.js';
+import { createSession, getSession, isInfrastructureError } from '../ws/sessionManager.js';
 import { sandboxAvailable } from '../ws/sandbox.js';
 import { isValidApp } from '../ws/appLaunch.js';
 import { projectHashForCwd } from '../ws/projectHash.js';
@@ -451,14 +451,13 @@ export async function groupsRoute(fastify, opts) {
     if (res.error || !res.session) {
       // createSession()'s error is usually a rejection of the request as
       // given (hiddenApps, not-installed, invalid cwd, ...) -- matching POST
-      // /groups' fail() helper, which maps the identical createSession()
-      // rejection to 400, not 500. Infrastructure failures below surface as
-      // 500s instead: a sandbox that no longer builds or a process that no
-      // longer spawns is a server fault, not a bad request.
+      // /groups' fail() helper (STATUS_FOR_CODE: validation -> 400), which
+      // maps the identical createSession() rejection to 400, not 500.
+      // Infrastructure failures (see isInfrastructureError) surface as 500s
+      // instead: a sandbox that no longer builds or a process that no longer
+      // spawns is a server fault, not a bad request.
       const msg = res.error || 'unknown error';
-      const isServerFault = msg.startsWith('Failed to build sandbox')
-        || msg.startsWith('Failed to spawn');
-      return reply.code(isServerFault ? 500 : 400).send({ error: `orchestrator restart failed: ${msg}` });
+      return reply.code(isInfrastructureError(msg) ? 500 : 400).send({ error: `orchestrator restart failed: ${msg}` });
     }
     groupManager.registerMember(group.id, 'orchestrator', res.sessionId);
     groupManager.setMemberPrefs(group.id, 'orchestrator', { app, model: res.session.model, sandboxOpts });
