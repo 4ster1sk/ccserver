@@ -74,22 +74,35 @@ export default function RightSidebar({ usageProps = {}, prefs }) {
     // 未取得時は枠を作らない。ローディング／エラー表示は
     // リスト上部の単一バナーに集約する。
     if (!data) return null;
+    // 各カードはデータ欠落時に内部で null を描画するが、ここで返す React 要素
+    // 自体は null にならないため、下流の `.filter(body !== null)` では除外
+    // できない。空の WidgetShell を作らないよう、ここで描画可否を判定する。
     switch (id) {
       case 'cpu':
+        if (!data.cpu) return null;
         return <CpuCard data={data} hideTitle />;
       case 'memory-storage':
+        if (!data.memory && !(data.storage?.length)) return null;
         return (
           <>
             <MemoryCard data={data} hideTitle />
             <StorageCard data={data} hideTitle />
           </>
         );
-      case 'temps':
+      case 'temps': {
+        const t = data.temperatures;
+        if (!t?.cpu && !t?.pch && !t?.other) return null;
         return <TempCard data={data} hideTitle />;
+      }
       case 'gpu':
+        if (!data.gpu) return null;
         return <GpuCard data={data} hideTitle />;
-      case 'ipmi':
+      case 'ipmi': {
+        if (!showIpmi || !data.ipmi) return null;
+        const ipmi = data.ipmi;
+        if (!ipmi.power?.length && !ipmi.voltage?.length && !ipmi.fans?.length && !ipmi.temps?.length) return null;
         return <IpmiCards data={data} showIpmi={showIpmi} hideTitle />;
+      }
       default:
         return null;
     }
