@@ -18,6 +18,7 @@ import {
   opencodeGoAvailable,
   readOpencodeGoKey,
   getOpencodeUsage,
+  warmOpencodeUsage,
 } from './opencodeUsage.js';
 
 let tmpRoot;
@@ -164,6 +165,37 @@ test('readOpencodeGoKey / opencodeGoAvailable: key file presence gates, toggle w
   assert.equal(opencodeGoAvailable(), true);
   writeConfig({ opencodeGoUsage: false });
   assert.equal(opencodeGoAvailable(), false, 'disabled toggle hides even with a key');
+});
+
+// hiddenApps (issue #105): an operator who hasn't contracted for opencode
+// must see it disappear from the picker (opencodeGoAvailable -> false) even
+// with a valid key, and no code path may read the key file or hit the
+// network on its behalf (capture()/getOpencodeUsage()/warmOpencodeUsage()).
+test('opencodeGoAvailable: false when opencode is hidden, even with a valid key', () => {
+  writeAuthKey('k123');
+  assert.equal(opencodeGoAvailable(), true);
+  writeConfig({ hiddenApps: ['opencode'] });
+  assert.equal(opencodeGoAvailable(), false);
+});
+
+test('getOpencodeUsage: hidden app short-circuits without reading the key or fetching', async () => {
+  writeConfig({ hiddenApps: ['opencode'] });
+  writeAuthKey('k123');
+  let fetched = false;
+  globalThis.fetch = async () => { fetched = true; throw new Error('must not fetch'); };
+  const res = await getOpencodeUsage({ force: true });
+  assert.equal(res.usage, null);
+  assert.match(res.error, /hidden on this server/);
+  assert.equal(fetched, false);
+});
+
+test('warmOpencodeUsage: does nothing when opencode is hidden, even with a valid key', () => {
+  writeConfig({ hiddenApps: ['opencode'] });
+  writeAuthKey('k123');
+  let fetched = false;
+  globalThis.fetch = async () => { fetched = true; throw new Error('must not fetch'); };
+  warmOpencodeUsage();
+  assert.equal(fetched, false);
 });
 
 test('readOpencodeGoKey: OPENCODE_AUTH_CONTENT wins over auth.json', () => {

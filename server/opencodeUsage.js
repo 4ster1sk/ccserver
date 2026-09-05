@@ -26,7 +26,7 @@
 import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { loadSandboxConfig } from './ws/sandbox.js';
+import { loadSandboxConfig, isAppHidden } from './ws/sandbox.js';
 
 const CACHE_TTL_MS = 60 * 1000;        // serve cache without re-fetching
 const FETCH_TIMEOUT_MS = 10 * 1000;    // hard cap on a single fetch
@@ -37,9 +37,11 @@ let cache = null;      // { usage, updatedAt }
 let inflight = null;   // Promise<fetchResult> while a fetch is running
 
 // Layer 1: the config toggle (default on; env override handled inside
-// loadSandboxConfig -- see ws/sandbox.js's opencodeGoUsage).
-export function opencodeGoEnabled() {
-  return loadSandboxConfig().opencodeGoUsage !== false;
+// loadSandboxConfig -- see ws/sandbox.js's opencodeGoUsage). Accepts an
+// already-loaded config so callers that need multiple fields (e.g. GET
+// /dirs/home) don't read sandbox.config.json twice.
+export function opencodeGoEnabled(cfg = loadSandboxConfig()) {
+  return cfg.opencodeGoUsage !== false;
 }
 
 function authFilePath() {
@@ -89,8 +91,11 @@ export function readOpencodeGoKey() {
 // Layer 2: synchronous, network-free availability for GET /api/dirs/home
 // (toggle on AND a key exists). Subscription validity (layer 3, the 403
 // case) is only known after a fetch, so it is handled at fetch time.
-export function opencodeGoAvailable() {
-  return opencodeGoEnabled() && readOpencodeGoKey() != null;
+// hiddenApps (issue #105) wins over both: a hidden app must never read as
+// "available" in the picker just because a key happens to exist.
+export function opencodeGoAvailable(cfg = loadSandboxConfig()) {
+  if (isAppHidden('opencode')) return false;
+  return opencodeGoEnabled(cfg) && readOpencodeGoKey() != null;
 }
 
 function formatResets(resetAtMs) {
@@ -166,7 +171,13 @@ async function fetchOnce(key) {
 }
 
 function capture() {
-  // Layer 1 first: disabled means no key read and no request at all.
+  // hiddenApps (issue #105) first, same guard usage.js/codexUsage.js apply
+  // for claude/codex: an operator who hasn't contracted for opencode must
+  // never have this reach out to opencode.ai, regardless of toggle/key.
+  if (isAppHidden('opencode')) {
+    return Promise.resolve({ error: 'opencode is hidden on this server (sandbox.config.json\'s "hiddenApps")' });
+  }
+  // Layer 1 next: disabled means no key read and no request at all.
   if (!opencodeGoEnabled()) {
     return Promise.resolve({ error: 'opencode Go usage is disabled by config (opencodeGoUsage: false)' });
   }

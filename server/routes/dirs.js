@@ -121,7 +121,8 @@ export async function createDirectory({ parent, name, gitInit }) {
 
 export async function dirsRoute(fastify, opts) {
   fastify.get('/dirs/home', async () => {
-    const { defaultApp, forceSandbox, showUsage, hiddenApps } = loadSandboxConfig();
+    const cfg = loadSandboxConfig();
+    const { defaultApp, forceSandbox, showUsage, hiddenApps } = cfg;
     // hostname for the browser tab title ("<host> ccserver"): the same
     // resolution the notify footer uses, so the tab matches _from: <host>.
     // Extra field, so existing clients are unaffected.
@@ -139,7 +140,7 @@ export async function dirsRoute(fastify, opts) {
     // metaAgentEnabled: the launch modal's メタエージェント mode is disabled
     // (with an explanation) unless the privileged ccserver-meta feature is
     // explicitly opted into via sandbox.config.json. Extra field as well.
-    return { home: homedir(), defaultApp, forceSandbox, hostname: resolvedHostname(), showUsage, availableApps: { ...installedApps(), opencodeGo: opencodeGoAvailable() }, hiddenApps, metaAgentEnabled: metaAgentEnabled(), metaAgentDir: metaAgentDir() };
+    return { home: homedir(), defaultApp, forceSandbox, hostname: resolvedHostname(), showUsage, availableApps: { ...installedApps(), opencodeGo: opencodeGoAvailable(cfg) }, hiddenApps, metaAgentEnabled: metaAgentEnabled(), metaAgentDir: metaAgentDir() };
   });
 
   fastify.get('/dirs', async (request, reply) => {
