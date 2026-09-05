@@ -9,7 +9,7 @@ export default function UsageButton({ hidden = false, defaultApp = 'claude', ava
   // when nothing valid has been saved yet. Availability is still respected --
   // a saved app that isn't installed or is hidden falls back below.
   const { tab, setTab, claudeAvailable, codexAvailable } = useUsageTab({ defaultApp, availableApps, hiddenApps });
-  const { data, loading, load } = useUsageData(tab);
+  const { data, loading, load } = useUsageData(tab, { enabled: !hidden });
   const wrapRef = useRef(null);
 
   // Fetch fresh-ish data whenever the popover opens.

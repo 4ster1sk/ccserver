@@ -79,7 +79,13 @@ export function useUsageTab({ defaultApp = 'claude', availableApps = null, hidde
   return { tab, setTab, isSelectable, claudeAvailable, codexAvailable };
 }
 
-export function useUsageData(tab) {
+// 同一appへの同時リクエストを一本化するためのin-flight共有マップ
+// (app -> Promise)。UsageButtonとUsageWidgetのマウント時など、
+// 同タイミングの同一クエリが2本飛ぶのを防ぐ。settledら除去し、
+// 結果のキャッシュはしない (stalenessを持ち込まない)。
+const inflightUsage = new Map();
+
+export function useUsageData(tab, { enabled = true } = {}) {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(false);
   const tabRef = useRef(tab);
@@ -92,8 +98,21 @@ export function useUsageData(tab) {
     const requestId = ++requestIdRef.current;
     setLoading(true);
     try {
-      const res = await authFetch(`/api/usage?app=${app}${force ? '&force=1' : ''}`);
-      const json = await res.json();
+      let pending = !force ? inflightUsage.get(app) : null;
+      if (!pending) {
+        pending = (async () => {
+          const res = await authFetch(`/api/usage?app=${app}${force ? '&force=1' : ''}`);
+          return res.json();
+        })();
+        // force時は共有マップを汚さない (明示更新は常に新規取得)。
+        if (!force) inflightUsage.set(app, pending);
+        try {
+          await pending;
+        } finally {
+          if (inflightUsage.get(app) === pending) inflightUsage.delete(app);
+        }
+      }
+      const json = await pending;
       if (requestIdRef.current === requestId) setData(json);
     } catch (err) {
       if (requestIdRef.current === requestId) setData({ error: String(err?.message || err) });
@@ -102,7 +121,11 @@ export function useUsageData(tab) {
     }
   }, []);
 
-  useEffect(() => { setData(null); load(false); }, [tab, load]);
+  useEffect(() => {
+    if (!enabled) return;
+    setData(null);
+    load(false);
+  }, [tab, load, enabled]);
 
   return { data, loading, load };
 }
