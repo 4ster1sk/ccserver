@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { authFetch } from '../auth.js';
-import { isAppSelectable } from '../appAvailability.js';
+import { isAppVisible } from '../appAvailability.js';
 
 function pctClass(pct) {
   if (pct >= 80) return 'usage-bar-fill high';
@@ -53,31 +53,6 @@ function loadSavedUsageApp() {
   }
 }
 
-// availableApps key for a usage tab. opencode Go is NOT the opencode CLI
-// install flag (a Go subscription needs no binary): the server reports it
-// separately as `opencodeGo` (toggle on + Go API key present).
-function availableKey(app) {
-  return app === 'opencode' ? 'opencodeGo' : app;
-}
-
-function isAppVisible(app, availableApps, hiddenApps) {
-  // opencode Go is NOT the opencode CLI install flag (a Go subscription
-  // needs no binary): hidden via hiddenApps 'opencode' (issue #105), else
-  // toggle on + Go API key present reported as availableApps.opencodeGo.
-  // Whole object missing (fetch pending/failed) -> assume all visible, the
-  // pre-existing loading convention. But a PRESENT object without the
-  // opencodeGo key means an older server that predates Go support entirely:
-  // the Go tab must stay hidden there (old servers ignore ?app=opencode and
-  // would serve Claude data under the (opencode) badge). New servers always
-  // send the key (see routes/dirs.js).
-  if (app === 'opencode') {
-    if (hiddenApps?.includes('opencode')) return false;
-    if (!availableApps) return true;
-    return availableApps.opencodeGo === true;
-  }
-  return isAppSelectable(app, availableApps, hiddenApps);
-}
-
 function saveUsageApp(app) {
   try {
     window.localStorage.setItem(USAGE_APP_KEY, app);
@@ -93,8 +68,8 @@ export default function UsageButton({ hidden = false, defaultApp = 'claude', ava
   const [, setTick] = useState(0);   // re-render so pace/age stay live while open
   // Selectable = installed (availableApps !== false; opencode Go = toggle on
   // + Go key present) AND not hidden via sandbox.config.json's hiddenApps
-  // (issue #105). Shared with App.jsx's button visibility via isAppSelectable
-  // for claude/codex; Go adds its own opencodeGo-key rule above.
+  // (issue #105). isAppVisible is shared with App.jsx's button visibility
+  // (see appAvailability.js) so the two definitions can't drift.
   const isSelectable = useCallback(
     (app) => isAppVisible(app, availableApps, hiddenApps),
     [availableApps, hiddenApps]

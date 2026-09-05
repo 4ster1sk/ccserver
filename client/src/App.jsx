@@ -11,7 +11,7 @@ import RemoteInstanceView from './components/RemoteInstanceView.jsx';
 import { useNotifications } from './hooks/useNotifications.js';
 import { authFetch } from './auth.js';
 import { getTheme, loadThemeId, saveThemeId, applyThemeCss } from './themes.js';
-import { isAppSelectable } from './appAvailability.js';
+import { isAppSelectable, isAppVisible } from './appAvailability.js';
 
 const TerminalView = lazy(() => import('./components/TerminalView.jsx'));
 
@@ -459,13 +459,11 @@ export default function App() {
   // install flag: it means toggle on + Go API key present. Unlike
   // claude/codex (whose keys predate this feature), a PRESENT object
   // without the opencodeGo key is an older server, so Go stays hidden
-  // there (see UsageButton's isAppVisible). hiddenApps 'opencode' hides
-  // the Go tab as well (issue #105).
+  // there (see appAvailability.js's isAppVisible, shared with UsageButton).
+  // hiddenApps 'opencode' hides the Go tab as well (issue #105).
   const claudeAvailable = isAppSelectable('claude', usagePrefs.availableApps, usagePrefs.hiddenApps);
   const codexAvailable = isAppSelectable('codex', usagePrefs.availableApps, usagePrefs.hiddenApps);
-  const opencodeGoAvailable = usagePrefs.hiddenApps?.includes('opencode')
-    ? false
-    : (!usagePrefs.availableApps || usagePrefs.availableApps.opencodeGo === true);
+  const opencodeGoAvailable = isAppVisible('opencode', usagePrefs.availableApps, usagePrefs.hiddenApps);
   const usageHidden = !usagePrefs.showUsage || (!claudeAvailable && !codexAvailable && !opencodeGoAvailable);
   // First-run seed only: UsageButton remembers the app the user last picked
   // (localStorage), so this active-tab-derived default is used just when
@@ -474,7 +472,7 @@ export default function App() {
   const activeTabApp = activeTab?.type === 'group' ? groupActiveApp : activeTab?.app;
   const usageDefaultApp = (activeTabApp === 'codex' && codexAvailable) ? 'codex'
     : (activeTabApp === 'opencode' && opencodeGoAvailable) ? 'opencode'
-    : (claudeAvailable ? 'claude' : (codexAvailable ? 'codex' : 'opencode'));
+    : (claudeAvailable ? 'claude' : (codexAvailable ? 'codex' : (opencodeGoAvailable ? 'opencode' : 'claude')));
 
   return (
     <div className="app">
