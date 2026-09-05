@@ -98,7 +98,7 @@ export async function createSessionViaApi(body, { isReviewJob = false } = {}) {
     }
   }
   if (body.app !== undefined && body.app !== null && !isValidApp(body.app)) {
-    return { ok: false, code: 'validation', message: 'app must be one of claude, opencode, copilot, codex' };
+    return { ok: false, code: 'validation', message: 'app must be one of claude, opencode, copilot, codex, commandcode' };
   }
   if (body.sandboxOpts !== undefined && body.sandboxOpts !== null
     && (typeof body.sandboxOpts !== 'object' || Array.isArray(body.sandboxOpts))) {

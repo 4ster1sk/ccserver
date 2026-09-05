@@ -898,7 +898,7 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
                     />
                   </div>
                 )}
-                {appDefault === 'commandcode' && (
+                {appDefault === 'commandcode' && !effectiveAppHidden && (
                   <>
                     <div className="open-menu-label">許可モード</div>
                     <div className="open-menu-app-row">
