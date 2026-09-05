@@ -48,7 +48,7 @@ test('previewKind classifies by MIME type: markdown, json, text, case-insensitiv
   for (const name of ['config.json', 'APP.JSON', 'app.jsonc', 'settings.JSONC']) {
     assert.equal(previewKind(name), 'json', name);
   }
-  for (const name of ['notes.txt', 'NOTES.TXT', '/a/b/c.Txt', 'script.js', 'app.TS', 'a.tsx', 'page.html', 'style.css', 'app.yaml', 'app.yml', 'c.toml', 'app.py', 'main.go', 'x.log', 'y.csv']) {
+  for (const name of ['notes.txt', 'NOTES.TXT', '/a/b/c.Txt', 'script.js', 'app.TS', 'a.tsx', 'page.html', 'style.css', 'app.yaml', 'app.yml', 'c.toml', 'app.py', 'main.go', 'run.sh', 'deploy.BASH', 'a.xml', 'feed.rss', 'x.log', 'y.csv']) {
     assert.equal(previewKind(name), 'text', name);
   }
   for (const name of ['image.png', 'doc.pdf', 'a.zip', 'font.woff2', 'x.mp4', 'Makefile', 'md', 'txt', '.md', '.txt', 'file.md.bak', 'a.markdown.bak', 'unknown123', 'noext.', '']) {
@@ -67,6 +67,17 @@ test('MIME overrides keep text sources out of media/unknown types', () => {
   assert.equal(mimeForPreview('app.jsonc'), 'application/jsonc');
   assert.equal(previewKind('app.ts'), 'text');
   assert.equal(previewKind('app.jsonc'), 'json');
+  // application/x-* script types pinned back to text/*.
+  assert.equal(mimeForPreview('run.sh'), 'text/x-sh');
+  assert.equal(mimeForPreview('deploy.bash'), 'text/x-sh');
+  assert.equal(mimeForPreview('app.cjs'), 'text/javascript');
+  assert.equal(mimeForPreview('app.php'), 'text/x-php');
+  assert.equal(mimeForPreview('x.pl'), 'text/x-perl');
+  assert.equal(mimeForPreview('run.bat'), 'text/x-bat');
+  assert.equal(previewKind('run.sh'), 'text');
+  // application/*+xml data types pinned back to text/xml.
+  assert.equal(mimeForPreview('a.xml'), 'text/xml');
+  assert.equal(mimeForPreview('feed.rss'), 'text/xml');
   // application/* text sources pinned back to text/*.
   assert.equal(mimeForPreview('s.sql'), 'text/x-sql');
   assert.equal(mimeForPreview('c.toml'), 'text/x-toml');

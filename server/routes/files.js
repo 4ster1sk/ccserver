@@ -21,11 +21,19 @@ export const SNIFF_BYTES = 8 * 1024;
 
 // MIME overrides for extensions where the `mime` database returns the wrong
 // answer (or none) for a plain-text source file. The keys are bare lowercase
-// extensions without the dot; values feed the same text/* + json rule below.
-//   .ts/.mts -> video/mp2t, model/vnd.mts: registered media types that would
-//     hide TypeScript sources behind "unsupported".
+// extensions without the dot; values feed the same previewable rule below
+// (text/* + json in previewKind / isPreviewableMime).
+//   .ts/.mts -> video/mp2t: registered media types that would hide
+//     TypeScript sources behind "unsupported".
 //   .cts/.tsx/.py/.go/.rb/.vue and friends -> unregistered (null): languages
 //     the mime db simply does not know as file extensions.
+//   .sh/.csh/.php/.pl/.tcl/.bat -> application/x-*: registered executable /
+//     script types for plain-text sources, pinned back to text/*.
+//   .js/.mjs -> application/javascript in mime v3 (root node_modules): pinned
+//     to text/javascript so the rule holds regardless of the mime major.
+//   .cjs -> application/node: Node-specific, pinned to text/javascript.
+//   .xml/.xsl/.xsd/.rss/.atom -> application/*+xml: registered data types for
+//     plain-text sources, pinned back to text/xml.
 //   .sql -> application/sql, .toml -> application/toml: registered
 //     non-text types for plain-text sources, pinned back to text/*.
 //   .md/.markdown -> pinned to text/markdown so the markdown renderer is
@@ -34,6 +42,9 @@ export const SNIFF_BYTES = 8 * 1024;
 export const MIME_OVERRIDES = {
   md: 'text/markdown',
   markdown: 'text/markdown',
+  js: 'text/javascript',
+  mjs: 'text/javascript',
+  cjs: 'text/javascript',
   ts: 'text/typescript',
   mts: 'text/typescript',
   cts: 'text/typescript',
@@ -46,7 +57,35 @@ export const MIME_OVERRIDES = {
   rb: 'text/x-ruby',
   go: 'text/x-go',
   rs: 'text/x-rust',
+  sh: 'text/x-sh',
+  bash: 'text/x-sh',
+  zsh: 'text/x-sh',
+  fish: 'text/x-sh',
+  ksh: 'text/x-sh',
+  csh: 'text/x-csh',
+  php: 'text/x-php',
+  pl: 'text/x-perl',
+  pm: 'text/x-perl',
+  tcl: 'text/x-tcl',
+  bat: 'text/x-bat',
+  cmd: 'text/x-bat',
+  ps1: 'text/x-powershell',
+  lua: 'text/x-lua',
+  r: 'text/x-r',
+  scala: 'text/x-scala',
+  kt: 'text/x-kotlin',
+  swift: 'text/x-swift',
+  cs: 'text/x-csharp',
+  vb: 'text/x-vb',
+  hpp: 'text/x-c',
+  dart: 'text/x-dart',
+  xml: 'text/xml',
+  xsl: 'text/xml',
+  xsd: 'text/xml',
+  rss: 'text/xml',
+  atom: 'text/xml',
   graphql: 'text/x-graphql',
+  gql: 'text/x-graphql',
   sql: 'text/x-sql',
   diff: 'text/x-diff',
   patch: 'text/x-diff',
