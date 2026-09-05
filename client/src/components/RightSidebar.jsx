@@ -95,6 +95,8 @@ export default function RightSidebar({ usageProps = {}, prefs }) {
     }
   };
 
+  const showMonitorStatus = shownWidgets.some((w) => MONITOR_WIDGET_IDS.includes(w.id));
+
   return (
     <aside className="right-sidebar">
       <div className="sidebar-header">
@@ -137,10 +139,10 @@ export default function RightSidebar({ usageProps = {}, prefs }) {
         </span>
       </div>
       <div className="sidebar-widgets">
-        {stats?.error && !stats?.data && (
+        {showMonitorStatus && stats?.error && !stats?.data && (
           <div className="error">Failed to load system stats: {stats.error}</div>
         )}
-        {!stats?.error && !stats?.data && (
+        {showMonitorStatus && !stats?.error && !stats?.data && (
           <div className="loading">Loading system stats...</div>
         )}
         {shownWidgets
