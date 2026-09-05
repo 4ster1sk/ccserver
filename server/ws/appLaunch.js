@@ -9,8 +9,8 @@
 export const APPS = ['claude', 'opencode', 'copilot', 'codex', 'commandcode'];
 
 // Which app new sessions launch when none is requested is configured, not
-// hardcoded here -- see sandbox.js's loadSandboxConfig() / sessionManager.js's
-// defaultApp() (sandbox.config.json's "defaultApp", default 'claude').
+// hardcoded here -- see sandbox.js's loadSandboxConfig()
+// (sandbox.config.json's "defaultApp", default 'claude').
 
 export function isValidApp(app) {
   return APPS.includes(app);

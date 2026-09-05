@@ -625,7 +625,7 @@ export function loadSandboxConfig() {
   const claudeBin = process.env.CCSERVER_CLAUDE_BIN || (typeof raw.claudeBin === 'string' ? raw.claudeBin : null);
   // Which agent a new session launches when the client doesn't request one.
   // See appLaunch.js's APPS; anything else (including unset) falls back to
-  // claude -- see sessionManager.js's defaultApp().
+  // claude -- see loadSandboxConfig()'s defaultApp below.
   const defaultApp = raw.defaultApp === 'opencode' || raw.defaultApp === 'copilot' || raw.defaultApp === 'codex' || raw.defaultApp === 'commandcode' ? raw.defaultApp : 'claude';
   // Show the client's top-bar Usage button (Claude Code /usage spend). Off
   // for setups that don't want it; the client also hides the button on its

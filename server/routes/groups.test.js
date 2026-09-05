@@ -6,6 +6,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { orchestratorRestartSessionOpts, orchestratorDirForCwd, groupExistsForCwd } from './groups.js';
+import { isInfrastructureError } from '../ws/sessionManager.js';
 
 test('orchestratorRestartSessionOpts: restart continues the last conversation', () => {
   const opts = orchestratorRestartSessionOpts({
@@ -37,6 +38,23 @@ test('orchestratorRestartSessionOpts: resumeLast is independent of the app', () 
     assert.equal(opts.app, app);
     assert.equal(opts.projectName, 'proj', `the real project basename is attributed for ${app}`);
   }
+});
+
+test('isInfrastructureError: infra failures surface as 500, request rejections stay 400', () => {
+  // Mirrors the actual createSession() message shapes in server/ws/sessionManager.js;
+  // if those messages change, this test forces INFRA_ERROR_PREFIXES to follow.
+  assert.equal(isInfrastructureError('Failed to build sandbox: bwrap not found'), true);
+  assert.equal(isInfrastructureError('Failed to spawn "claude": spawn ENOENT'), true);
+  assert.equal(isInfrastructureError('Cannot launch: sandbox.config.json sets "forceSandbox": true, but bwrap is not available on this host. Install bwrap (bubblewrap) or disable forceSandbox.'), true);
+  // Request-as-given rejections must keep mapping to 400.
+  assert.equal(isInfrastructureError('Cannot launch: copilot is hidden on this server (sandbox.config.json\'s "hiddenApps"). Remove it from hiddenApps to allow launches.'), false);
+  assert.equal(isInfrastructureError('Cannot launch: codex is not installed on this server (searched /usr/bin).'), false);
+  assert.equal(isInfrastructureError('Cannot launch in the filesystem root (/) -- claude aborts immediately there. Choose a working directory first.'), false);
+  // Defensive: the restart route passes `res.error || 'unknown error'`.
+  assert.equal(isInfrastructureError('unknown error'), false);
+  assert.equal(isInfrastructureError(null), false);
+  assert.equal(isInfrastructureError(undefined), false);
+  assert.equal(isInfrastructureError(''), false);
 });
 
 test('orchestratorDirForCwd is deterministic per project path', () => {
