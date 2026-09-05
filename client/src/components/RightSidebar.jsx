@@ -61,6 +61,9 @@ export default function RightSidebar({ usageProps = {}, prefs }) {
   const shownWidgets = usageProps?.hidden
     ? visibleWidgets.filter((w) => w.id !== 'usage')
     : visibleWidgets;
+  const addableWidgets = usageProps?.hidden
+    ? hiddenWidgets.filter((w) => w.id !== 'usage')
+    : hiddenWidgets;
 
   const renderWidgetBody = (id) => {
     if (id === 'usage') {
@@ -97,7 +100,7 @@ export default function RightSidebar({ usageProps = {}, prefs }) {
       <div className="sidebar-header">
         <span className="sidebar-title">Widgets</span>
         <span className="sidebar-header-actions">
-          {hiddenWidgets.length > 0 && (
+          {addableWidgets.length > 0 && (
             <span className="sidebar-add-wrap" ref={addWrapRef}>
               <button
                 type="button"
@@ -109,7 +112,7 @@ export default function RightSidebar({ usageProps = {}, prefs }) {
               </button>
               {addOpen && (
                 <span className="sidebar-add-menu">
-                  {hiddenWidgets.map((w) => (
+                  {addableWidgets.map((w) => (
                     <button
                       key={w.id}
                       type="button"
