@@ -80,22 +80,21 @@ export function useWidgetPrefs(widgetDefs) {
 
   const moveWidget = useCallback((id, dir) => {
     if (dir !== 'up' && dir !== 'down') return;
-    const idx = order.indexOf(id);
-    if (dir === 'up' && idx <= 0) return;
-    if (dir === 'down' && (idx < 0 || idx >= order.length - 1)) return;
-    const next = [...order];
-    if (dir === 'up') {
-      [next[idx - 1], next[idx]] = [next[idx], next[idx - 1]];
-    } else {
-      [next[idx + 1], next[idx]] = [next[idx], next[idx + 1]];
-    }
-    setOrderState(next);
-    try {
-      localStorage.setItem(ORDER_KEY, JSON.stringify(next));
-    } catch {
-      // ignore
-    }
-  }, [order]);
+    setOrderState((prev) => {
+      const idx = prev.indexOf(id);
+      if (dir === 'up' && idx <= 0) return prev;
+      if (dir === 'down' && (idx < 0 || idx >= prev.length - 1)) return prev;
+      const next = [...prev];
+      const j = dir === 'up' ? idx - 1 : idx + 1;
+      [next[idx], next[j]] = [next[j], next[idx]];
+      try {
+        localStorage.setItem(ORDER_KEY, JSON.stringify(next));
+      } catch {
+        // ignore
+      }
+      return next;
+    });
+  }, []);
 
   const visibleWidgets = order
     .map((id) => widgetDefs.find((w) => w.id === id))
