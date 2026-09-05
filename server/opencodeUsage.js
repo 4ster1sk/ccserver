@@ -117,7 +117,12 @@ const WINDOWS = [
 function mapWindow(raw, { label, windowMs }) {
   if (!raw || typeof raw !== 'object') return null;
   const { percent, status, resetsAt } = raw;
-  if (typeof percent !== 'number' || !Number.isFinite(percent) || percent < 0 || percent > 100) return null;
+  // No upper bound: a rate-limited window can legitimately report over 100%
+  // (e.g. 104%), and that's a normal state to surface, not a malformed
+  // payload -- rejecting it here used to discard the whole fetch (see
+  // getOpencodeUsage's WINDOWS.length check), hiding two otherwise-valid
+  // windows along with it. UsageButton.jsx already clamps the bar width.
+  if (typeof percent !== 'number' || !Number.isFinite(percent) || percent < 0) return null;
   if (status !== 'ok' && status !== 'rate-limited') return null;
   const resetAt = typeof resetsAt === 'string' ? Date.parse(resetsAt) : NaN;
   if (!Number.isFinite(resetAt)) return null;

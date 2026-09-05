@@ -122,7 +122,7 @@ test('mapGoUsage: null/invalid payload -> empty limits, null plan/cost', () => {
 test('mapGoUsage: malformed windows are skipped', () => {
   const result = mapGoUsage({
     usage: {
-      rolling: { status: 'ok', percent: 120, resetsAt: '2026-08-13T16:27:38.287Z' }, // out of range
+      rolling: { status: 'ok', percent: -5, resetsAt: '2026-08-13T16:27:38.287Z' }, // negative
       weekly: { status: 'weird', percent: 3, resetsAt: '2026-08-17T00:00:00.287Z' }, // bad status
       monthly: { status: 'ok', percent: 1, resetsAt: 'not-a-date' }, // bad resetsAt
     },
@@ -131,16 +131,20 @@ test('mapGoUsage: malformed windows are skipped', () => {
   assert.equal(result.plan, null);
 });
 
-test('mapGoUsage: rate-limited window is still surfaced with its pct', () => {
+// A rate-limited window can legitimately report over 100% used (e.g. a burst
+// against a rolling quota) -- this must surface as-is, not be discarded as
+// malformed (which used to drop the other two, otherwise-valid, windows too;
+// see getOpencodeUsage's WINDOWS.length check on the full mapped result).
+test('mapGoUsage: rate-limited window is still surfaced with its pct, over-100 included', () => {
   const result = mapGoUsage({
     usage: {
-      rolling: { status: 'rate-limited', percent: 100, resetsAt: '2026-08-13T16:27:38.287Z' },
+      rolling: { status: 'rate-limited', percent: 104, resetsAt: '2026-08-13T16:27:38.287Z' },
       weekly: { status: 'ok', percent: 3, resetsAt: '2026-08-17T00:00:00.287Z' },
       monthly: { status: 'ok', percent: 1, resetsAt: '2026-09-13T06:06:01.287Z' },
     },
   });
   assert.equal(result.limits.length, 3);
-  assert.equal(result.limits[0].pct, 100);
+  assert.equal(result.limits[0].pct, 104);
 });
 
 test('opencodeGoEnabled: default on; file false disables; env wins both ways', () => {
