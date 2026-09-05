@@ -475,18 +475,33 @@ function slugify(p) {
   return p.replace(/[^a-zA-Z0-9]+/g, '_').replace(/^_+|_+$/g, '') || 'root';
 }
 
-// Resolve a booleanish flag from an env override + a config-file value with
-// a default. Env wins when it is a recognized boolean word
-// (1/true/on/yes vs 0/false/off/no, case-insensitive); an unrecognized or
-// empty env value falls back to the config file, which itself is only
-// on/off by strict boolean (anything else -> the default).
-function resolveFlag(envVal, fileVal, def) {
-  if (typeof envVal === 'string' && envVal.trim() !== '') {
-    const v = envVal.trim().toLowerCase();
-    if (['1', 'true', 'on', 'yes'].includes(v)) return true;
-    if (['0', 'false', 'off', 'no'].includes(v)) return false;
+// Parse a booleanish value (actual boolean, or the recognized word forms
+// 1/true/on/yes vs 0/false/off/no, case-insensitive) -- or undefined when it
+// doesn't match either. Shared by resolveFlag below so a config-file value
+// gets the same vocabulary an env var already did; this only widens what a
+// FILE value can express -- an unrecognized value still falls back the same
+// way it always has, one level further down resolveFlag's chain.
+function parseBoolish(v) {
+  if (typeof v === 'boolean') return v;
+  if (typeof v === 'string' && v.trim() !== '') {
+    const s = v.trim().toLowerCase();
+    if (['1', 'true', 'on', 'yes'].includes(s)) return true;
+    if (['0', 'false', 'off', 'no'].includes(s)) return false;
   }
-  if (typeof fileVal === 'boolean') return fileVal;
+  return undefined;
+}
+
+// Resolve a booleanish flag from an env override + a config-file value with
+// a default. Env wins when it is a recognized boolean word; an unrecognized
+// or empty env value falls back to the config file, which now accepts the
+// same word forms (not just a strict boolean) -- so e.g. a quoted
+// `"opencodeGoUsage": "false"` in the config file is honored instead of
+// silently falling back to the default as if unset.
+function resolveFlag(envVal, fileVal, def) {
+  const fromEnv = parseBoolish(envVal);
+  if (fromEnv !== undefined) return fromEnv;
+  const fromFile = parseBoolish(fileVal);
+  if (fromFile !== undefined) return fromFile;
   return def;
 }
 
