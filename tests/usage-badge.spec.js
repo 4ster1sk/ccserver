@@ -6,7 +6,7 @@ import { test, expect } from '@playwright/test';
 // needed here: both server endpoints are mocked so the fixture percentages
 // (claude=10, codex=55) prove which app's data is on screen.
 
-function mockRoutes(page) {
+function mockRoutes(page, { availableApps = { claude: true, codex: true } } = {}) {
   page.route('**/api/dirs/home*', async (route) => {
     await route.fulfill({
       status: 200,
@@ -17,13 +17,13 @@ function mockRoutes(page) {
         forceSandbox: false,
         hostname: 'test',
         showUsage: true,
-        availableApps: { claude: true, codex: true },
+        availableApps,
       }),
     });
   });
   page.route('**/api/usage**', async (route) => {
     const app = new URL(route.request().url()).searchParams.get('app') || 'claude';
-    const pct = app === 'codex' ? 55 : 10;
+    const pct = app === 'codex' ? 55 : app === 'opencode' ? 77 : 10;
     await route.fulfill({
       status: 200,
       contentType: 'application/json',
@@ -66,6 +66,21 @@ test('switching apps in the popover flips the badge and the numbers', async () =
   await expect(badge()).toHaveText('(codex)');
   // The fetch is re-issued for codex, so the pct must switch to its fixture.
   await expect(page.locator('.usage-btn .usage-btn-pct')).toHaveText('55%');
+});
+
+test('switching to the OpenCode tab flips the badge and the numbers', async () => {
+  await page.unrouteAll({ behavior: 'wait' });
+  mockRoutes(page, { availableApps: { claude: true, codex: true, opencodeGo: true } });
+  await page.reload();
+
+  await expect(badge()).toHaveText('(claude)');
+  await page.locator('.usage-btn').click();
+  const menu = page.locator('.usage-menu');
+  await expect(menu).toBeVisible();
+  await menu.locator('.usage-tab', { hasText: 'OpenCode' }).click();
+  await expect(badge()).toHaveText('(opencode)');
+  // The fetch is re-issued for opencode, so the pct must switch to its fixture.
+  await expect(page.locator('.usage-btn .usage-btn-pct')).toHaveText('77%');
 });
 
 test('the badge persists after the popover is closed', async () => {

@@ -453,10 +453,13 @@ export default function App() {
   // (no CLI installed AND no Go key). `availableApps` null/absent (fetch
   // pending or failed, older server) means "unknown" -- every tab is
   // assumed available in that case. Note `opencodeGo` is not the opencode
-  // CLI install flag: it means toggle on + Go API key present.
+  // CLI install flag: it means toggle on + Go API key present. Unlike
+  // claude/codex (whose keys predate this feature), a PRESENT object
+  // without the opencodeGo key is an older server, so Go stays hidden
+  // there (see UsageButton's isAppVisible).
   const claudeAvailable = !usagePrefs.availableApps || usagePrefs.availableApps.claude !== false;
   const codexAvailable = !usagePrefs.availableApps || usagePrefs.availableApps.codex !== false;
-  const opencodeGoAvailable = !usagePrefs.availableApps || usagePrefs.availableApps.opencodeGo !== false;
+  const opencodeGoAvailable = !usagePrefs.availableApps || usagePrefs.availableApps.opencodeGo === true;
   const usageHidden = !usagePrefs.showUsage || (!claudeAvailable && !codexAvailable && !opencodeGoAvailable);
   // First-run seed only: UsageButton remembers the app the user last picked
   // (localStorage), so this active-tab-derived default is used just when

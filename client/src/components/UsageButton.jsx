@@ -60,7 +60,15 @@ function availableKey(app) {
 }
 
 function isAppVisible(app, availableApps) {
-  return !availableApps || availableApps[availableKey(app)] !== false;
+  // Whole object missing (fetch pending/failed) -> assume all visible, the
+  // pre-existing loading convention. But a PRESENT object without the
+  // opencodeGo key means an older server that predates Go support entirely:
+  // the Go tab must stay hidden there (old servers ignore ?app=opencode and
+  // would serve Claude data under the (opencode) badge). New servers always
+  // send the key (see routes/dirs.js).
+  if (!availableApps) return true;
+  if (app === 'opencode') return availableApps.opencodeGo === true;
+  return availableApps[app] !== false;
 }
 
 function saveUsageApp(app) {
