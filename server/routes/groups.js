@@ -449,11 +449,16 @@ export async function groupsRoute(fastify, opts) {
 
     const res = createSession(orchestratorRestartSessionOpts({ group, app, model, sandboxOpts, mcpSocketPath, orchestratorClaudeMdSrc }));
     if (res.error || !res.session) {
-      // createSession()'s error is always a rejection of the request as given
-      // (hiddenApps, not-installed, invalid cwd, ...), never an internal
-      // server fault -- matching POST /groups' fail() helper, which maps the
-      // identical createSession() rejection to 400, not 500.
-      return reply.code(400).send({ error: `orchestrator restart failed: ${res.error || 'unknown error'}` });
+      // createSession()'s error is usually a rejection of the request as
+      // given (hiddenApps, not-installed, invalid cwd, ...) -- matching POST
+      // /groups' fail() helper, which maps the identical createSession()
+      // rejection to 400, not 500. Infrastructure failures below surface as
+      // 500s instead: a sandbox that no longer builds or a process that no
+      // longer spawns is a server fault, not a bad request.
+      const msg = res.error || 'unknown error';
+      const isServerFault = msg.startsWith('Failed to build sandbox')
+        || msg.startsWith('Failed to spawn');
+      return reply.code(isServerFault ? 500 : 400).send({ error: `orchestrator restart failed: ${msg}` });
     }
     groupManager.registerMember(group.id, 'orchestrator', res.sessionId);
     groupManager.setMemberPrefs(group.id, 'orchestrator', { app, model: res.session.model, sandboxOpts });
