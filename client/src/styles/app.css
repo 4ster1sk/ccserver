@@ -864,9 +864,9 @@ body {
   min-width: 0;
 }
 
-.main-row.sidebar-open .directory-browser {
-  max-width: none;
-}
+/* NOTE: .directory-browser はサイドバー開閉時も max-width: 800px のままに
+   しておくこと。ここで max-width を解除すると、サイドバー表示で残幅いっぱいに
+   伸びて内容サイズが不連続に変わる（閉800px中央寄せ→開980pxストレッチ等）。 */
 
 /* Desktop overlay mode (sidebarOverlay ON in 一般設定): the sidebar floats
    above the CLI without resizing it, at any viewport width. Narrow screens
