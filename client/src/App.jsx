@@ -476,8 +476,8 @@ export default function App() {
     ));
   }, []);
 
-  // Session hamburger menu: terminal tabs are listed vertically in the menu,
-  // while browser/remote/settings + group (combo) tabs stay horizontal.
+  // Session hamburger menu: terminal + group (combo) tabs are listed
+  // vertically in the menu, while browser/remote/settings tabs stay horizontal.
   // 表示モードは設定で切替: 'popup' (従来のポップアップ) | 'sidebar' (既定・
   // 右ウィジェットと同じ挙動の左常時表示パネル。開閉・重ね表示は右と別フラグ)。
   const sessionSidebarPrefs = useSessionSidebarPrefs();
@@ -625,7 +625,9 @@ export default function App() {
   }, [contextMenu]);
 
   const sessionTabs = tabs.filter((t) => t.type === 'terminal');
-  const barTabs = tabs.filter((t) => t.type !== 'terminal');
+  const groupTabs = tabs.filter((t) => t.type === 'group');
+  const openedTabCount = sessionTabs.length + groupTabs.length;
+  const barTabs = tabs.filter((t) => t.type === 'browser' || t.type === 'remote' || t.type === 'settings');
   const openedSessionIds = new Set();
   for (const t of tabs) {
     if (t.sessionId) openedSessionIds.add(t.sessionId);
@@ -690,6 +692,7 @@ export default function App() {
             onToggle={toggleSessionMenu}
             onClose={closeSessionMenu}
             sessionTabs={sessionTabs}
+            groupTabs={groupTabs}
             activeTabId={activeTabId}
             unopenedSessions={unopenedSessions}
             unopenedGroups={unopenedGroups}
@@ -706,13 +709,13 @@ export default function App() {
             type="button"
             className="btn session-menu-btn"
             onClick={() => sessionSidebarPrefs.setOpen(!sessionSidebarOpen)}
-            title={sessionTabs.length > 0 ? `セッション (${sessionTabs.length})` : 'セッション'}
+            title={openedTabCount > 0 ? `セッション (${openedTabCount})` : 'セッション'}
             aria-label={sessionSidebarOpen ? 'セッションサイドバーを閉じる' : 'セッションサイドバーを開く'}
             aria-expanded={sessionSidebarOpen}
           >
             <span aria-hidden="true">☰</span>
-            {sessionTabs.length > 0 && (
-              <span className="session-menu-count" aria-hidden="true">{sessionTabs.length}</span>
+            {openedTabCount > 0 && (
+              <span className="session-menu-count" aria-hidden="true">{openedTabCount}</span>
             )}
           </button>
         )}
@@ -721,17 +724,12 @@ export default function App() {
           <div
             key={tab.id}
             className={`tab-item${tab.id === activeTabId ? ' active' : ''}`}
-            title={tab.type === 'group' && tab.cwd ? tab.cwd : tab.remote ? `${tab.remote.label} — ${tab.cwd || ''}`.trim() : undefined}
+            title={tab.remote ? `${tab.remote.label} — ${tab.cwd || ''}`.trim() : undefined}
             onClick={() => handleTabClick(tab.id)}
           >
             <span className="tab-label">
               <TabIcon type={tab.type} app={tab.app} shell={tab.shell} isMetaAgent={!!tab.isMetaAgent} />
               {tab.label}
-              {tab.type === 'group' && tab.currentTurn && (
-                <span className="tab-turn-badge" title={`現在の手番: ${tab.currentTurn}`}>
-                  {tab.currentTurn === 'orchestrator' ? 'ORCH' : tab.currentTurn.toUpperCase()}
-                </span>
-              )}
               {tab.remote && <span className="tab-remote-badge" title={`接続先: ${tab.remote.label} (${tab.remote.instanceId.slice(0, 8)})`}>⇄ {tab.remote.label}</span>}
             </span>
             {tab.type !== 'browser' && tab.type !== 'remote' && (
@@ -777,6 +775,7 @@ export default function App() {
         <SessionSidebar
           open={sessionSidebarOpen}
           sessionTabs={sessionTabs}
+          groupTabs={groupTabs}
           activeTabId={activeTabId}
           unopenedSessions={unopenedSessions}
           unopenedGroups={unopenedGroups}

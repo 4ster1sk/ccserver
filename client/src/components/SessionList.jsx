@@ -21,6 +21,7 @@ export function appLabel(sessionOrTab) {
 // (サーバー保存の表示名の設定用。サーバーセッション未確立のタブは対象外)。
 export default function SessionList({
   sessionTabs,
+  groupTabs = [],
   activeTabId,
   unopenedSessions,
   onSelectTab,
@@ -37,14 +38,16 @@ export default function SessionList({
     e.preventDefault();
     onRowContextMenu(e, { id, currentLabel: currentLabel || null });
   };
+  const hasOpened = sessionTabs.length > 0 || groupTabs.length > 0;
   return (
     <>
       <div className="session-menu-section" data-section="opened">
         <div className="session-menu-section-label">開いているセッション</div>
-        {sessionTabs.length === 0 ? (
+        {!hasOpened ? (
           <div className="session-menu-empty">開いているセッションはありません</div>
         ) : (
-          sessionTabs.map((tab) => {
+          <>
+          {sessionTabs.map((tab) => {
             const isActive = tab.id === activeTabId;
             const stateClass = tab.exited ? 'is-exited' : 'is-running';
             const stateText = tab.exited ? 'exited' : 'connected';
@@ -93,7 +96,53 @@ export default function SessionList({
                 </button>
               </div>
             );
-          })
+          })}
+          {groupTabs.map((tab) => {
+            const isActive = tab.id === activeTabId;
+            const memberCount = Array.isArray(tab.members) ? tab.members.length : 0;
+            const turnText = tab.currentTurn === 'orchestrator' ? 'ORCH' : tab.currentTurn ? String(tab.currentTurn).toUpperCase() : null;
+            const statusText = memberCount > 0 ? `${memberCount} members` : 'グループ';
+            return (
+              <div
+                key={tab.id}
+                role="none"
+                className={`session-menu-item${isActive ? ' active' : ''} is-running`}
+                data-tab-type="group"
+                data-group-id={tab.groupId || ''}
+                title={tab.cwd || tab.label}
+              >
+                <button
+                  type="button"
+                  role="menuitem"
+                  className="session-menu-select"
+                  aria-label={turnText ? `グループ: ${tab.label}, ${statusText}, 現在の手番 ${turnText}` : `グループ: ${tab.label}, ${statusText}`}
+                  onClick={() => { onSelectTab(tab.id); }}
+                >
+                  <span className="session-menu-item-top">
+                    <TabIcon type="group" />
+                    <span className="session-menu-label">{tab.label}</span>
+                    {turnText && (
+                      <span className="tab-turn-badge" title={`現在の手番: ${tab.currentTurn}`}>{turnText}</span>
+                    )}
+                  </span>
+                  <span className="session-menu-status">
+                    {tab.cwd && <span className="session-menu-path" title={tab.cwd}>{baseName(tab.cwd)}</span>}
+                    <span className="session-menu-state">{statusText}</span>
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  className="tab-close session-menu-close"
+                  title="タブを閉じる"
+                  aria-label={`タブを閉じる: ${tab.label}`}
+                  onClick={() => { onCloseTab(tab.id); }}
+                >
+                  &#10005;
+                </button>
+              </div>
+            );
+          })}
+          </>
         )}
       </div>
       {unopenedSessions.length > 0 && (
