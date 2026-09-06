@@ -1,13 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { authFetch } from '../auth.js';
-
-function formatSize(bytes) {
-  if (!Number.isFinite(bytes) || bytes <= 0) return '0 B';
-  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
-  const i = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
-  const val = bytes / Math.pow(1024, i);
-  return `${i === 0 ? val : val.toFixed(1)} ${units[i]}`;
-}
+import { formatSize } from '../formatSize.js';
 
 // sandboxes.lastUsedAt (INTEGER ms, plan §2 v2) -> "YYYY/MM/DD HH:MM" in the
 // browser's local timezone. Returns null when absent/unparseable so older

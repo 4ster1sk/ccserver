@@ -203,6 +203,178 @@ body {
   color: var(--bg-primary);
 }
 
+/* Session hamburger menu (left end of the tab bar): terminal tabs are
+   listed vertically here, while browser/remote/settings + group tabs stay
+   in the horizontal .tab-list. Open/close follows the widget pattern
+   (.sidebar-add-menu / .usage-menu): absolute dropdown, outside-click and
+   Escape to close. Status is a left border line using theme-aware vars:
+   running -> --success (green), idle -> --warning (orange),
+   exited -> --text-muted. */
+.session-menu-wrap {
+  position: relative;
+  display: flex;
+  align-items: stretch;
+  flex-shrink: 0;
+}
+
+.session-menu-btn {
+  align-self: center;
+  margin: 0 4px 0 8px;
+  padding: 4px 8px;
+  font-size: 14px;
+  line-height: 1;
+  flex-shrink: 0;
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--text-secondary);
+  border-radius: 6px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.session-menu-btn:hover {
+  background: var(--bg-surface);
+  border-color: var(--border);
+}
+
+.session-menu-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1;
+}
+
+.session-menu {
+  position: absolute;
+  top: 100%;
+  left: 8px;
+  margin-top: 6px;
+  width: 320px;
+  max-width: calc(100vw - 24px);
+  max-height: 60vh;
+  overflow-y: auto;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+  padding: 8px;
+  z-index: 50;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.session-menu-section-label {
+  padding: 4px 8px 2px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.session-menu-sep {
+  height: 1px;
+  background: var(--border);
+  margin: 4px 6px;
+}
+
+.session-menu-empty {
+  padding: 8px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.session-menu-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px 8px 6px 10px;
+  border-radius: 6px;
+  border-left: 3px solid transparent;
+  cursor: pointer;
+  min-width: 0;
+}
+
+.session-menu-item:hover {
+  background: var(--bg-surface);
+}
+
+.session-menu-item.active {
+  background: var(--bg-primary);
+  outline: 1px solid var(--accent);
+}
+
+.session-menu-item.is-running {
+  border-left-color: var(--success);
+}
+
+.session-menu-item.is-idle {
+  border-left-color: var(--warning);
+}
+
+.session-menu-item.is-exited {
+  border-left-color: var(--text-muted);
+  opacity: 0.6;
+}
+
+.session-menu-item-top {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.session-menu-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+  color: var(--text-primary);
+}
+
+.session-menu-close {
+  margin-left: auto;
+}
+
+.session-menu-status {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  padding-left: 20px;
+}
+
+.session-menu-path {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.session-menu-state {
+  flex-shrink: 0;
+  font-size: 11px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
 /* Group tab: second-level sub-tab bar (workers + orchestrator) */
 .group-tab-view {
   display: flex;

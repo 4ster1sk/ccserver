@@ -5,6 +5,7 @@ import ApprovalBanner from './components/ApprovalBanner.jsx';
 import PairingRequestBanner from './components/PairingRequestBanner.jsx';
 import UsageButton from './components/UsageButton.jsx';
 import TabIcon from './components/TabIcon.jsx';
+import SessionTabMenu from './components/SessionTabMenu.jsx';
 import GroupTabView from './components/GroupTabView.jsx';
 import RemoteInstanceView from './components/RemoteInstanceView.jsx';
 import RightSidebar, { WIDGET_DEFS, MONITOR_WIDGET_IDS } from './components/RightSidebar.jsx';
@@ -454,6 +455,76 @@ export default function App() {
     ));
   }, []);
 
+  // Session hamburger menu: terminal tabs are listed vertically in the menu,
+  // while browser/remote/settings + group (combo) tabs stay horizontal.
+  const [sessionMenuOpen, setSessionMenuOpen] = useState(false);
+  const [serverSessions, setServerSessions] = useState([]);
+  const sessionsRefreshingRef = useRef(false);
+  const fetchServerSessions = useCallback(async () => {
+    if (sessionsRefreshingRef.current) return;
+    sessionsRefreshingRef.current = true;
+    try {
+      const res = await authFetch('/api/sessions');
+      if (!res.ok) return;
+      const data = await res.json();
+      // Same filter as DirectoryBrowser: group members attach only through
+      // the combo group's own sub-tab UI. Listing them here would detach
+      // the live socket inside the group.
+      setServerSessions((data.sessions || []).filter((s) => s.groupId == null));
+    } catch {
+      // supplementary panel: keep the last-known list on failure
+    } finally {
+      sessionsRefreshingRef.current = false;
+    }
+  }, []);
+  useEffect(() => {
+    if (sessionMenuOpen) fetchServerSessions();
+    // tabs is intentionally included: closing a tab moves its server-side
+    // session from the upper section to the lower one while the menu stays
+    // open, so the list must refresh on tab changes too.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionMenuOpen, fetchServerSessions, groupsVersion, tabs]);
+  const closeSessionMenu = useCallback(() => setSessionMenuOpen(false), []);
+  const toggleSessionMenu = useCallback(() => {
+    setSessionMenuOpen((v) => !v);
+  }, []);
+  const handleSelectSessionTab = useCallback((tabId) => {
+    setActiveTabId(tabId);
+    setSessionMenuOpen(false);
+  }, []);
+  const handleCloseSessionTab = useCallback((tabId) => {
+    handleCloseTab(tabId);
+  }, [handleCloseTab]);
+  const handleOpenUnopenedSession = useCallback((session) => {
+    setSessionMenuOpen(false);
+    handleSessionClick(session);
+  }, [handleSessionClick]);
+  // Lower section's X: terminate the server-side session (tab close keeps
+  // the session alive, so this is the only destructive action here).
+  const handleTerminateUnopenedSession = useCallback(async (session) => {
+    const label = session.cwd || session.id;
+    if (!window.confirm(`セッションを終了しますか?\n${label}`)) return;
+    try {
+      const res = await authFetch(`/api/sessions/${session.id}`, { method: 'DELETE' });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.error || `HTTP ${res.status}`);
+      }
+    } catch (err) {
+      window.alert(`セッションを終了できませんでした: ${err.message}`);
+    }
+    fetchServerSessions();
+  }, [fetchServerSessions]);
+
+  const sessionTabs = tabs.filter((t) => t.type === 'terminal');
+  const barTabs = tabs.filter((t) => t.type !== 'terminal');
+  const openedSessionIds = new Set();
+  for (const t of tabs) {
+    if (t.sessionId) openedSessionIds.add(t.sessionId);
+    if (t.attachSessionId) openedSessionIds.add(t.attachSessionId);
+  }
+  const unopenedSessions = serverSessions.filter((s) => !openedSessionIds.has(s.id));
+
   const activeTab = tabs.find((t) => t.id === activeTabId);
   // Usage covers claude (Claude Code's /usage), codex (Codex's rate-limit
   // read) and opencode Go (the zen/go quota API); the popover itself has
@@ -499,12 +570,24 @@ export default function App() {
           another ccserver instance can't be missed on any tab. */}
       <PairingRequestBanner />
       <div className="tab-bar">
+        <SessionTabMenu
+          open={sessionMenuOpen}
+          onToggle={toggleSessionMenu}
+          onClose={closeSessionMenu}
+          sessionTabs={sessionTabs}
+          activeTabId={activeTabId}
+          unopenedSessions={unopenedSessions}
+          onSelectTab={handleSelectSessionTab}
+          onCloseTab={handleCloseSessionTab}
+          onOpenSession={handleOpenUnopenedSession}
+          onTerminateSession={handleTerminateUnopenedSession}
+        />
         <div className="tab-list">
-        {tabs.map((tab) => (
+        {barTabs.map((tab) => (
           <div
             key={tab.id}
-            className={`tab-item${tab.id === activeTabId ? ' active' : ''}${tab.type === 'terminal' && !tab.shell && !tab.sandbox ? ' no-sandbox' : ''}`}
-            title={tab.type === 'group' && tab.cwd ? tab.cwd : tab.remote ? `${tab.remote.label} — ${tab.cwd || ''}`.trim() : (tab.type === 'terminal' && tab.cwd ? tab.cwd : undefined)}
+            className={`tab-item${tab.id === activeTabId ? ' active' : ''}`}
+            title={tab.type === 'group' && tab.cwd ? tab.cwd : tab.remote ? `${tab.remote.label} — ${tab.cwd || ''}`.trim() : undefined}
             onClick={() => handleTabClick(tab.id)}
           >
             <span className="tab-label">
@@ -515,7 +598,7 @@ export default function App() {
                   {tab.currentTurn === 'orchestrator' ? 'ORCH' : tab.currentTurn.toUpperCase()}
                 </span>
               )}
-              {tab.type === 'terminal' && tab.remote && <span className="tab-remote-badge" title={`接続先: ${tab.remote.label} (${tab.remote.instanceId.slice(0, 8)})`}>⇄ {tab.remote.label}</span>}
+              {tab.remote && <span className="tab-remote-badge" title={`接続先: ${tab.remote.label} (${tab.remote.instanceId.slice(0, 8)})`}>⇄ {tab.remote.label}</span>}
             </span>
             {tab.type !== 'browser' && tab.type !== 'remote' && (
               <button
