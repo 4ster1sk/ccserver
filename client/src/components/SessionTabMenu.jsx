@@ -1,11 +1,12 @@
 import { useEffect, useRef, useCallback } from 'react';
 import SessionList from './SessionList.jsx';
 import { moveMenuFocus } from './sessionMenuNav.js';
+import { sessionMenuIcon } from './TabIcon.jsx';
 
 // セッションタブ用ハンバーガーメニュー: 開いている terminal タブと group
 // (コンボ) タブを上段、サーバー上で稼働中だが未オープンのセッションを下段に
 // 縦並びで表示する。
-// 開閉はウィジェット系 (RightSidebar / UsageButton) と同じ方式:
+// 開閉はウィジェット系 (RightSidebar) と同じ方式:
 // ラッパー ref による外側 mousedown で閉じる + Escape で閉じる。
 //
 // 一覧の実体は SessionList.jsx (左サイドバーと共用)。ここは popup ラッパー
@@ -69,7 +70,7 @@ export default function SessionTabMenu({
         aria-haspopup="menu"
         aria-expanded={open}
       >
-        <span aria-hidden="true">☰</span>
+        {sessionMenuIcon}
         {openedCount > 0 && (
           <span className="session-menu-count" aria-hidden="true">{openedCount}</span>
         )}

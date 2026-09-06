@@ -3,8 +3,7 @@ import DirectoryBrowser from './components/DirectoryBrowser.jsx';
 import SettingsView from './components/SettingsView.jsx';
 import ApprovalBanner from './components/ApprovalBanner.jsx';
 import PairingRequestBanner from './components/PairingRequestBanner.jsx';
-import UsageButton from './components/UsageButton.jsx';
-import TabIcon from './components/TabIcon.jsx';
+import TabIcon, { sessionMenuIcon } from './components/TabIcon.jsx';
 import SessionTabMenu from './components/SessionTabMenu.jsx';
 import SessionSidebar from './components/SessionSidebar.jsx';
 import SessionContextMenu from './components/SessionContextMenu.jsx';
@@ -31,6 +30,7 @@ export default function App() {
   const [tabs, setTabs] = useState([
     { id: 'browser', type: 'browser', label: 'Files' },
     { id: 'remote', type: 'remote', label: 'Remote' },
+    { id: 'settings', type: 'settings', label: 'Settings' },
   ]);
   const [activeTabId, setActiveTabId] = useState('browser');
   const [lastDir, setLastDir] = useState(() => localStorage.getItem('ccserver-last-dir'));
@@ -248,16 +248,6 @@ export default function App() {
     // still handled by handleOpen.
     await handleOpen(dir, { sandbox: !!sandbox, sandboxOpts: null, app, model, isMetaAgent: true });
   }, [metaAgentDir, handleOpen]);
-
-  // Settings page as a tab (singleton): the gear button in the directory
-  // browser opens/activates it; it is closable like any dynamic tab.
-  const openSettingsTab = useCallback(() => {
-    setTabs((prev) => {
-      if (prev.some((t) => t.type === 'settings')) return prev;
-      return [...prev, { id: 'settings', type: 'settings', label: 'Settings' }];
-    });
-    setActiveTabId('settings');
-  }, []);
 
   // Combo launch: ask the server to spawn 2 workers + 1 orchestrator as one
   // group, then add a single group tab for all three (each member attaches
@@ -722,10 +712,10 @@ export default function App() {
   const canTerminateCloseConfirm = !!closeConfirmTab && closeConfirm?.kind === 'terminal'
     && !closeConfirmTab.remote && !!(closeConfirmTab.sessionId || closeConfirmTab.attachSessionId);
   // Usage covers claude (Claude Code's /usage), codex (Codex's rate-limit
-  // read) and opencode Go (the zen/go quota API); the popover itself has
-  // tabs to switch between them, so the button is no longer tied to
-  // whichever app the active terminal tab happens to be running -- it stays
-  // visible on opencode/copilot terminals too, as long as at least one
+  // read) and opencode Go (the zen/go quota API); the UsageWidget (right
+  // sidebar) itself has tabs to switch between them, so it is no longer tied
+  // to whichever app the active terminal tab happens to be running -- it
+  // stays visible on opencode/copilot terminals too, as long as at least one
   // source is usable. It's hidden only via sandbox.config.json's
   // "showUsage": false, or when the server reports nothing usable at all
   // (no CLI installed AND no Go key, accounting for hiddenApps).
@@ -735,13 +725,13 @@ export default function App() {
   // install flag: it means toggle on + Go API key present. Unlike
   // claude/codex (whose keys predate this feature), a PRESENT object
   // without the opencodeGo key is an older server, so Go stays hidden
-  // there (see appAvailability.js's isAppVisible, shared with UsageButton).
+  // there (see appAvailability.js's isAppVisible, shared with UsageWidget).
   // hiddenApps 'opencode' hides the Go tab as well (issue #105).
   const claudeAvailable = isAppSelectable('claude', usagePrefs.availableApps, usagePrefs.hiddenApps);
   const codexAvailable = isAppSelectable('codex', usagePrefs.availableApps, usagePrefs.hiddenApps);
   const opencodeGoAvailable = isAppVisible('opencode', usagePrefs.availableApps, usagePrefs.hiddenApps);
   const usageHidden = !usagePrefs.showUsage || (!claudeAvailable && !codexAvailable && !opencodeGoAvailable);
-  // First-run seed only: UsageButton remembers the app the user last picked
+  // First-run seed only: UsageWidget remembers the app the user last picked
   // (localStorage), so this active-tab-derived default is used just when
   // nothing has been saved yet. The active tab's app wins when that source
   // is actually usable, else claude, else whichever of codex/Go is usable.
@@ -792,7 +782,7 @@ export default function App() {
             aria-label={sessionSidebarOpen ? 'セッションサイドバーを閉じる' : 'セッションサイドバーを開く'}
             aria-expanded={sessionSidebarOpen}
           >
-            <span aria-hidden="true">☰</span>
+            {sessionMenuIcon}
             {openedTabCount > 0 && (
               <span className="session-menu-count" aria-hidden="true">{openedTabCount}</span>
             )}
@@ -803,15 +793,15 @@ export default function App() {
           <div
             key={tab.id}
             className={`tab-item${tab.id === activeTabId ? ' active' : ''}`}
-            title={tab.remote ? `${tab.remote.label} — ${tab.cwd || ''}`.trim() : undefined}
+            title={tab.remote ? `${tab.remote.label} — ${tab.cwd || ''}`.trim() : tab.label}
+            aria-label={tab.label}
             onClick={() => handleTabClick(tab.id)}
           >
             <span className="tab-label">
               <TabIcon type={tab.type} app={tab.app} shell={tab.shell} isMetaAgent={!!tab.isMetaAgent} />
-              {tab.label}
               {tab.remote && <span className="tab-remote-badge" title={`接続先: ${tab.remote.label} (${tab.remote.instanceId.slice(0, 8)})`}>⇄ {tab.remote.label}</span>}
             </span>
-            {tab.type !== 'browser' && tab.type !== 'remote' && (
+            {tab.type !== 'browser' && tab.type !== 'remote' && tab.type !== 'settings' && (
               <button
                 className="tab-close"
                 onClick={(e) => {
@@ -827,16 +817,19 @@ export default function App() {
         ))}
         <div className="tab-bar-spacer" />
         </div>
-        <UsageButton hidden={usageHidden} defaultApp={usageDefaultApp} availableApps={usagePrefs.availableApps} hiddenApps={usagePrefs.hiddenApps} />
         <button
           type="button"
           className="btn sidebar-toggle-btn"
           onClick={() => sidebarPrefs.setOpen(!sidebarPrefs.open)}
-          title={sidebarPrefs.open ? 'サイドバーを閉じる' : 'サイドバーを開く'}
-          aria-label={sidebarPrefs.open ? 'サイドバーを閉じる' : 'サイドバーを開く'}
+          title={sidebarPrefs.open ? 'Widgetsパネルを閉じる' : 'Widgetsパネルを開く'}
+          aria-label={sidebarPrefs.open ? 'Widgetsパネルを閉じる' : 'Widgetsパネルを開く'}
           aria-expanded={sidebarPrefs.open}
         >
-          {sidebarPrefs.open ? '▶' : '◀'}
+          <svg className="tab-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round">
+            <rect x="1.5" y="2.5" width="13" height="11" rx="1.5" />
+            <path d="M10 2.5v11" />
+            {sidebarPrefs.open && <rect x="10" y="2.5" width="4.5" height="11" fill="currentColor" stroke="none" />}
+          </svg>
         </button>
       </div>
       <SystemStatsProvider active={statsActive}>
@@ -869,7 +862,7 @@ export default function App() {
       )}
       <div className="tab-content">
         <div style={{ display: activeTabId === 'browser' ? 'flex' : 'none', height: '100%', flexDirection: 'column' }}>
-          <DirectoryBrowser onOpen={handleOpen} onOpenShell={handleOpenShell} onOpenCombo={handleOpenCombo} onOpenSettings={openSettingsTab} initialPath={lastDir} metaAgentDir={metaAgentDir} onOpenMeta={handleOpenMeta} sandboxDefaults={sandboxDefaults} />
+          <DirectoryBrowser onOpen={handleOpen} onOpenShell={handleOpenShell} onOpenCombo={handleOpenCombo} initialPath={lastDir} metaAgentDir={metaAgentDir} onOpenMeta={handleOpenMeta} sandboxDefaults={sandboxDefaults} />
         </div>
         <div style={{ display: activeTabId === 'remote' ? 'flex' : 'none', height: '100%', flexDirection: 'column', overflow: 'auto' }}>
           <RemoteInstanceView onOpenRemoteTerminal={openRemoteTerminalTab} visible={activeTabId === 'remote'} />
@@ -891,6 +884,9 @@ export default function App() {
               onSandboxDefaultsChange={setSandboxDefaultsPersisted}
               navGuardMode={navGuardMode}
               onNavGuardModeChange={setNavGuardModePersisted}
+              notifyEnabled={notifyEnabled}
+              notifyPermission={notifyPermission}
+              onToggleNotify={toggleNotify}
             />
           </div>
         )}
