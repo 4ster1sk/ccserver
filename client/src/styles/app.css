@@ -366,6 +366,55 @@ body {
   background: var(--text-muted);
 }
 
+/* Session right-click menu: fixed-position small menu shared by the popup
+   and sidebar lists. Same look as .sidebar-add-menu. */
+.session-context-menu {
+  position: fixed;
+  z-index: 100;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 4px 0;
+  min-width: 180px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+  display: flex;
+  flex-direction: column;
+}
+
+.session-context-item {
+  background: none;
+  border: none;
+  text-align: left;
+  padding: 8px 12px;
+  font-size: 13px;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.session-context-item:hover,
+.session-context-item:focus-visible {
+  background: var(--bg-surface);
+  color: var(--text-primary);
+}
+
+/* Rename dialog input: full-width text field in the resume-dialog frame. */
+.session-rename-input {
+  width: 100%;
+  box-sizing: border-box;
+  margin: 8px 0;
+  padding: 8px 10px;
+  font-size: 14px;
+  color: var(--text-primary);
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+.session-rename-input:focus {
+  outline: 1px solid var(--accent);
+  border-color: var(--accent);
+}
+
 .session-menu-item.is-exited {
   opacity: 0.6;
 }

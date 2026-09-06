@@ -17,6 +17,8 @@ export default function SessionSidebar({
   onCloseTab,
   onOpenSession,
   onTerminateSession,
+  customLabels,
+  onRowContextMenu,
 }) {
   const listRef = useRef(null);
 
@@ -59,6 +61,8 @@ export default function SessionSidebar({
           onCloseTab={onCloseTab}
           onOpenSession={onOpenSession}
           onTerminateSession={onTerminateSession}
+          customLabels={customLabels}
+          onRowContextMenu={onRowContextMenu}
         />
       </div>
     </aside>

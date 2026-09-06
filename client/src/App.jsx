@@ -7,6 +7,8 @@ import UsageButton from './components/UsageButton.jsx';
 import TabIcon from './components/TabIcon.jsx';
 import SessionTabMenu from './components/SessionTabMenu.jsx';
 import SessionSidebar from './components/SessionSidebar.jsx';
+import SessionContextMenu from './components/SessionContextMenu.jsx';
+import SessionRenameDialog from './components/SessionRenameDialog.jsx';
 import GroupTabView from './components/GroupTabView.jsx';
 import RemoteInstanceView from './components/RemoteInstanceView.jsx';
 import RightSidebar, { WIDGET_DEFS, MONITOR_WIDGET_IDS } from './components/RightSidebar.jsx';
@@ -544,6 +546,52 @@ export default function App() {
     fetchServerSessions();
   }, [fetchServerSessions]);
 
+  // セッション表示名 (右クリック改名): サーバー保存の customLabel を
+  // sessionId で引くマップ。一覧の上段・ターミナルヘッダーで使う。
+  // 下段 (未オープン) は serverSessions 要素の customLabel を直接使う。
+  const labelBySessionId = new Map();
+  for (const s of serverSessions) {
+    if (s.customLabel) labelBySessionId.set(s.id, s.customLabel);
+  }
+  const resolveTabLabel = (tab) => {
+    const sid = tab.sessionId || tab.attachSessionId;
+    return (sid && labelBySessionId.get(sid)) || null;
+  };
+  // 右クリックメニューと改名ダイアログの表示状態。contextMenu: { x, y, id,
+  // currentLabel }、renameTarget: { id, currentLabel }。
+  const [contextMenu, setContextMenu] = useState(null);
+  const [renameTarget, setRenameTarget] = useState(null);
+  const closeContextMenu = useCallback(() => setContextMenu(null), []);
+  const handleRowContextMenu = useCallback((e, target) => {
+    setContextMenu({ x: e.clientX, y: e.clientY, id: target.id, currentLabel: target.currentLabel });
+  }, []);
+  const handleRenameSession = useCallback(async (id, name) => {
+    try {
+      const res = await authFetch(`/api/sessions/${id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ customLabel: name }),
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.error || `HTTP ${res.status}`);
+      }
+    } catch (err) {
+      window.alert(`セッション名を設定できませんでした: ${err.message}`);
+    }
+    setRenameTarget(null);
+    fetchServerSessions();
+  }, [fetchServerSessions]);
+  const handleClearSessionLabel = useCallback((id) => {
+    setContextMenu(null);
+    handleRenameSession(id, null);
+  }, [handleRenameSession]);
+  const handleOpenRenameDialog = useCallback(() => {
+    if (!contextMenu) return;
+    setRenameTarget({ id: contextMenu.id, currentLabel: contextMenu.currentLabel });
+    setContextMenu(null);
+  }, [contextMenu]);
+
   const sessionTabs = tabs.filter((t) => t.type === 'terminal');
   const barTabs = tabs.filter((t) => t.type !== 'terminal');
   const openedSessionIds = new Set();
@@ -610,6 +658,8 @@ export default function App() {
             onCloseTab={handleCloseSessionTab}
             onOpenSession={handleOpenUnopenedSession}
             onTerminateSession={handleTerminateUnopenedSession}
+            customLabels={labelBySessionId}
+            onRowContextMenu={handleRowContextMenu}
           />
         ) : (
           <button
@@ -693,6 +743,8 @@ export default function App() {
           onCloseTab={handleCloseSessionTab}
           onOpenSession={handleOpenUnopenedSession}
           onTerminateSession={handleTerminateUnopenedSession}
+          customLabels={labelBySessionId}
+          onRowContextMenu={handleRowContextMenu}
         />
       )}
       <div className="tab-content">
@@ -741,6 +793,7 @@ export default function App() {
                   permissionMode={tab.permissionMode || 'standard'}
                   resume={!!tab.resume}
                   isMetaAgent={!!tab.isMetaAgent}
+                  customLabel={resolveTabLabel(tab)}
                   notify={notify}
                   notifyEnabled={notifyEnabled}
                   notifyPermission={notifyPermission}
@@ -795,6 +848,23 @@ export default function App() {
       <RightSidebar usageProps={usageWidgetProps} prefs={sidebarPrefs} />
       </div>
       </SystemStatsProvider>
+      {contextMenu && (
+        <SessionContextMenu
+          x={contextMenu.x}
+          y={contextMenu.y}
+          hasCustomLabel={!!contextMenu.currentLabel}
+          onRename={handleOpenRenameDialog}
+          onClear={() => handleClearSessionLabel(contextMenu.id)}
+          onClose={closeContextMenu}
+        />
+      )}
+      {renameTarget && (
+        <SessionRenameDialog
+          initialName={renameTarget.currentLabel}
+          onSubmit={(name) => handleRenameSession(renameTarget.id, name)}
+          onClose={() => setRenameTarget(null)}
+        />
+      )}
       {sandboxPrompt && (
         <div className="resume-overlay" onClick={cancelSandboxPrompt}>
           <div className="resume-dialog" onClick={(e) => e.stopPropagation()}>
