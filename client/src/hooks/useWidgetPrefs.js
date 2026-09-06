@@ -1,4 +1,5 @@
 import { useState, useCallback, useEffect } from 'react';
+import { NARROW_DRAWER_QUERY } from './useViewport.js';
 
 const SIDEBAR_OPEN_KEY = 'ccserver-sidebar-open';
 const SIDEBAR_OVERLAY_KEY = 'ccserver-sidebar-overlay';
@@ -11,9 +12,9 @@ function loadOpen() {
     const stored = localStorage.getItem(SIDEBAR_OPEN_KEY);
     // 保存済み設定はviewportに関わらず尊重する。
     if (stored !== null) return stored !== '0';
-    // 初回のみ狭幅 (app.css のドロワー化境界 max-width: 900px と一致) では
+    // 初回のみ狭幅 (NARROW_DRAWER_QUERY = app.css のドロワー化境界) では
     // 閉じておく。開いたままだと画面の約85%を覆い、背後の操作を塞ぐ。
-    if (typeof window !== 'undefined' && window.matchMedia?.('(max-width: 900px)').matches) {
+    if (typeof window !== 'undefined' && window.matchMedia?.(NARROW_DRAWER_QUERY).matches) {
       return false;
     }
     return true;

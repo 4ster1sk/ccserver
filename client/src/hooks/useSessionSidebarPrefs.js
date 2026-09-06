@@ -1,4 +1,5 @@
 import { useState, useCallback } from 'react';
+import { NARROW_DRAWER_QUERY } from './useViewport.js';
 
 // 左セッション表示の設定 (右ウィジェットとは独立したフラグ群)。
 // - mode: 'sidebar' (既定・常時表示の左サイドバー) | 'popup' (従来のポップアップ)
@@ -22,10 +23,10 @@ function loadOpen() {
   try {
     const stored = localStorage.getItem(OPEN_KEY);
     if (stored !== null) return stored !== '0';
-    // 初回のみ狭幅 (app.css のドロワー化境界 max-width: 900px と一致) では
+    // 初回のみ狭幅 (NARROW_DRAWER_QUERY = app.css のドロワー化境界) では
     // 閉じておく。開いたままだと画面の約85%を覆い、背後の操作を塞ぐ。
     // (useWidgetPrefs.js の右サイドバーと同一方針)
-    if (typeof window !== 'undefined' && window.matchMedia?.('(max-width: 900px)').matches) {
+    if (typeof window !== 'undefined' && window.matchMedia?.(NARROW_DRAWER_QUERY).matches) {
       return false;
     }
     return true;
