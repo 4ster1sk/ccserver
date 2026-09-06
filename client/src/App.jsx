@@ -42,6 +42,15 @@ export default function App() {
   const [themeId, setThemeId] = useState(loadThemeId);
   const [closeConfirm, setCloseConfirm] = useState(null);
   const [dontAskAgain, setDontAskAgain] = useState(false);
+  // "セッションを終了" (terminateSessionAndCloseTab) is async: while its
+  // DELETE is in flight the dialog buttons are disabled and re-entry is
+  // ignored, so a double-click can't fire a duplicate DELETE (whose 404
+  // would surface a bogus failure alert after a successful termination).
+  // The guard is a ref (not just the state below): setState applies
+  // asynchronously, so two clicks before the next render would both see a
+  // stale `false` and slip through. The state remains for the disabled UI.
+  const isTerminatingRef = useRef(false);
+  const [isTerminatingSession, setIsTerminatingSession] = useState(false);
   const [groupActiveApp, setGroupActiveApp] = useState(null);
   // Bumped whenever a group is created / destroyed / re-opened, so the
   // directory browser's groups list refetches (it is otherwise fetch-on-mount).
@@ -596,6 +605,50 @@ export default function App() {
     fetchServerSessions();
   }, [fetchServerSessions]);
 
+  // Close-confirm dialog's "セッションを終了": fully terminate the
+  // server-side session (DELETE /api/sessions/:id -- the same primitive as
+  // the lower-section X above) and close the tab as well. Unlike
+  // confirmCloseTab ("閉じる") the session does not linger for re-attach.
+  // Shown only for local terminal tabs with a known session id: group tabs
+  // already destroy their members on close, and remote tabs belong to another
+  // instance (a local DELETE would 404 or hit the wrong session).
+  // NOTE: this must stay below fetchServerSessions/follow-ups in source
+  // order -- the deps array below is evaluated during render, so referencing
+  // a later const would throw a TDZ ReferenceError and blank the whole app.
+  const terminateSessionAndCloseTab = useCallback(async () => {
+    if (!closeConfirm || isTerminatingRef.current) return;
+    const tab = tabs.find((t) => t.id === closeConfirm.tabId);
+    const sessionId = tab?.sessionId || tab?.attachSessionId || null;
+    if (!tab || !sessionId) return;
+    isTerminatingRef.current = true;
+    setIsTerminatingSession(true);
+    try {
+      const res = await authFetch(`/api/sessions/${sessionId}`, { method: 'DELETE' });
+      if (res.status === 404) {
+        // Session already gone server-side: termination is effectively done,
+        // fall through and close the tab.
+      } else if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.error || `HTTP ${res.status}`);
+      }
+    } catch (err) {
+      window.alert(`セッションを終了できませんでした: ${err.message}`);
+      return;
+    } finally {
+      isTerminatingRef.current = false;
+      setIsTerminatingSession(false);
+    }
+    // Persist "don't ask again" only after a successful termination: on
+    // failure the session is still alive, and a persisted skip would
+    // silently switch future closes to the keep-alive path.
+    if (dontAskAgain) {
+      setSkipCloseConfirmPersisted(true);
+    }
+    doCloseTab(closeConfirm.tabId);
+    setCloseConfirm(null);
+    fetchServerSessions();
+  }, [closeConfirm, dontAskAgain, tabs, doCloseTab, setSkipCloseConfirmPersisted, fetchServerSessions]);
+
   // セッション表示名 (右クリック改名): サーバー保存の customLabel を
   // sessionId で引くマップ。一覧の上段・ターミナルヘッダーで使う。
   // 下段 (未オープン) は serverSessions 要素の customLabel を直接使う。
@@ -660,6 +713,12 @@ export default function App() {
   const unopenedGroups = serverGroups.filter((g) => !openedGroupIds.has(g.groupId));
 
   const activeTab = tabs.find((t) => t.id === activeTabId);
+  // Close-confirm dialog's "セッションを終了" availability: local terminal
+  // tabs with a known server-side session id only (group tabs destroy their
+  // members on close already; remote tabs belong to another instance).
+  const closeConfirmTab = closeConfirm ? tabs.find((t) => t.id === closeConfirm.tabId) : null;
+  const canTerminateCloseConfirm = !!closeConfirmTab && closeConfirm?.kind === 'terminal'
+    && !closeConfirmTab.remote && !!(closeConfirmTab.sessionId || closeConfirmTab.attachSessionId);
   // Usage covers claude (Claude Code's /usage), codex (Codex's rate-limit
   // read) and opencode Go (the zen/go quota API); the popover itself has
   // tabs to switch between them, so the button is no longer tied to
@@ -974,7 +1033,7 @@ export default function App() {
         </div>
       )}
       {closeConfirm && (
-        <div className="resume-overlay" onClick={() => setCloseConfirm(null)}>
+        <div className="resume-overlay" onClick={() => { if (!isTerminatingSession) setCloseConfirm(null); }}>
           <div className="resume-dialog" onClick={(e) => e.stopPropagation()}>
             <h3>{closeConfirm.kind === 'group' ? 'グループを閉じますか?' : 'タブを閉じますか?'}</h3>
             <p>{closeConfirm.kind === 'group'
@@ -984,15 +1043,21 @@ export default function App() {
               <input
                 type="checkbox"
                 checked={dontAskAgain}
+                disabled={isTerminatingSession}
                 onChange={(e) => setDontAskAgain(e.target.checked)}
               />
               次回以降確認しない
             </label>
             <div className="resume-actions">
-              <button className="btn btn-secondary" onClick={() => setCloseConfirm(null)}>
+              {canTerminateCloseConfirm && (
+                <button className="btn btn-danger btn-left" onClick={terminateSessionAndCloseTab} disabled={isTerminatingSession}>
+                  {isTerminatingSession ? '終了中...' : 'セッションを終了'}
+                </button>
+              )}
+              <button className="btn btn-secondary" onClick={() => setCloseConfirm(null)} disabled={isTerminatingSession}>
                 キャンセル
               </button>
-              <button className="btn btn-primary" onClick={confirmCloseTab}>
+              <button className="btn btn-primary" onClick={confirmCloseTab} disabled={isTerminatingSession}>
                 閉じる
               </button>
             </div>

@@ -73,6 +73,18 @@ body {
   background: var(--border);
 }
 
+.btn-danger {
+  background: transparent;
+  color: var(--error);
+  border-color: var(--error);
+}
+
+.btn-danger:hover {
+  background: var(--error);
+  color: var(--bg-primary);
+  border-color: var(--error);
+}
+
 .btn:disabled {
   opacity: 0.5;
   cursor: not-allowed;
@@ -3212,6 +3224,12 @@ body {
   display: flex;
   gap: 8px;
   justify-content: flex-end;
+}
+
+/* Close-confirm dialog: destructive action pinned to the left end while
+   キャンセル/閉じる stay right-aligned. */
+.resume-actions .btn-left {
+  margin-right: auto;
 }
 
 .close-confirm-checkbox {
