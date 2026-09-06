@@ -11,6 +11,7 @@ import SessionList from './SessionList.jsx';
 export default function SessionSidebar({
   open,
   sessionTabs,
+  groupTabs = [],
   activeTabId,
   unopenedSessions,
   unopenedGroups,
@@ -42,7 +43,7 @@ export default function SessionSidebar({
 
   if (!open) return null;
 
-  const openedCount = sessionTabs.length;
+  const openedCount = sessionTabs.length + groupTabs.length;
 
   return (
     <aside className="left-sidebar" aria-label="セッションサイドバー">
@@ -57,6 +58,7 @@ export default function SessionSidebar({
       <div className="sidebar-widgets session-sidebar-list" ref={listRef} onKeyDown={onListKeyDown} role="menu" aria-label="セッション一覧">
         <SessionList
           sessionTabs={sessionTabs}
+          groupTabs={groupTabs}
           activeTabId={activeTabId}
           unopenedSessions={unopenedSessions}
           unopenedGroups={unopenedGroups}
