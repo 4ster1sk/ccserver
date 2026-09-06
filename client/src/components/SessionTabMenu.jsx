@@ -23,6 +23,8 @@ export default function SessionTabMenu({
   onCloseTab,
   onOpenSession,
   onTerminateSession,
+  customLabels,
+  onRowContextMenu,
 }) {
   const wrapRef = useRef(null);
   const menuRef = useRef(null);
@@ -88,6 +90,8 @@ export default function SessionTabMenu({
             onCloseTab={onCloseTab}
             onOpenSession={onOpenSession}
             onTerminateSession={onTerminateSession}
+            customLabels={customLabels}
+            onRowContextMenu={onRowContextMenu}
           />
         </div>
       )}

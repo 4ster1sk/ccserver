@@ -172,7 +172,7 @@ function normalizeModel(model) {
   return typeof model === 'string' && model.length > 0 ? model : null;
 }
 
-export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox, sandboxOpts, app, model, permissionMode, resumeLast, groupId = null, groupRole = null, mcpSocketPath = null, projectName = null, reuseSandboxHome = true, orchestratorClaudeMdSrc = null, gitCommonDir = null, groupFilesDir = null, isMetaAgent = false, isReviewJob = false, sandboxHomeCreatedBy = null }) {
+export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox, sandboxOpts, app, model, permissionMode, resumeLast, groupId = null, groupRole = null, mcpSocketPath = null, projectName = null, reuseSandboxHome = true, orchestratorClaudeMdSrc = null, gitCommonDir = null, groupFilesDir = null, isMetaAgent = false, isReviewJob = false, sandboxHomeCreatedBy = null, customLabel = null }) {
   const id = randomUUID();
   // Read once and thread through: this hot path (every session launch) was
   // otherwise re-reading + re-parsing sandbox.config.json up to four times
@@ -556,6 +556,12 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox
     permissionMode: sessionPermissionMode,
     groupId,
     groupRole,
+    // Operator-assigned display name (null = none; the UI falls back to the
+    // directory basename). Set post-launch via setSessionLabel (PATCH
+    // /api/sessions/:id), never from launch input -- launch bodies are
+    // forwarded nearly as-is across trust boundaries (REST, MCP, federation),
+    // so a display string must not ride along with them.
+    customLabel: normalizeCustomLabel(customLabel),
     // True only for sessions launched with the explicit isMetaAgent flag (the
     // privileged self-management agent). Display/debug bookkeeping -- the
     // authorization boundary is the meta broker socket, not this flag.
@@ -836,6 +842,37 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox
 
 export function getSession(id) {
   return sessions.get(id);
+}
+
+// Operator-assigned display names for sessions (right-click rename in the
+// client). Null/undefined/empty-after-trim means "no custom name". Overlong
+// input is rejected (not truncated) so the caller can surface the limit.
+export const MAX_CUSTOM_LABEL_LENGTH = 64;
+
+export function normalizeCustomLabel(value) {
+  if (value === null || value === undefined) return null;
+  if (typeof value !== 'string') return null;
+  // Strip ASCII control characters (including newlines/tabs) -- the label is
+  // rendered in single-line UI slots (session rows, terminal header).
+  const cleaned = value.replace(/[\u0000-\u001F\u007F]/g, '').trim();
+  if (!cleaned) return null;
+  return cleaned;
+}
+
+export function setSessionLabel(id, label) {
+  const session = sessions.get(id);
+  if (!session) {
+    return { ok: false, code: 'not-found', message: 'Session not found' };
+  }
+  if (label !== null && label !== undefined && typeof label !== 'string') {
+    return { ok: false, code: 'validation', message: 'customLabel must be a string or null' };
+  }
+  const normalized = normalizeCustomLabel(label);
+  if (normalized !== null && [...normalized].length > MAX_CUSTOM_LABEL_LENGTH) {
+    return { ok: false, code: 'validation', message: `customLabel must be at most ${MAX_CUSTOM_LABEL_LENGTH} characters` };
+  }
+  session.customLabel = normalized;
+  return { ok: true, session };
 }
 
 // Write text into a live session's pty, optionally submitting with Enter.
@@ -1468,6 +1505,7 @@ export function listSessions() {
       groupId: session.groupId || null,
       groupRole: session.groupRole || null,
       isMetaAgent: !!session.isMetaAgent,
+      customLabel: session.customLabel || null,
     });
   }
   return result;
@@ -1629,6 +1667,7 @@ export function savedSessionPublic(session, claudeId) {
     permissionMode: normalizePermissionMode(session.permissionMode),
     groupId: session.groupId || null,
     groupRole: session.groupRole || null,
+    customLabel: session.customLabel || null,
   };
 }
 

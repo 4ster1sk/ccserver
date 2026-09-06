@@ -185,6 +185,65 @@ test('createSession stores the normalized permissionMode; shells are always stan
   }
 });
 
+// Operator-assigned display names (client right-click rename): stored on the
+// session, surfaced via listSessions, persisted via savedSessionPublic.
+// Blank clears, overlong/non-string input is rejected without clobbering the
+// stored label, unknown ids report not-found.
+test('setSessionLabel stores, clears, validates, and surfaces customLabel', () => {
+  const shell = sessionManager.createSession({ cwd: '/tmp', cols: 80, rows: 24, shell: true, sandbox: false });
+  assert.ok(shell.session, 'shell session should spawn');
+  try {
+    assert.equal(shell.session.customLabel, null, 'no custom label by default');
+    assert.equal(sessionManager.listSessions().find((s) => s.id === shell.sessionId).customLabel, null);
+
+    let res = sessionManager.setSessionLabel(shell.sessionId, '  マイ作業  ');
+    assert.equal(res.ok, true);
+    assert.equal(res.session.customLabel, 'マイ作業', 'trims surrounding whitespace');
+    assert.equal(sessionManager.listSessions().find((s) => s.id === shell.sessionId).customLabel, 'マイ作業');
+    assert.equal(sessionManager.savedSessionPublic(shell.session, null).customLabel, 'マイ作業');
+
+    res = sessionManager.setSessionLabel(shell.sessionId, 'a\nb\tc');
+    assert.equal(res.ok, true);
+    assert.equal(res.session.customLabel, 'abc', 'strips control characters');
+
+    res = sessionManager.setSessionLabel(shell.sessionId, 'x'.repeat(64));
+    assert.equal(res.ok, true, 'exactly the limit is accepted');
+
+    res = sessionManager.setSessionLabel(shell.sessionId, '   ');
+    assert.equal(res.ok, true);
+    assert.equal(res.session.customLabel, null, 'blank clears the label');
+    assert.equal(sessionManager.listSessions().find((s) => s.id === shell.sessionId).customLabel, null);
+
+    res = sessionManager.setSessionLabel(shell.sessionId, null);
+    assert.equal(res.ok, true);
+    assert.equal(res.session.customLabel, null);
+
+    res = sessionManager.setSessionLabel(shell.sessionId, 'x'.repeat(65));
+    assert.equal(res.ok, false);
+    assert.equal(res.code, 'validation');
+    assert.equal(sessionManager.getSession(shell.sessionId).customLabel, null, 'rejected input must not clobber the stored label');
+
+    res = sessionManager.setSessionLabel(shell.sessionId, 42);
+    assert.equal(res.ok, false);
+    assert.equal(res.code, 'validation');
+    assert.equal(sessionManager.getSession(shell.sessionId).customLabel, null);
+
+    res = sessionManager.setSessionLabel('no-such-session', 'foo');
+    assert.equal(res.ok, false);
+    assert.equal(res.code, 'not-found');
+  } finally {
+    sessionManager.destroySession(shell.sessionId, { keepSchedule: false });
+  }
+
+  const named = sessionManager.createSession({ cwd: '/tmp', cols: 80, rows: 24, shell: true, sandbox: false, customLabel: '初期名' });
+  assert.ok(named.session, 'shell session should spawn');
+  try {
+    assert.equal(named.session.customLabel, '初期名', 'createSession accepts an initial label (restart restore path)');
+  } finally {
+    sessionManager.destroySession(named.sessionId, { keepSchedule: false });
+  }
+});
+
 // PR#108 review: permissionMode is a commandcode-only concept (appLaunch.js's
 // appPermissionArgs is a no-op for every other app), but before this test the
 // stored session.permissionMode itself wasn't forced back to 'standard' for

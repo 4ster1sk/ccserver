@@ -235,7 +235,7 @@ function osc52Response(text) {
   return `\x1b]52;c;${btoa(bin)}\x07`;
 }
 
-export default function TerminalView({ cwd, onClose, claudeSessionId, shell, sandbox, sandboxOpts, reuseSandboxHome = true, app = 'claude', model = null, permissionMode = 'standard', resume = false, isMetaAgent = false, notify, notifyEnabled, notifyPermission, onToggleNotify, visible, onSessionId, onExited, attachSessionId, xtermTheme, tabId, onFocusTab, groupId, groupRole, projectCwd = null, remoteInstanceId = null, remoteInstanceLabel = null }) {
+export default function TerminalView({ cwd, onClose, claudeSessionId, shell, sandbox, sandboxOpts, reuseSandboxHome = true, app = 'claude', model = null, permissionMode = 'standard', resume = false, isMetaAgent = false, customLabel = null, notify, notifyEnabled, notifyPermission, onToggleNotify, visible, onSessionId, onExited, attachSessionId, xtermTheme, tabId, onFocusTab, groupId, groupRole, projectCwd = null, remoteInstanceId = null, remoteInstanceLabel = null }) {
   const isMobile = useMemo(() => 'ontouchstart' in window, []);
   const terminalRef = useRef(null);
   const terminalViewRef = useRef(null);
@@ -1255,7 +1255,7 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
         <span
           className="terminal-title"
           title={projectCwd && projectCwd !== cwd ? `Project: ${projectCwd}\nWorktree: ${cwd}` : cwd}
-        >{sandbox ? '🔒 ' : (!shell ? '⚠️ ' : '')}{shell ? 'Terminal' : appLabel(app)}{!shell && model ? ` · ${model}` : ''}{!shell && app === 'commandcode' && isElevatedPermissionMode(permissionMode) ? ` · ${permissionMode}` : ''} &mdash; {displayPath(cwd, homeDir)}</span>
+        >{sandbox ? '🔒 ' : (!shell ? '⚠️ ' : '')}{customLabel ? `${customLabel} — ` : ''}{shell ? 'Terminal' : appLabel(app)}{!shell && model ? ` · ${model}` : ''}{!shell && app === 'commandcode' && isElevatedPermissionMode(permissionMode) ? ` · ${permissionMode}` : ''} &mdash; {displayPath(cwd, homeDir)}</span>
         <div className="header-actions">
           {!shell && (
             <>
