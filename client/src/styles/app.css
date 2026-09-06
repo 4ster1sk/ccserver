@@ -207,9 +207,8 @@ body {
    listed vertically here, while browser/remote/settings + group tabs stay
    in the horizontal .tab-list. Open/close follows the widget pattern
    (.sidebar-add-menu / .usage-menu): absolute dropdown, outside-click and
-   Escape to close. Status is a left border line using theme-aware vars:
-   running -> --success (green), idle -> --warning (orange),
-   exited -> --text-muted. */
+   Escape to close. Status is a left border line: running -> --success
+   (green), idle -> #fab387 (peach/orange), exited -> --text-muted. */
 .session-menu-wrap {
   position: relative;
   display: flex;
@@ -359,7 +358,7 @@ body {
 }
 
 .session-menu-item.is-idle::before {
-  background: var(--warning);
+  background: #fab387;
 }
 
 .session-menu-item.is-exited::before {
