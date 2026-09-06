@@ -124,6 +124,19 @@ test('resolveTools: per-session sandboxOpts.tools overrides the config default',
   assert.equal(off.codeReviewGraph, false);
 });
 
+test('resolveTools: threaded cfgTools avoids re-reading the config file', () => {
+  // The on-disk config disables everything; the threaded snapshot enables rtk.
+  // If resolveTools re-read the file, the threaded value would lose.
+  writeConfig({ docker: false, gitBroker: false, tools: { rtk: false } });
+  const tools = resolveTools(null, { rtk: true });
+  assert.equal(tools.rtk, true, 'threaded cfgTools wins over the file');
+  assert.equal(tools.codeReviewGraph, false);
+  assert.ok(tools.rtkSpec.version.length > 0, 'pinned version present');
+  // And a threaded empty snapshot behaves like a tools-less config.
+  const off = resolveTools({ tools: { rtk: true } }, {});
+  assert.equal(off.rtk, true, 'per-session toggles still apply on top of the snapshot');
+});
+
 test('buildSandboxSpawn binds the provisioner + sets env when a tool is enabled', () => {
   writeConfig({ docker: false, gitBroker: false, tools: { rtk: true, 'code-review-graph': true } });
   const spawn = buildSandboxSpawn({ cwd: join(tmpRoot, 'proj'), targetCommand: ['claude'], app: 'claude', sandboxOpts: null });

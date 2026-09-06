@@ -501,17 +501,34 @@ export default function App() {
   }, []);
   // tabs全体ではなくセッション構成に影響する安定キーのみ監視する
   // (手番ポーリング等の無関係なsetTabsで/api/sessionsを叩かない)。
+  // グループ一覧 (左セッション一覧の第3セクション用)。Files画面の
+  // .session-list 撤去に伴い、再オープン動線はこちらに移設した。
+  // セッション取得と同じタイミングで更新する。
+  const [serverGroups, setServerGroups] = useState([]);
+  const fetchServerGroups = useCallback(async () => {
+    try {
+      const res = await authFetch('/api/groups');
+      if (!res.ok) return;
+      const data = await res.json();
+      setServerGroups((data.groups || []).filter((g) => g.liveCount > 0 || g.memberCount > 0));
+    } catch {
+      // supplementary panel: keep the last-known list on failure
+    }
+  }, []);
   const sessionTabsKey = tabs.map((t) => `${t.id}:${t.sessionId || ''}:${t.attachSessionId || ''}`).join(',');
   // サイドバーモードではパネル開表示の間、ポップアップモードではメニュー開表示の間
   // 一覧を更新する。タブ構成変化時も下段 (稼働中) との付け替えを反映する。
   const sessionPanelOpen = sessionSidebarMode === 'sidebar' ? sessionSidebarOpen : sessionMenuOpen;
   useEffect(() => {
-    if (sessionPanelOpen) fetchServerSessions();
+    if (sessionPanelOpen) {
+      fetchServerSessions();
+      fetchServerGroups();
+    }
     // closing a tab moves its server-side session from the upper section
     // to the lower one while the menu stays open, so the list must refresh
     // on tab changes too.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sessionPanelOpen, sessionSidebarMode, fetchServerSessions, groupsVersion, sessionTabsKey]);
+  }, [sessionPanelOpen, sessionSidebarMode, fetchServerSessions, fetchServerGroups, groupsVersion, sessionTabsKey]);
   const closeSessionMenu = useCallback(() => setSessionMenuOpen(false), []);
   const toggleSessionMenu = useCallback(() => {
     setSessionMenuOpen((v) => !v);
@@ -529,6 +546,12 @@ export default function App() {
     if (sessionSidebarPrefs.mode !== 'sidebar') setSessionMenuOpen(false);
     handleSessionClick(session);
   }, [handleSessionClick, sessionSidebarPrefs.mode]);
+  // グループ再オープン (Files画面のGroups一覧から移設)。セッションと同様、
+  // ポップアップでは選択で閉じる。サイドバーは常時表示のため閉じない。
+  const handleOpenGroupFromList = useCallback((groupId) => {
+    if (sessionSidebarPrefs.mode !== 'sidebar') setSessionMenuOpen(false);
+    handleOpenGroup(groupId);
+  }, [handleOpenGroup, sessionSidebarPrefs.mode]);
   // Lower section's X: terminate the server-side session (tab close keeps
   // the session alive, so this is the only destructive action here).
   const handleTerminateUnopenedSession = useCallback(async (session) => {
@@ -600,6 +623,12 @@ export default function App() {
     if (t.attachSessionId) openedSessionIds.add(t.attachSessionId);
   }
   const unopenedSessions = serverSessions.filter((s) => !openedSessionIds.has(s.id));
+  // 開き済みグループタブのあるグループを除いた未オープン一覧。
+  const openedGroupIds = new Set();
+  for (const t of tabs) {
+    if (t.type === 'group' && t.groupId) openedGroupIds.add(t.groupId);
+  }
+  const unopenedGroups = serverGroups.filter((g) => !openedGroupIds.has(g.groupId));
 
   const activeTab = tabs.find((t) => t.id === activeTabId);
   // Usage covers claude (Claude Code's /usage), codex (Codex's rate-limit
@@ -654,10 +683,12 @@ export default function App() {
             sessionTabs={sessionTabs}
             activeTabId={activeTabId}
             unopenedSessions={unopenedSessions}
+            unopenedGroups={unopenedGroups}
             onSelectTab={handleSelectSessionTab}
             onCloseTab={handleCloseSessionTab}
             onOpenSession={handleOpenUnopenedSession}
             onTerminateSession={handleTerminateUnopenedSession}
+            onOpenGroup={handleOpenGroupFromList}
             customLabels={labelBySessionId}
             onRowContextMenu={handleRowContextMenu}
           />
@@ -739,17 +770,19 @@ export default function App() {
           sessionTabs={sessionTabs}
           activeTabId={activeTabId}
           unopenedSessions={unopenedSessions}
+          unopenedGroups={unopenedGroups}
           onSelectTab={handleSelectSessionTab}
           onCloseTab={handleCloseSessionTab}
           onOpenSession={handleOpenUnopenedSession}
           onTerminateSession={handleTerminateUnopenedSession}
+          onOpenGroup={handleOpenGroupFromList}
           customLabels={labelBySessionId}
           onRowContextMenu={handleRowContextMenu}
         />
       )}
       <div className="tab-content">
         <div style={{ display: activeTabId === 'browser' ? 'flex' : 'none', height: '100%', flexDirection: 'column' }}>
-          <DirectoryBrowser onOpen={handleOpen} onOpenShell={handleOpenShell} onOpenCombo={handleOpenCombo} onOpenGroup={handleOpenGroup} onSessionClick={handleSessionClick} onOpenSettings={openSettingsTab} initialPath={lastDir} groupsVersion={groupsVersion} metaAgentDir={metaAgentDir} onOpenMeta={handleOpenMeta} sandboxDefaults={sandboxDefaults} />
+          <DirectoryBrowser onOpen={handleOpen} onOpenShell={handleOpenShell} onOpenCombo={handleOpenCombo} onOpenSettings={openSettingsTab} initialPath={lastDir} metaAgentDir={metaAgentDir} onOpenMeta={handleOpenMeta} sandboxDefaults={sandboxDefaults} />
         </div>
         <div style={{ display: activeTabId === 'remote' ? 'flex' : 'none', height: '100%', flexDirection: 'column', overflow: 'auto' }}>
           <RemoteInstanceView onOpenRemoteTerminal={openRemoteTerminalTab} visible={activeTabId === 'remote'} />

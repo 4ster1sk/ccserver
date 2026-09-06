@@ -29,6 +29,8 @@ export default function SessionList({
   onTerminateSession,
   customLabels,
   onRowContextMenu,
+  unopenedGroups,
+  onOpenGroup,
 }) {
   const handleRowContextMenu = (e, id, currentLabel) => {
     if (!id || !onRowContextMenu) return;
@@ -138,6 +140,43 @@ export default function SessionList({
               </button>
             </div>
           ))}
+        </div>
+      )}
+      {(unopenedGroups || []).length > 0 && (
+        <div className="session-menu-section" data-section="unopened-groups">
+          <div className="session-menu-sep" />
+          <div className="session-menu-section-label">グループ</div>
+          {unopenedGroups.map((g) => {
+            const dirName = (g.cwd || '').split(/[/\\]/).filter(Boolean).pop() || g.groupId;
+            const liveText = g.liveCount > 0
+              ? `${g.memberCount} members · ${g.liveCount} live`
+              : `${g.memberCount} members`;
+            return (
+              <div
+                key={g.groupId}
+                role="none"
+                className={`session-menu-item ${g.liveCount > 0 ? 'is-running' : 'is-idle'}`}
+                title={g.cwd || g.groupId}
+              >
+                <button
+                  type="button"
+                  role="menuitem"
+                  className="session-menu-select"
+                  aria-label={`グループ: ${dirName}`}
+                  onClick={() => { onOpenGroup(g.groupId); }}
+                >
+                  <span className="session-menu-item-top">
+                    <TabIcon type="group" />
+                    <span className="session-menu-label">{dirName}</span>
+                  </span>
+                  <span className="session-menu-status">
+                    {g.cwd && <span className="session-menu-path" title={g.cwd}>{baseName(g.cwd)}</span>}
+                    <span className="session-menu-state">{liveText}</span>
+                  </span>
+                </button>
+              </div>
+            );
+          })}
         </div>
       )}
     </>

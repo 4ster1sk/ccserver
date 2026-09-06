@@ -66,13 +66,13 @@ test('combo group tab lifecycle: create via API, attach, close-confirm mentions 
     expect(roles).toEqual(['orchestrator', 'workerA', 'workerB']);
 
     // A group tab appears as one entry with the directory name -- opened
-    // from the browser's Groups list (API-created groups don't open a tab
-    // by themselves).
+    // from the session list's Groups section (API-created groups don't open
+    // a tab by themselves).
     await page.goto('/');
     const dirName = cwd.split(/[/\\]/).filter(Boolean).pop();
-    const groupItem = page.locator('.session-item', { hasText: cwd });
+    const groupItem = page.locator('.left-sidebar [data-section="unopened-groups"] .session-menu-item', { hasText: dirName });
     await expect(groupItem).toBeVisible({ timeout: 15_000 });
-    await groupItem.click();
+    await groupItem.locator('.session-menu-select').click();
     const groupTab = page.locator('.tab-item', { hasText: dirName });
     await expect(groupTab).toBeVisible({ timeout: 15_000 });
 

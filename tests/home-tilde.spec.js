@@ -4,8 +4,9 @@ import { join, basename } from 'node:path';
 import { test, expect } from '@playwright/test';
 
 // The display layer abbreviates $HOME as `~` (client/src/displayPath.js) in
-// the session list and the terminal title, while title attributes keep the
-// raw full path. A session whose cwd sits under $HOME must show as ~/...;
+// the terminal title, while title attributes keep the raw full path. The
+// session list shows the basename with the raw path on hover. A session whose
+// cwd sits under $HOME must show as ~/... in the terminal header;
 // the /tmp-based specs (sandbox-resume etc.) stay on the raw path.
 
 async function openShell(page, cwd) {
@@ -41,7 +42,7 @@ async function exitShell(page, sessionId) {
   }, sessionId);
 }
 
-test('$HOME paths show as ~ in the session list and terminal title', async ({ page }) => {
+test('$HOME paths keep the raw path on hover and show as ~ in the terminal title', async ({ page }) => {
   const base = mkdtempSync(join(homedir(), '.ccserver-home-tilde-'));
   const cwd = join(base, 'project');
   mkdirSync(cwd, { recursive: true });
@@ -54,15 +55,20 @@ test('$HOME paths show as ~ in the session list and terminal title', async ({ pa
     await page.waitForSelector('.dir-list');
     sessionId = await openShell(page, cwd);
 
+    // Files画面の Active Sessions 一覧は撤去され、左セッション一覧の下段に
+    // 移設された。下段の行は basename 表示 + title 属性にフルパスを持つため、
+    // title 属性 (cwd完全一致) で一意に特定する。
     await page.reload();
-    const item = page.locator('.session-item', { hasText: label });
+    const item = page.locator(`.left-sidebar [data-section="unopened"] .session-menu-item[title="${cwd}"]`);
     await expect(item).toBeVisible();
-    // The raw full path stays available on hover (title attribute).
-    await expect(item.locator('.session-cwd')).toHaveAttribute('title', cwd);
-    await expect(item.locator('.session-cwd')).not.toHaveText(cwd);
+    // The raw full path stays available on hover (title attribute), and the
+    // visible row never shows the full path.
+    await expect(item.locator('.session-menu-path')).toHaveAttribute('title', cwd);
+    await expect(item.locator('.session-menu-path')).toHaveText('project');
+    await expect(item.locator('.session-menu-path')).not.toHaveText(cwd);
 
     // Opening the session shows the abbreviated path in the terminal header.
-    await item.click();
+    await item.locator('.session-menu-select').click();
     await expect(page.locator('.terminal-title', { hasText: label })).toBeVisible();
   } finally {
     if (sessionId) await exitShell(page, sessionId);

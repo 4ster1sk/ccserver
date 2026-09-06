@@ -45,7 +45,10 @@ export async function sessionsRoute(fastify, opts) {
   fastify.patch('/sessions/:id', async (request, reply) => {
     const { id } = request.params;
     const body = request.body || {};
-    if (!('customLabel' in body)) {
+    // Guard the `in` check: a truthy primitive JSON body (e.g. `"foo"` or
+    // `42`) would otherwise throw a TypeError and surface as a 500 instead
+    // of a 400. Arrays fall through to the missing-key 400 below.
+    if (typeof body !== 'object' || body === null || !('customLabel' in body)) {
       return reply.code(400).send({ error: 'customLabel is required' });
     }
     // Shape-check before the lookup so malformed bodies 400 even for

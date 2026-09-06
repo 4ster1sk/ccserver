@@ -2245,117 +2245,7 @@ body {
   overflow-y: auto;
 }
 
-/* Session List */
-.session-list {
-  border: 1px solid var(--accent);
-  border-radius: 6px;
-  background: var(--bg-secondary);
-  margin-bottom: 12px;
-  overflow: hidden;
-}
-
-.session-list-header {
-  padding: 8px 12px;
-  font-size: 12px;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
-  color: var(--accent);
-  border-bottom: 1px solid var(--border);
-}
-
-.session-item {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 8px 12px;
-  cursor: pointer;
-  border-bottom: 1px solid var(--border);
-  transition: background 0.1s;
-}
-
-.session-item:last-child {
-  border-bottom: none;
-}
-
-.session-item:hover {
-  background: var(--bg-surface);
-}
-
-.session-body {
-  display: flex;
-  flex-direction: column;
-  flex: 1;
-  min-width: 0;
-  gap: 4px;
-}
-
-.session-item-top {
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 8px;
-}
-
-.session-icon {
-  font-size: 14px;
-  flex-shrink: 0;
-  width: 20px;
-  text-align: center;
-}
-
-.session-cwd {
-  font-family: 'JetBrains Mono', 'Fira Code', monospace;
-  font-size: 13px;
-  width: 100%;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-/* >= 800px: revert to a single-line item (cwd then status right-aligned) */
-@media (min-width: 800px) {
-  .session-body {
-    flex-direction: row-reverse;
-    align-items: center;
-    gap: 8px;
-  }
-
-  .session-item-top {
-    justify-content: flex-start;
-    flex-shrink: 0;
-  }
-
-  .session-cwd {
-    width: auto;
-    flex: 1;
-    min-width: 0;
-  }
-}
-
-.session-status {
-  font-size: 11px;
-  flex-shrink: 0;
-  padding: 2px 8px;
-  border-radius: 10px;
-  font-weight: 500;
-}
-
-.session-status.active {
-  color: var(--success);
-  background: rgba(166, 227, 161, 0.1);
-}
-
-.session-status.exited {
-  color: var(--text-muted);
-  background: rgba(108, 112, 134, 0.1);
-}
-
-.session-status.resumable {
-  color: var(--accent);
-  background: rgba(137, 180, 250, 0.1);
-}
-
+/* Session List (Files画面からは撤去済み。左セッション一覧は .session-menu-* を使用) */
 .session-badge {
   font-size: 11px;
   flex-shrink: 0;
@@ -2376,13 +2266,6 @@ body {
   color: var(--error, #f38ba8);
   background: rgba(243, 139, 168, 0.12);
   border: 1px solid rgba(243, 139, 168, 0.35);
-}
-
-.session-delete-btn {
-  padding: 2px 8px;
-  font-size: 12px;
-  line-height: 1;
-  flex-shrink: 0;
 }
 
 /* Directory list */

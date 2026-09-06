@@ -716,8 +716,11 @@ export function loadSandboxConfig() {
 // (see DirectoryBrowser) -- overrides it. Returns { rtk, codeReviewGraph,
 // rtkSpec, crgSpec } where rtkSpec/crgSpec are the { version, url, sha256, ... }
 // payloads for sandbox-provision.sh (null when the tool is disabled).
-export function resolveTools(sandboxOpts = null) {
-  const cfg = loadSandboxConfig().tools;
+export function resolveTools(sandboxOpts = null, cfgTools = null) {
+  // cfgTools threads through an already-loaded config (createSession /
+  // buildSandboxSpawn read sandbox.config.json once per launch) instead of
+  // re-reading + re-parsing it here on every call.
+  const cfg = cfgTools ?? loadSandboxConfig().tools;
   const per = (sandboxOpts && sandboxOpts.tools && typeof sandboxOpts.tools === 'object') ? sandboxOpts.tools : {};
   const resolve = (jsKey, cfgKeys, def) => {
     // Per-session values are client-controlled toggles: booleans only. The
@@ -1548,13 +1551,14 @@ export function buildMinimalSandboxSpawn({ cwd, targetCommand, app = 'claude' })
 //                 bookkeeping row ('user' | 'meta-agent:<sessionId>' | ...).
 //                 Display only; never an authorization input.
 export function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, mcpSocketPath = null, notifySocketPath = null, usageSocketPath = null, metaSocketPath = null, reviewerSocketPath = null, reuseSandboxHome = true, orchestratorClaudeMdSrc = null, gitCommonDir = null, groupFilesDir = null, sandboxHomeCreatedBy = null }) {
-  const { docker: cfgDocker, persistentHome, gpg: cfgGpg, sshAgent: cfgSshAgent, gitBroker: gitBrokerEnabled, binds, env, claudeBin } = loadSandboxConfig();
+  const { docker: cfgDocker, persistentHome, gpg: cfgGpg, sshAgent: cfgSshAgent, gitBroker: gitBrokerEnabled, binds, env, tools: cfgTools, claudeBin } = loadSandboxConfig();
   const docker = cfgDocker && dockerSandboxAvailable();
   const gpg = sandboxOpts?.gpg ?? cfgGpg;
   const sshAgent = sandboxOpts?.sshAgent ?? cfgSshAgent;
   // Opt-in tool provisioning (rtk / code-review-graph), merged like gpg/sshAgent
   // from the config default + the client's per-session sandboxOpts.tools.
-  const tools = resolveTools(sandboxOpts);
+  // Thread cfgTools through instead of re-reading the config file.
+  const tools = resolveTools(sandboxOpts, cfgTools);
 
   // ssh-agent forwarding is opt-in (see loadSandboxConfig). When on, an
   // explicit env.SSH_AUTH_SOCK in the config wins; otherwise auto-discover.
