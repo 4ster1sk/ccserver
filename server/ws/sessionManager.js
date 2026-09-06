@@ -399,7 +399,9 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox
   // the launch menu defaults to ON for these, remembered per directory)
   // overrides it. The tools are provisioned into the sandbox HOME at launch,
   // so they are only ever injected when this session is actually sandboxed.
-  const tools = resolveTools(sandboxOpts);
+  // Thread cfg.tools through: the config was already read once above, so
+  // resolveTools must not re-read + re-parse it here on every launch.
+  const tools = resolveTools(sandboxOpts, cfg.tools);
 
   // MCP config injection -- never written to a file (see mcpConfig.js). Combo
   // sessions (groupId set) get their role's broker (ccserver); notify-enabled

@@ -19,10 +19,12 @@ export default function SessionTabMenu({
   sessionTabs,
   activeTabId,
   unopenedSessions,
+  unopenedGroups,
   onSelectTab,
   onCloseTab,
   onOpenSession,
   onTerminateSession,
+  onOpenGroup,
   customLabels,
   onRowContextMenu,
 }) {
@@ -86,10 +88,12 @@ export default function SessionTabMenu({
             sessionTabs={sessionTabs}
             activeTabId={activeTabId}
             unopenedSessions={unopenedSessions}
+            unopenedGroups={unopenedGroups}
             onSelectTab={onSelectTab}
             onCloseTab={onCloseTab}
             onOpenSession={onOpenSession}
             onTerminateSession={onTerminateSession}
+            onOpenGroup={onOpenGroup}
             customLabels={customLabels}
             onRowContextMenu={onRowContextMenu}
           />
