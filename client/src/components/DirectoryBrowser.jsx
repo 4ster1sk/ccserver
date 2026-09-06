@@ -5,6 +5,7 @@ import { formatSize } from '../formatSize.js';
 import { isPreviewable } from '../previewExts.js';
 import { isAppSelectable } from '../appAvailability.js';
 import { PERMISSION_MODES, PERMISSION_MODE_LABELS, isElevatedPermissionMode } from '../permissionMode.js';
+import { loadSandboxDefaults, defaultSandboxOpts } from '../sandboxDefaults.js';
 import MetaLaunchDialog from './MetaLaunchDialog.jsx';
 
 // marked + DOMPurify only matter once someone opens a preview, so keep them
@@ -55,10 +56,19 @@ function loadComboApps() {
 // separately per cwd rather than as one server-wide default -- see
 // server/sandbox.config.json's `gpg`/`sshAgent`/`tools` for the fallback these
 // override at launch. `tools` (rtk / code-review-graph) provisions the tool
-// into the sandbox HOME at launch instead of installing it on the host. Unlike
-// gpg/sshAgent (opt-in), rtk / code-review-graph default to ON in the launch
-// menu; a stored explicit false turns them back off for that directory.
-function loadSandboxOpts(path) {
+// into the sandbox HOME at launch instead of installing it on the host.
+// 記憶が無い場合の初期値は Settings > 一般のグローバル既定値
+// (client/src/sandboxDefaults.js) を使う。gpg/sshAgent は既定オフ、
+// rtk / code-review-graph は既定オンが初期値; a stored explicit false
+// turns them back off for that directory.
+export function hasSandboxOptsMemory(path) {
+  try {
+    return localStorage.getItem(SANDBOX_OPTS_PREFIX + path) !== null;
+  } catch { /* ignore */ }
+  return false;
+}
+
+function loadSandboxOpts(path, globalDefaults) {
   try {
     const raw = localStorage.getItem(SANDBOX_OPTS_PREFIX + path);
     if (raw) {
@@ -73,7 +83,7 @@ function loadSandboxOpts(path) {
       };
     }
   } catch { /* ignore */ }
-  return { gpg: false, sshAgent: false, tools: { rtk: true, codeReviewGraph: true } };
+  return defaultSandboxOpts(globalDefaults || loadSandboxDefaults());
 }
 
 function saveSandboxOpts(path, opts) {
@@ -82,7 +92,7 @@ function saveSandboxOpts(path, opts) {
   } catch { /* ignore */ }
 }
 
-export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onOpenGroup, onSessionClick, onOpenSettings, initialPath, groupsVersion, metaAgentDir, onOpenMeta }) {
+export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onOpenGroup, onSessionClick, onOpenSettings, initialPath, groupsVersion, metaAgentDir, onOpenMeta, sandboxDefaults }) {
   const [currentPath, setCurrentPath] = useState(initialPath || localStorage.getItem(LAST_DIR_KEY) || '/');
   const [homeDir, setHomeDir] = useState(null);
   const [dirs, setDirs] = useState([]);
@@ -166,7 +176,7 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
   // Per-role sandbox overrides; null = inherit the group-level common flags.
   const [comboRoleSandbox, setComboRoleSandbox] = useState({ workerA: null, workerB: null, orchestrator: null });
   const [orchestratorInstructions, setOrchestratorInstructions] = useState('');
-  const [sandboxOpts, setSandboxOpts] = useState(() => loadSandboxOpts(currentPath));
+  const [sandboxOpts, setSandboxOpts] = useState(() => loadSandboxOpts(currentPath, sandboxDefaults));
 
   // Worker presets (shared server-side library). presetsState: 'idle' until
   // the combo modal first needs them, then 'loading' | 'ready' | 'error'.
@@ -366,11 +376,16 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
     }
   }, [fetchPresets]);
 
-  // gpg/sshAgent are remembered per directory, not globally -- reload whenever
-  // the browser navigates to a different one.
+  // gpg/sshAgent/tools はディレクトリ別に記憶し、記憶が無い場合のみ
+  // Settings > 一般のグローバル既定値を使う。ディレクトリ移動時と
+  // グローバル既定値の変更時に再読込するが、記憶済みの場所は上書きしない。
   useEffect(() => {
-    setSandboxOpts(loadSandboxOpts(currentPath));
-  }, [currentPath]);
+    if (hasSandboxOptsMemory(currentPath)) {
+      setSandboxOpts(loadSandboxOpts(currentPath, sandboxDefaults));
+    } else {
+      setSandboxOpts(defaultSandboxOpts(sandboxDefaults || loadSandboxDefaults()));
+    }
+  }, [currentPath, sandboxDefaults]);
 
   const updateSandboxOpts = useCallback((path, next) => {
     setSandboxOpts(next);
@@ -734,7 +749,7 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
       <p className="open-menu-note">
         {forceSandbox
           ? 'サンドボックスがサーバー設定 (forceSandbox) で強制されています。通常起動はできません。'
-          : `サンドボックス: 隣接プロジェクトを隔離し、内部に rootless docker を用意。GPG/ssh-agentは既定オフ・ツール導入 (rtk / code-review-graph) は既定オンで、このディレクトリ (${displayPath(currentPath, homeDir)}) に記憶されます。`}
+          : `サンドボックス: 隣接プロジェクトを隔離し、内部に rootless docker を用意。初期値は一般設定で変更でき、このディレクトリ (${displayPath(currentPath, homeDir)}) に記憶されます。`}
       </p>
     </>
   );
@@ -1596,7 +1611,7 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
               onClick={() => navigateTo(dir.path)}
               onDoubleClick={() => onOpen(dir.path, {
                 sandbox: sandboxDefault,
-                sandboxOpts: loadSandboxOpts(dir.path),
+                sandboxOpts: loadSandboxOpts(dir.path, sandboxDefaults),
                 app: appDefault,
                 model: modelForApp(appDefault),
                 permissionMode: permissionModeForApp(appDefault),

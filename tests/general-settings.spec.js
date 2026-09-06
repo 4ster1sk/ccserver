@@ -11,6 +11,10 @@ test.describe('Settings general section', () => {
       localStorage.removeItem('ccserver-theme');
       localStorage.removeItem('ccserver-skip-close-confirm');
       localStorage.removeItem('ccserver-sidebar-overlay');
+      localStorage.removeItem('ccserver-default-sandbox-gpg');
+      localStorage.removeItem('ccserver-default-sandbox-ssh-agent');
+      localStorage.removeItem('ccserver-default-sandbox-rtk');
+      localStorage.removeItem('ccserver-default-sandbox-code-review-graph');
     });
     await page.reload();
     await expect(page.getByRole('button', { name: 'Terminal', exact: true })).toBeVisible();
@@ -83,5 +87,43 @@ test.describe('Settings general section', () => {
     await expect(page.locator('.right-sidebar')).toBeVisible();
     await check.uncheck();
     await expect(page.locator('.main-row')).not.toHaveClass(/sidebar-overlay/);
+  });
+
+  test('sandbox defaults default to off/off/on/on and persist', async ({ page }) => {
+    const panel = page.locator('[role="tabpanel"]');
+    const gpg = panel.getByLabel('GPG署名を使う');
+    const ssh = panel.getByLabel('ssh-agentを転送する');
+    const rtk = panel.getByLabel('rtk を導入する');
+    const crg = panel.getByLabel('code-review-graph MCP を導入する');
+    await expect(gpg).not.toBeChecked();
+    await expect(ssh).not.toBeChecked();
+    await expect(rtk).toBeChecked();
+    await expect(crg).toBeChecked();
+    // 変更が localStorage に永続化される。
+    await gpg.check();
+    await ssh.check();
+    await rtk.uncheck();
+    await crg.uncheck();
+    await expect
+      .poll(() => page.evaluate(() => localStorage.getItem('ccserver-default-sandbox-gpg')))
+      .toBe('1');
+    await expect
+      .poll(() => page.evaluate(() => localStorage.getItem('ccserver-default-sandbox-ssh-agent')))
+      .toBe('1');
+    await expect
+      .poll(() => page.evaluate(() => localStorage.getItem('ccserver-default-sandbox-rtk')))
+      .toBe('0');
+    await expect
+      .poll(() => page.evaluate(() => localStorage.getItem('ccserver-default-sandbox-code-review-graph')))
+      .toBe('0');
+    // リロード後も復元される。
+    await page.reload();
+    await expect(page.getByRole('button', { name: 'Terminal', exact: true })).toBeVisible();
+    await page.getByRole('button', { name: 'Settings' }).click();
+    const panel2 = page.locator('[role="tabpanel"]');
+    await expect(panel2.getByLabel('GPG署名を使う')).toBeChecked();
+    await expect(panel2.getByLabel('ssh-agentを転送する')).toBeChecked();
+    await expect(panel2.getByLabel('rtk を導入する')).not.toBeChecked();
+    await expect(panel2.getByLabel('code-review-graph MCP を導入する')).not.toBeChecked();
   });
 });

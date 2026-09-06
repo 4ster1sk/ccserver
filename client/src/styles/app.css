@@ -1258,6 +1258,11 @@ body {
   cursor: pointer;
 }
 
+.general-setting-subhead {
+  margin: 20px 0 4px;
+  font-size: 14px;
+}
+
 .settings-hint {
   color: var(--text-secondary);
   font-size: 12px;
