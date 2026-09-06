@@ -87,7 +87,7 @@ test('combo group tab lifecycle: create via API, attach, close-confirm mentions 
 
     // Confirm closes the tab and destroys the group server-side.
     await groupTab.locator('.tab-close').click();
-    await page.getByRole('button', { name: '閉じる' }).click();
+    await page.locator('.resume-overlay', { hasText: 'グループを閉じますか?' }).getByRole('button', { name: '閉じる', exact: true }).click();
     await expect(groupTab).toBeHidden();
 
     const gone = await page.evaluate(async (gid) => {
