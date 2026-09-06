@@ -14,6 +14,7 @@ import { useWidgetPrefs } from './hooks/useWidgetPrefs.js';
 import { useNotifications } from './hooks/useNotifications.js';
 import { authFetch } from './auth.js';
 import { getTheme, loadThemeId, saveThemeId, applyThemeCss } from './themes.js';
+import { loadSandboxDefaults, saveSandboxDefaults } from './sandboxDefaults.js';
 import { isAppSelectable, isAppVisible } from './appAvailability.js';
 
 const TerminalView = lazy(() => import('./components/TerminalView.jsx'));
@@ -58,6 +59,13 @@ export default function App() {
     }
   }, []);
   const pendingOpenRef = useRef(null);
+  // サンドボックス起動フラグのグローバル既定値 (Settings > 一般で変更。
+  // ディレクトリ別記憶が無い場合の初期値として DirectoryBrowser が使う)。
+  const [sandboxDefaults, setSandboxDefaults] = useState(loadSandboxDefaults);
+  const setSandboxDefaultsPersisted = useCallback((next) => {
+    setSandboxDefaults(next);
+    saveSandboxDefaults(next);
+  }, []);
   const { enabled: notifyEnabled, permission: notifyPermission, toggle: toggleNotify, notify } = useNotifications();
   // Server-side facts from /api/dirs/home: whether the Usage button is
   // enabled (sandbox.config.json's "showUsage") and which agent CLIs are
@@ -632,7 +640,7 @@ export default function App() {
       <div className={`main-row${sidebarPrefs.open ? ' sidebar-open' : ''}${sidebarPrefs.overlay ? ' sidebar-overlay' : ''}`}>
       <div className="tab-content">
         <div style={{ display: activeTabId === 'browser' ? 'flex' : 'none', height: '100%', flexDirection: 'column' }}>
-          <DirectoryBrowser onOpen={handleOpen} onOpenShell={handleOpenShell} onOpenCombo={handleOpenCombo} onOpenGroup={handleOpenGroup} onSessionClick={handleSessionClick} onOpenSettings={openSettingsTab} initialPath={lastDir} groupsVersion={groupsVersion} metaAgentDir={metaAgentDir} onOpenMeta={handleOpenMeta} />
+          <DirectoryBrowser onOpen={handleOpen} onOpenShell={handleOpenShell} onOpenCombo={handleOpenCombo} onOpenGroup={handleOpenGroup} onSessionClick={handleSessionClick} onOpenSettings={openSettingsTab} initialPath={lastDir} groupsVersion={groupsVersion} metaAgentDir={metaAgentDir} onOpenMeta={handleOpenMeta} sandboxDefaults={sandboxDefaults} />
         </div>
         <div style={{ display: activeTabId === 'remote' ? 'flex' : 'none', height: '100%', flexDirection: 'column', overflow: 'auto' }}>
           <RemoteInstanceView onOpenRemoteTerminal={openRemoteTerminalTab} visible={activeTabId === 'remote'} />
@@ -646,6 +654,8 @@ export default function App() {
               onConfirmBeforeCloseChange={(v) => setSkipCloseConfirmPersisted(!v)}
               sidebarOverlay={sidebarPrefs.overlay}
               onSidebarOverlayChange={sidebarPrefs.setOverlay}
+              sandboxDefaults={sandboxDefaults}
+              onSandboxDefaultsChange={setSandboxDefaultsPersisted}
             />
           </div>
         )}

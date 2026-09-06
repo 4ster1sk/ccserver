@@ -19,6 +19,8 @@ export default function SettingsView({
   onConfirmBeforeCloseChange,
   sidebarOverlay,
   onSidebarOverlayChange,
+  sandboxDefaults,
+  onSandboxDefaultsChange,
 }) {
   const [activeKey, setActiveKey] = useState('general');
 
@@ -61,6 +63,8 @@ export default function SettingsView({
               onConfirmBeforeCloseChange={onConfirmBeforeCloseChange}
               sidebarOverlay={sidebarOverlay}
               onSidebarOverlayChange={onSidebarOverlayChange}
+              sandboxDefaults={sandboxDefaults}
+              onSandboxDefaultsChange={onSandboxDefaultsChange}
             />
           )}
           {activeKey === 'sandboxes' && <SandboxSection />}
