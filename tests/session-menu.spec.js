@@ -77,10 +77,12 @@ test('hamburger is always at the left end; shell tabs go to the vertical menu, n
   await expect(page.locator('.session-menu-count')).toHaveText('1');
 
   // Menu lists the opened session vertically with a running (green) state line.
+  // 状態文字(connected/idle/exited)は左線の色で表現するため表示しない。下段右端はCLI名のみ。
   await btn.click();
   const items = sessionMenu(page).locator('[data-section="opened"] .session-menu-item.is-running');
   await expect(items).toHaveCount(1);
-  await expect(items.first().getByText(/shell · connected/)).toBeVisible();
+  await expect(items.first().locator('.session-menu-status .session-menu-state')).toHaveText('shell');
+  await expect(items.first()).not.toContainText(/connected|idle|exited/);
 
   // Selecting the item activates the terminal and closes the menu.
   await items.first().locator('.session-menu-select').click();

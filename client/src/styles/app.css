@@ -437,6 +437,11 @@ body {
   min-width: 0;
 }
 
+/* sandbox系バッジ (sandbox / no-sandbox) は上段の右端に固定 (ラベルが省略されても右端に残る)。 */
+.session-menu-item-top .session-badge {
+  margin-left: auto;
+}
+
 .session-menu-label {
   flex: 1 1 auto;
   min-width: 0;
@@ -473,6 +478,7 @@ body {
 
 .session-menu-state {
   flex-shrink: 0;
+  margin-left: auto;
   font-size: 11px;
   color: var(--text-muted);
   white-space: nowrap;

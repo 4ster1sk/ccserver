@@ -1,5 +1,5 @@
 import { useState, useCallback } from 'react';
-import { NARROW_DRAWER_QUERY } from './useViewport.js';
+import { NARROW_DRAWER_QUERY } from './viewportQuery.js';
 
 // 左セッション表示の設定 (右ウィジェットとは独立したフラグ群)。
 // - mode: 'sidebar' (既定・常時表示の左サイドバー) | 'popup' (従来のポップアップ)

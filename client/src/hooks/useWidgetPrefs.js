@@ -1,5 +1,5 @@
 import { useState, useCallback, useEffect } from 'react';
-import { NARROW_DRAWER_QUERY } from './useViewport.js';
+import { NARROW_DRAWER_QUERY } from './viewportQuery.js';
 
 const SIDEBAR_OPEN_KEY = 'ccserver-sidebar-open';
 const SIDEBAR_OVERLAY_KEY = 'ccserver-sidebar-overlay';

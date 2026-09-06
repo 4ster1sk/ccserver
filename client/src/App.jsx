@@ -15,7 +15,7 @@ import RightSidebar, { WIDGET_DEFS, MONITOR_WIDGET_IDS } from './components/Righ
 import { SystemStatsProvider } from './components/widgets/SystemStatsProvider.jsx';
 import { useWidgetPrefs } from './hooks/useWidgetPrefs.js';
 import { useSessionSidebarPrefs } from './hooks/useSessionSidebarPrefs.js';
-import { NARROW_DRAWER_QUERY } from './hooks/useViewport.js';
+import { NARROW_DRAWER_QUERY } from './hooks/viewportQuery.js';
 import { useNotifications } from './hooks/useNotifications.js';
 import { loadNavGuardMode, saveNavGuardMode, useNavGuard } from './hooks/useNavGuard.js';
 import { authFetch } from './auth.js';
