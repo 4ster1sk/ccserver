@@ -133,3 +133,68 @@ test('exited tab closes without a confirm (skip not enabled)', async ({ page }) 
   await expect(sessionBadge(page)).toHaveCount(0);
   await expect(modal(page)).toBeHidden();
 });
+
+test('terminate button ends the session completely: tab closes and session is gone', async ({ page }) => {
+  await usePopupMode(page);
+  await gotoApp(page);
+
+  // Earlier tests in this file leave lingered sessions in the shared e2e
+  // server; drain them so the "nothing left behind" assertions are exact.
+  await openMenu(page);
+  for (let i = 0; i < 15; i++) {
+    const lowers = sessionMenu(page).locator('[data-section="unopened"] .session-menu-item');
+    const before = await lowers.count();
+    if (before === 0) break;
+    page.once('dialog', (d) => d.accept());
+    await lowers.first().locator('.session-menu-close').click();
+    await expect.poll(async () => sessionMenu(page).locator('[data-section="unopened"] .session-menu-item').count(), { timeout: 10_000 }).toBeLessThan(before);
+  }
+  await page.keyboard.press('Escape').catch(() => {});
+  await expect(sessionMenu(page)).toBeHidden();
+
+  await openShellTab(page);
+
+  // The dialog offers session termination at the left end.
+  await openMenu(page);
+  await menuCloseButtons(page).first().click();
+  await expect(modal(page)).toBeVisible();
+  const terminateBtn = modal(page).getByRole('button', { name: 'セッションを終了', exact: true });
+  await expect(terminateBtn).toBeVisible();
+
+  await terminateBtn.click();
+  await expect(modal(page)).toBeHidden();
+  await expect(sessionBadge(page)).toHaveCount(0);
+
+  // The session is gone server-side: nothing lingers in the lower section.
+  await openMenu(page);
+  await expect(sessionMenu(page).locator('[data-section="unopened"] .session-menu-item')).toHaveCount(0);
+  await page.keyboard.press('Escape').catch(() => {});
+});
+
+test('terminate button ignores double-click: single DELETE, no error alert', async ({ page }) => {
+  await usePopupMode(page);
+  await gotoApp(page);
+  await openShellTab(page);
+
+  await openMenu(page);
+  await menuCloseButtons(page).first().click();
+  await expect(modal(page)).toBeVisible();
+
+  // A duplicate DELETE would 404 and surface a bogus failure alert, so count
+  // the requests and fail if any dialog appears.
+  let deleteCount = 0;
+  await page.route('**/api/sessions/*', async (route) => {
+    if (route.request().method() === 'DELETE') deleteCount += 1;
+    await route.continue();
+  });
+  let alerted = false;
+  page.on('dialog', (d) => { alerted = true; d.accept().catch(() => {}); });
+
+  await modal(page).getByRole('button', { name: 'セッションを終了', exact: true }).dblclick();
+  await expect(modal(page)).toBeHidden({ timeout: 15_000 });
+  await expect(sessionBadge(page)).toHaveCount(0);
+  await page.waitForTimeout(1000); // let a duplicate request surface if any
+  expect(deleteCount).toBe(1);
+  expect(alerted).toBe(false);
+  await page.unroute('**/api/sessions/*');
+});
