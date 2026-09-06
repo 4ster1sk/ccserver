@@ -156,6 +156,13 @@ test('tapping outside the sidebar closes it on narrow screens', async ({ page })
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto('/');
 
+  // 狭幅の初回 (保存済み設定なし) は閉じた状態で始まる。
+  // 開いたままだと画面の約85%を覆い背後の操作を塞ぐため (useWidgetPrefs.loadOpen)。
+  await expect(page.locator('.right-sidebar')).toBeHidden();
+  await expect(page.locator('.sidebar-backdrop')).toBeHidden();
+
+  // タブバーのトグルで開く
+  await page.locator('.sidebar-toggle-btn').click();
   await expect(page.locator('.right-sidebar')).toBeVisible();
   await expect(page.locator('.sidebar-backdrop')).toBeVisible();
 
@@ -167,6 +174,26 @@ test('tapping outside the sidebar closes it on narrow screens', async ({ page })
   // タブバーのトグルで開き直せる
   await page.locator('.sidebar-toggle-btn').click();
   await expect(page.locator('.right-sidebar')).toBeVisible();
+});
+
+test('narrow first visit keeps main actions reachable (no sidebar overlay)', async ({ page }) => {
+  mockRoutes(page);
+  await page.setViewportSize({ width: 375, height: 667 });
+  await page.goto('/');
+
+  // 保存済み設定なしの狭幅初回はサイドバーが閉じていること。
+  // file-preview 375px / text-selection (iPhone) で right-sidebar が
+  // 背後のボタンを塞いでタイムアウトした回帰を防ぐ。
+  await expect(page.locator('.right-sidebar')).toBeHidden();
+
+  const terminalBtn = page.getByRole('button', { name: 'Terminal', exact: true });
+  await expect(terminalBtn).toBeVisible();
+  const hitTarget = await terminalBtn.evaluate((el) => {
+    const r = el.getBoundingClientRect();
+    const target = document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2);
+    return target?.closest?.('.right-sidebar, .sidebar-backdrop') ?? null;
+  });
+  expect(hitTarget).toBeNull();
 });
 
 test('backdrop is hidden on wide screens', async ({ page }) => {

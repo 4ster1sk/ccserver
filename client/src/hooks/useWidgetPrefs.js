@@ -7,7 +7,15 @@ const VIS_SUFFIX = ':visible';
 
 function loadOpen() {
   try {
-    return localStorage.getItem(SIDEBAR_OPEN_KEY) !== '0';
+    const stored = localStorage.getItem(SIDEBAR_OPEN_KEY);
+    // 保存済み設定はviewportに関わらず尊重する。
+    if (stored !== null) return stored !== '0';
+    // 初回のみ狭幅 (app.css のドロワー化境界 max-width: 900px と一致) では
+    // 閉じておく。開いたままだと画面の約85%を覆い、背後の操作を塞ぐ。
+    if (typeof window !== 'undefined' && window.matchMedia?.('(max-width: 900px)').matches) {
+      return false;
+    }
+    return true;
   } catch {
     return true;
   }
