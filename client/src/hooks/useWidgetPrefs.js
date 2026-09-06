@@ -1,5 +1,4 @@
 import { useState, useCallback, useEffect } from 'react';
-import { NARROW_DRAWER_QUERY } from './viewportQuery.js';
 
 const SIDEBAR_OPEN_KEY = 'ccserver-sidebar-open';
 const SIDEBAR_OVERLAY_KEY = 'ccserver-sidebar-overlay';
@@ -12,14 +11,10 @@ function loadOpen() {
     const stored = localStorage.getItem(SIDEBAR_OPEN_KEY);
     // 保存済み設定はviewportに関わらず尊重する。
     if (stored !== null) return stored !== '0';
-    // 初回のみ狭幅 (NARROW_DRAWER_QUERY = app.css のドロワー化境界) では
-    // 閉じておく。開いたままだと画面の約85%を覆い、背後の操作を塞ぐ。
-    if (typeof window !== 'undefined' && window.matchMedia?.(NARROW_DRAWER_QUERY).matches) {
-      return false;
-    }
-    return true;
+    // 初期は非表示で起動する。保存済み設定がある場合のみそれに従う。
+    return false;
   } catch {
-    return true;
+    return false;
   }
 }
 
@@ -61,9 +56,12 @@ export function useWidgetPrefs(widgetDefs) {
   // オーバーレイのため、この設定は広幅時のみ効く。
   const [overlay, setOverlayState] = useState(() => {
     try {
-      return localStorage.getItem(SIDEBAR_OVERLAY_KEY) === '1';
+      const stored = localStorage.getItem(SIDEBAR_OVERLAY_KEY);
+      // 保存済み設定があれば尊重し、初期は true (重ねて表示) で起動する。
+      if (stored !== null) return stored === '1';
+      return true;
     } catch {
-      return false;
+      return true;
     }
   });
   const [order, setOrderState] = useState(() => loadOrder(defaultIds));

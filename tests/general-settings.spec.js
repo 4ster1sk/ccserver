@@ -12,7 +12,8 @@ test.describe('Settings general section', () => {
     await page.evaluate(() => {
       localStorage.removeItem('ccserver-theme');
       localStorage.removeItem('ccserver-skip-close-confirm');
-      localStorage.removeItem('ccserver-sidebar-overlay');
+      localStorage.setItem('ccserver-sidebar-overlay', '0');
+      localStorage.setItem('ccserver-sidebar-open', '1');
       localStorage.setItem('ccserver-session-mode', 'popup');
       localStorage.removeItem('ccserver-session-sidebar-open');
       localStorage.removeItem('ccserver-session-sidebar-overlay');
@@ -72,6 +73,23 @@ test.describe('Settings general section', () => {
     await expect
       .poll(() => page.evaluate(() => localStorage.getItem('ccserver-skip-close-confirm')))
       .toBeNull();
+  });
+
+  test('sidebar overlay defaults to on and sidebar starts hidden', async ({ page }) => {
+    await page.evaluate(() => {
+      localStorage.removeItem('ccserver-sidebar-overlay');
+      localStorage.removeItem('ccserver-sidebar-open');
+    });
+    await page.reload();
+    await expect(page.getByRole('button', { name: 'Terminal', exact: true })).toBeVisible();
+    // 初期はウィジェット非表示＋重ね表示ON。
+    await expect(page.locator('.right-sidebar')).toBeHidden();
+    await expect(page.getByRole('button', { name: 'サイドバーを開く' })).toBeVisible();
+    await page.getByRole('button', { name: 'Settings' }).click();
+    await expect(page.locator('.settings-view')).toBeVisible();
+    const panel = page.locator('[role="tabpanel"]');
+    await expect(panel.getByLabel('ウィジェットをCLIの上に重ねて表示する')).toBeChecked();
+    await expect(page.locator('.main-row')).toHaveClass(/sidebar-overlay/);
   });
 
   test('sidebar overlay checkbox toggles overlay mode', async ({ page }) => {

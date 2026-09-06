@@ -11,7 +11,8 @@ test.use({ viewport: { width: 1280, height: 800 } });
 test('directory browser keeps its width when the sidebar opens/closes', async ({ page }) => {
   await page.addInitScript(() => {
     localStorage.setItem('ccserver-sidebar-open', '1');
-    localStorage.removeItem('ccserver-sidebar-overlay');
+    // in-flow配置での幅検証のため重ね表示は明示OFF (既定はON)。
+    localStorage.setItem('ccserver-sidebar-overlay', '0');
   });
   await page.goto('/');
   const browser = page.locator('.directory-browser');

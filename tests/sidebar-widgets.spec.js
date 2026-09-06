@@ -53,28 +53,34 @@ function mockRoutes(page, hooks = {}) {
   });
 }
 
-test('sidebar open state persists across a reload', async ({ page }) => {
+test('sidebar initial state is hidden and open state persists across a reload', async ({ page }) => {
   mockRoutes(page);
   await page.goto('/');
 
   const sidebar = page.locator('.right-sidebar');
   const toggle = page.locator('.sidebar-toggle-btn');
-  await expect(sidebar).toBeVisible();
-  await expect(toggle).toHaveAttribute('aria-expanded', 'true');
-
-  await toggle.click();
+  // 初期 (保存済み設定なし) は非表示で起動する。
   await expect(sidebar).toBeHidden();
   await expect(toggle).toHaveAttribute('aria-expanded', 'false');
 
+  // 開く → リロード後も復元される。
+  await toggle.click();
+  await expect(sidebar).toBeVisible();
+  await expect(toggle).toHaveAttribute('aria-expanded', 'true');
+
   await page.reload();
-  await expect(page.locator('.right-sidebar')).toBeHidden();
+  await expect(page.locator('.right-sidebar')).toBeVisible();
 
   await page.locator('.sidebar-toggle-btn').click();
-  await expect(page.locator('.right-sidebar')).toBeVisible();
+  await expect(page.locator('.right-sidebar')).toBeHidden();
+
+  await page.reload();
+  await expect(page.locator('.right-sidebar')).toBeHidden();
 });
 
 test('hiding a widget persists across a reload', async ({ page }) => {
   mockRoutes(page);
+  await page.addInitScript(() => localStorage.setItem('ccserver-sidebar-open', '1'));
   await page.goto('/');
 
   const cpuWidget = page.locator('.widget-card', { hasText: 'CPU' });
@@ -92,6 +98,7 @@ test('hiding a widget persists across a reload', async ({ page }) => {
 test('closing the sidebar stops system-stats polling', async ({ page }) => {
   let systemStatsHits = 0;
   mockRoutes(page, { onSystemStats: () => { systemStatsHits += 1; } });
+  await page.addInitScript(() => localStorage.setItem('ccserver-sidebar-open', '1'));
   await page.goto('/');
 
   await expect(page.locator('.widget-card', { hasText: 'CPU' })).toBeVisible();
@@ -110,6 +117,7 @@ test('closing the sidebar stops system-stats polling', async ({ page }) => {
 
 test('sidebar header has interval menu left of add button and no close button', async ({ page }) => {
   mockRoutes(page);
+  await page.addInitScript(() => localStorage.setItem('ccserver-sidebar-open', '1'));
   await page.goto('/');
 
   // 右ヘッダーに限定 (左セッションサイドバーも .sidebar-header を持つため)。
@@ -139,6 +147,7 @@ test('sidebar header has interval menu left of add button and no close button', 
 
 test('sidebar interval menu persists across a reload', async ({ page }) => {
   mockRoutes(page);
+  await page.addInitScript(() => localStorage.setItem('ccserver-sidebar-open', '1'));
   await page.goto('/');
 
   const intervalBtn = page.locator('.sidebar-header .btn[title="更新頻度"]');
@@ -157,8 +166,7 @@ test('tapping outside the sidebar closes it on narrow screens', async ({ page })
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto('/');
 
-  // 狭幅の初回 (保存済み設定なし) は閉じた状態で始まる。
-  // 開いたままだと画面の約85%を覆い背後の操作を塞ぐため (useWidgetPrefs.loadOpen)。
+  // 初回 (保存済み設定なし) は幅に関わらず閉じた状態で始まる。
   await expect(page.locator('.right-sidebar')).toBeHidden();
   await expect(page.locator('.sidebar-backdrop')).toBeHidden();
 
@@ -182,7 +190,7 @@ test('narrow first visit keeps main actions reachable (no sidebar overlay)', asy
   await page.setViewportSize({ width: 375, height: 667 });
   await page.goto('/');
 
-  // 保存済み設定なしの狭幅初回はサイドバーが閉じていること。
+  // 保存済み設定なしの初回はサイドバーが閉じていること。
   // file-preview 375px / text-selection (iPhone) で right-sidebar が
   // 背後のボタンを塞いでタイムアウトした回帰を防ぐ。
   await expect(page.locator('.right-sidebar')).toBeHidden();
@@ -199,15 +207,17 @@ test('narrow first visit keeps main actions reachable (no sidebar overlay)', asy
 
 test('backdrop is hidden on wide screens', async ({ page }) => {
   mockRoutes(page);
+  await page.addInitScript(() => localStorage.setItem('ccserver-sidebar-open', '1'));
   await page.goto('/');
 
   await expect(page.locator('.right-sidebar')).toBeVisible();
-  // 広幅画面では in-flow 表示のためスクリムは出ない
+  // 広幅画面ではスクリムは出ない (CSSで狭幅のみ表示)。
   await expect(page.locator('.sidebar-backdrop')).toBeHidden();
 });
 
 test('system widget shows uptime and load average', async ({ page }) => {
   mockRoutes(page);
+  await page.addInitScript(() => localStorage.setItem('ccserver-sidebar-open', '1'));
   await page.goto('/');
 
   const systemWidget = page.locator('.widget-card', {
@@ -227,6 +237,7 @@ test('system widget shows uptime and load average', async ({ page }) => {
 
 test('hiding the system widget persists across a reload', async ({ page }) => {
   mockRoutes(page);
+  await page.addInitScript(() => localStorage.setItem('ccserver-sidebar-open', '1'));
   await page.goto('/');
 
   const systemWidget = page.locator('.widget-card', {
@@ -260,6 +271,7 @@ test('missing uptime/loadAvg makes no empty system widget', async ({ page }) => 
       ipmi: null,
     },
   });
+  await page.addInitScript(() => localStorage.setItem('ccserver-sidebar-open', '1'));
   await page.goto('/');
 
   // サイドバー: Systemウィジェットの枠は作られないが、CPUは表示される
@@ -284,6 +296,7 @@ test('partial cpu payload neither crashes nor makes an empty cpu widget', async 
       ipmi: null,
     },
   });
+  await page.addInitScript(() => localStorage.setItem('ccserver-sidebar-open', '1'));
   await page.goto('/');
 
   // usage.total/cores 欠落時: CPUウィジェットの枠は作られない。
@@ -299,6 +312,7 @@ test('partial cpu payload neither crashes nor makes an empty cpu widget', async 
 
 test('widget reorder persists across a reload', async ({ page }) => {
   mockRoutes(page);
+  await page.addInitScript(() => localStorage.setItem('ccserver-sidebar-open', '1'));
   await page.goto('/');
 
   const titles = page.locator('.widget-card .widget-card-title');
@@ -314,6 +328,7 @@ test('widget reorder persists across a reload', async ({ page }) => {
 
 test('moving a widget across a hidden one changes the visible order', async ({ page }) => {
   mockRoutes(page);
+  await page.addInitScript(() => localStorage.setItem('ccserver-sidebar-open', '1'));
   await page.goto('/');
 
   // Systemを非表示にし、先頭Usageを下へ。旧コードでは不可視Systemと
@@ -341,6 +356,7 @@ test('moving across usage hidden by env skips it', async ({ page }) => {
     },
   });
   // usageが途中に残る保存順序 (環境でusageが除外される場合)
+  await page.addInitScript(() => localStorage.setItem('ccserver-sidebar-open', '1'));
   await page.addInitScript(
     () => localStorage.setItem('ccserver-widget-order', JSON.stringify(['system', 'usage', 'cpu', 'memory-storage', 'gpu'])),
   );
@@ -355,6 +371,7 @@ test('moving across usage hidden by env skips it', async ({ page }) => {
 
 test('move buttons at the rendered boundaries are disabled', async ({ page }) => {
   mockRoutes(page);
+  await page.addInitScript(() => localStorage.setItem('ccserver-sidebar-open', '1'));
   await page.goto('/');
 
   const cards = page.locator('.widget-card');
@@ -378,6 +395,7 @@ test('moving across an unrendered visible widget changes the visible order', asy
       ipmi: null,
     },
   });
+  await page.addInitScript(() => localStorage.setItem('ccserver-sidebar-open', '1'));
   await page.goto('/');
 
   // 描画順は [Usage, CPU, ...] (Systemは枠なし)。先頭Usageを下へ押すと
@@ -403,6 +421,7 @@ test('partial ipmi payload neither crashes nor makes empty ipmi cards', async ({
       ipmi: { power: [{ label: 'PSU', value: 120 }] },
     },
   });
+  await page.addInitScript(() => localStorage.setItem('ccserver-sidebar-open', '1'));
   await page.goto('/');
 
   // ページ全体は生きている
@@ -436,6 +455,7 @@ test('non-numeric gpu fields never render as NaN', async ({ page }) => {
       ipmi: null,
     },
   });
+  await page.addInitScript(() => localStorage.setItem('ccserver-sidebar-open', '1'));
   await page.goto('/');
 
   const gpuWidget = page.locator('.widget-card', {
@@ -463,6 +483,7 @@ test('gpu payload without usable metrics makes no gpu widget', async ({ page }) 
       ipmi: null,
     },
   });
+  await page.addInitScript(() => localStorage.setItem('ccserver-sidebar-open', '1'));
   await page.goto('/');
 
   await expect(page.locator('.widget-card', {
@@ -488,6 +509,7 @@ test('empty temperature arrays make no temperatures widget', async ({ page }) =>
       ipmi: null,
     },
   });
+  await page.addInitScript(() => localStorage.setItem('ccserver-sidebar-open', '1'));
   await page.goto('/');
 
   // ＋メニューからTemperaturesを追加しても枠は作られない
@@ -515,6 +537,7 @@ test('temperature groups with data render while empty groups stay hidden', async
       ipmi: null,
     },
   });
+  await page.addInitScript(() => localStorage.setItem('ccserver-sidebar-open', '1'));
   await page.goto('/');
 
   await page.locator('.sidebar-header .btn', { hasText: '＋' }).click();
@@ -542,6 +565,7 @@ test('temperature rows with missing values are hidden', async ({ page }) => {
       ipmi: null,
     },
   });
+  await page.addInitScript(() => localStorage.setItem('ccserver-sidebar-open', '1'));
   await page.goto('/');
 
   await page.locator('.sidebar-header .btn', { hasText: '＋' }).click();
@@ -568,6 +592,7 @@ test('temperatures with only missing values make no widget', async ({ page }) =>
       ipmi: null,
     },
   });
+  await page.addInitScript(() => localStorage.setItem('ccserver-sidebar-open', '1'));
   await page.goto('/');
 
   await page.locator('.sidebar-header .btn', { hasText: '＋' }).click();
@@ -583,6 +608,10 @@ test('temperatures with only missing values make no widget', async ({ page }) =>
 
 test('usage tab selection syncs between the sidebar widget and the header popover', async ({ page }) => {
   mockRoutes(page);
+  await page.addInitScript(() => localStorage.setItem('ccserver-sidebar-open', '1'));
+  // in-flow配置で検証する。重ね表示ON (既定) では前面のサイドバーが
+  // ヘッダーの usage-menu ポップオーバーに被さりクリックを横取りするため。
+  await page.addInitScript(() => localStorage.setItem('ccserver-sidebar-overlay', '0'));
   await page.goto('/');
 
   const widget = page.locator('.usage-widget');
@@ -607,6 +636,7 @@ test('usage tab selection syncs between the sidebar widget and the header popove
 
 test('usage api error shows the error state instead of bogus data', async ({ page }) => {
   mockRoutes(page, { usageStatus: 500 });
+  await page.addInitScript(() => localStorage.setItem('ccserver-sidebar-open', '1'));
   await page.goto('/');
 
   // res.okチェックによりHTTP 500は例外→エラー表示になる (成功データ扱いしない)
@@ -627,6 +657,7 @@ test('non-finite cpu values are hidden, not rendered as NaN', async ({ page }) =
       ipmi: null,
     },
   });
+  await page.addInitScript(() => localStorage.setItem('ccserver-sidebar-open', '1'));
   await page.goto('/');
 
   const cpuWidget = page.locator('.widget-card', {
@@ -653,6 +684,7 @@ test('memory without usable numbers makes no memory-storage widget', async ({ pa
       ipmi: null,
     },
   });
+  await page.addInitScript(() => localStorage.setItem('ccserver-sidebar-open', '1'));
   await page.goto('/');
 
   await expect(page.locator('.widget-card', {
@@ -676,6 +708,7 @@ test('partial memory renders placeholders instead of undefined', async ({ page }
       ipmi: null,
     },
   });
+  await page.addInitScript(() => localStorage.setItem('ccserver-sidebar-open', '1'));
   await page.goto('/');
 
   const memWidget = page.locator('.widget-card', {
@@ -703,6 +736,7 @@ test('storage rows with missing numbers are hidden', async ({ page }) => {
       ipmi: null,
     },
   });
+  await page.addInitScript(() => localStorage.setItem('ccserver-sidebar-open', '1'));
   await page.goto('/');
 
   const memWidget = page.locator('.widget-card', {
@@ -727,6 +761,7 @@ test('system filters unusable load values instead of showing 0.00/NaN', async ({
       ipmi: null,
     },
   });
+  await page.addInitScript(() => localStorage.setItem('ccserver-sidebar-open', '1'));
   await page.goto('/');
 
   const systemWidget = page.locator('.widget-card', {
@@ -753,6 +788,7 @@ test('system with only unusable values makes no widget', async ({ page }) => {
       ipmi: null,
     },
   });
+  await page.addInitScript(() => localStorage.setItem('ccserver-sidebar-open', '1'));
   await page.goto('/');
 
   await expect(page.locator('.widget-card', {
@@ -782,6 +818,7 @@ test('ipmi rows with missing values are hidden without crashing', async ({ page 
       },
     },
   });
+  await page.addInitScript(() => localStorage.setItem('ccserver-sidebar-open', '1'));
   await page.goto('/');
 
   await page.locator('.sidebar-header .btn', { hasText: '＋' }).click();
@@ -814,6 +851,7 @@ test('ipmi with only missing values makes no widget', async ({ page }) => {
       ipmi: { power: [{ label: 'PSU', value: null }] },
     },
   });
+  await page.addInitScript(() => localStorage.setItem('ccserver-sidebar-open', '1'));
   await page.goto('/');
 
   await page.locator('.sidebar-header .btn', { hasText: '＋' }).click();
@@ -830,6 +868,7 @@ test('ipmi with only missing values makes no widget', async ({ page }) => {
 test('off-option interval from storage shows fallback in sidebar control', async ({ page }) => {
   mockRoutes(page);
   // 選択肢外の値 (旧値・手編集値) で起動。normalizeIntervalは通す。
+  await page.addInitScript(() => localStorage.setItem('ccserver-sidebar-open', '1'));
   await page.addInitScript(() => localStorage.setItem('monitor-interval', '3000'));
   await page.goto('/');
 
@@ -839,6 +878,7 @@ test('off-option interval from storage shows fallback in sidebar control', async
 
 test('sidebar menus close on Escape and are mutually exclusive', async ({ page }) => {
   mockRoutes(page);
+  await page.addInitScript(() => localStorage.setItem('ccserver-sidebar-open', '1'));
   await page.goto('/');
 
   const intervalBtn = page.locator('.sidebar-header .btn[title="更新頻度"]');
@@ -866,6 +906,7 @@ test('slow responses do not pile up overlapping system-stats polls', async ({ pa
   let systemStatsHits = 0;
   // 応答2.5sに対し周期1s。旧コードは毎tick発行して並走する。
   mockRoutes(page, { systemStatsDelay: 2500, onSystemStats: () => { systemStatsHits += 1; } });
+  await page.addInitScript(() => localStorage.setItem('ccserver-sidebar-open', '1'));
   await page.addInitScript(() => localStorage.setItem('monitor-interval', '1000'));
   await page.goto('/');
 

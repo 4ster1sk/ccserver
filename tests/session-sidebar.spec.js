@@ -117,8 +117,8 @@ test('settings select switches mode and persists', async ({ page }) => {
 test('session overlay is independent from widget overlay', async ({ page }) => {
   await gotoApp(page);
   await page.evaluate(() => {
-    localStorage.removeItem('ccserver-sidebar-overlay');
-    localStorage.removeItem('ccserver-session-sidebar-overlay');
+    localStorage.setItem('ccserver-sidebar-overlay', '0');
+    localStorage.setItem('ccserver-session-sidebar-overlay', '0');
   });
   await page.reload();
   await expect(openTerminalBtn(page)).toBeVisible();
@@ -139,7 +139,7 @@ test('session overlay is independent from widget overlay', async ({ page }) => {
   await expect.poll(() => page.evaluate(() => localStorage.getItem('ccserver-session-sidebar-overlay'))).toBe('1');
   await expect(page.locator('.main-row')).toHaveClass(/session-overlay/);
   await expect(page.locator('.main-row')).not.toHaveClass(/sidebar-overlay/);
-  expect(await page.evaluate(() => localStorage.getItem('ccserver-sidebar-overlay'))).toBeNull();
+  expect(await page.evaluate(() => localStorage.getItem('ccserver-sidebar-overlay'))).toBe('0');
   // 開き直しても表示され、前面に重なる (absolute配置)。
   await page.getByRole('button', { name: 'セッションサイドバーを開く' }).click();
   await expect(leftSidebar(page)).toBeVisible();
