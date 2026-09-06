@@ -22,6 +22,9 @@ async function openShellTab(page) {
   await page.locator('.tab-list .tab-item', { hasText: 'Files' }).click();
   await openTerminalBtn(page).click();
   await expect(tabToggleBadge(page)).toHaveText('1');
+  // pty確立 (サーバー側セッション生成) を待つ。直後にタブを閉じる手順では、
+  // 確立前に閉じるとサーバーにセッションが残らず下段が空になる競合を避ける。
+  await expect(page.locator('.terminal-container .xterm-rows')).toContainText(/[$#%>]/, { timeout: 15_000 });
 }
 
 async function closeAllUpperSidebar(page) {
@@ -154,4 +157,104 @@ test('session overlay is independent from widget overlay', async ({ page }) => {
   await expect(page.locator('.main-row')).toHaveClass(/sidebar-overlay/);
   await expect(page.locator('.main-row')).not.toHaveClass(/session-overlay/);
   expect(await page.evaluate(() => localStorage.getItem('ccserver-session-sidebar-overlay'))).toBe('0');
+});
+
+test('overlay時は選択で閉じる (上段・下段とも)', async ({ page }) => {
+  await page.addInitScript((k) => localStorage.setItem(k, '1'), SKIP_KEY);
+  await page.addInitScript(() => localStorage.setItem('ccserver-session-sidebar-overlay', '1'));
+  await gotoApp(page);
+  await expect(page.locator('.main-row')).toHaveClass(/session-overlay/);
+  // overlay中はパネルがCLI側を覆うため、タブ起動の間は閉じておく。
+  await sessionToggle(page).click();
+  await expect(leftSidebar(page)).toBeHidden();
+  await openShellTab(page);
+  await page.getByRole('button', { name: 'セッションサイドバーを開く' }).click();
+  await expect(leftSidebar(page)).toBeVisible();
+
+  // 上段選択で閉じる。
+  await openedItems(page).first().locator('.session-menu-select').click();
+  await expect(page.locator('.terminal-container')).toBeVisible();
+  await expect(leftSidebar(page)).toBeHidden();
+  await expect.poll(() => page.evaluate(() => localStorage.getItem('ccserver-session-sidebar-open'))).toBe('0');
+
+  // 開き直してタブを閉じると下段に移る。下段選択でも閉じる。
+  await page.getByRole('button', { name: 'セッションサイドバーを開く' }).click();
+  await openedItems(page).first().locator('.session-menu-close').click();
+  await expect(unopenedItems(page)).toHaveCount(1, { timeout: 10_000 });
+  await unopenedItems(page).first().locator('.session-menu-select').click();
+  await expect(page.locator('.terminal-container')).toBeVisible();
+  await expect(leftSidebar(page)).toBeHidden();
+
+  // Cleanup: 開き直してタブを閉じ、残った稼働セッションを終了する。
+  await page.getByRole('button', { name: 'セッションサイドバーを開く' }).click();
+  await closeAllUpperSidebar(page);
+  await terminateAllLowerSidebar(page);
+});
+
+test('in-flowでは下段選択でも開いたまま', async ({ page }) => {
+  await page.addInitScript((k) => localStorage.setItem(k, '1'), SKIP_KEY);
+  await gotoApp(page);
+  await expect(page.locator('.main-row')).not.toHaveClass(/session-overlay/);
+  await openShellTab(page);
+
+  await openedItems(page).first().locator('.session-menu-close').click();
+  await expect(unopenedItems(page)).toHaveCount(1, { timeout: 10_000 });
+  await unopenedItems(page).first().locator('.session-menu-select').click();
+  await expect(page.locator('.terminal-container')).toBeVisible();
+  await expect(leftSidebar(page)).toBeVisible();
+
+  await closeAllUpperSidebar(page);
+  await terminateAllLowerSidebar(page);
+});
+
+test('狭幅では重ねOFFでも選択で閉じる', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.addInitScript((k) => localStorage.setItem(k, '1'), SKIP_KEY);
+  await gotoApp(page);
+  // 狭幅の初回は閉じた状態で始まる。先にタブを開いてから (backdropに
+  // 塞がれる前に) サイドバーを開け、選択で閉じることを確認する。
+  await expect(leftSidebar(page)).toBeHidden();
+  await openShellTab(page);
+  await page.getByRole('button', { name: 'セッションサイドバーを開く' }).click();
+  await expect(leftSidebar(page)).toBeVisible();
+  await openedItems(page).first().locator('.session-menu-select').click();
+  await expect(page.locator('.terminal-container')).toBeVisible();
+  await expect(leftSidebar(page)).toBeHidden();
+
+  await page.getByRole('button', { name: 'セッションサイドバーを開く' }).click();
+  await closeAllUpperSidebar(page);
+  await terminateAllLowerSidebar(page);
+});
+
+test('overlay時はグループ再オープンでも閉じる', async ({ page }) => {
+  await page.addInitScript((k) => localStorage.setItem(k, '1'), SKIP_KEY);
+  await page.addInitScript(() => localStorage.setItem('ccserver-session-sidebar-overlay', '1'));
+  // エージェント不要のスタブグループで再オープン経路を検証する。
+  await page.route('**/api/groups', async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        groups: [{ groupId: 'group-stub-1', cwd: '/tmp/stub-proj', createdAt: Date.now(), memberCount: 3, liveCount: 2 }],
+      }),
+    });
+  });
+  await page.route('**/api/groups/group-stub-1', async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ groupId: 'group-stub-1', cwd: '/tmp/stub-proj', members: [] }),
+    });
+  });
+  await gotoApp(page);
+  await expect(page.locator('.main-row')).toHaveClass(/session-overlay/);
+
+  const groupItem = page.locator('.left-sidebar [data-section="unopened-groups"] .session-menu-item', { hasText: 'stub-proj' });
+  await expect(groupItem).toBeVisible({ timeout: 15_000 });
+  await groupItem.locator('.session-menu-select').click();
+  // 自動クローズで閉じる。開き直すと、上段にグループ親行がある
+  // (水平.tab-itemには出ない)。
+  await expect(leftSidebar(page)).toBeHidden();
+  await page.getByRole('button', { name: 'セッションサイドバーを開く' }).click();
+  await expect(page.locator('.left-sidebar [data-section="opened"] .session-menu-item[data-tab-type="group"]', { hasText: 'stub-proj' })).toBeVisible({ timeout: 15_000 });
 });

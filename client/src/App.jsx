@@ -15,6 +15,7 @@ import RightSidebar, { WIDGET_DEFS, MONITOR_WIDGET_IDS } from './components/Righ
 import { SystemStatsProvider } from './components/widgets/SystemStatsProvider.jsx';
 import { useWidgetPrefs } from './hooks/useWidgetPrefs.js';
 import { useSessionSidebarPrefs } from './hooks/useSessionSidebarPrefs.js';
+import { NARROW_DRAWER_QUERY } from './hooks/useViewport.js';
 import { useNotifications } from './hooks/useNotifications.js';
 import { loadNavGuardMode, saveNavGuardMode, useNavGuard } from './hooks/useNavGuard.js';
 import { authFetch } from './auth.js';
@@ -542,25 +543,42 @@ export default function App() {
   const toggleSessionMenu = useCallback(() => {
     setSessionMenuOpen((v) => !v);
   }, []);
-  // ポップアップは選択で閉じる。サイドバーは常時表示のため閉じない
-  // (右ウィジェットと同一方針)。
+  // サイドバー表示中に開く操作をした際、重ね表示のときだけ閉じる。
+  // in-flow表示はCLIをリサイズ済みのため開いたままにする。重ね表示とは
+  // 設定ONのデスクトップオーバーレイと、狭幅ドロワー (NARROW_DRAWER_QUERY・
+  // 常時前面) の両方を指す。狭幅判定はクリック時に都度行う (リサイズ対応の
+  // ため購読はしない)。
+  const closeSessionSidebarIfOverlay = useCallback(() => {
+    if (sessionSidebarPrefs.overlay) {
+      sessionSidebarPrefs.setOpen(false);
+      return;
+    }
+    if (typeof window !== 'undefined' && window.matchMedia?.(NARROW_DRAWER_QUERY).matches) {
+      sessionSidebarPrefs.setOpen(false);
+    }
+  }, [sessionSidebarPrefs.overlay, sessionSidebarPrefs.setOpen]);
+  // ポップアップは選択で閉じる。サイドバーは重ね表示のときだけ閉じ、
+  // in-flow表示では常時表示のため閉じない (ターミナルタブとグループタブ共通)。
   const handleSelectSessionTab = useCallback((tabId) => {
     setActiveTabId(tabId);
     if (sessionSidebarPrefs.mode !== 'sidebar') setSessionMenuOpen(false);
-  }, [sessionSidebarPrefs.mode]);
+    else closeSessionSidebarIfOverlay();
+  }, [sessionSidebarPrefs.mode, closeSessionSidebarIfOverlay]);
   const handleCloseSessionTab = useCallback((tabId) => {
     handleCloseTab(tabId);
   }, [handleCloseTab]);
   const handleOpenUnopenedSession = useCallback((session) => {
     if (sessionSidebarPrefs.mode !== 'sidebar') setSessionMenuOpen(false);
+    else closeSessionSidebarIfOverlay();
     handleSessionClick(session);
-  }, [handleSessionClick, sessionSidebarPrefs.mode]);
+  }, [handleSessionClick, sessionSidebarPrefs.mode, closeSessionSidebarIfOverlay]);
   // グループ再オープン (Files画面のGroups一覧から移設)。セッションと同様、
-  // ポップアップでは選択で閉じる。サイドバーは常時表示のため閉じない。
+  // ポップアップでは選択で閉じる。サイドバーは重ね表示のときだけ閉じる。
   const handleOpenGroupFromList = useCallback((groupId) => {
     if (sessionSidebarPrefs.mode !== 'sidebar') setSessionMenuOpen(false);
+    else closeSessionSidebarIfOverlay();
     handleOpenGroup(groupId);
-  }, [handleOpenGroup, sessionSidebarPrefs.mode]);
+  }, [handleOpenGroup, sessionSidebarPrefs.mode, closeSessionSidebarIfOverlay]);
   // Lower section's X: terminate the server-side session (tab close keeps
   // the session alive, so this is the only destructive action here).
   const handleTerminateUnopenedSession = useCallback(async (session) => {
