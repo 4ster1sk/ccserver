@@ -23,6 +23,7 @@ export default function SessionSidebar({
   onOpenGroup,
   customLabels,
   onRowContextMenu,
+  homeDir,
 }) {
   const listRef = useRef(null);
 
@@ -58,6 +59,7 @@ export default function SessionSidebar({
           onOpenGroup={onOpenGroup}
           customLabels={customLabels}
           onRowContextMenu={onRowContextMenu}
+          homeDir={homeDir}
         />
       </div>
     </aside>

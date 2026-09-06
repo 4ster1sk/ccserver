@@ -30,6 +30,7 @@ export default function SessionTabMenu({
   onOpenGroup,
   customLabels,
   onRowContextMenu,
+  homeDir,
 }) {
   const wrapRef = useRef(null);
   const menuRef = useRef(null);
@@ -89,6 +90,7 @@ export default function SessionTabMenu({
             onOpenGroup={onOpenGroup}
             customLabels={customLabels}
             onRowContextMenu={onRowContextMenu}
+            homeDir={homeDir}
           />
         </div>
       )}

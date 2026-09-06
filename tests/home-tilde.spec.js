@@ -4,10 +4,10 @@ import { join, basename } from 'node:path';
 import { test, expect } from '@playwright/test';
 
 // The display layer abbreviates $HOME as `~` (client/src/displayPath.js) in
-// the terminal title, while title attributes keep the raw full path. The
-// session list shows the basename with the raw path on hover. A session whose
-// cwd sits under $HOME must show as ~/... in the terminal header;
-// the /tmp-based specs (sandbox-resume etc.) stay on the raw path.
+// the terminal title and in the session list rows, while title attributes
+// keep the raw full path. A session whose cwd sits under $HOME must show as
+// ~/... in both places; the /tmp-based specs (sandbox-resume etc.) stay on
+// the raw path.
 
 async function openShell(page, cwd) {
   return page.evaluate(async (cwd) => {
@@ -56,15 +56,16 @@ test('$HOME paths keep the raw path on hover and show as ~ in the terminal title
     sessionId = await openShell(page, cwd);
 
     // Files画面の Active Sessions 一覧は撤去され、左セッション一覧の下段に
-    // 移設された。下段の行は basename 表示 + title 属性にフルパスを持つため、
+    // 移設された。下段の行は `~` 省略形のパス表示 + title 属性にフルパスを持つため、
     // title 属性 (cwd完全一致) で一意に特定する。
     await page.reload();
     const item = page.locator(`.left-sidebar [data-section="unopened"] .session-menu-item[title="${cwd}"]`);
     await expect(item).toBeVisible();
     // The raw full path stays available on hover (title attribute), and the
-    // visible row never shows the full path.
+    // visible row shows the `~`-abbreviated directory path (never the raw
+    // full path).
     await expect(item.locator('.session-menu-path')).toHaveAttribute('title', cwd);
-    await expect(item.locator('.session-menu-path')).toHaveText('project');
+    await expect(item.locator('.session-menu-path')).toHaveText(label);
     await expect(item.locator('.session-menu-path')).not.toHaveText(cwd);
 
     // Opening the session shows the abbreviated path in the terminal header.

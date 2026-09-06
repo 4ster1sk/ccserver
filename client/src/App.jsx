@@ -96,6 +96,9 @@ export default function App() {
   // exists, so a missing claude hides the button regardless of showUsage.
   const [usagePrefs, setUsagePrefs] = useState({ showUsage: true, availableApps: null, hiddenApps: [] });
   const [metaAgentDir, setMetaAgentDir] = useState(null);
+  // $HOME from /api/dirs/home, only for display: `displayPath` turns the
+  // prefix into `~` in the session list rows (raw paths stay in `title`).
+  const [homeDir, setHomeDir] = useState(null);
 
   useEffect(() => {
     applyThemeCss(themeId);
@@ -121,6 +124,7 @@ export default function App() {
           hiddenApps: Array.isArray(data.hiddenApps) ? data.hiddenApps : [],
         });
         if (data.metaAgentDir) setMetaAgentDir(data.metaAgentDir);
+        if (data.home) setHomeDir(data.home);
       })
       .catch(() => {});
   }, []);
@@ -782,6 +786,7 @@ export default function App() {
             onOpenGroup={handleOpenGroupFromList}
             customLabels={labelBySessionId}
             onRowContextMenu={handleRowContextMenu}
+            homeDir={homeDir}
           />
         ) : (
           <button
@@ -865,6 +870,7 @@ export default function App() {
           onOpenGroup={handleOpenGroupFromList}
           customLabels={labelBySessionId}
           onRowContextMenu={handleRowContextMenu}
+          homeDir={homeDir}
         />
       )}
       <div className="tab-content">

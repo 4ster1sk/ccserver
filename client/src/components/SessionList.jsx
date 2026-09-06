@@ -1,4 +1,5 @@
 import TabIcon from './TabIcon.jsx';
+import { displayPath } from '../displayPath.js';
 
 export function baseName(path) {
   if (!path) return '';
@@ -32,6 +33,7 @@ export default function SessionList({
   onRowContextMenu,
   unopenedGroups,
   onOpenGroup,
+  homeDir,
 }) {
   const handleRowContextMenu = (e, id, currentLabel) => {
     if (!id || !onRowContextMenu) return;
@@ -82,7 +84,7 @@ export default function SessionList({
                     {tab.sandbox && <span className="session-badge sandbox">sandbox</span>}
                   </span>
                   <span className="session-menu-status">
-                    {tab.cwd && <span className="session-menu-path" title={tab.cwd}>{baseName(tab.cwd)}</span>}
+                    {tab.cwd && <span className="session-menu-path" title={tab.cwd}>{displayPath(tab.cwd, homeDir)}</span>}
                     <span className="session-menu-state">{statusText}</span>
                   </span>
                 </button>
@@ -127,7 +129,7 @@ export default function SessionList({
                     )}
                   </span>
                   <span className="session-menu-status">
-                    {tab.cwd && <span className="session-menu-path" title={tab.cwd}>{baseName(tab.cwd)}</span>}
+                    {tab.cwd && <span className="session-menu-path" title={tab.cwd}>{displayPath(tab.cwd, homeDir)}</span>}
                     <span className="session-menu-state">{statusText}</span>
                   </span>
                 </button>
@@ -173,7 +175,7 @@ export default function SessionList({
                     : (!s.shell ? <span className="session-badge no-sandbox">no sandbox</span> : null)}
                 </span>
                 <span className="session-menu-status">
-                  {s.cwd && <span className="session-menu-path" title={s.cwd}>{baseName(s.cwd)}</span>}
+                  {s.cwd && <span className="session-menu-path" title={s.cwd}>{displayPath(s.cwd, homeDir)}</span>}
                   <span className="session-menu-state">{appLabel(s)}</span>
                 </span>
               </button>
@@ -218,7 +220,7 @@ export default function SessionList({
                     <span className="session-menu-label">{dirName}</span>
                   </span>
                   <span className="session-menu-status">
-                    {g.cwd && <span className="session-menu-path" title={g.cwd}>{baseName(g.cwd)}</span>}
+                    {g.cwd && <span className="session-menu-path" title={g.cwd}>{displayPath(g.cwd, homeDir)}</span>}
                     <span className="session-menu-state">{liveText}</span>
                   </span>
                 </button>
