@@ -1,6 +1,5 @@
 import { useState, useCallback, useRef, useEffect, lazy, Suspense } from 'react';
 import DirectoryBrowser from './components/DirectoryBrowser.jsx';
-import SystemMonitor from './components/SystemMonitor.jsx';
 import SettingsView from './components/SettingsView.jsx';
 import ApprovalBanner from './components/ApprovalBanner.jsx';
 import PairingRequestBanner from './components/PairingRequestBanner.jsx';
@@ -23,7 +22,6 @@ let tabIdCounter = 0;
 export default function App() {
   const [tabs, setTabs] = useState([
     { id: 'browser', type: 'browser', label: 'Files' },
-    { id: 'monitor', type: 'monitor', label: 'Monitor' },
     { id: 'remote', type: 'remote', label: 'Remote' },
   ]);
   const [activeTabId, setActiveTabId] = useState('browser');
@@ -474,7 +472,7 @@ export default function App() {
   const sidebarPrefs = useWidgetPrefs(WIDGET_DEFS);
   const monitorWidgetsVisible = sidebarPrefs.open
     && sidebarPrefs.visibleWidgets.some((w) => MONITOR_WIDGET_IDS.includes(w.id));
-  const statsActive = monitorWidgetsVisible || activeTabId === 'monitor';
+  const statsActive = monitorWidgetsVisible;
   const usageWidgetProps = { hidden: usageHidden, defaultApp: usageDefaultApp, availableApps: usagePrefs.availableApps, hiddenApps: usagePrefs.hiddenApps };
 
   return (
@@ -505,7 +503,7 @@ export default function App() {
               )}
               {tab.type === 'terminal' && tab.remote && <span className="tab-remote-badge" title={`接続先: ${tab.remote.label} (${tab.remote.instanceId.slice(0, 8)})`}>⇄ {tab.remote.label}</span>}
             </span>
-            {tab.type !== 'browser' && tab.type !== 'monitor' && tab.type !== 'remote' && (
+            {tab.type !== 'browser' && tab.type !== 'remote' && (
               <button
                 className="tab-close"
                 onClick={(e) => {
@@ -538,9 +536,6 @@ export default function App() {
       <div className="tab-content">
         <div style={{ display: activeTabId === 'browser' ? 'flex' : 'none', height: '100%', flexDirection: 'column' }}>
           <DirectoryBrowser onOpen={handleOpen} onOpenShell={handleOpenShell} onOpenCombo={handleOpenCombo} onOpenGroup={handleOpenGroup} onSessionClick={handleSessionClick} onOpenSettings={openSettingsTab} initialPath={lastDir} groupsVersion={groupsVersion} metaAgentDir={metaAgentDir} onOpenMeta={handleOpenMeta} />
-        </div>
-        <div style={{ display: activeTabId === 'monitor' ? 'flex' : 'none', height: '100%', flexDirection: 'column' }}>
-          <SystemMonitor visible={activeTabId === 'monitor'} />
         </div>
         <div style={{ display: activeTabId === 'remote' ? 'flex' : 'none', height: '100%', flexDirection: 'column', overflow: 'auto' }}>
           <RemoteInstanceView onOpenRemoteTerminal={openRemoteTerminalTab} visible={activeTabId === 'remote'} />

@@ -1,6 +1,6 @@
 export function formatUptime(seconds) {
   // 非有限値・負数は欠測として '—' 表示 (GpuCard の numOrNull 方針と一致)。
-  // SystemMonitor.jsx 側の呼び出しもこのガードで安全になる。
+  // 右サイドバー側の呼び出しもこのガードで安全になる。
   const n = numOrNull(seconds);
   if (n == null || n < 0) return '—';
   const s = Math.floor(n);

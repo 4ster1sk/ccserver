@@ -10,11 +10,11 @@ const modal = (page) => page.locator('.resume-overlay', { hasText: 'タブを閉
 
 async function openShellTab(page) {
   // The "Terminal" button lives in the Files/DirectoryBrowser tab. Closing a
-  // terminal tab activates an adjacent tab (Monitor), so re-activate Files first.
+  // terminal tab activates an adjacent tab (Remote), so re-activate Files first.
   await page.locator('.tab-item', { hasText: 'Files' }).click();
   const before = await closeButtons(page).count();
   await openTerminalBtn(page).click();
-  // A terminal tab has a close (×) button; Files/Monitor tabs do not.
+  // A terminal tab has a close (×) button; Files/Remote tabs do not.
   await expect(closeButtons(page)).toHaveCount(before + 1);
 }
 

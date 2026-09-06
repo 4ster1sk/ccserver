@@ -69,7 +69,6 @@ ccserver/
         │   ├── DirectoryBrowser.jsx
         │   ├── TerminalView.jsx    # 遅延ロード (初期バンドル削減)
         │   ├── UsageButton.jsx
-        │   ├── SystemMonitor.jsx
         │   └── ApprovalBanner.jsx  # メタエージェント承認待ちグローバルバナー (ポーリング)
         └── styles/
             └── app.css

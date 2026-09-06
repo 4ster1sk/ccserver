@@ -136,7 +136,7 @@ test('sidebar header has interval menu left of add button and no close button', 
   expect(await page.evaluate(() => localStorage.getItem('monitor-interval'))).toBe('1000');
 });
 
-test('sidebar interval menu persists and syncs with monitor tab', async ({ page }) => {
+test('sidebar interval menu persists across a reload', async ({ page }) => {
   mockRoutes(page);
   await page.goto('/');
 
@@ -146,9 +146,6 @@ test('sidebar interval menu persists and syncs with monitor tab', async ({ page 
   await page.locator('.sidebar-add-item', { hasText: '5秒' }).click();
   await expect(intervalBtn).toHaveText('5秒');
   expect(await page.evaluate(() => localStorage.getItem('monitor-interval'))).toBe('5000');
-  // Monitorタブ側のセレクトも同じ値を共有する（両置き）
-  const monitorValue = await page.locator('.system-monitor .monitor-interval-select').evaluate((el) => el.value);
-  expect(monitorValue).toBe('5000');
 
   await page.reload();
   await expect(page.locator('.sidebar-header .btn[title="更新頻度"]')).toHaveText('5秒');
@@ -224,7 +221,7 @@ test('hiding the system widget persists across a reload', async ({ page }) => {
   })).toBeVisible();
 });
 
-test('missing uptime/loadAvg neither crashes the monitor tab nor makes an empty system widget', async ({ page }) => {
+test('missing uptime/loadAvg makes no empty system widget', async ({ page }) => {
   mockRoutes(page, {
     systemStats: {
       cpu: { model: 'Test CPU', usage: { total: 25, cores: [20, 30] } },
@@ -244,17 +241,6 @@ test('missing uptime/loadAvg neither crashes the monitor tab nor makes an empty 
   await expect(page.locator('.widget-card', {
     has: page.locator('.widget-card-title', { hasText: 'CPU' }),
   })).toBeVisible();
-
-  // Monitorタブ: クラッシュせず '—' プレースホルダで表示される。
-  // 注: Monitorタブ自体は開かない。タブ内にはネイティブselectがあり、
-  // このsandboxのheadless-shellでは可視化でレンダラーが落ちるため
-  // (既知の環境制約、製品コードの問題ではない)。
-  // SystemMonitorはマウント済みなのでDOMテキストで検証できる。
-  // ガード前のコード (data.loadAvg.map) ならrender時に例外→画面全体が
-  // 壊れるため、サイドバーのCPU表示＋以下のテキスト検証で回帰を防ぐ。
-  const metaText = await page.locator('.system-monitor .monitor-meta').evaluate((el) => el.textContent);
-  expect(metaText).toContain('Uptime: —');
-  expect(metaText).toContain('Load: —');
 });
 
 test('partial cpu payload neither crashes nor makes an empty cpu widget', async ({ page }) => {
@@ -813,7 +799,7 @@ test('ipmi with only missing values makes no widget', async ({ page }) => {
   })).toBeVisible();
 });
 
-test('off-option interval from storage shows fallback in both controls', async ({ page }) => {
+test('off-option interval from storage shows fallback in sidebar control', async ({ page }) => {
   mockRoutes(page);
   // 選択肢外の値 (旧値・手編集値) で起動。normalizeIntervalは通す。
   await page.addInitScript(() => localStorage.setItem('monitor-interval', '3000'));
@@ -821,12 +807,6 @@ test('off-option interval from storage shows fallback in both controls', async (
 
   // サイドバー側はフォールバック表示
   await expect(page.locator('.sidebar-header .btn[title="更新頻度"]')).toHaveText('3s');
-  // Monitorタブ側のselectも空白にならずフォールバックoptionを選択する
-  // (タブ自体は開かない。要素はマウント済みなのでDOMで検証できる)
-  const selected = await page.locator('.system-monitor .monitor-interval-select').evaluate(
-    (el) => el.selectedOptions[0]?.textContent,
-  );
-  expect(selected).toBe('3s');
 });
 
 test('sidebar menus close on Escape and are mutually exclusive', async ({ page }) => {
