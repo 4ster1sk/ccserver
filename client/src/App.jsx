@@ -6,11 +6,13 @@ import PairingRequestBanner from './components/PairingRequestBanner.jsx';
 import UsageButton from './components/UsageButton.jsx';
 import TabIcon from './components/TabIcon.jsx';
 import SessionTabMenu from './components/SessionTabMenu.jsx';
+import SessionSidebar from './components/SessionSidebar.jsx';
 import GroupTabView from './components/GroupTabView.jsx';
 import RemoteInstanceView from './components/RemoteInstanceView.jsx';
 import RightSidebar, { WIDGET_DEFS, MONITOR_WIDGET_IDS } from './components/RightSidebar.jsx';
 import { SystemStatsProvider } from './components/widgets/SystemStatsProvider.jsx';
 import { useWidgetPrefs } from './hooks/useWidgetPrefs.js';
+import { useSessionSidebarPrefs } from './hooks/useSessionSidebarPrefs.js';
 import { useNotifications } from './hooks/useNotifications.js';
 import { authFetch } from './auth.js';
 import { getTheme, loadThemeId, saveThemeId, applyThemeCss } from './themes.js';
@@ -465,6 +467,11 @@ export default function App() {
 
   // Session hamburger menu: terminal tabs are listed vertically in the menu,
   // while browser/remote/settings + group (combo) tabs stay horizontal.
+  // 表示モードは設定で切替: 'popup' (従来のポップアップ) | 'sidebar' (既定・
+  // 右ウィジェットと同じ挙動の左常時表示パネル。開閉・重ね表示は右と別フラグ)。
+  const sessionSidebarPrefs = useSessionSidebarPrefs();
+  const sessionSidebarMode = sessionSidebarPrefs.mode;
+  const sessionSidebarOpen = sessionSidebarPrefs.open;
   const [sessionMenuOpen, setSessionMenuOpen] = useState(false);
   const [serverSessions, setServerSessions] = useState([]);
   const sessionsRefreshingRef = useRef(false);
@@ -493,28 +500,33 @@ export default function App() {
   // tabs全体ではなくセッション構成に影響する安定キーのみ監視する
   // (手番ポーリング等の無関係なsetTabsで/api/sessionsを叩かない)。
   const sessionTabsKey = tabs.map((t) => `${t.id}:${t.sessionId || ''}:${t.attachSessionId || ''}`).join(',');
+  // サイドバーモードではパネル開表示の間、ポップアップモードではメニュー開表示の間
+  // 一覧を更新する。タブ構成変化時も下段 (稼働中) との付け替えを反映する。
+  const sessionPanelOpen = sessionSidebarMode === 'sidebar' ? sessionSidebarOpen : sessionMenuOpen;
   useEffect(() => {
-    if (sessionMenuOpen) fetchServerSessions();
+    if (sessionPanelOpen) fetchServerSessions();
     // closing a tab moves its server-side session from the upper section
     // to the lower one while the menu stays open, so the list must refresh
     // on tab changes too.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sessionMenuOpen, fetchServerSessions, groupsVersion, sessionTabsKey]);
+  }, [sessionPanelOpen, sessionSidebarMode, fetchServerSessions, groupsVersion, sessionTabsKey]);
   const closeSessionMenu = useCallback(() => setSessionMenuOpen(false), []);
   const toggleSessionMenu = useCallback(() => {
     setSessionMenuOpen((v) => !v);
   }, []);
+  // ポップアップは選択で閉じる。サイドバーは常時表示のため閉じない
+  // (右ウィジェットと同一方針)。
   const handleSelectSessionTab = useCallback((tabId) => {
     setActiveTabId(tabId);
-    setSessionMenuOpen(false);
-  }, []);
+    if (sessionSidebarPrefs.mode !== 'sidebar') setSessionMenuOpen(false);
+  }, [sessionSidebarPrefs.mode]);
   const handleCloseSessionTab = useCallback((tabId) => {
     handleCloseTab(tabId);
   }, [handleCloseTab]);
   const handleOpenUnopenedSession = useCallback((session) => {
-    setSessionMenuOpen(false);
+    if (sessionSidebarPrefs.mode !== 'sidebar') setSessionMenuOpen(false);
     handleSessionClick(session);
-  }, [handleSessionClick]);
+  }, [handleSessionClick, sessionSidebarPrefs.mode]);
   // Lower section's X: terminate the server-side session (tab close keeps
   // the session alive, so this is the only destructive action here).
   const handleTerminateUnopenedSession = useCallback(async (session) => {
@@ -586,18 +598,34 @@ export default function App() {
           another ccserver instance can't be missed on any tab. */}
       <PairingRequestBanner />
       <div className="tab-bar">
-        <SessionTabMenu
-          open={sessionMenuOpen}
-          onToggle={toggleSessionMenu}
-          onClose={closeSessionMenu}
-          sessionTabs={sessionTabs}
-          activeTabId={activeTabId}
-          unopenedSessions={unopenedSessions}
-          onSelectTab={handleSelectSessionTab}
-          onCloseTab={handleCloseSessionTab}
-          onOpenSession={handleOpenUnopenedSession}
-          onTerminateSession={handleTerminateUnopenedSession}
-        />
+        {sessionSidebarMode === 'popup' ? (
+          <SessionTabMenu
+            open={sessionMenuOpen}
+            onToggle={toggleSessionMenu}
+            onClose={closeSessionMenu}
+            sessionTabs={sessionTabs}
+            activeTabId={activeTabId}
+            unopenedSessions={unopenedSessions}
+            onSelectTab={handleSelectSessionTab}
+            onCloseTab={handleCloseSessionTab}
+            onOpenSession={handleOpenUnopenedSession}
+            onTerminateSession={handleTerminateUnopenedSession}
+          />
+        ) : (
+          <button
+            type="button"
+            className="btn session-menu-btn"
+            onClick={() => sessionSidebarPrefs.setOpen(!sessionSidebarOpen)}
+            title={sessionTabs.length > 0 ? `セッション (${sessionTabs.length})` : 'セッション'}
+            aria-label={sessionSidebarOpen ? 'セッションサイドバーを閉じる' : 'セッションサイドバーを開く'}
+            aria-expanded={sessionSidebarOpen}
+          >
+            <span aria-hidden="true">☰</span>
+            {sessionTabs.length > 0 && (
+              <span className="session-menu-count" aria-hidden="true">{sessionTabs.length}</span>
+            )}
+          </button>
+        )}
         <div className="tab-list">
         {barTabs.map((tab) => (
           <div
@@ -645,7 +673,28 @@ export default function App() {
         </button>
       </div>
       <SystemStatsProvider active={statsActive}>
-      <div className={`main-row${sidebarPrefs.open ? ' sidebar-open' : ''}${sidebarPrefs.overlay ? ' sidebar-overlay' : ''}`}>
+      <div className={`main-row${sidebarPrefs.open ? ' sidebar-open' : ''}${sidebarPrefs.overlay ? ' sidebar-overlay' : ''}${sessionSidebarMode === 'sidebar' && sessionSidebarOpen ? ' session-open' : ''}${sessionSidebarMode === 'sidebar' && sessionSidebarPrefs.overlay ? ' session-overlay' : ''}`}>
+      {sessionSidebarMode === 'sidebar' && sessionSidebarOpen && (
+        <button
+          type="button"
+          className="session-backdrop"
+          aria-label="セッションサイドバーを閉じる"
+          tabIndex={-1}
+          onClick={() => sessionSidebarPrefs.setOpen(false)}
+        />
+      )}
+      {sessionSidebarMode === 'sidebar' && (
+        <SessionSidebar
+          open={sessionSidebarOpen}
+          sessionTabs={sessionTabs}
+          activeTabId={activeTabId}
+          unopenedSessions={unopenedSessions}
+          onSelectTab={handleSelectSessionTab}
+          onCloseTab={handleCloseSessionTab}
+          onOpenSession={handleOpenUnopenedSession}
+          onTerminateSession={handleTerminateUnopenedSession}
+        />
+      )}
       <div className="tab-content">
         <div style={{ display: activeTabId === 'browser' ? 'flex' : 'none', height: '100%', flexDirection: 'column' }}>
           <DirectoryBrowser onOpen={handleOpen} onOpenShell={handleOpenShell} onOpenCombo={handleOpenCombo} onOpenGroup={handleOpenGroup} onSessionClick={handleSessionClick} onOpenSettings={openSettingsTab} initialPath={lastDir} groupsVersion={groupsVersion} metaAgentDir={metaAgentDir} onOpenMeta={handleOpenMeta} sandboxDefaults={sandboxDefaults} />
@@ -662,6 +711,10 @@ export default function App() {
               onConfirmBeforeCloseChange={(v) => setSkipCloseConfirmPersisted(!v)}
               sidebarOverlay={sidebarPrefs.overlay}
               onSidebarOverlayChange={sidebarPrefs.setOverlay}
+              sessionMode={sessionSidebarPrefs.mode}
+              onSessionModeChange={sessionSidebarPrefs.setMode}
+              sessionOverlay={sessionSidebarPrefs.overlay}
+              onSessionOverlayChange={sessionSidebarPrefs.setOverlay}
               sandboxDefaults={sandboxDefaults}
               onSandboxDefaultsChange={setSandboxDefaultsPersisted}
             />

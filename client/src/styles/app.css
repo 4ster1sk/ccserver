@@ -919,6 +919,23 @@ body {
   min-height: 0;
 }
 
+/* Left session sidebar: RightSidebar の左右反転。in-flow時はCLIをリサイズし、
+   session-overlay時は前面に重ねる (右とは独立したフラグで制御)。 */
+.left-sidebar {
+  width: 300px;
+  flex-shrink: 0;
+  border-right: 1px solid var(--border);
+  background: var(--bg-secondary);
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.session-sidebar-list {
+  overflow-y: auto;
+}
+
 .sidebar-header {
   display: flex;
   align-items: center;
@@ -1102,6 +1119,21 @@ body {
   box-shadow: -8px 0 24px rgba(0, 0, 0, 0.35);
 }
 
+/* Left session overlay (sessionOverlay ON): 右と独立。閉じるのはタブバーの
+   トグルのみのため .main-row 内 absolute に留め、タブバーを覆わない。 */
+.main-row.session-overlay.session-open {
+  position: relative;
+}
+.main-row.session-overlay.session-open .left-sidebar {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: min(320px, 85vw);
+  z-index: 60;
+  box-shadow: 8px 0 24px rgba(0, 0, 0, 0.35);
+}
+
 @media (max-width: 900px) {
   .right-sidebar {
     position: fixed;
@@ -1112,6 +1144,15 @@ body {
     z-index: 60;
     box-shadow: -8px 0 24px rgba(0, 0, 0, 0.35);
   }
+  .left-sidebar {
+    position: fixed;
+    left: 0;
+    top: 0;
+    bottom: 0;
+    width: min(320px, 85vw);
+    z-index: 60;
+    box-shadow: 8px 0 24px rgba(0, 0, 0, 0.35);
+  }
 }
 
 /* 狭幅画面でサイドバーがオーバーレイ表示のとき、ウィジェット外
@@ -1121,8 +1162,25 @@ body {
   display: none;
 }
 
+/* 左セッション用のスクリム (右と独立。狭幅時のみ表示)。 */
+.session-backdrop {
+  display: none;
+}
+
 @media (max-width: 900px) {
   .sidebar-backdrop {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: 55;
+    background: rgba(0, 0, 0, 0.35);
+    border: none;
+    border-radius: 0;
+    padding: 0;
+    margin: 0;
+    cursor: default;
+  }
+  .session-backdrop {
     display: block;
     position: fixed;
     inset: 0;

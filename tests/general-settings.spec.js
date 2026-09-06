@@ -7,10 +7,15 @@ test.describe('Settings general section', () => {
     await page.goto('/');
     await expect(page.getByRole('button', { name: 'Terminal', exact: true })).toBeVisible();
     // localStorage を初期化してデフォルト状態から始める。
+    // popup前提: セッション表示の既定はサイドバーのため、従来popup挙動に
+    // 依存する本ファイルの検証では明示する (アサーション自体は不変)。
     await page.evaluate(() => {
       localStorage.removeItem('ccserver-theme');
       localStorage.removeItem('ccserver-skip-close-confirm');
       localStorage.removeItem('ccserver-sidebar-overlay');
+      localStorage.setItem('ccserver-session-mode', 'popup');
+      localStorage.removeItem('ccserver-session-sidebar-open');
+      localStorage.removeItem('ccserver-session-sidebar-overlay');
       localStorage.removeItem('ccserver-default-sandbox-gpg');
       localStorage.removeItem('ccserver-default-sandbox-ssh-agent');
       localStorage.removeItem('ccserver-default-sandbox-rtk');

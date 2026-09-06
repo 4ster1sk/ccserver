@@ -1,6 +1,11 @@
 import { test, expect } from '@playwright/test';
 
 const SKIP_KEY = 'ccserver-skip-close-confirm';
+// popup前提: 既定はサイドバーのため、従来popup挙動の検証では明示する
+// (アサーション自体は不変)。
+const usePopupMode = (page) => page.addInitScript(() => {
+  localStorage.setItem('ccserver-session-mode', 'popup');
+});
 const openTerminalBtn = (page) => page.getByRole('button', { name: 'Terminal', exact: true });
 const hamburger = (page) => page.getByRole('button', { name: 'セッション一覧メニュー' });
 const sessionMenu = (page) => page.locator('.session-menu');
@@ -45,6 +50,7 @@ async function closeAllUpper(page) {
 
 test('hamburger is always at the left end; shell tabs go to the vertical menu, not the tab bar', async ({ page }) => {
   await page.addInitScript((k) => localStorage.setItem(k, '1'), SKIP_KEY);
+  await usePopupMode(page);
   await gotoApp(page);
 
   // Hamburger is always visible at the left end of the tab bar.
@@ -88,6 +94,7 @@ test('hamburger is always at the left end; shell tabs go to the vertical menu, n
 
 test('menu supports keyboard operation: Enter selects, arrows move focus, Escape closes', async ({ page }) => {
   await page.addInitScript((k) => localStorage.setItem(k, '1'), SKIP_KEY);
+  await usePopupMode(page);
   await gotoApp(page);
 
   await page.locator('.tab-list .tab-item', { hasText: 'Files' }).click();
@@ -122,6 +129,7 @@ test('menu X closes the tab; unopened running session appears below and X termin
   // Deterministic close: skip the close-confirm modal (must be set before
   // the app mounts, since App reads it into state on first render).
   await page.addInitScript((k) => localStorage.setItem(k, '1'), SKIP_KEY);
+  await usePopupMode(page);
   await gotoApp(page);
 
   await page.locator('.tab-list .tab-item', { hasText: 'Files' }).click();

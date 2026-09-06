@@ -2,6 +2,12 @@ import { test, expect } from '@playwright/test';
 
 const SKIP_KEY = 'ccserver-skip-close-confirm';
 
+// popup前提: 既定はサイドバーのため、従来popup挙動の検証では明示する
+// (アサーション自体は不変)。
+const usePopupMode = (page) => page.addInitScript(() => {
+  localStorage.setItem('ccserver-session-mode', 'popup');
+});
+
 // Locators / helpers ---------------------------------------------------------
 // Session (terminal) tabs now live in the hamburger menu at the left end of
 // the tab bar, not in .tab-list. Files/Remote tabs stay horizontal.
@@ -42,6 +48,7 @@ async function gotoApp(page) {
 // Tests ----------------------------------------------------------------------
 
 test('running tab: modal shows, cancel keeps the tab, confirm closes it', async ({ page }) => {
+  await usePopupMode(page);
   await gotoApp(page);
   await openShellTab(page);
 
@@ -69,6 +76,7 @@ test('running tab: modal shows, cancel keeps the tab, confirm closes it', async 
 });
 
 test('"don\'t ask again" persists to localStorage and skips future confirms (incl. after reload)', async ({ page }) => {
+  await usePopupMode(page);
   await gotoApp(page);
   await openShellTab(page);
 
@@ -103,6 +111,7 @@ test('"don\'t ask again" persists to localStorage and skips future confirms (inc
 });
 
 test('exited tab closes without a confirm (skip not enabled)', async ({ page }) => {
+  await usePopupMode(page);
   await gotoApp(page);
   await openShellTab(page);
 
