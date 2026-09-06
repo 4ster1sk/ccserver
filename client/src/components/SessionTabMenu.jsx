@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useCallback } from 'react';
 import TabIcon from './TabIcon.jsx';
 
 function baseName(path) {
@@ -18,6 +18,10 @@ function appLabel(sessionOrTab) {
 // サーバー上で稼働中だが未オープンのセッションを下段に縦並びで表示する。
 // 開閉はウィジェット系 (RightSidebar / UsageButton) と同じ方式:
 // ラッパー ref による外側 mousedown で閉じる + Escape で閉じる。
+//
+// a11y: 行コンテナは role="none" の非対話要素とし、「選択」と「閉じる/終了」
+// を独立した button で提供する (menuitem 内に button を入れ子にしない)。
+// メニュー内の上下矢印キーでフォーカス移動できる。
 export default function SessionTabMenu({
   open,
   onToggle,
@@ -31,6 +35,7 @@ export default function SessionTabMenu({
   onTerminateSession,
 }) {
   const wrapRef = useRef(null);
+  const menuRef = useRef(null);
 
   useEffect(() => {
     if (!open) return;
@@ -47,6 +52,23 @@ export default function SessionTabMenu({
       document.removeEventListener('keydown', onKey);
     };
   }, [open, onClose]);
+
+  // メニュー内のボタン間を矢印キーで移動する (menu パターンのキーボード操作)。
+  const onMenuKeyDown = useCallback((e) => {
+    if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(e.key)) return;
+    const menu = menuRef.current;
+    if (!menu) return;
+    const buttons = [...menu.querySelectorAll('button.session-menu-select, button.session-menu-close')];
+    if (buttons.length === 0) return;
+    const idx = buttons.indexOf(document.activeElement);
+    e.preventDefault();
+    if (e.key === 'Home') { buttons[0].focus(); return; }
+    if (e.key === 'End') { buttons[buttons.length - 1].focus(); return; }
+    const next = e.key === 'ArrowDown'
+      ? buttons[(idx + 1 + buttons.length) % buttons.length]
+      : buttons[(idx - 1 + buttons.length) % buttons.length];
+    next.focus();
+  }, []);
 
   const openedCount = sessionTabs.length;
 
@@ -67,7 +89,7 @@ export default function SessionTabMenu({
         )}
       </button>
       {open && (
-        <div className="session-menu" role="menu" aria-label="セッション一覧">
+        <div className="session-menu" role="menu" aria-label="セッション一覧" ref={menuRef} onKeyDown={onMenuKeyDown}>
           <div className="session-menu-section" data-section="opened">
           <div className="session-menu-section-label">開いているセッション</div>
           {sessionTabs.length === 0 ? (
@@ -81,43 +103,40 @@ export default function SessionTabMenu({
               return (
                 <div
                   key={tab.id}
-                  role="menuitem"
-                  tabIndex={0}
+                  role="none"
                   className={`session-menu-item${isActive ? ' active' : ''} ${stateClass}${tab.type === 'terminal' && !tab.shell && !tab.sandbox ? ' no-sandbox' : ''}`}
                   title={tab.cwd || tab.label}
-                  aria-label={`${tab.exited ? '終了済み' : '稼働中'}: ${tab.label}`}
-                  onClick={() => { onSelectTab(tab.id); }}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onSelectTab(tab.id); }
-                  }}
                 >
-                  <span className="session-menu-item-top">
-                    <TabIcon type={tab.type} app={tab.app} shell={tab.shell} isMetaAgent={!!tab.isMetaAgent} />
-                    <span className="session-menu-label">{tab.label}</span>
-                    {tab.remote && (
-                      <span className="tab-remote-badge" title={`接続先: ${tab.remote.label}`}>⇄ {tab.remote.label}</span>
-                    )}
-                    <button
-                      type="button"
-                      className="tab-close session-menu-close"
-                      title="タブを閉じる"
-                      aria-label={`タブを閉じる: ${tab.label}`}
-                      onClick={(e) => { e.stopPropagation(); onCloseTab(tab.id); }}
-                      onKeyDown={(e) => {
-                        // 親 menuitem の選択動作 (Enter/Space) へのバブリングのみ止める。
-                        // Escape は document の keydown リスナに届けてメニューを閉じさせる。
-                        if (e.key === 'Enter' || e.key === ' ') e.stopPropagation();
-                      }}
-                    >
-                      &#10005;
-                    </button>
-                  </span>
-                  <span className="session-menu-status">
-                    {tab.cwd && <span className="session-menu-path" title={tab.cwd}>{baseName(tab.cwd)}</span>}
-                    <span className="session-menu-state">{statusText}</span>
-                    {!tab.shell && !tab.sandbox && <span className="session-badge no-sandbox">no sandbox</span>}
-                    {tab.sandbox && <span className="session-badge sandbox">sandbox</span>}
-                  </span>
+                  <button
+                    type="button"
+                    role="menuitem"
+                    className="session-menu-select"
+                    aria-label={`${tab.exited ? '終了済み' : '稼働中'}: ${tab.label}`}
+                    onClick={() => { onSelectTab(tab.id); }}
+                  >
+                    <span className="session-menu-item-top">
+                      <TabIcon type={tab.type} app={tab.app} shell={tab.shell} isMetaAgent={!!tab.isMetaAgent} />
+                      <span className="session-menu-label">{tab.label}</span>
+                      {tab.remote && (
+                        <span className="tab-remote-badge" title={`接続先: ${tab.remote.label}`}>⇄ {tab.remote.label}</span>
+                      )}
+                    </span>
+                    <span className="session-menu-status">
+                      {tab.cwd && <span className="session-menu-path" title={tab.cwd}>{baseName(tab.cwd)}</span>}
+                      <span className="session-menu-state">{statusText}</span>
+                      {!tab.shell && !tab.sandbox && <span className="session-badge no-sandbox">no sandbox</span>}
+                      {tab.sandbox && <span className="session-badge sandbox">sandbox</span>}
+                    </span>
+                  </button>
+                  <button
+                    type="button"
+                    className="tab-close session-menu-close"
+                    title="タブを閉じる"
+                    aria-label={`タブを閉じる: ${tab.label}`}
+                    onClick={() => { onCloseTab(tab.id); }}
+                  >
+                    &#10005;
+                  </button>
                 </div>
               );
             })
@@ -130,43 +149,40 @@ export default function SessionTabMenu({
               {unopenedSessions.map((s) => (
                 <div
                   key={s.id}
-                  role="menuitem"
-                  tabIndex={0}
+                  role="none"
                   className={`session-menu-item ${s.connected ? 'is-running' : 'is-idle'}`}
                   title={s.cwd || s.id}
-                  aria-label={`${s.connected ? '稼働中' : 'アイドル'}: ${s.cwd || s.id}`}
-                  onClick={() => { onOpenSession(s); }}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onOpenSession(s); }
-                  }}
                 >
-                  <span className="session-menu-item-top">
-                    <TabIcon type="terminal" app={s.app} shell={!!s.shell} isMetaAgent={!!s.isMetaAgent} />
-                    <span className="session-menu-label">{baseName(s.cwd) || s.id.slice(0, 8)}</span>
-                    <button
-                      type="button"
-                      className="tab-close session-menu-close"
-                      title="セッションを終了する"
-                      aria-label={`セッションを終了する: ${s.cwd || s.id}`}
-                      onClick={(e) => { e.stopPropagation(); onTerminateSession(s); }}
-                      onKeyDown={(e) => {
-                        // 親 menuitem の選択動作 (Enter/Space) へのバブリングのみ止める。
-                        // Escape は document の keydown リスナに届けてメニューを閉じさせる。
-                        if (e.key === 'Enter' || e.key === ' ') e.stopPropagation();
-                      }}
-                    >
-                      &#10005;
-                    </button>
-                  </span>
-                  <span className="session-menu-status">
-                    {s.cwd && <span className="session-menu-path" title={s.cwd}>{s.cwd}</span>}
-                    <span className="session-menu-state">
-                      {s.shell ? `shell · ${s.connected ? 'connected' : 'idle'}` : `${appLabel(s)} · ${s.connected ? 'connected' : 'idle'}`}
+                  <button
+                    type="button"
+                    role="menuitem"
+                    className="session-menu-select"
+                    aria-label={`${s.connected ? '稼働中' : 'アイドル'}: ${s.cwd || s.id}`}
+                    onClick={() => { onOpenSession(s); }}
+                  >
+                    <span className="session-menu-item-top">
+                      <TabIcon type="terminal" app={s.app} shell={!!s.shell} isMetaAgent={!!s.isMetaAgent} />
+                      <span className="session-menu-label">{baseName(s.cwd) || s.id.slice(0, 8)}</span>
                     </span>
-                    {s.sandbox
-                      ? <span className="session-badge sandbox">sandbox</span>
-                      : (!s.shell ? <span className="session-badge no-sandbox">no sandbox</span> : null)}
-                  </span>
+                    <span className="session-menu-status">
+                      {s.cwd && <span className="session-menu-path" title={s.cwd}>{baseName(s.cwd)}</span>}
+                      <span className="session-menu-state">
+                        {s.shell ? `shell · ${s.connected ? 'connected' : 'idle'}` : `${appLabel(s)} · ${s.connected ? 'connected' : 'idle'}`}
+                      </span>
+                      {s.sandbox
+                        ? <span className="session-badge sandbox">sandbox</span>
+                        : (!s.shell ? <span className="session-badge no-sandbox">no sandbox</span> : null)}
+                    </span>
+                  </button>
+                  <button
+                    type="button"
+                    className="tab-close session-menu-close"
+                    title="セッションを終了する"
+                    aria-label={`セッションを終了する: ${s.cwd || s.id}`}
+                    onClick={() => { onTerminateSession(s); }}
+                  >
+                    &#10005;
+                  </button>
                 </div>
               ))}
             </div>

@@ -468,8 +468,9 @@ export default function App() {
   const [sessionMenuOpen, setSessionMenuOpen] = useState(false);
   const [serverSessions, setServerSessions] = useState([]);
   const sessionsRefreshingRef = useRef(false);
+  const sessionsRefreshQueuedRef = useRef(false);
   const fetchServerSessions = useCallback(async () => {
-    if (sessionsRefreshingRef.current) return;
+    if (sessionsRefreshingRef.current) { sessionsRefreshQueuedRef.current = true; return; }
     sessionsRefreshingRef.current = true;
     try {
       const res = await authFetch('/api/sessions');
@@ -483,15 +484,22 @@ export default function App() {
       // supplementary panel: keep the last-known list on failure
     } finally {
       sessionsRefreshingRef.current = false;
+      if (sessionsRefreshQueuedRef.current) {
+        sessionsRefreshQueuedRef.current = false;
+        fetchServerSessions();
+      }
     }
   }, []);
+  // tabs全体ではなくセッション構成に影響する安定キーのみ監視する
+  // (手番ポーリング等の無関係なsetTabsで/api/sessionsを叩かない)。
+  const sessionTabsKey = tabs.map((t) => `${t.id}:${t.sessionId || ''}:${t.attachSessionId || ''}`).join(',');
   useEffect(() => {
     if (sessionMenuOpen) fetchServerSessions();
-    // tabs is intentionally included: closing a tab moves its server-side
-    // session from the upper section to the lower one while the menu stays
-    // open, so the list must refresh on tab changes too.
+    // closing a tab moves its server-side session from the upper section
+    // to the lower one while the menu stays open, so the list must refresh
+    // on tab changes too.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sessionMenuOpen, fetchServerSessions, groupsVersion, tabs]);
+  }, [sessionMenuOpen, fetchServerSessions, groupsVersion, sessionTabsKey]);
   const closeSessionMenu = useCallback(() => setSessionMenuOpen(false), []);
   const toggleSessionMenu = useCallback(() => {
     setSessionMenuOpen((v) => !v);

@@ -77,7 +77,39 @@ test('hamburger is always at the left end; shell tabs go to the vertical menu, n
   await expect(items.first().getByText(/shell · connected/)).toBeVisible();
 
   // Selecting the item activates the terminal and closes the menu.
-  await items.first().click();
+  await items.first().locator('.session-menu-select').click();
+  await expect(sessionMenu(page)).toBeHidden();
+  await expect(page.locator('.terminal-container')).toBeVisible();
+
+  // Cleanup: close the tab, then terminate the leftover server session.
+  await closeAllUpper(page);
+  await terminateAllLower(page);
+});
+
+test('menu supports keyboard operation: Enter selects, arrows move focus, Escape closes', async ({ page }) => {
+  await page.addInitScript((k) => localStorage.setItem(k, '1'), SKIP_KEY);
+  await gotoApp(page);
+
+  await page.locator('.tab-list .tab-item', { hasText: 'Files' }).click();
+  await openTerminalBtn(page).click();
+  await expect(page.locator('.session-menu-count')).toHaveText('1');
+
+  await hamburger(page).click();
+  const select = sessionMenu(page).locator('[data-section="opened"] .session-menu-select').first();
+  await select.focus();
+  await expect(select).toBeFocused();
+
+  // ArrowDown moves focus to the row's close button (next control in the menu).
+  await page.keyboard.press('ArrowDown');
+  const closeBtn = sessionMenu(page).locator('[data-section="opened"] .session-menu-close').first();
+  await expect(closeBtn).toBeFocused();
+
+  // ArrowUp moves focus back to the select button.
+  await page.keyboard.press('ArrowUp');
+  await expect(select).toBeFocused();
+
+  // Enter on the select button activates the terminal and closes the menu.
+  await page.keyboard.press('Enter');
   await expect(sessionMenu(page)).toBeHidden();
   await expect(page.locator('.terminal-container')).toBeVisible();
 

@@ -296,14 +296,53 @@ body {
 }
 
 .session-menu-item {
+  position: relative;
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 8px 6px 12px;
+  border-radius: 6px;
+  min-width: 0;
+}
+
+/* Row select button: a11y-wise the menuitem itself (the row container is
+   role="none" so it never nests interactive elements). Resets native button
+   chrome and behaves like the previous clickable row. */
+.session-menu-select {
+  flex: 1 1 auto;
+  min-width: 0;
   display: flex;
   flex-direction: column;
   gap: 2px;
-  padding: 6px 8px 6px 10px;
-  border-radius: 6px;
-  border-left: 3px solid transparent;
+  background: none;
+  border: none;
+  padding: 0;
+  margin: 0;
+  font: inherit;
+  color: inherit;
+  text-align: left;
   cursor: pointer;
-  min-width: 0;
+  border-radius: 4px;
+}
+
+.session-menu-select:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* Status line: a pure straight vertical line drawn with ::before instead of
+   border-left, so the item's border-radius never curves it. Slightly inset
+   (top/bottom offset) for a short indicator look. */
+.session-menu-item::before {
+  content: '';
+  position: absolute;
+  left: 3px;
+  top: 7px;
+  bottom: 7px;
+  width: 3px;
+  border-radius: 0;
+  background: transparent;
 }
 
 .session-menu-item:hover {
@@ -315,16 +354,19 @@ body {
   outline: 1px solid var(--accent);
 }
 
-.session-menu-item.is-running {
-  border-left-color: var(--success);
+.session-menu-item.is-running::before {
+  background: var(--success);
 }
 
-.session-menu-item.is-idle {
-  border-left-color: var(--warning);
+.session-menu-item.is-idle::before {
+  background: var(--warning);
+}
+
+.session-menu-item.is-exited::before {
+  background: var(--text-muted);
 }
 
 .session-menu-item.is-exited {
-  border-left-color: var(--text-muted);
   opacity: 0.6;
 }
 
@@ -346,7 +388,8 @@ body {
 }
 
 .session-menu-close {
-  margin-left: auto;
+  align-self: center;
+  flex-shrink: 0;
 }
 
 .session-menu-status {
