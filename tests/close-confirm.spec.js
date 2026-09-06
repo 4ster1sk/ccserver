@@ -41,7 +41,7 @@ test('running tab: modal shows, cancel keeps the tab, confirm closes it', async 
   // Confirm (without checking the box) closes the tab and does NOT persist skip.
   await closeButtons(page).first().click();
   await expect(modal(page)).toBeVisible();
-  await page.getByRole('button', { name: '閉じる' }).click();
+  await modal(page).getByRole('button', { name: '閉じる', exact: true }).click();
   await expect(modal(page)).toBeHidden();
   await expect(closeButtons(page)).toHaveCount(0);
 
@@ -57,7 +57,7 @@ test('"don\'t ask again" persists to localStorage and skips future confirms (inc
   await closeButtons(page).first().click();
   await expect(modal(page)).toBeVisible();
   await page.locator('.close-confirm-checkbox input[type="checkbox"]').check();
-  await page.getByRole('button', { name: '閉じる' }).click();
+  await modal(page).getByRole('button', { name: '閉じる', exact: true }).click();
   await expect(closeButtons(page)).toHaveCount(0);
 
   // Preference persisted.
