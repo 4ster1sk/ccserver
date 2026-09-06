@@ -112,7 +112,8 @@ test('sidebar header has interval menu left of add button and no close button', 
   mockRoutes(page);
   await page.goto('/');
 
-  const header = page.locator('.sidebar-header');
+  // 右ヘッダーに限定 (左セッションサイドバーも .sidebar-header を持つため)。
+  const header = page.locator('.right-sidebar .sidebar-header');
   await expect(header).toBeVisible();
   // Widgetsヘッダー内の ▶（閉じるボタン）は廃止。開閉はタブバーのトグルで行う。
   await expect(header.locator('.btn', { hasText: '▶' })).toHaveCount(0);

@@ -58,9 +58,10 @@ function loadComboApps() {
 // override at launch. `tools` (rtk / code-review-graph) provisions the tool
 // into the sandbox HOME at launch instead of installing it on the host.
 // 記憶が無い場合の初期値は Settings > 一般のグローバル既定値
-// (client/src/sandboxDefaults.js) を使う。gpg/sshAgent は既定オフ、
-// rtk / code-review-graph は既定オンが初期値; a stored explicit false
-// turns them back off for that directory.
+// (client/src/sandboxDefaults.js) を使う。gpg/sshAgent は既定オフ。
+// tools (rtk / code-review-graph) もキー不在時はグローバル既定値に
+// フォールバックする (旧形式の記憶には tools が無いため); a stored
+// explicit false turns them back off for that directory.
 export function hasSandboxOptsMemory(path) {
   try {
     return localStorage.getItem(SANDBOX_OPTS_PREFIX + path) !== null;
@@ -73,12 +74,16 @@ function loadSandboxOpts(path, globalDefaults) {
     const raw = localStorage.getItem(SANDBOX_OPTS_PREFIX + path);
     if (raw) {
       const parsed = JSON.parse(raw);
+      // 旧形式の記憶 ({gpg, sshAgent} のみ) では tools キーが不在。
+      // 不在 = 未選択なので一律 true にせずグローバル既定値にフォールバックする
+      // (明示保存された true/false は引き続き尊重される)。
+      const fallbackTools = defaultSandboxOpts(globalDefaults || loadSandboxDefaults()).tools;
       return {
         gpg: !!parsed.gpg,
         sshAgent: !!parsed.sshAgent,
         tools: {
-          rtk: parsed.tools?.rtk !== false,
-          codeReviewGraph: parsed.tools?.codeReviewGraph !== false,
+          rtk: parsed.tools?.rtk ?? fallbackTools.rtk,
+          codeReviewGraph: parsed.tools?.codeReviewGraph ?? fallbackTools.codeReviewGraph,
         },
       };
     }

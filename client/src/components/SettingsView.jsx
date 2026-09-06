@@ -19,6 +19,10 @@ export default function SettingsView({
   onConfirmBeforeCloseChange,
   sidebarOverlay,
   onSidebarOverlayChange,
+  sessionMode,
+  onSessionModeChange,
+  sessionOverlay,
+  onSessionOverlayChange,
   sandboxDefaults,
   onSandboxDefaultsChange,
 }) {
@@ -63,6 +67,10 @@ export default function SettingsView({
               onConfirmBeforeCloseChange={onConfirmBeforeCloseChange}
               sidebarOverlay={sidebarOverlay}
               onSidebarOverlayChange={onSidebarOverlayChange}
+              sessionMode={sessionMode}
+              onSessionModeChange={onSessionModeChange}
+              sessionOverlay={sessionOverlay}
+              onSessionOverlayChange={onSessionOverlayChange}
               sandboxDefaults={sandboxDefaults}
               onSandboxDefaultsChange={onSandboxDefaultsChange}
             />
