@@ -134,7 +134,9 @@ test('enabled dedicated button opens dialog and launches behind a per-launch con
   expect(dialogs[0].message).toMatch(/特権/);
 
   // The tab opens with the ⌘ prefix and the meta key icon...
-  const tab = page.locator('.tab-item', { hasText: '⌘ meta-agent' });
+  // (session tabs now live in the hamburger menu at the left end).
+  await page.getByRole('button', { name: 'セッション一覧メニュー' }).click();
+  const tab = page.locator('.session-menu [data-section="opened"] .session-menu-item', { hasText: '⌘ meta-agent' });
   await expect(tab).toBeVisible();
   await expect(tab.locator('.tab-icon-meta')).toHaveCount(1);
 

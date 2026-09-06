@@ -38,12 +38,14 @@ test.describe('Settings general section', () => {
 
   test('no theme picker in terminal header', async ({ page }) => {
     // shellタブを開いても、CLI上部のテーマ切り替えは存在しない
-    // (一般設定に移植済み)。
-    await page.locator('.tab-item', { hasText: 'Files' }).click();
-    const closeButtons = page.locator('.tab-item .tab-close');
-    const before = await closeButtons.count();
+    // (一般設定に移植済み)。セッションタブはハンバーガーメニュー内に
+    // 縦表示されるため、件数バッジで開 tab 数を検証する。
+    await page.locator('.tab-list .tab-item', { hasText: 'Files' }).click();
     await page.getByRole('button', { name: 'Terminal', exact: true }).click();
-    await expect(closeButtons).toHaveCount(before + 1);
+    await expect(page.locator('.session-menu-count')).toHaveText('1');
+    await page.getByRole('button', { name: 'セッション一覧メニュー' }).click();
+    await expect(page.locator('.session-menu [data-section="opened"] .session-menu-item')).toHaveCount(1);
+    await page.keyboard.press('Escape');
     await expect(page.locator('.terminal-header')).toBeVisible();
     await expect(page.locator('.terminal-header .theme-picker')).toHaveCount(0);
   });
