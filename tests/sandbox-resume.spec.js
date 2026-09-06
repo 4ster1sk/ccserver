@@ -93,6 +93,8 @@ test.describe('Session list sandbox preservation (issue #1)', () => {
     const item = unopenedItem(page, name);
     await expect(item).toBeVisible();
     await expect(item.locator('.session-badge.sandbox')).toBeVisible();
+    // sandboxバッジは上段右端に配置する。
+    await expect(item.locator('.session-menu-item-top .session-badge.sandbox')).toBeVisible();
 
     // 3) End the session: exit the shell so the server marks it exited (and,
     // once the socket is detached, destroys it after the 30s cleanup timer).

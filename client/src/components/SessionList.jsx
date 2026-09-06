@@ -50,8 +50,9 @@ export default function SessionList({
           {sessionTabs.map((tab) => {
             const isActive = tab.id === activeTabId;
             const stateClass = tab.exited ? 'is-exited' : 'is-running';
-            const stateText = tab.exited ? 'exited' : 'connected';
-            const statusText = tab.shell ? `shell · ${stateText}` : `${appLabel(tab)} · ${stateText}`;
+            // 状態(connected/idle/exited)は左線の色で表現するため文字では出さない。
+            // 下段右端にはCLI名のみを出す。
+            const statusText = appLabel(tab);
             // サーバー保存の表示名があれば優先する (未確立タブは sessionId 不在のため対象外)。
             const sessionId = tab.sessionId || tab.attachSessionId || null;
             const customLabel = sessionId ? (customLabels?.get(sessionId) ?? null) : null;
@@ -77,12 +78,12 @@ export default function SessionList({
                     {tab.remote && (
                       <span className="tab-remote-badge" title={`接続先: ${tab.remote.label}`}>⇄ {tab.remote.label}</span>
                     )}
+                    {!tab.shell && !tab.sandbox && <span className="session-badge no-sandbox">no sandbox</span>}
+                    {tab.sandbox && <span className="session-badge sandbox">sandbox</span>}
                   </span>
                   <span className="session-menu-status">
                     {tab.cwd && <span className="session-menu-path" title={tab.cwd}>{baseName(tab.cwd)}</span>}
                     <span className="session-menu-state">{statusText}</span>
-                    {!tab.shell && !tab.sandbox && <span className="session-badge no-sandbox">no sandbox</span>}
-                    {tab.sandbox && <span className="session-badge sandbox">sandbox</span>}
                   </span>
                 </button>
                 <button
@@ -167,15 +168,13 @@ export default function SessionList({
                 <span className="session-menu-item-top">
                   <TabIcon type="terminal" app={s.app} shell={!!s.shell} isMetaAgent={!!s.isMetaAgent} />
                   <span className="session-menu-label">{s.customLabel || baseName(s.cwd) || s.id.slice(0, 8)}</span>
-                </span>
-                <span className="session-menu-status">
-                  {s.cwd && <span className="session-menu-path" title={s.cwd}>{baseName(s.cwd)}</span>}
-                  <span className="session-menu-state">
-                    {s.shell ? `shell · ${s.connected ? 'connected' : 'idle'}` : `${appLabel(s)} · ${s.connected ? 'connected' : 'idle'}`}
-                  </span>
                   {s.sandbox
                     ? <span className="session-badge sandbox">sandbox</span>
                     : (!s.shell ? <span className="session-badge no-sandbox">no sandbox</span> : null)}
+                </span>
+                <span className="session-menu-status">
+                  {s.cwd && <span className="session-menu-path" title={s.cwd}>{baseName(s.cwd)}</span>}
+                  <span className="session-menu-state">{appLabel(s)}</span>
                 </span>
               </button>
               <button
