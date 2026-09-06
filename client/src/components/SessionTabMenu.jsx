@@ -1,8 +1,9 @@
 import { useEffect, useRef, useCallback } from 'react';
 import SessionList from './SessionList.jsx';
 
-// セッションタブ用ハンバーガーメニュー: 開いている terminal タブを上段、
-// サーバー上で稼働中だが未オープンのセッションを下段に縦並びで表示する。
+// セッションタブ用ハンバーガーメニュー: 開いている terminal タブと group
+// (コンボ) タブを上段、サーバー上で稼働中だが未オープンのセッションを下段に
+// 縦並びで表示する。
 // 開閉はウィジェット系 (RightSidebar / UsageButton) と同じ方式:
 // ラッパー ref による外側 mousedown で閉じる + Escape で閉じる。
 //
@@ -17,6 +18,7 @@ export default function SessionTabMenu({
   onToggle,
   onClose,
   sessionTabs,
+  groupTabs = [],
   activeTabId,
   unopenedSessions,
   unopenedGroups,
@@ -64,7 +66,7 @@ export default function SessionTabMenu({
     next.focus();
   }, []);
 
-  const openedCount = sessionTabs.length;
+  const openedCount = sessionTabs.length + groupTabs.length;
 
   return (
     <div className="session-menu-wrap" ref={wrapRef}>
@@ -86,6 +88,7 @@ export default function SessionTabMenu({
         <div className="session-menu" role="menu" aria-label="セッション一覧" ref={menuRef} onKeyDown={onMenuKeyDown}>
           <SessionList
             sessionTabs={sessionTabs}
+            groupTabs={groupTabs}
             activeTabId={activeTabId}
             unopenedSessions={unopenedSessions}
             unopenedGroups={unopenedGroups}

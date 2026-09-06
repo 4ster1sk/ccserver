@@ -65,30 +65,31 @@ test('combo group tab lifecycle: create via API, attach, close-confirm mentions 
     const roles = group.members.map((m) => m.role).sort();
     expect(roles).toEqual(['orchestrator', 'workerA', 'workerB']);
 
-    // A group tab appears as one entry with the directory name -- opened
-    // from the session list's Groups section (API-created groups don't open
-    // a tab by themselves).
+    // An opened group tab lives in the session sidebar's opened section as
+    // one parent row (never as a horizontal .tab-item) -- API-created groups
+    // don't open a tab by themselves, so attach from the Groups section.
     await page.goto('/');
     const dirName = cwd.split(/[/\\]/).filter(Boolean).pop();
     const groupItem = page.locator('.left-sidebar [data-section="unopened-groups"] .session-menu-item', { hasText: dirName });
     await expect(groupItem).toBeVisible({ timeout: 15_000 });
     await groupItem.locator('.session-menu-select').click();
-    const groupTab = page.locator('.tab-item', { hasText: dirName });
-    await expect(groupTab).toBeVisible({ timeout: 15_000 });
+    const groupRow = page.locator('.left-sidebar [data-section="opened"] .session-menu-item[data-tab-type="group"]', { hasText: dirName });
+    await expect(groupRow).toBeVisible({ timeout: 15_000 });
+    await expect(page.locator('.tab-list .tab-item', { hasText: dirName })).toHaveCount(0);
 
     // Its X opens the group-specific close dialog (mentions 3 sessions).
-    await groupTab.locator('.tab-close').click();
+    await groupRow.locator('.session-menu-close').click();
     await expect(page.locator('.resume-overlay', { hasText: 'グループを閉じますか?' })).toBeVisible();
     await expect(page.locator('.resume-overlay', { hasText: '3つのセッション' })).toBeVisible();
 
     // Cancel keeps the tab.
     await page.getByRole('button', { name: 'キャンセル' }).click();
-    await expect(groupTab).toBeVisible();
+    await expect(groupRow).toBeVisible();
 
     // Confirm closes the tab and destroys the group server-side.
-    await groupTab.locator('.tab-close').click();
+    await groupRow.locator('.session-menu-close').click();
     await page.locator('.resume-overlay', { hasText: 'グループを閉じますか?' }).getByRole('button', { name: '閉じる', exact: true }).click();
-    await expect(groupTab).toBeHidden();
+    await expect(groupRow).toBeHidden();
 
     const gone = await page.evaluate(async (gid) => {
       const res = await fetch(`/api/groups/${gid}`);
@@ -137,24 +138,93 @@ test('combo launch is single-slot per directory: relaunching the same cwd activa
       await page.locator('.resume-dialog .btn-primary', { hasText: 'コンボ起動' }).click();
     };
 
-    // First combo launch creates one group tab.
+    // First combo launch creates one sidebar row (not a horizontal tab).
     await openLaunchModal();
-    const groupTab = page.locator('.tab-item', { hasText: dirName });
-    await expect(groupTab).toBeVisible({ timeout: 15_000 });
+    const groupRow = page.locator('.left-sidebar [data-section="opened"] .session-menu-item[data-tab-type="group"]', { hasText: dirName });
+    await expect(groupRow).toBeVisible({ timeout: 15_000 });
+    await expect(page.locator('.tab-list .tab-item', { hasText: dirName })).toHaveCount(0);
     expect(createdGroupIds).toHaveLength(1);
     const groupId = createdGroupIds[0];
 
     // Relaunching the same cwd from the browser must activate the existing
-    // tab instead of spawning a second group.
+    // row instead of spawning a second group.
     await page.locator('.tab-item', { hasText: 'Files' }).click();
     await openLaunchModal();
 
-    await expect(groupTab).toHaveClass(/active/);
-    await expect(page.locator('.tab-item', { hasText: dirName })).toHaveCount(1);
+    await expect(groupRow).toHaveClass(/active/);
+    await expect(page.locator('.left-sidebar [data-section="opened"] .session-menu-item[data-tab-type="group"]', { hasText: dirName })).toHaveCount(1);
+    await expect(page.locator('.tab-list .tab-item', { hasText: dirName })).toHaveCount(0);
     await page.waitForTimeout(2000); // the buggy behavior would have POSTed by now
     expect(createdGroupIds).toHaveLength(1);
   } finally {
     await page.unroute('**/api/groups');
     if (createdGroupIds[0]) await destroyGroup(page, createdGroupIds[0]);
+  }
+});
+
+test('opened group tab lives in the session sidebar as a single parent row', async ({ page }) => {
+  const cwd = newCwd();
+  let groupId = null;
+  try {
+    await page.goto('/');
+    const group = await createGroup(page, cwd);
+    groupId = group.groupId;
+    const dirName = cwd.split(/[/\\]/).filter(Boolean).pop();
+
+    await page.goto('/');
+    const groupItem = page.locator('.left-sidebar [data-section="unopened-groups"] .session-menu-item', { hasText: dirName });
+    await expect(groupItem).toBeVisible({ timeout: 15_000 });
+    await groupItem.locator('.session-menu-select').click();
+
+    // Parent-only row in the opened section: members stay in the 2nd-level
+    // sub-tab bar, never as individual sidebar rows.
+    const groupRow = page.locator('.left-sidebar [data-section="opened"] .session-menu-item[data-tab-type="group"]', { hasText: dirName });
+    await expect(groupRow).toBeVisible({ timeout: 15_000 });
+    await expect(groupRow).toContainText('3 members');
+    await expect(page.locator('.left-sidebar [data-section="opened"] .session-menu-item')).toHaveCount(1);
+    await expect(page.locator('.left-sidebar .session-menu-count')).toHaveText('1');
+    // No horizontal tab for the group; the in-tab sub-tab bar takes over.
+    await expect(page.locator('.tab-list .tab-item', { hasText: dirName })).toHaveCount(0);
+    await expect(page.locator('.group-subtab-bar')).toBeVisible();
+
+    // Selecting the Files tab then the sidebar row re-activates the group.
+    await page.locator('.tab-item', { hasText: 'Files' }).click();
+    await expect(page.locator('.group-subtab-bar')).toBeHidden();
+    await groupRow.locator('.session-menu-select').click();
+    await expect(page.locator('.group-subtab-bar')).toBeVisible();
+    await expect(groupRow).toHaveClass(/active/);
+  } finally {
+    if (groupId) await destroyGroup(page, groupId);
+  }
+});
+
+test('opened group tab appears in the popup hamburger menu', async ({ page }) => {
+  await page.addInitScript(() => {
+    localStorage.setItem('ccserver-session-mode', 'popup');
+  });
+  const cwd = newCwd();
+  let groupId = null;
+  try {
+    await page.goto('/');
+    const group = await createGroup(page, cwd);
+    groupId = group.groupId;
+    const dirName = cwd.split(/[/\\]/).filter(Boolean).pop();
+
+    await page.goto('/');
+    await page.getByRole('button', { name: 'セッション一覧メニュー' }).click();
+    const groupItem = page.locator('.session-menu [data-section="unopened-groups"] .session-menu-item', { hasText: dirName });
+    await expect(groupItem).toBeVisible({ timeout: 15_000 });
+    await groupItem.locator('.session-menu-select').click();
+
+    // Popup closes on select: reopen and assert the parent row + badge.
+    await page.getByRole('button', { name: 'セッション一覧メニュー' }).click();
+    const groupRow = page.locator('.session-menu [data-section="opened"] .session-menu-item[data-tab-type="group"]', { hasText: dirName });
+    await expect(groupRow).toBeVisible({ timeout: 15_000 });
+    await expect(groupRow).toContainText('3 members');
+    await expect(page.locator('.session-menu-count')).toHaveText('1');
+    await expect(page.locator('.tab-list .tab-item', { hasText: dirName })).toHaveCount(0);
+    await page.keyboard.press('Escape').catch(() => {});
+  } finally {
+    if (groupId) await destroyGroup(page, groupId);
   }
 });
