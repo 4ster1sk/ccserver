@@ -31,6 +31,7 @@ const execFileAsync = promisify(execFile);
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ENTRYPOINT = join(__dirname, 'sandbox-entrypoint.sh');
+const PROVISION_SCRIPT = join(__dirname, 'sandbox-provision.sh');
 const GH_WRAPPER_SCRIPT = join(__dirname, 'sandbox-gh-wrapper.cjs');
 const CRED_HELPER_SCRIPT = join(__dirname, 'sandbox-git-credential-helper.cjs');
 const SSH_WRAPPER_SCRIPT = join(__dirname, 'sandbox-ssh-wrapper.cjs');
@@ -72,6 +73,30 @@ const SANDBOX_META_SOCK_PATH = '/ccserver-sandbox-meta.sock';
 const SANDBOX_REVIEWER_SOCK_PATH = '/ccserver-sandbox-reviewer.sock';
 const SANDBOX_MCP_BRIDGE_PATH = '/ccserver-sandbox-mcp-bridge';
 const MCP_BRIDGE_SCRIPT = join(__dirname, 'sandbox-mcp-wrapper.cjs');
+
+// Fixed in-sandbox path for the tool-provisioning script (see resolveTools /
+// sandbox-provision.sh): bound read-only at launch when any opt-in tool is
+// enabled, executed by the entrypoint before the target command.
+const SANDBOX_PROVISION_PATH = '/ccserver-sandbox-provision.sh';
+
+// Pinned defaults for the opt-in tools provisioned into the sandbox HOME at
+// launch (see resolveTools / sandbox-provision.sh). The host OS never needs
+// them installed; sandbox.config.json's "tools" (or the client's per-session
+// sandboxOpts.tools) enables them, and the object form can override any of
+// these fields (version / url / sha256).
+const RTK_VERSION = 'v0.45.0';
+const RTK_ASSET = { x64: 'x86_64-unknown-linux-musl', arm64: 'aarch64-unknown-linux-gnu' }[process.arch] || null;
+// Unknown arches (armv7, riscv64, ...) resolve to no spec: provisioning skips
+// rtk instead of installing an unrunnable binary with a skipped checksum.
+const RTK_DEFAULT = RTK_ASSET ? {
+  version: RTK_VERSION,
+  url: `https://github.com/rtk-ai/rtk/releases/download/${RTK_VERSION}/rtk-${RTK_ASSET}.tar.gz`,
+  // sha256 of the x86_64 musl tarball (the arch ccserver runs on in practice).
+  // Empty on other arches: the provisioner warns on the terminal, logs, and
+  // skips the checksum, and the config object form can pin one explicitly.
+  sha256: process.arch === 'x64' ? 'c4c036fbf181fc55ef329786c8c17e0d427972b053b825944d968a6aafef1ba4' : '',
+} : null;
+const CRG_DEFAULT = { version: '2.3.7' };
 
 const HOME = homedir();
 // process.getuid is undefined on Windows; the sandbox is Linux-only, but this
@@ -620,12 +645,17 @@ export function loadSandboxConfig() {
     || (typeof rawVikunjaBuckets.todo === 'string' && rawVikunjaBuckets.todo ? rawVikunjaBuckets.todo : 'To-Do');
   const binds = Array.isArray(raw.binds) ? raw.binds : [];
   const env = (raw.env && typeof raw.env === 'object') ? raw.env : {};
+  // Tools provisioned into the sandbox HOME at launch (rtk / code-review-graph).
+  // This is the server-wide fallback (off unless enabled here); the client's
+  // launch menu defaults them to ON per session/directory and its per-session
+  // sandboxOpts.tools overrides this. See resolveTools.
+  const tools = (raw.tools && typeof raw.tools === 'object' && !Array.isArray(raw.tools)) ? raw.tools : {};
   // How to launch claude. Overridable because the install location is
   // environment-specific (see resolveClaude). Env var wins over the config file.
   const claudeBin = process.env.CCSERVER_CLAUDE_BIN || (typeof raw.claudeBin === 'string' ? raw.claudeBin : null);
   // Which agent a new session launches when the client doesn't request one.
   // See appLaunch.js's APPS; anything else (including unset) falls back to
-  // claude -- see sessionManager.js's defaultApp().
+  // claude -- see loadSandboxConfig()'s defaultApp below.
   const defaultApp = raw.defaultApp === 'opencode' || raw.defaultApp === 'copilot' || raw.defaultApp === 'codex' || raw.defaultApp === 'commandcode' ? raw.defaultApp : 'claude';
   // Show the client's top-bar Usage button (Claude Code /usage spend). Off
   // for setups that don't want it; the client also hides the button on its
@@ -665,7 +695,7 @@ export function loadSandboxConfig() {
     ? [...new Set(raw.hiddenApps.filter((a) => APP_IDS.includes(a)))]
     : [];
   return {
-    docker, persistentHome, gpg, sshAgent, gitBroker, forceSandbox, binds, env, claudeBin, defaultApp, showUsage, opencodeGoUsage, usageMcp, metaAgentMcp, reviewerMcp, hiddenApps,
+    docker, persistentHome, gpg, sshAgent, gitBroker, forceSandbox, binds, env, tools, claudeBin, defaultApp, showUsage, opencodeGoUsage, usageMcp, metaAgentMcp, reviewerMcp, hiddenApps,
     notify: {
       discordWebhook, subscriptions, hostname: notifyHostname, attribution: notifyAttribution,
       vikunja: {
@@ -680,6 +710,45 @@ export function loadSandboxConfig() {
     },
     configPath,
   };
+}
+
+// Which tools to provision into the sandbox HOME, and their pinned specs.
+// sandbox.config.json's "tools" supplies the server-wide fallback (off unless
+// enabled there); the client's per-session sandboxOpts.tools -- which the launch
+// menu defaults to OFF (opt-in), remembered per directory
+// (see DirectoryBrowser) -- overrides it. Returns { rtk, codeReviewGraph,
+// rtkSpec, crgSpec } where rtkSpec/crgSpec are the { version, url, sha256, ... }
+// payloads for sandbox-provision.sh (null when the tool is disabled).
+export function resolveTools(sandboxOpts = null, cfgTools = null) {
+  // cfgTools threads through an already-loaded config (createSession /
+  // buildSandboxSpawn read sandbox.config.json once per launch) instead of
+  // re-reading + re-parsing it here on every call.
+  const cfg = cfgTools ?? loadSandboxConfig().tools;
+  const per = (sandboxOpts && sandboxOpts.tools && typeof sandboxOpts.tools === 'object') ? sandboxOpts.tools : {};
+  const resolve = (jsKey, cfgKeys, def) => {
+    // Per-session values are client-controlled toggles: booleans only. The
+    // object form (version/url/sha256 overrides) is operator-only and read
+    // solely from sandbox.config.json below -- accepting it from the client
+    // would let any WS caller point the provisioner at an arbitrary URL
+    // (with an empty sha256 skipping the checksum) or an arbitrary pip
+    // version.
+    // A null def means this host arch has no pinned binary (see RTK_DEFAULT):
+    // toggles resolve to disabled unless the operator pins an explicit url
+    // in the object form below.
+    if (per[jsKey] !== undefined) return per[jsKey] === true ? (def && { ...def }) : null;
+    const v = cfgKeys.map((k) => cfg[k]).find((x) => x !== undefined);
+    if (v === true) return def && { ...def };
+    if (v && typeof v === 'object' && !Array.isArray(v)) {
+      if (v.enabled === false) return null;
+      const { enabled, ...overrides } = v;
+      if (!def && !overrides.url) return null;
+      return { ...(def || {}), ...overrides };
+    }
+    return null;
+  };
+  const rtkSpec = resolve('rtk', ['rtk'], RTK_DEFAULT);
+  const crgSpec = resolve('codeReviewGraph', ['code-review-graph', 'codeReviewGraph'], CRG_DEFAULT);
+  return { rtk: !!rtkSpec, codeReviewGraph: !!crgSpec, rtkSpec, crgSpec };
 }
 
 // Locate an executable named `cmd` on the given PATH (or return it as-is if
@@ -995,7 +1064,10 @@ export function sandboxAvailable() {
 //   homeDir - host path of the persistent per-project HOME to bind at HOME
 //             (see persistentHomeDir), or null for a fresh tmpfs HOME.
 //   app     - which agent is being launched (used to bind node for command-code's wrapper)
-function buildBwrapArgs({ cwd, docker, gpg, extraBinds, extraEnv, authSock, stateDir, claudeDir, gitBroker, mcpSocketPath, notifySocketPath, usageSocketPath, metaSocketPath, reviewerSocketPath, homeDir = null, orchestratorClaudeMdSrc = null, gitCommonDir = null, groupFilesDir = null, app = null }) {
+//   tools   - resolved opt-in tool specs (see resolveTools), or null when no
+//             tool is enabled. Binds the provisioner and hands it the specs
+//             via env (see the tail of this function).
+function buildBwrapArgs({ cwd, docker, gpg, extraBinds, extraEnv, authSock, stateDir, claudeDir, gitBroker, mcpSocketPath, notifySocketPath, usageSocketPath, metaSocketPath, reviewerSocketPath, homeDir = null, orchestratorClaudeMdSrc = null, gitCommonDir = null, groupFilesDir = null, app = null, tools = null }) {
   const args = [
     '--die-with-parent',
     // Own PID namespace so the whole sandbox tree is reaped as a unit. Without
@@ -1382,6 +1454,24 @@ function buildBwrapArgs({ cwd, docker, gpg, extraBinds, extraEnv, authSock, stat
   // Expose the entrypoint script read-only at a fixed path.
   args.push('--ro-bind', ENTRYPOINT, '/ccserver-sandbox-entrypoint.sh');
 
+  // Opt-in tool provisioning: bind the provisioner read-only at a fixed path
+  // and hand it the tool specs via env (see resolveTools / sandbox-provision.sh).
+  // It installs into $HOME/.local inside the sandbox (persistent per-project
+  // home or fresh tmpfs) before the target command runs, so nothing needs to be
+  // pre-installed on the host OS. The provisioner only needs python3 (already
+  // bound via /usr) and writes solely under the sandbox's own HOME.
+  if (tools && (tools.rtk || tools.codeReviewGraph)) {
+    args.push('--ro-bind', PROVISION_SCRIPT, SANDBOX_PROVISION_PATH);
+    args.push(
+      '--setenv', 'CCSANDBOX_PROVISION_RTK', tools.rtk ? '1' : '0',
+      '--setenv', 'CCSANDBOX_PROVISION_CRG', tools.codeReviewGraph ? '1' : '0',
+      '--setenv', 'CCSANDBOX_RTK_VERSION', tools.rtkSpec?.version || '',
+      '--setenv', 'CCSANDBOX_RTK_URL', tools.rtkSpec?.url || '',
+      '--setenv', 'CCSANDBOX_RTK_SHA256', tools.rtkSpec?.sha256 || '',
+      '--setenv', 'CCSANDBOX_CRG_VERSION', tools.crgSpec?.version || '',
+    );
+  }
+
   return args;
 }
 
@@ -1468,10 +1558,14 @@ export function buildMinimalSandboxSpawn({ cwd, targetCommand, app = 'claude' })
 //                 bookkeeping row ('user' | 'meta-agent:<sessionId>' | ...).
 //                 Display only; never an authorization input.
 export function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, mcpSocketPath = null, notifySocketPath = null, usageSocketPath = null, metaSocketPath = null, reviewerSocketPath = null, reuseSandboxHome = true, orchestratorClaudeMdSrc = null, gitCommonDir = null, groupFilesDir = null, sandboxHomeCreatedBy = null }) {
-  const { docker: cfgDocker, persistentHome, gpg: cfgGpg, sshAgent: cfgSshAgent, gitBroker: gitBrokerEnabled, binds, env, claudeBin } = loadSandboxConfig();
+  const { docker: cfgDocker, persistentHome, gpg: cfgGpg, sshAgent: cfgSshAgent, gitBroker: gitBrokerEnabled, binds, env, tools: cfgTools, claudeBin } = loadSandboxConfig();
   const docker = cfgDocker && dockerSandboxAvailable();
   const gpg = sandboxOpts?.gpg ?? cfgGpg;
   const sshAgent = sandboxOpts?.sshAgent ?? cfgSshAgent;
+  // Opt-in tool provisioning (rtk / code-review-graph), merged like gpg/sshAgent
+  // from the config default + the client's per-session sandboxOpts.tools.
+  // Thread cfgTools through instead of re-reading the config file.
+  const tools = resolveTools(sandboxOpts, cfgTools);
 
   // ssh-agent forwarding is opt-in (see loadSandboxConfig). When on, an
   // explicit env.SSH_AUTH_SOCK in the config wins; otherwise auto-discover.
@@ -1538,7 +1632,7 @@ export function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, mcpSoc
   }
 
   const { command, installDir } = resolveApp(app, claudeBin);
-  const bwrapArgs = buildBwrapArgs({ cwd, docker, gpg, extraBinds: binds, extraEnv: env, authSock, stateDir, claudeDir: installDir, gitBroker, mcpSocketPath, notifySocketPath, usageSocketPath, metaSocketPath, reviewerSocketPath, homeDir, orchestratorClaudeMdSrc, gitCommonDir, groupFilesDir, app });
+  const bwrapArgs = buildBwrapArgs({ cwd, docker, gpg, extraBinds: binds, extraEnv: env, authSock, stateDir, claudeDir: installDir, gitBroker, mcpSocketPath, notifySocketPath, usageSocketPath, metaSocketPath, reviewerSocketPath, homeDir, orchestratorClaudeMdSrc, gitCommonDir, groupFilesDir, app, tools });
   // command-code's launcher is a Node script. Run it explicitly via the
   // sandbox's node binary, bypassing the #!/usr/bin/env shebang which would
   // otherwise require /usr/bin/node to be present inside the sandbox's PATH.

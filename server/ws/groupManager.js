@@ -124,9 +124,15 @@ function normalizeDisplayName(name) {
   return t && t.length <= 80 && !/[\u0000-\u001f\u007f]/.test(t) ? t : null;
 }
 
-function normalizeSandboxOpts(opts) {
+export function normalizeSandboxOpts(opts) {
   if (!opts || typeof opts !== 'object') return null;
-  return { gpg: !!opts.gpg, sshAgent: !!opts.sshAgent };
+  const out = { gpg: !!opts.gpg, sshAgent: !!opts.sshAgent };
+  // Opt-in tool provisioning (rtk / code-review-graph) -- carried only when the
+  // caller provided it, so the common { gpg, sshAgent } shape is unchanged.
+  if (opts.tools && typeof opts.tools === 'object') {
+    out.tools = { rtk: !!opts.tools.rtk, codeReviewGraph: !!opts.tools.codeReviewGraph };
+  }
+  return out;
 }
 
 function normalizeMemberPref(pref, fallback = {}) {

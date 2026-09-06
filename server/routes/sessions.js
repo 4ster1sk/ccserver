@@ -10,7 +10,7 @@
 
 import { homedir } from 'node:os';
 import { statSync } from 'node:fs';
-import { createSession, getSession, destroySession, listSessions } from '../ws/sessionManager.js';
+import { createSession, getSession, destroySession, listSessions, setSessionLabel } from '../ws/sessionManager.js';
 import { isValidApp } from '../ws/appLaunch.js';
 
 export async function sessionsRoute(fastify, opts) {
@@ -37,6 +37,31 @@ export async function sessionsRoute(fastify, opts) {
     // Explicit teardown: also cancel any scheduled prompt for this session.
     destroySession(id, { keepSchedule: false });
     return { success: true, id };
+  });
+
+  // Operator-assigned display name (client right-click rename). Body:
+  //   { customLabel: string | null }  (missing key / wrong type -> 400,
+  //   empty-after-trim clears the name, overlong -> 400)
+  fastify.patch('/sessions/:id', async (request, reply) => {
+    const { id } = request.params;
+    const body = request.body || {};
+    // Guard the `in` check: a truthy primitive JSON body (e.g. `"foo"` or
+    // `42`) would otherwise throw a TypeError and surface as a 500 instead
+    // of a 400. Arrays fall through to the missing-key 400 below.
+    if (typeof body !== 'object' || body === null || !('customLabel' in body)) {
+      return reply.code(400).send({ error: 'customLabel is required' });
+    }
+    // Shape-check before the lookup so malformed bodies 400 even for
+    // unknown ids (length/emptiness rules live in setSessionLabel).
+    if (body.customLabel !== null && typeof body.customLabel !== 'string') {
+      return reply.code(400).send({ error: 'customLabel must be a string or null' });
+    }
+    const res = setSessionLabel(id, body.customLabel);
+    if (!res.ok) {
+      const status = res.code === 'not-found' ? 404 : 400;
+      return reply.code(status).send({ error: res.message });
+    }
+    return { success: true, id, customLabel: res.session.customLabel };
   });
 
   if (process.env.CCSERVER_DEBUG) {

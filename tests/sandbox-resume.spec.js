@@ -63,12 +63,18 @@ function initFrames(page) {
   return frames;
 }
 
-test.describe('Active Sessions sandbox preservation (issue #1)', () => {
+test.describe('Session list sandbox preservation (issue #1)', () => {
   test.skip(!sandboxAvailable, 'bwrap not available — sandbox cannot run');
+
+  // Files画面の Active Sessions 一覧は撤去され、同等の一覧は左セッション一覧の
+  // 下段「稼働中のセッション」に移設されたため、そちら経由で検証する。
+  const unopenedItem = (page, text) =>
+    page.locator('.left-sidebar [data-section="unopened"] .session-menu-item', { hasText: text });
 
   test('ended sandboxed session relaunches from the list with the sandbox kept', async ({ page }) => {
     test.setTimeout(120_000);
     const cwd = newCwd();
+    const name = cwd.split(/[/\\]/).filter(Boolean).pop();
 
     await page.goto('/');
     await expect(page.getByRole('button', { name: 'Terminal', exact: true })).toBeVisible();
@@ -80,13 +86,15 @@ test.describe('Active Sessions sandbox preservation (issue #1)', () => {
     const sessionId = await openSandboxedShell(page, cwd);
     expect(sessionId).toBeTruthy();
 
-    // 2) Reload so DirectoryBrowser re-fetches the session list; the running
-    // sandboxed session must show the sandbox badge.
+    // 2) Reload so the session list re-fetches; the running sandboxed session
+    // must show the sandbox badge in the lower section.
     await page.reload();
     await expect(page.getByRole('button', { name: 'Terminal', exact: true })).toBeVisible();
-    const item = page.locator('.session-item', { hasText: cwd });
+    const item = unopenedItem(page, name);
     await expect(item).toBeVisible();
     await expect(item.locator('.session-badge.sandbox')).toBeVisible();
+    // sandboxバッジは上段右端に配置する。
+    await expect(item.locator('.session-menu-item-top .session-badge.sandbox')).toBeVisible();
 
     // 3) End the session: exit the shell so the server marks it exited (and,
     // once the socket is detached, destroys it after the 30s cleanup timer).
@@ -99,10 +107,10 @@ test.describe('Active Sessions sandbox preservation (issue #1)', () => {
     // map by the time we click (the SESSION_NOT_FOUND re-init path).
     await page.waitForTimeout(31_000);
 
-    // 5) Click the (stale) Active Sessions entry. The server refuses the
+    // 5) Click the (stale) lower-section entry. The server refuses the
     // attach of the dead session, and TerminalView must re-init the session
     // carrying the listing's sandbox flag — not silently drop it.
-    await item.click();
+    await item.locator('.session-menu-select').click();
     await expect.poll(() => inits.length).toBeGreaterThan(0);
     const init = inits[inits.length - 1];
     expect(init.sandbox).toBe(true);
@@ -116,6 +124,7 @@ test.describe('Active Sessions sandbox preservation (issue #1)', () => {
   test('running session entry still attaches (no relaunch)', async ({ page }) => {
     test.setTimeout(60_000);
     const cwd = newCwd();
+    const name = cwd.split(/[/\\]/).filter(Boolean).pop();
 
     await page.goto('/');
     await expect(page.getByRole('button', { name: 'Terminal', exact: true })).toBeVisible();
@@ -125,12 +134,12 @@ test.describe('Active Sessions sandbox preservation (issue #1)', () => {
 
     await page.reload();
     await expect(page.getByRole('button', { name: 'Terminal', exact: true })).toBeVisible();
-    const item = page.locator('.session-item', { hasText: cwd });
+    const item = unopenedItem(page, name);
     await expect(item).toBeVisible();
 
     // Clicking a live session attaches to it; no fresh `init` should be sent.
     const inits = initFrames(page);
-    await item.click();
+    await item.locator('.session-menu-select').click();
     await page.waitForTimeout(2000);
     expect(inits.length).toBe(0);
 

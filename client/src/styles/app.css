@@ -73,6 +73,18 @@ body {
   background: var(--border);
 }
 
+.btn-danger {
+  background: transparent;
+  color: var(--error);
+  border-color: var(--error);
+}
+
+.btn-danger:hover {
+  background: var(--error);
+  color: var(--bg-primary);
+  border-color: var(--error);
+}
+
 .btn:disabled {
   opacity: 0.5;
   cursor: not-allowed;
@@ -201,6 +213,275 @@ body {
 .tab-close:hover {
   background: var(--error);
   color: var(--bg-primary);
+}
+
+/* Session hamburger menu (left end of the tab bar): terminal tabs are
+   listed vertically here, while browser/remote/settings + group tabs stay
+   in the horizontal .tab-list. Open/close follows the widget pattern
+   (.sidebar-add-menu / .usage-menu): absolute dropdown, outside-click and
+   Escape to close. Status is a left border line: running -> --success
+   (green), idle -> #fab387 (peach/orange), exited -> --text-muted. */
+.session-menu-wrap {
+  position: relative;
+  display: flex;
+  align-items: stretch;
+  flex-shrink: 0;
+}
+
+.session-menu-btn {
+  align-self: center;
+  margin: 0 4px 0 8px;
+  padding: 4px 8px;
+  font-size: 14px;
+  line-height: 1;
+  flex-shrink: 0;
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--text-secondary);
+  border-radius: 6px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.session-menu-btn:hover {
+  background: var(--bg-surface);
+  border-color: var(--border);
+}
+
+.session-menu-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1;
+}
+
+.session-menu {
+  position: absolute;
+  top: 100%;
+  left: 8px;
+  margin-top: 6px;
+  width: 320px;
+  max-width: calc(100vw - 24px);
+  max-height: 60vh;
+  overflow-y: auto;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+  padding: 8px;
+  z-index: 50;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.session-menu-section-label {
+  padding: 4px 8px 2px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.session-menu-sep {
+  height: 1px;
+  background: var(--border);
+  margin: 4px 6px;
+}
+
+.session-menu-empty {
+  padding: 8px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.session-menu-item {
+  position: relative;
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 8px 6px 12px;
+  border-radius: 6px;
+  min-width: 0;
+}
+
+/* Row select button: a11y-wise the menuitem itself (the row container is
+   role="none" so it never nests interactive elements). Resets native button
+   chrome and behaves like the previous clickable row. */
+.session-menu-select {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  background: none;
+  border: none;
+  padding: 0;
+  margin: 0;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  border-radius: 4px;
+}
+
+.session-menu-select:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* Status line: a pure straight vertical line drawn with ::before instead of
+   border-left, so the item's border-radius never curves it. Slightly inset
+   (top/bottom offset) for a short indicator look. */
+.session-menu-item::before {
+  content: '';
+  position: absolute;
+  left: 3px;
+  top: 7px;
+  bottom: 7px;
+  width: 3px;
+  border-radius: 0;
+  background: transparent;
+}
+
+.session-menu-item:hover {
+  background: var(--bg-surface);
+}
+
+.session-menu-item.active {
+  background: var(--bg-primary);
+  outline: 1px solid var(--accent);
+}
+
+.session-menu-item.is-running::before {
+  background: var(--success);
+}
+
+.session-menu-item.is-idle::before {
+  background: #fab387;
+}
+
+.session-menu-item.is-exited::before {
+  background: var(--text-muted);
+}
+
+/* Session right-click menu: fixed-position small menu shared by the popup
+   and sidebar lists. Same look as .sidebar-add-menu. */
+.session-context-menu {
+  position: fixed;
+  z-index: 100;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 4px 0;
+  min-width: 180px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+  display: flex;
+  flex-direction: column;
+}
+
+.session-context-item {
+  background: none;
+  border: none;
+  text-align: left;
+  padding: 8px 12px;
+  font-size: 13px;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.session-context-item:hover,
+.session-context-item:focus-visible {
+  background: var(--bg-surface);
+  color: var(--text-primary);
+}
+
+/* Rename dialog input: full-width text field in the resume-dialog frame. */
+.session-rename-input {
+  width: 100%;
+  box-sizing: border-box;
+  margin: 8px 0;
+  padding: 8px 10px;
+  font-size: 14px;
+  color: var(--text-primary);
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+.session-rename-input:focus {
+  outline: 1px solid var(--accent);
+  border-color: var(--accent);
+}
+
+.session-menu-item.is-exited {
+  opacity: 0.6;
+}
+
+.session-menu-item-top {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+/* sandbox系バッジ (sandbox / no-sandbox) は上段の右端に固定 (ラベルが省略されても右端に残る)。 */
+.session-menu-item-top .session-badge {
+  margin-left: auto;
+}
+
+.session-menu-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+  color: var(--text-primary);
+}
+
+.session-menu-close {
+  align-self: center;
+  flex-shrink: 0;
+}
+
+.session-menu-status {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  padding-left: 20px;
+}
+
+.session-menu-path {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.session-menu-state {
+  flex-shrink: 0;
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--text-muted);
+  white-space: nowrap;
 }
 
 /* Group tab: second-level sub-tab bar (workers + orchestrator) */
@@ -658,30 +939,100 @@ body {
   flex-shrink: 0;
 }
 
-.theme-picker {
+.tab-content {
+  flex: 1;
+  overflow: hidden;
   position: relative;
-  flex-shrink: 0;
+  min-width: 0;
 }
 
-.theme-btn {
+/* Right sidebar layout: .main-row sits between the tab bar and the dialogs,
+   holding .tab-content and .right-sidebar side by side. */
+.main-row {
+  flex: 1;
   display: flex;
-  align-items: center;
-  justify-content: center;
+  min-height: 0;
+  min-width: 0;
+}
+
+.sidebar-toggle-btn {
+  align-self: center;
+  margin-right: 8px;
+  padding: 4px 8px;
+  font-size: 12px;
+  line-height: 1;
+  flex-shrink: 0;
+  /* 隣のUsageボタンと揃えたゴースト表示 (.usage-btnと同一方針) */
   background: transparent;
   border: 1px solid transparent;
   color: var(--text-secondary);
-  cursor: pointer;
-  padding: 6px 8px;
-  border-radius: 4px;
-  line-height: 1;
+  border-radius: 6px;
 }
 
-.theme-btn:hover {
+.sidebar-toggle-btn:hover {
   background: var(--bg-surface);
   border-color: var(--border);
 }
 
-.theme-menu {
+.right-sidebar {
+  width: 300px;
+  flex-shrink: 0;
+  border-left: 1px solid var(--border);
+  background: var(--bg-secondary);
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+/* Left session sidebar: RightSidebar の左右反転。in-flow時はCLIをリサイズし、
+   session-overlay時は前面に重ねる (右とは独立したフラグで制御)。 */
+.left-sidebar {
+  width: 300px;
+  flex-shrink: 0;
+  border-right: 1px solid var(--border);
+  background: var(--bg-secondary);
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.session-sidebar-list {
+  overflow-y: auto;
+}
+
+.sidebar-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+  position: sticky;
+  top: 0;
+  background: var(--bg-secondary);
+  z-index: 1;
+}
+
+.sidebar-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.sidebar-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.sidebar-add-wrap {
+  position: relative;
+  display: inline-flex;
+}
+
+.sidebar-add-menu {
   position: absolute;
   top: 100%;
   right: 0;
@@ -691,32 +1042,222 @@ body {
   border-radius: 6px;
   padding: 4px 0;
   min-width: 160px;
-  z-index: 100;
+  z-index: 60;
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+  display: flex;
+  flex-direction: column;
 }
 
-.theme-menu-item {
-  padding: 10px 14px;
-  font-size: 14px;
+.sidebar-add-item {
+  background: none;
+  border: none;
+  text-align: left;
+  padding: 8px 12px;
+  font-size: 13px;
   color: var(--text-secondary);
   cursor: pointer;
-  white-space: nowrap;
 }
 
-.theme-menu-item:hover {
+.sidebar-add-item:hover {
   background: var(--bg-surface);
   color: var(--text-primary);
 }
 
-.theme-menu-item.active {
-  color: var(--accent);
-  font-weight: 600;
+.sidebar-widgets {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px;
 }
 
-.tab-content {
-  flex: 1;
-  overflow: hidden;
+.widget-card {
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.widget-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+}
+
+.widget-card-title {
+  background: none;
+  border: none;
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0;
+  min-width: 0;
+}
+
+.widget-collapse-mark {
+  font-size: 10px;
+  color: var(--text-muted);
+}
+
+.widget-card-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
+}
+
+.widget-icon-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border: none;
+  background: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  border-radius: 3px;
+  font-size: 11px;
+  line-height: 1;
+}
+
+.widget-icon-btn:hover {
+  background: var(--bg-surface);
+  color: var(--text-primary);
+}
+
+.widget-card-body {
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.widget-card-body .monitor-card {
+  padding: 10px 12px;
+}
+
+.sidebar-empty {
+  padding: 16px;
+  text-align: center;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+/* UsageWidget reuses the .usage-* classes from the popover, unanchored. */
+.usage-widget {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+/* NOTE: .directory-browser はサイドバー開閉時も max-width: 800px のままに
+   しておくこと。ここで max-width を解除すると、サイドバー表示で残幅いっぱいに
+   伸びて内容サイズが不連続に変わる（閉800px中央寄せ→開980pxストレッチ等）。 */
+
+/* Desktop overlay mode (sidebarOverlay ON in 一般設定): the sidebar floats
+   above the CLI without resizing it, at any viewport width. Narrow screens
+   (<=900px) already behave this way; this class extends it to desktop.
+   No backdrop here by design -- closing is via the toggle button only, so
+   the overlay stays inside .main-row (absolute, not fixed): a viewport-wide
+   fixed layer would also cover the tab bar and bury the toggle button. */
+.main-row.sidebar-overlay.sidebar-open {
   position: relative;
+}
+.main-row.sidebar-overlay.sidebar-open .right-sidebar {
+  position: absolute;
+  right: 0;
+  top: 0;
+  bottom: 0;
+  width: min(320px, 85vw);
+  z-index: 60;
+  box-shadow: -8px 0 24px rgba(0, 0, 0, 0.35);
+}
+
+/* Left session overlay (sessionOverlay ON): 右と独立。閉じるのはタブバーの
+   トグルのみのため .main-row 内 absolute に留め、タブバーを覆わない。 */
+.main-row.session-overlay.session-open {
+  position: relative;
+}
+.main-row.session-overlay.session-open .left-sidebar {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: min(320px, 85vw);
+  z-index: 60;
+  box-shadow: 8px 0 24px rgba(0, 0, 0, 0.35);
+}
+
+@media (max-width: 900px) {
+  .right-sidebar {
+    position: fixed;
+    right: 0;
+    top: 0;
+    bottom: 0;
+    width: min(320px, 85vw);
+    z-index: 60;
+    box-shadow: -8px 0 24px rgba(0, 0, 0, 0.35);
+  }
+  .left-sidebar {
+    position: fixed;
+    left: 0;
+    top: 0;
+    bottom: 0;
+    width: min(320px, 85vw);
+    z-index: 60;
+    box-shadow: 8px 0 24px rgba(0, 0, 0, 0.35);
+  }
+}
+
+/* 狭幅画面でサイドバーがオーバーレイ表示のとき、ウィジェット外
+   （画面左側）のタップで閉じられるようにするスクリム。
+   広幅画面では in-flow 表示なので不要。 */
+.sidebar-backdrop {
+  display: none;
+}
+
+/* 左セッション用のスクリム (右と独立。狭幅時のみ表示)。 */
+.session-backdrop {
+  display: none;
+}
+
+@media (max-width: 900px) {
+  .sidebar-backdrop {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: 55;
+    background: rgba(0, 0, 0, 0.35);
+    border: none;
+    border-radius: 0;
+    padding: 0;
+    margin: 0;
+    cursor: default;
+  }
+  .session-backdrop {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: 55;
+    background: rgba(0, 0, 0, 0.35);
+    border: none;
+    border-radius: 0;
+    padding: 0;
+    margin: 0;
+    cursor: default;
+  }
 }
 
 /* Directory Browser */
@@ -784,6 +1325,115 @@ body {
 .settings-header h2 {
   font-size: 22px;
   font-weight: 600;
+}
+
+/* Settings left-menu layout (SettingsView.jsx): sidebar + content.
+   Inactive sections stay unmounted so their polling stops. */
+.settings-layout {
+  display: flex;
+  gap: 20px;
+  align-items: flex-start;
+}
+
+.settings-sidebar {
+  width: 200px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.settings-menu-btn {
+  text-align: left;
+  padding: 8px 12px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 14px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.settings-menu-btn:hover {
+  color: var(--text-primary);
+  background: var(--bg-secondary);
+}
+
+.settings-menu-btn.active {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: var(--bg-secondary);
+  font-weight: 600;
+}
+
+.settings-content {
+  flex: 1;
+  min-width: 0;
+}
+
+.settings-section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.settings-section-header h3 {
+  margin-bottom: 0;
+}
+
+@media (max-width: 700px) {
+  .settings-layout {
+    flex-direction: column;
+  }
+
+  .settings-sidebar {
+    width: 100%;
+    flex-direction: row;
+    overflow-x: auto;
+  }
+
+  .settings-menu-btn {
+    flex-shrink: 0;
+  }
+}
+
+/* General section rows */
+.general-setting-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 0;
+}
+
+.general-setting-row select {
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 8px;
+  font-size: 14px;
+}
+
+.general-setting-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 0 0;
+  cursor: pointer;
+}
+
+.general-setting-subhead {
+  margin: 20px 0 4px;
+  font-size: 14px;
+}
+
+.settings-hint {
+  color: var(--text-secondary);
+  font-size: 12px;
+  margin: 2px 0 8px 24px;
 }
 
 .settings-section {
@@ -1612,117 +2262,7 @@ body {
   overflow-y: auto;
 }
 
-/* Session List */
-.session-list {
-  border: 1px solid var(--accent);
-  border-radius: 6px;
-  background: var(--bg-secondary);
-  margin-bottom: 12px;
-  overflow: hidden;
-}
-
-.session-list-header {
-  padding: 8px 12px;
-  font-size: 12px;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
-  color: var(--accent);
-  border-bottom: 1px solid var(--border);
-}
-
-.session-item {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 8px 12px;
-  cursor: pointer;
-  border-bottom: 1px solid var(--border);
-  transition: background 0.1s;
-}
-
-.session-item:last-child {
-  border-bottom: none;
-}
-
-.session-item:hover {
-  background: var(--bg-surface);
-}
-
-.session-body {
-  display: flex;
-  flex-direction: column;
-  flex: 1;
-  min-width: 0;
-  gap: 4px;
-}
-
-.session-item-top {
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 8px;
-}
-
-.session-icon {
-  font-size: 14px;
-  flex-shrink: 0;
-  width: 20px;
-  text-align: center;
-}
-
-.session-cwd {
-  font-family: 'JetBrains Mono', 'Fira Code', monospace;
-  font-size: 13px;
-  width: 100%;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-/* >= 800px: revert to a single-line item (cwd then status right-aligned) */
-@media (min-width: 800px) {
-  .session-body {
-    flex-direction: row-reverse;
-    align-items: center;
-    gap: 8px;
-  }
-
-  .session-item-top {
-    justify-content: flex-start;
-    flex-shrink: 0;
-  }
-
-  .session-cwd {
-    width: auto;
-    flex: 1;
-    min-width: 0;
-  }
-}
-
-.session-status {
-  font-size: 11px;
-  flex-shrink: 0;
-  padding: 2px 8px;
-  border-radius: 10px;
-  font-weight: 500;
-}
-
-.session-status.active {
-  color: var(--success);
-  background: rgba(166, 227, 161, 0.1);
-}
-
-.session-status.exited {
-  color: var(--text-muted);
-  background: rgba(108, 112, 134, 0.1);
-}
-
-.session-status.resumable {
-  color: var(--accent);
-  background: rgba(137, 180, 250, 0.1);
-}
-
+/* Session List (Files画面からは撤去済み。左セッション一覧は .session-menu-* を使用) */
 .session-badge {
   font-size: 11px;
   flex-shrink: 0;
@@ -1743,13 +2283,6 @@ body {
   color: var(--error, #f38ba8);
   background: rgba(243, 139, 168, 0.12);
   border: 1px solid rgba(243, 139, 168, 0.35);
-}
-
-.session-delete-btn {
-  padding: 2px 8px;
-  font-size: 12px;
-  line-height: 1;
-  flex-shrink: 0;
 }
 
 /* Directory list */
@@ -2699,6 +3232,12 @@ body {
   justify-content: flex-end;
 }
 
+/* Close-confirm dialog: destructive action pinned to the left end while
+   キャンセル/閉じる stay right-aligned. */
+.resume-actions .btn-left {
+  margin-right: auto;
+}
+
 .close-confirm-checkbox {
   display: flex;
   align-items: center;
@@ -2735,76 +3274,7 @@ body {
   color: var(--accent);
 }
 
-/* System Monitor */
-.system-monitor {
-  height: 100%;
-  display: flex;
-  flex-direction: column;
-  padding: 16px;
-  overflow-y: auto;
-}
-
-.monitor-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin-bottom: 16px;
-  flex-shrink: 0;
-  flex-wrap: wrap;
-  gap: 8px;
-}
-
-.monitor-header h2 {
-  font-size: 20px;
-  font-weight: 600;
-}
-
-.monitor-meta {
-  display: flex;
-  align-items: center;
-  gap: 16px;
-  font-size: 13px;
-  color: var(--text-secondary);
-  font-family: 'JetBrains Mono', 'Fira Code', monospace;
-}
-
-.monitor-interval-select {
-  padding: 2px 6px;
-  background: var(--bg-surface);
-  color: var(--text-secondary);
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  font-size: 12px;
-  cursor: pointer;
-  outline: none;
-}
-
-.monitor-interval-select:hover {
-  border-color: var(--accent);
-}
-
-.monitor-toggle {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  font-size: 12px;
-  color: var(--text-secondary);
-  cursor: pointer;
-}
-
-.monitor-toggle input {
-  cursor: pointer;
-  accent-color: var(--accent);
-}
-
-.monitor-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
-  gap: 12px;
-  flex: 1;
-  align-content: start;
-}
-
+/* Monitor cards (right-sidebar widgets) */
 .monitor-card {
   background: var(--bg-secondary);
   border: 1px solid var(--border);
@@ -3037,14 +3507,6 @@ body {
 
   .tab-label {
     max-width: 120px;
-  }
-
-  .system-monitor {
-    padding: 10px;
-  }
-
-  .monitor-grid {
-    grid-template-columns: 1fr;
   }
 
   .monitor-bar-label {

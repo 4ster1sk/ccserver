@@ -4,7 +4,7 @@ import { execFileSync } from 'node:child_process';
 import { writeFileSync, readFileSync, unlinkSync, rmSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { buildSandboxSpawn, resolveApp, sandboxAvailable, loadSandboxConfig, persistentHomeDir, dockerSandboxAvailable, dockerdStatus, dockerdLockHeld } from './sandbox.js';
+import { buildSandboxSpawn, resolveApp, sandboxAvailable, loadSandboxConfig, persistentHomeDir, dockerSandboxAvailable, dockerdStatus, dockerdLockHeld, resolveTools } from './sandbox.js';
 import { getGroupFilesDir, ensureGroupFilesDir } from './groupFiles.js';
 import { buildMcpConfigArgsAndEnv } from './mcpConfig.js';
 import { shouldInjectNotify, notifyEnabled, getNotifySockPath, notifyBrokerRunning } from './notify.js';
@@ -149,13 +149,19 @@ function extractResumeId(session) {
   return extractResumeSessionId(session.app, session.outputBuffer.slice(-50).join(''));
 }
 
-// Which agent new sessions launch when the client doesn't request one
-// (legacy scheduled prompts, or a client that predates app selection).
-// Config-driven rather than a hardcoded constant, per sandbox.config.json's
-// gitignored-real-file / committed-.example.json pattern -- so the default
-// lives in the (untracked) config, not in committed source.
-function defaultApp() {
-  return loadSandboxConfig().defaultApp;
+// Prefixes marking a createSession() failure as a server-side infrastructure
+// fault rather than a rejection of the request as given. Exported so HTTP
+// layers (routes/groups.js) classify without re-typing the strings.
+export const INFRA_ERROR_PREFIXES = ['Failed to build sandbox', 'Failed to spawn', 'Cannot launch: sandbox.config.json sets "forceSandbox"'];
+
+/**
+ * Whether a createSession() error message reports infrastructure failure
+ * (sandbox build / process spawn) as opposed to a bad request.
+ * @param {string} msg Error message from createSession().
+ * @returns {boolean}
+ */
+export function isInfrastructureError(msg) {
+  return INFRA_ERROR_PREFIXES.some((p) => String(msg || '').startsWith(p));
 }
 
 // Model normalization for storage/serialization: `model` is an optional
@@ -166,7 +172,7 @@ function normalizeModel(model) {
   return typeof model === 'string' && model.length > 0 ? model : null;
 }
 
-export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox, sandboxOpts, app, model, permissionMode, resumeLast, groupId = null, groupRole = null, mcpSocketPath = null, projectName = null, reuseSandboxHome = true, orchestratorClaudeMdSrc = null, gitCommonDir = null, groupFilesDir = null, isMetaAgent = false, isReviewJob = false, sandboxHomeCreatedBy = null }) {
+export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox, sandboxOpts, app, model, permissionMode, resumeLast, groupId = null, groupRole = null, mcpSocketPath = null, projectName = null, reuseSandboxHome = true, orchestratorClaudeMdSrc = null, gitCommonDir = null, groupFilesDir = null, isMetaAgent = false, isReviewJob = false, sandboxHomeCreatedBy = null, customLabel = null }) {
   const id = randomUUID();
   // Read once and thread through: this hot path (every session launch) was
   // otherwise re-reading + re-parsing sandbox.config.json up to four times
@@ -388,6 +394,15 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox
   const forceSandbox = cfg.forceSandbox;
   const sandboxRequested = (forceSandbox || sandbox) && process.platform !== 'win32' && sandboxAvailable();
 
+  // Tool provisioning (rtk / code-review-graph): the server config supplies
+  // the fallback default and the client's per-session sandboxOpts.tools (which
+  // the launch menu defaults to ON for these, remembered per directory)
+  // overrides it. The tools are provisioned into the sandbox HOME at launch,
+  // so they are only ever injected when this session is actually sandboxed.
+  // Thread cfg.tools through: the config was already read once above, so
+  // resolveTools must not re-read + re-parse it here on every launch.
+  const tools = resolveTools(sandboxOpts, cfg.tools);
+
   // MCP config injection -- never written to a file (see mcpConfig.js). Combo
   // sessions (groupId set) get their role's broker (ccserver); notify-enabled
   // sessions additionally get ccserver-notify, whose bridge command depends on
@@ -395,7 +410,7 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox
   // host node+bridge). The args must be in the target command before
   // buildSandboxSpawn runs, so the mode is derived from sandboxRequested.
   let mcpEnv = {};
-  if (sessionApp && (mcpSocketPath || useNotify || useUsage || useMeta || useReviewer)) {
+  if (sessionApp && (mcpSocketPath || useNotify || useUsage || useMeta || useReviewer || (sandboxRequested && tools.codeReviewGraph))) {
     const injected = buildMcpConfigArgsAndEnv(sessionApp, {
       // ccserver (the group broker) only when the session has a group socket:
       // standalone notify sessions must not get a broken ccserver entry (its
@@ -427,6 +442,10 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox
         sockPath: reviewerSocketPath,
         identity: reviewerIdentity,
       } : undefined,
+      // code-review-graph MCP is injected only into sandboxed sessions (the
+      // tool is provisioned inside the sandbox, never on the host).
+      tools: sandboxRequested ? tools : null,
+      cwd,
     });
     mcpEnv = injected.env;
     args.push(...injected.args);
@@ -539,6 +558,12 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox
     permissionMode: sessionPermissionMode,
     groupId,
     groupRole,
+    // Operator-assigned display name (null = none; the UI falls back to the
+    // directory basename). Set post-launch via setSessionLabel (PATCH
+    // /api/sessions/:id), never from launch input -- launch bodies are
+    // forwarded nearly as-is across trust boundaries (REST, MCP, federation),
+    // so a display string must not ride along with them.
+    customLabel: normalizeCustomLabel(customLabel),
     // True only for sessions launched with the explicit isMetaAgent flag (the
     // privileged self-management agent). Display/debug bookkeeping -- the
     // authorization boundary is the meta broker socket, not this flag.
@@ -819,6 +844,38 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox
 
 export function getSession(id) {
   return sessions.get(id);
+}
+
+// Operator-assigned display names for sessions (right-click rename in the
+// client). Null/undefined/empty-after-trim means "no custom name". Overlong
+// input is rejected (not truncated) so the caller can surface the limit.
+export const MAX_CUSTOM_LABEL_LENGTH = 64;
+
+export function normalizeCustomLabel(value) {
+  if (value === null || value === undefined) return null;
+  if (typeof value !== 'string') return null;
+  // Strip ASCII + C1 control characters and U+2028/U+2029 line separators --
+  // the label is rendered in single-line UI slots (session rows, terminal
+  // header), where they would split lines or break layout.
+  const cleaned = value.replace(/[\u0000-\u001F\u007F\u0080-\u009F\u2028\u2029]/g, '').trim();
+  if (!cleaned) return null;
+  return cleaned;
+}
+
+export function setSessionLabel(id, label) {
+  const session = sessions.get(id);
+  if (!session) {
+    return { ok: false, code: 'not-found', message: 'Session not found' };
+  }
+  if (label !== null && label !== undefined && typeof label !== 'string') {
+    return { ok: false, code: 'validation', message: 'customLabel must be a string or null' };
+  }
+  const normalized = normalizeCustomLabel(label);
+  if (normalized !== null && [...normalized].length > MAX_CUSTOM_LABEL_LENGTH) {
+    return { ok: false, code: 'validation', message: `customLabel must be at most ${MAX_CUSTOM_LABEL_LENGTH} characters` };
+  }
+  session.customLabel = normalized;
+  return { ok: true, session };
 }
 
 // Write text into a live session's pty, optionally submitting with Enter.
@@ -1451,6 +1508,7 @@ export function listSessions() {
       groupId: session.groupId || null,
       groupRole: session.groupRole || null,
       isMetaAgent: !!session.isMetaAgent,
+      customLabel: session.customLabel || null,
     });
   }
   return result;
@@ -1612,6 +1670,7 @@ export function savedSessionPublic(session, claudeId) {
     permissionMode: normalizePermissionMode(session.permissionMode),
     groupId: session.groupId || null,
     groupRole: session.groupRole || null,
+    customLabel: session.customLabel || null,
   };
 }
 

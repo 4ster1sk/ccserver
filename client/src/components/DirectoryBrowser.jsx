@@ -4,7 +4,8 @@ import { displayPath } from '../displayPath.js';
 import { formatSize } from '../formatSize.js';
 import { isPreviewable } from '../previewExts.js';
 import { isAppSelectable } from '../appAvailability.js';
-import { PERMISSION_MODES, PERMISSION_MODE_LABELS, isElevatedPermissionMode } from '../permissionMode.js';
+import { PERMISSION_MODES, PERMISSION_MODE_LABELS } from '../permissionMode.js';
+import { loadSandboxDefaults, defaultSandboxOpts } from '../sandboxDefaults.js';
 import MetaLaunchDialog from './MetaLaunchDialog.jsx';
 
 // marked + DOMPurify only matter once someone opens a preview, so keep them
@@ -51,18 +52,43 @@ function loadComboApps() {
   return { ...COMBO_DEFAULT_APPS };
 }
 
-// Per-directory opt-in sandbox flags (gpg / sshAgent), remembered separately
-// per cwd rather than as one server-wide default -- see server/sandbox.config.json's
-// `gpg`/`sshAgent` for the fallback these override at launch.
-function loadSandboxOpts(path) {
+// Per-directory opt-in sandbox flags (gpg / sshAgent / tools), remembered
+// separately per cwd rather than as one server-wide default -- see
+// server/sandbox.config.json's `gpg`/`sshAgent`/`tools` for the fallback these
+// override at launch. `tools` (rtk / code-review-graph) provisions the tool
+// into the sandbox HOME at launch instead of installing it on the host.
+// 記憶が無い場合の初期値は Settings > 一般のグローバル既定値
+// (client/src/sandboxDefaults.js) を使う。gpg/sshAgent は既定オフ。
+// tools (rtk / code-review-graph) もキー不在時はグローバル既定値に
+// フォールバックする (旧形式の記憶には tools が無いため); a stored
+// explicit false turns them back off for that directory.
+export function hasSandboxOptsMemory(path) {
+  try {
+    return localStorage.getItem(SANDBOX_OPTS_PREFIX + path) !== null;
+  } catch { /* ignore */ }
+  return false;
+}
+
+function loadSandboxOpts(path, globalDefaults) {
   try {
     const raw = localStorage.getItem(SANDBOX_OPTS_PREFIX + path);
     if (raw) {
       const parsed = JSON.parse(raw);
-      return { gpg: !!parsed.gpg, sshAgent: !!parsed.sshAgent };
+      // 旧形式の記憶 ({gpg, sshAgent} のみ) では tools キーが不在。
+      // 不在 = 未選択なので一律 true にせずグローバル既定値にフォールバックする
+      // (明示保存された true/false は引き続き尊重される)。
+      const fallbackTools = defaultSandboxOpts(globalDefaults || loadSandboxDefaults()).tools;
+      return {
+        gpg: !!parsed.gpg,
+        sshAgent: !!parsed.sshAgent,
+        tools: {
+          rtk: parsed.tools?.rtk ?? fallbackTools.rtk,
+          codeReviewGraph: parsed.tools?.codeReviewGraph ?? fallbackTools.codeReviewGraph,
+        },
+      };
     }
   } catch { /* ignore */ }
-  return { gpg: false, sshAgent: false };
+  return defaultSandboxOpts(globalDefaults || loadSandboxDefaults());
 }
 
 function saveSandboxOpts(path, opts) {
@@ -71,7 +97,7 @@ function saveSandboxOpts(path, opts) {
   } catch { /* ignore */ }
 }
 
-export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onOpenGroup, onSessionClick, onOpenSettings, initialPath, groupsVersion, metaAgentDir, onOpenMeta }) {
+export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onOpenSettings, initialPath, metaAgentDir, onOpenMeta, sandboxDefaults }) {
   const [currentPath, setCurrentPath] = useState(initialPath || localStorage.getItem(LAST_DIR_KEY) || '/');
   const [homeDir, setHomeDir] = useState(null);
   const [dirs, setDirs] = useState([]);
@@ -85,8 +111,6 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
   // git init opt-in for folder creation (off by default, like the other
   // launch flags): avoids surprising nested repositories under existing ones.
   const [initGit, setInitGit] = useState(false);
-  const [sessions, setSessions] = useState([]);
-  const [groups, setGroups] = useState([]);
   const [dragOver, setDragOver] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState('');
@@ -155,7 +179,7 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
   // Per-role sandbox overrides; null = inherit the group-level common flags.
   const [comboRoleSandbox, setComboRoleSandbox] = useState({ workerA: null, workerB: null, orchestrator: null });
   const [orchestratorInstructions, setOrchestratorInstructions] = useState('');
-  const [sandboxOpts, setSandboxOpts] = useState(() => loadSandboxOpts(currentPath));
+  const [sandboxOpts, setSandboxOpts] = useState(() => loadSandboxOpts(currentPath, sandboxDefaults));
 
   // Worker presets (shared server-side library). presetsState: 'idle' until
   // the combo modal first needs them, then 'loading' | 'ready' | 'error'.
@@ -355,11 +379,16 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
     }
   }, [fetchPresets]);
 
-  // gpg/sshAgent are remembered per directory, not globally -- reload whenever
-  // the browser navigates to a different one.
+  // gpg/sshAgent/tools はディレクトリ別に記憶し、記憶が無い場合のみ
+  // Settings > 一般のグローバル既定値を使う。ディレクトリ移動時と
+  // グローバル既定値の変更時に再読込するが、記憶済みの場所は上書きしない。
   useEffect(() => {
-    setSandboxOpts(loadSandboxOpts(currentPath));
-  }, [currentPath]);
+    if (hasSandboxOptsMemory(currentPath)) {
+      setSandboxOpts(loadSandboxOpts(currentPath, sandboxDefaults));
+    } else {
+      setSandboxOpts(defaultSandboxOpts(sandboxDefaults || loadSandboxDefaults()));
+    }
+  }, [currentPath, sandboxDefaults]);
 
   const updateSandboxOpts = useCallback((path, next) => {
     setSandboxOpts(next);
@@ -507,57 +536,6 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
     }
   }, [currentPath, newFolderName, initGit, closeFolderForm]);
 
-  const fetchSessions = useCallback(async () => {
-    try {
-      const res = await authFetch('/api/sessions');
-      if (res.ok) {
-        const data = await res.json();
-        // Group members (workerA/workerB/orchestrator) are reached through
-        // the combo group's own sub-tab UI; listing them here would let a
-        // click attach the same sessionId from a second tab, detaching the
-        // live one inside the group (attachSocket replaces the old socket).
-        setSessions((data.sessions || []).filter((s) => s.groupId == null));
-      }
-    } catch {
-      // ignore — sessions panel is supplementary
-    }
-    // Combo groups live in their own tab UI; list them here so a reloaded
-    // browser can re-open a group (live members re-attach, restored ones
-    // resume). A running group's members are filtered from the session list
-    // above, so this is the only way back in after a page reload.
-    try {
-      const res = await authFetch('/api/groups');
-      if (res.ok) {
-        const data = await res.json();
-        setGroups((data.groups || []).filter((g) => g.liveCount > 0 || g.memberCount > 0));
-      }
-    } catch {
-      // ignore — groups panel is supplementary
-    }
-  }, []);
-
-  useEffect(() => {
-    fetchSessions();
-  }, [fetchSessions, groupsVersion]);
-
-  const handleSessionClick = useCallback((session) => {
-    onSessionClick(session);
-  }, [onSessionClick]);
-
-  const handleDeleteSession = useCallback(async (session) => {
-    if (!window.confirm(`セッションを終了しますか?\n${displayPath(session.cwd, homeDir)}`)) return;
-    try {
-      const res = await authFetch(`/api/sessions/${session.id}`, { method: 'DELETE' });
-      if (!res.ok) {
-        const body = await res.json().catch(() => ({}));
-        throw new Error(body.error || `HTTP ${res.status}`);
-      }
-    } catch (err) {
-      setError(err.message);
-    }
-    fetchSessions();
-  }, [fetchSessions, homeDir]);
-
   const closePreview = useCallback(() => setPreviewFile(null), []);
 
   const handleDownload = useCallback((file) => {
@@ -703,11 +681,27 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
           />
           ssh-agentを転送する
         </label>
+        <label className="open-menu-suboption">
+          <input
+            type="checkbox"
+            checked={sandboxOpts.tools.rtk}
+            onChange={(e) => updateSandboxOpts(currentPath, { ...sandboxOpts, tools: { ...sandboxOpts.tools, rtk: e.target.checked } })}
+          />
+          rtk を導入する (sandbox 内にインストール)
+        </label>
+        <label className="open-menu-suboption">
+          <input
+            type="checkbox"
+            checked={sandboxOpts.tools.codeReviewGraph}
+            onChange={(e) => updateSandboxOpts(currentPath, { ...sandboxOpts, tools: { ...sandboxOpts.tools, codeReviewGraph: e.target.checked } })}
+          />
+          code-review-graph MCP を導入する
+        </label>
       </div>
       <p className="open-menu-note">
         {forceSandbox
           ? 'サンドボックスがサーバー設定 (forceSandbox) で強制されています。通常起動はできません。'
-          : `サンドボックス: 隣接プロジェクトを隔離し、内部に rootless docker を用意。GPG/ssh-agentは既定オフ、このディレクトリ (${displayPath(currentPath, homeDir)}) に記憶されます。`}
+          : `サンドボックス: 隣接プロジェクトを隔離し、内部に rootless docker を用意。初期値は一般設定で変更でき、このディレクトリ (${displayPath(currentPath, homeDir)}) に記憶されます。`}
       </p>
     </>
   );
@@ -770,7 +764,7 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
           <button className="btn btn-secondary" onClick={() => homeDir && navigateTo(homeDir)} disabled={!homeDir}>
             Home
           </button>
-          <button className="btn btn-secondary" onClick={() => { fetchDirs(currentPath); fetchSessions(); }} disabled={loading}>
+          <button className="btn btn-secondary" onClick={() => { fetchDirs(currentPath); }} disabled={loading}>
             Refresh
           </button>
           <button
@@ -1076,6 +1070,22 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
                     />
                     ssh-agentを転送する (両ワーカー共通)
                   </label>
+                  <label className="open-menu-suboption">
+                    <input
+                      type="checkbox"
+                      checked={sandboxOpts.tools.rtk}
+                      onChange={(e) => updateSandboxOpts(currentPath, { ...sandboxOpts, tools: { ...sandboxOpts.tools, rtk: e.target.checked } })}
+                    />
+                    rtk を導入する (両ワーカー共通)
+                  </label>
+                  <label className="open-menu-suboption">
+                    <input
+                      type="checkbox"
+                      checked={sandboxOpts.tools.codeReviewGraph}
+                      onChange={(e) => updateSandboxOpts(currentPath, { ...sandboxOpts, tools: { ...sandboxOpts.tools, codeReviewGraph: e.target.checked } })}
+                    />
+                    code-review-graph MCP を導入する (両ワーカー共通)
+                  </label>
                 </div>
                 {(['workerA', 'workerB']).map((role) => (
                   <div key={role} className="open-menu-role-sandbox">
@@ -1113,6 +1123,28 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
                             }))}
                           />
                           {role} ssh-agent
+                        </label>
+                        <label className="open-menu-suboption">
+                          <input
+                            type="checkbox"
+                            checked={comboRoleSandbox[role].tools.rtk}
+                            onChange={(e) => setComboRoleSandbox((s) => ({
+                              ...s,
+                              [role]: { ...s[role], tools: { ...s[role].tools, rtk: e.target.checked } },
+                            }))}
+                          />
+                          {role} rtk を導入
+                        </label>
+                        <label className="open-menu-suboption">
+                          <input
+                            type="checkbox"
+                            checked={comboRoleSandbox[role].tools.codeReviewGraph}
+                            onChange={(e) => setComboRoleSandbox((s) => ({
+                              ...s,
+                              [role]: { ...s[role], tools: { ...s[role].tools, codeReviewGraph: e.target.checked } },
+                            }))}
+                          />
+                          {role} code-review-graph MCP を導入
                         </label>
                       </div>
                     )}
@@ -1178,6 +1210,28 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
                           }))}
                         />
                         オーケストレーター ssh-agent
+                      </label>
+                      <label className="open-menu-suboption">
+                        <input
+                          type="checkbox"
+                          checked={comboRoleSandbox.orchestrator.tools.rtk}
+                          onChange={(e) => setComboRoleSandbox((s) => ({
+                            ...s,
+                            orchestrator: { ...s.orchestrator, tools: { ...s.orchestrator.tools, rtk: e.target.checked } },
+                          }))}
+                        />
+                        オーケストレーター rtk を導入
+                      </label>
+                      <label className="open-menu-suboption">
+                        <input
+                          type="checkbox"
+                          checked={comboRoleSandbox.orchestrator.tools.codeReviewGraph}
+                          onChange={(e) => setComboRoleSandbox((s) => ({
+                            ...s,
+                            orchestrator: { ...s.orchestrator, tools: { ...s.orchestrator.tools, codeReviewGraph: e.target.checked } },
+                          }))}
+                        />
+                        オーケストレーター code-review-graph MCP を導入
                       </label>
                     </div>
                   )}
@@ -1418,82 +1472,6 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
         </div>
       )}
 
-      {(sessions.length > 0 || groups.length > 0) && (
-        <div className="session-list">
-          <div className="session-list-header">Active Sessions</div>
-          {sessions.map((session) => (
-            <div
-              key={session.id}
-              className="session-item"
-              onClick={() => handleSessionClick(session)}
-              role="button"
-              tabIndex={0}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter') handleSessionClick(session);
-              }}
-            >
-              <span className="session-icon">
-                {session.connected ? '\u25B6' : '\u23F8'}
-              </span>
-              <div className="session-body">
-                <div className="session-item-top">
-                  {session.sandbox ? (
-                    <span className="session-badge sandbox" title="このセッションはサンドボックスで実行中">sandbox</span>
-                  ) : !session.shell ? (
-                    <span className="session-badge no-sandbox" title="このセッションはサンドボックス外で実行中">no sandbox</span>
-                  ) : null}
-                  <span className="session-status active">
-                    {session.shell
-                      ? 'shell'
-                      : `${session.app === 'claude' ? 'claude' : session.app === 'copilot' ? 'copilot' : session.app === 'codex' ? 'codex' : session.app === 'commandcode' ? 'command-code' : 'opencode'} · ${session.connected ? 'connected' : 'idle'}`}
-                  </span>
-                  {!session.shell && session.app === 'commandcode' && isElevatedPermissionMode(session.permissionMode) && (
-                    <span className={`session-badge permission-${session.permissionMode}`} title={session.permissionMode === 'yolo' ? 'yolo モード (--yolo) で実行中' : '自動承認モード (--auto-accept) で実行中'}>{session.permissionMode}</span>
-                  )}
-                </div>
-                <span className="session-cwd" title={session.cwd}>{displayPath(session.cwd, homeDir)}</span>
-              </div>
-              <button
-                className="btn btn-secondary session-delete-btn"
-                onClick={(e) => { e.stopPropagation(); handleDeleteSession(session); }}
-                title="Terminate session"
-              >
-                &#10005;
-              </button>
-            </div>
-          ))}
-          {groups.length > 0 && (
-            <>
-              <div className="session-list-header">Groups</div>
-              {groups.map((g) => (
-                <div
-                  key={g.groupId}
-                  className="session-item"
-                  onClick={() => onOpenGroup(g.groupId)}
-                  role="button"
-                  tabIndex={0}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter') onOpenGroup(g.groupId);
-                  }}
-                >
-                  <span className="session-icon">{'\u26A1'}</span>
-                  <div className="session-body">
-                    <div className="session-item-top">
-                      <span className="session-status resumable">
-                        {g.liveCount > 0
-                          ? `group · ${g.memberCount} members · ${g.liveCount} live`
-                          : `group · ${g.memberCount} members · closed (click to reopen)`}
-                      </span>
-                    </div>
-                    <span className="session-cwd" title={g.cwd}>{displayPath(g.cwd, homeDir)}</span>
-                  </div>
-                </div>
-              ))}
-            </>
-          )}
-        </div>
-      )}
-
       <div className={`dir-list${dragOver ? ' drag-over' : ''}`}>
         {loading && <div className="loading">Loading...</div>}
         {error && <div className="error">Error: {error}</div>}
@@ -1509,7 +1487,7 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
               onClick={() => navigateTo(dir.path)}
               onDoubleClick={() => onOpen(dir.path, {
                 sandbox: sandboxDefault,
-                sandboxOpts: loadSandboxOpts(dir.path),
+                sandboxOpts: loadSandboxOpts(dir.path, sandboxDefaults),
                 app: appDefault,
                 model: modelForApp(appDefault),
                 permissionMode: permissionModeForApp(appDefault),

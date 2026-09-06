@@ -1,8 +1,8 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { authFetch } from '../auth.js';
 
-// "ペアリング済みインスタンス" section of SettingsView.jsx (plan Phase 1,
-// section 9). Lists every paired_instances row (all statuses -- active,
+// "ペアリング済みインスタンス" section (SettingsView.jsx の左メニューから
+// 表示される。plan Phase 1, section 9). Lists every paired_instances row (all statuses -- active,
 // still-pending in either direction, revoked/rejected/expired as an audit
 // trail) and lets the user start a new pairing or revoke an existing one.
 // Approving/rejecting an INCOMING request is PairingRequestBanner's job, not
@@ -166,7 +166,7 @@ export default function PairedInstancesSection() {
 
   return (
     <section className="settings-section">
-      <div className="settings-header">
+      <div className="settings-section-header">
         <h3>ペアリング済みインスタンス</h3>
         <button className="btn btn-secondary" onClick={openModal} disabled={enabled === false}>
           新しいインスタンスとペアリング

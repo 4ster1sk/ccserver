@@ -5,7 +5,8 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { orchestratorRestartSessionOpts, orchestratorDirForCwd, groupExistsForCwd } from './groups.js';
+import { orchestratorRestartSessionOpts, orchestratorDirForCwd, groupExistsForCwd, orchestratorRestartFailureStatus, launchFailureCode, workerLaunchFailureCode } from './groups.js';
+import { isInfrastructureError } from '../ws/sessionManager.js';
 
 test('orchestratorRestartSessionOpts: restart continues the last conversation', () => {
   const opts = orchestratorRestartSessionOpts({
@@ -37,6 +38,76 @@ test('orchestratorRestartSessionOpts: resumeLast is independent of the app', () 
     assert.equal(opts.app, app);
     assert.equal(opts.projectName, 'proj', `the real project basename is attributed for ${app}`);
   }
+});
+
+test('isInfrastructureError: infra failures surface as 500, request rejections stay 400', () => {
+  // Mirrors the actual createSession() message shapes in server/ws/sessionManager.js;
+  // if those messages change, this test forces INFRA_ERROR_PREFIXES to follow.
+  assert.equal(isInfrastructureError('Failed to build sandbox: bwrap not found'), true);
+  assert.equal(isInfrastructureError('Failed to spawn "claude": spawn ENOENT'), true);
+  assert.equal(isInfrastructureError('Cannot launch: sandbox.config.json sets "forceSandbox": true, but bwrap is not available on this host. Install bwrap (bubblewrap) or disable forceSandbox.'), true);
+  // Request-as-given rejections must keep mapping to 400.
+  assert.equal(isInfrastructureError('Cannot launch: copilot is hidden on this server (sandbox.config.json\'s "hiddenApps"). Remove it from hiddenApps to allow launches.'), false);
+  assert.equal(isInfrastructureError('Cannot launch: codex is not installed on this server (searched /usr/bin).'), false);
+  assert.equal(isInfrastructureError('Cannot launch in the filesystem root (/) -- claude aborts immediately there. Choose a working directory first.'), false);
+  // Defensive: the restart route passes `res.error || 'unknown error'`.
+  assert.equal(isInfrastructureError('unknown error'), false);
+  assert.equal(isInfrastructureError(null), false);
+  assert.equal(isInfrastructureError(undefined), false);
+  assert.equal(isInfrastructureError(''), false);
+});
+
+test('orchestratorRestartFailureStatus: infra faults are 500, request rejections stay 400', () => {
+  // The restart route must branch on this (it is the only production caller):
+  // createSession() CAN fail server-side, so a fixed 400 misclassifies.
+  assert.equal(orchestratorRestartFailureStatus('Failed to build sandbox: bwrap not found'), 500);
+  assert.equal(orchestratorRestartFailureStatus('Failed to spawn "claude": spawn ENOENT'), 500);
+  assert.equal(orchestratorRestartFailureStatus('Cannot launch: sandbox.config.json sets "forceSandbox": true, but bwrap is not available.'), 500);
+  // Request-as-given rejections -- including the sandbox-home conflict, which
+  // is a state conflict (close the using tab first), not an infra fault.
+  assert.equal(orchestratorRestartFailureStatus('Cannot launch: copilot is hidden on this server.'), 400);
+  assert.equal(orchestratorRestartFailureStatus('このプロジェクトのサンドボックスを利用中のセッションがあるため、新規作成（前回環境の破棄）できません。先にタブを閉じてください。'), 400);
+  // Defensive: the route passes `res.error || 'unknown error'`, and a missing
+  // session without an error string must stay 400.
+  assert.equal(orchestratorRestartFailureStatus('unknown error'), 400);
+  assert.equal(orchestratorRestartFailureStatus(null), 400);
+  assert.equal(orchestratorRestartFailureStatus(undefined), 400);
+  assert.equal(orchestratorRestartFailureStatus(''), 400);
+});
+
+test('launchFailureCode: POST /groups launch failures split internal/validation like the restart route', () => {
+  // Same classification core as orchestratorRestartFailureStatus, but in the
+  // { ok, code } vocabulary of launchGroupFromSpec/fail().
+  assert.equal(launchFailureCode('Failed to build sandbox: bwrap not found'), 'internal');
+  assert.equal(launchFailureCode('Failed to spawn "codex": spawn ENOENT'), 'internal');
+  assert.equal(launchFailureCode('Cannot launch: sandbox.config.json sets "forceSandbox": true, but bwrap is not available.'), 'internal');
+  assert.equal(launchFailureCode('Cannot launch: copilot is hidden on this server.'), 'validation');
+  assert.equal(launchFailureCode('Cannot launch: codex is not installed on this server (searched /usr/bin).'), 'validation');
+  assert.equal(launchFailureCode('Cannot launch in the filesystem root (/) -- claude aborts immediately there. Choose a working directory first.'), 'validation');
+  assert.equal(launchFailureCode('このプロジェクトのサンドボックスを利用中のセッションがあるため、新規作成（前回環境の破棄）できません。先にタブを閉じてください。'), 'validation');
+  assert.equal(launchFailureCode('unknown error'), 'validation');
+  assert.equal(launchFailureCode(null), 'validation');
+  assert.equal(launchFailureCode(undefined), 'validation');
+  assert.equal(launchFailureCode(''), 'validation');
+});
+
+test('workerLaunchFailureCode: channel-failed is internal, the rest follows the message', () => {
+  // addMember's stable error code for handoff broker (unix socket) creation
+  // failure -- server-side fault regardless of the message text.
+  assert.equal(workerLaunchFailureCode({ error: 'channel-failed', message: 'failed to create handoff channel' }), 'internal');
+  // spawn-failed passes the createSession error through as message, so the
+  // infra/request split still applies.
+  assert.equal(workerLaunchFailureCode({ error: 'spawn-failed', message: 'Failed to spawn "codex": spawn ENOENT' }), 'internal');
+  assert.equal(workerLaunchFailureCode({ error: 'spawn-failed', message: 'Failed to build sandbox: bwrap not found' }), 'internal');
+  assert.equal(workerLaunchFailureCode({ error: 'spawn-failed', message: 'Cannot launch: codex is not installed on this server (searched /usr/bin).' }), 'validation');
+  // Request-as-given rejections keep their codes.
+  assert.equal(workerLaunchFailureCode({ error: 'bad-request', message: 'app must be claude, opencode, or codex' }), 'validation');
+  assert.equal(workerLaunchFailureCode({ error: 'invalid-role', message: 'only worker sessions can be replaced' }), 'validation');
+  assert.equal(workerLaunchFailureCode({ error: 'too-many-members', message: 'group is full' }), 'validation');
+  // Defensive shapes never surface as 500.
+  assert.equal(workerLaunchFailureCode({ error: 'boom' }), 'validation');
+  assert.equal(workerLaunchFailureCode(null), 'validation');
+  assert.equal(workerLaunchFailureCode(undefined), 'validation');
 });
 
 test('orchestratorDirForCwd is deterministic per project path', () => {
@@ -138,6 +209,20 @@ test('normalizeWorkers: legacy payloads without workers[] keep the workerA/worke
   assert.deepEqual(empty.workers[0].spec, {});
 });
 
+test('normalizeWorkers: legacy adapter carries sandboxOpts.tools through (regression: PR#114 review)', () => {
+  const legacy = normalizeWorkers({
+    workerA: { sandboxOpts: { gpg: true, tools: { rtk: true, codeReviewGraph: false } } },
+    workerB: { sandboxOpts: { gpg: false } },
+  });
+  assert.deepEqual(legacy.workers[0].spec.sandboxOpts, {
+    gpg: true,
+    sshAgent: false,
+    tools: { rtk: true, codeReviewGraph: false },
+  });
+  // No tools provided -> no tools key (mirrors groupManager.normalizeSandboxOpts).
+  assert.deepEqual(legacy.workers[1].spec.sandboxOpts, { gpg: false, sshAgent: false });
+});
+
 test('normalizeWorkers: a valid workers[] snapshot passes through normalized', () => {
   const res = normalizeWorkers({
     workers: [
@@ -180,6 +265,29 @@ test('normalizeWorkers: per-entry sandboxOpts mirror memberSpecFromBody semantic
   ]});
   assert.deepEqual(res.workers[0].spec.sandboxOpts, { gpg: true, sshAgent: true });
   assert.deepEqual(res.workers[1].spec.sandboxOpts, null);
+});
+
+test('normalizeWorkers: workers[] sandboxOpts.tools survives normalization (regression: PR#114 review, groups.js was dropping tools)', () => {
+  const res = normalizeWorkers({ workers: [
+    { role: 'workerRtk', sandboxOpts: { gpg: true, sshAgent: false, tools: { rtk: true, codeReviewGraph: true } } },
+    { role: 'workerMixed', sandboxOpts: { tools: { rtk: 1, codeReviewGraph: 0 } } },
+    { role: 'workerBadTools', sandboxOpts: { gpg: true, tools: 'nope' } },
+    { role: 'workerNoTools', sandboxOpts: { gpg: true } },
+  ]});
+  assert.deepEqual(res.workers[0].spec.sandboxOpts, {
+    gpg: true,
+    sshAgent: false,
+    tools: { rtk: true, codeReviewGraph: true },
+  });
+  assert.deepEqual(res.workers[1].spec.sandboxOpts, {
+    gpg: false,
+    sshAgent: false,
+    tools: { rtk: true, codeReviewGraph: false },
+  });
+  // Non-object tools is treated as absent, same as normalizeSandboxOpts.
+  assert.deepEqual(res.workers[2].spec.sandboxOpts, { gpg: true, sshAgent: false });
+  // No tools key at all -> no tools key in the output.
+  assert.deepEqual(res.workers[3].spec.sandboxOpts, { gpg: true, sshAgent: false });
 });
 
 test('normalizeWorkers: workers explicitly null falls back to the legacy adapter', () => {

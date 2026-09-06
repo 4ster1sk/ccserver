@@ -26,7 +26,7 @@ import { mkdirSync, statSync, rmSync, existsSync } from 'node:fs';
 import { basename, join, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import * as groupManager from '../ws/groupManager.js';
-import { createSession, getSession } from '../ws/sessionManager.js';
+import { createSession, getSession, isInfrastructureError } from '../ws/sessionManager.js';
 import { sandboxAvailable } from '../ws/sandbox.js';
 import { isValidApp } from '../ws/appLaunch.js';
 import { projectHashForCwd } from '../ws/projectHash.js';
@@ -77,9 +77,7 @@ function memberSpecFromBody(spec) {
     else result.model = source.model;
   }
   if (Object.prototype.hasOwnProperty.call(source, 'sandboxOpts')) {
-    result.sandboxOpts = source.sandboxOpts && typeof source.sandboxOpts === 'object'
-      ? { gpg: !!source.sandboxOpts.gpg, sshAgent: !!source.sandboxOpts.sshAgent }
-      : null;
+    result.sandboxOpts = groupManager.normalizeSandboxOpts(source.sandboxOpts);
   }
   return result;
 }
@@ -127,9 +125,7 @@ export function normalizeWorkers(body) {
       if (hasOwn(src, 'app')) spec.app = n.value.app;
       if (hasOwn(src, 'model')) spec.model = n.value.model;
       if (hasOwn(src, 'sandboxOpts')) {
-        spec.sandboxOpts = src.sandboxOpts && typeof src.sandboxOpts === 'object'
-          ? { gpg: !!src.sandboxOpts.gpg, sshAgent: !!src.sandboxOpts.sshAgent }
-          : null;
+        spec.sandboxOpts = groupManager.normalizeSandboxOpts(src.sandboxOpts);
       }
       out.push({ role: n.value.role, spec });
     }
@@ -143,6 +139,36 @@ export function normalizeWorkers(body) {
       { role: 'workerB', spec: memberSpecFromBody(body?.workerB) },
     ],
   };
+}
+
+// HTTP status for an orchestrator-restart failure. Pure (and exported) so the
+// 500/400 contract is unit-testable without fastify machinery: server-side
+// infrastructure faults (sandbox build / process spawn) are 500, rejections of
+// the request as given (hiddenApps, not-installed, invalid cwd, conflicts,
+// ...) stay 400. The restart route must call this -- see below.
+export function orchestratorRestartFailureStatus(errorMsg) {
+  return isInfrastructureError(errorMsg) ? 500 : 400;
+}
+
+// Result code for a group-launch failure. Pure (and exported) so the
+// internal/validation contract is unit-testable: server-side faults take
+// 'internal' (->HTTP 500), rejections of the request as given stay
+// 'validation' (->400). Classify on the RAW createSession/addMember error --
+// isInfrastructureError() matches message prefixes, so a message already
+// wrapped with role context would never match.
+export function launchFailureCode(rawError) {
+  return isInfrastructureError(rawError) ? 'internal' : 'validation';
+}
+
+// Result code for a worker-launch failure inside launchGroupFromSpec. Takes
+// the whole addMember result: most failures classify on the raw message via
+// launchFailureCode(), but 'channel-failed' (handoff broker socket creation
+// under the server data dir) is a server-side fault whose message
+// ('failed to create handoff channel') matches no infra prefix, so it is
+// branched on the stable error code first.
+export function workerLaunchFailureCode(res) {
+  if (res?.error === 'channel-failed') return 'internal';
+  return launchFailureCode(res?.message || res?.error);
 }
 
 // Session options for the orchestrator-restart route. Extracted (and pure)
@@ -229,9 +255,7 @@ export async function launchGroupFromSpec(body) {
   if (workers.some(({ spec }) => badModel(spec)) || badModel(orchestrator)) {
     return { ok: false, code: 'validation', message: 'member model must be a string or null' };
   }
-  const sandboxOpts = (input.sandboxOpts && typeof input.sandboxOpts === 'object')
-    ? { gpg: !!input.sandboxOpts.gpg, sshAgent: !!input.sandboxOpts.sshAgent }
-    : null;
+  const sandboxOpts = groupManager.normalizeSandboxOpts(input.sandboxOpts);
 
   const groupId = randomUUID();
   const orchestratorDir = orchestratorDirForCwd(cwd);
@@ -277,10 +301,12 @@ export async function launchGroupFromSpec(body) {
   const controlBroker = groupManager.getGroup(groupId).controlBroker;
 
   // Roll back cleanly if any of the three spawns fails.
-  const fail = (message) => {
+  // code defaults to 'validation' (->400); pass 'internal' (->500) for
+  // server-side faults -- see launchFailureCode().
+  const fail = (message, code = 'validation') => {
     groupManager.destroyGroup(groupId);
     if (!dirAlreadyExisted) { try { rmSync(orchestratorDir, { recursive: true, force: true }); } catch { /* best effort */ } }
-    return { ok: false, code: 'validation', message };
+    return { ok: false, code, message };
   };
 
   // Merge the template with `instructions` and write the result to the
@@ -291,7 +317,7 @@ export async function launchGroupFromSpec(body) {
   try {
     orchestratorClaudeMdSrc = groupManager.generateOrchestratorClaudeMdSrc(groupId);
   } catch (err) {
-    return fail(`failed to generate orchestrator instructions: ${err.message}`);
+    return fail(`failed to generate orchestrator instructions: ${err.message}`, 'internal');
   }
   // A null return (group/orchestratorDir unexpectedly missing) is just as
   // fatal as a thrown error here: launching with orchestratorClaudeMdSrc
@@ -301,7 +327,7 @@ export async function launchGroupFromSpec(body) {
   // close. Fail closed, matching the auto-resume resolver in
   // sessionManager.js's fireSchedule.
   if (!orchestratorClaudeMdSrc) {
-    return fail('failed to generate orchestrator instructions: no CLAUDE.md overlay was produced');
+    return fail('failed to generate orchestrator instructions: no CLAUDE.md overlay was produced', 'internal');
   }
 
   // Workers reuse addMember (the open_tab path) so validation, channel
@@ -314,7 +340,10 @@ export async function launchGroupFromSpec(body) {
     })),
   );
   for (const { role, res } of workerResults) {
-    if (res.error) return fail(`worker ${role} failed to launch: ${res.message || res.error}`);
+    if (res.error) {
+      const raw = res.message || res.error;
+      return fail(`worker ${role} failed to launch: ${raw}`, workerLaunchFailureCode(res));
+    }
   }
 
   const orchRes = createSession({
@@ -324,7 +353,7 @@ export async function launchGroupFromSpec(body) {
     sandbox: true,
     sandboxOpts: orchestrator.sandboxOpts ?? null,
     // An absent orchestrator app must not fall through to createSession's
-    // defaultApp(): a config defaulting to copilot would launch a group
+    // cfg.defaultApp: a config defaulting to copilot would launch a group
     // member copilot can't run (no MCP injection). claude is the group
     // default.
     app: orchestrator.app || 'claude',
@@ -338,7 +367,8 @@ export async function launchGroupFromSpec(body) {
     orchestratorClaudeMdSrc,
   });
   if (orchRes.error || !orchRes.session) {
-    return fail(`orchestrator failed to launch: ${orchRes.error || 'unknown error'}`);
+    const raw = orchRes.error || 'unknown error';
+    return fail(`orchestrator failed to launch: ${raw}`, launchFailureCode(raw));
   }
   groupManager.registerMember(groupId, 'orchestrator', orchRes.sessionId);
   groupManager.setMemberPrefs(groupId, 'orchestrator', {
@@ -449,11 +479,12 @@ export async function groupsRoute(fastify, opts) {
 
     const res = createSession(orchestratorRestartSessionOpts({ group, app, model, sandboxOpts, mcpSocketPath, orchestratorClaudeMdSrc }));
     if (res.error || !res.session) {
-      // createSession()'s error is always a rejection of the request as given
-      // (hiddenApps, not-installed, invalid cwd, ...), never an internal
-      // server fault -- matching POST /groups' fail() helper, which maps the
-      // identical createSession() rejection to 400, not 500.
-      return reply.code(400).send({ error: `orchestrator restart failed: ${res.error || 'unknown error'}` });
+      // Infra faults (sandbox build / spawn) are 500; request-as-given
+      // rejections stay 400 -- see orchestratorRestartFailureStatus().
+      // (POST /groups' fail() classifies the identical createSession()
+      // rejection the same way via launchFailureCode().)
+      const code = orchestratorRestartFailureStatus(res.error);
+      return reply.code(code).send({ error: `orchestrator restart failed: ${res.error || 'unknown error'}` });
     }
     groupManager.registerMember(group.id, 'orchestrator', res.sessionId);
     groupManager.setMemberPrefs(group.id, 'orchestrator', { app, model: res.session.model, sandboxOpts });

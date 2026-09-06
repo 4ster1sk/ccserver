@@ -1,16 +1,26 @@
 import { useState, useCallback, useRef, useEffect, lazy, Suspense } from 'react';
 import DirectoryBrowser from './components/DirectoryBrowser.jsx';
-import SystemMonitor from './components/SystemMonitor.jsx';
 import SettingsView from './components/SettingsView.jsx';
 import ApprovalBanner from './components/ApprovalBanner.jsx';
 import PairingRequestBanner from './components/PairingRequestBanner.jsx';
 import UsageButton from './components/UsageButton.jsx';
 import TabIcon from './components/TabIcon.jsx';
+import SessionTabMenu from './components/SessionTabMenu.jsx';
+import SessionSidebar from './components/SessionSidebar.jsx';
+import SessionContextMenu from './components/SessionContextMenu.jsx';
+import SessionRenameDialog from './components/SessionRenameDialog.jsx';
 import GroupTabView from './components/GroupTabView.jsx';
 import RemoteInstanceView from './components/RemoteInstanceView.jsx';
+import RightSidebar, { WIDGET_DEFS, MONITOR_WIDGET_IDS } from './components/RightSidebar.jsx';
+import { SystemStatsProvider } from './components/widgets/SystemStatsProvider.jsx';
+import { useWidgetPrefs } from './hooks/useWidgetPrefs.js';
+import { useSessionSidebarPrefs } from './hooks/useSessionSidebarPrefs.js';
+import { NARROW_DRAWER_QUERY } from './hooks/viewportQuery.js';
 import { useNotifications } from './hooks/useNotifications.js';
+import { loadNavGuardMode, saveNavGuardMode, useNavGuard } from './hooks/useNavGuard.js';
 import { authFetch } from './auth.js';
 import { getTheme, loadThemeId, saveThemeId, applyThemeCss } from './themes.js';
+import { loadSandboxDefaults, saveSandboxDefaults } from './sandboxDefaults.js';
 import { isAppSelectable, isAppVisible } from './appAvailability.js';
 
 const TerminalView = lazy(() => import('./components/TerminalView.jsx'));
@@ -20,7 +30,6 @@ let tabIdCounter = 0;
 export default function App() {
   const [tabs, setTabs] = useState([
     { id: 'browser', type: 'browser', label: 'Files' },
-    { id: 'monitor', type: 'monitor', label: 'Monitor' },
     { id: 'remote', type: 'remote', label: 'Remote' },
   ]);
   const [activeTabId, setActiveTabId] = useState('browser');
@@ -33,14 +42,53 @@ export default function App() {
   const [themeId, setThemeId] = useState(loadThemeId);
   const [closeConfirm, setCloseConfirm] = useState(null);
   const [dontAskAgain, setDontAskAgain] = useState(false);
+  // "セッションを終了" (terminateSessionAndCloseTab) is async: while its
+  // DELETE is in flight the dialog buttons are disabled and re-entry is
+  // ignored, so a double-click can't fire a duplicate DELETE (whose 404
+  // would surface a bogus failure alert after a successful termination).
+  // The guard is a ref (not just the state below): setState applies
+  // asynchronously, so two clicks before the next render would both see a
+  // stale `false` and slip through. The state remains for the disabled UI.
+  const isTerminatingRef = useRef(false);
+  const [isTerminatingSession, setIsTerminatingSession] = useState(false);
   const [groupActiveApp, setGroupActiveApp] = useState(null);
   // Bumped whenever a group is created / destroyed / re-opened, so the
   // directory browser's groups list refetches (it is otherwise fetch-on-mount).
   const [groupsVersion, setGroupsVersion] = useState(0);
-  const [skipCloseConfirm, setSkipCloseConfirm] = useState(
-    () => localStorage.getItem('ccserver-skip-close-confirm') === '1'
-  );
+  const [skipCloseConfirm, setSkipCloseConfirm] = useState(() => {
+    try {
+      return localStorage.getItem('ccserver-skip-close-confirm') === '1';
+    } catch {
+      return false;
+    }
+  });
+  // 終了確認スキップの永続化付き setter (一般設定タブと終了確認ダイアログ
+  // の「次回以降確認しない」から共有する)。
+  const setSkipCloseConfirmPersisted = useCallback((v) => {
+    setSkipCloseConfirm(v);
+    try {
+      if (v) localStorage.setItem('ccserver-skip-close-confirm', '1');
+      else localStorage.removeItem('ccserver-skip-close-confirm');
+    } catch {
+      // ignore (private mode etc.)
+    }
+  }, []);
   const pendingOpenRef = useRef(null);
+  // ブラウザの「戻る / 進む」履歴操作ガード (Settings > 一般で変更。
+  // confirm: 確認ダイアログ / suppress: 黙って抑制 / allow: 無効)。
+  const [navGuardMode, setNavGuardMode] = useState(loadNavGuardMode);
+  const setNavGuardModePersisted = useCallback((v) => {
+    setNavGuardMode(v);
+    saveNavGuardMode(v);
+  }, []);
+  useNavGuard(navGuardMode);
+  // サンドボックス起動フラグのグローバル既定値 (Settings > 一般で変更。
+  // ディレクトリ別記憶が無い場合の初期値として DirectoryBrowser が使う)。
+  const [sandboxDefaults, setSandboxDefaults] = useState(loadSandboxDefaults);
+  const setSandboxDefaultsPersisted = useCallback((next) => {
+    setSandboxDefaults(next);
+    saveSandboxDefaults(next);
+  }, []);
   const { enabled: notifyEnabled, permission: notifyPermission, toggle: toggleNotify, notify } = useNotifications();
   // Server-side facts from /api/dirs/home: whether the Usage button is
   // enabled (sandbox.config.json's "showUsage") and which agent CLIs are
@@ -403,8 +451,7 @@ export default function App() {
   const confirmCloseTab = useCallback(async () => {
     if (!closeConfirm) return;
     if (dontAskAgain) {
-      localStorage.setItem('ccserver-skip-close-confirm', '1');
-      setSkipCloseConfirm(true);
+      setSkipCloseConfirmPersisted(true);
     }
     const tab = tabs.find((t) => t.id === closeConfirm.tabId);
     if (tab?.type === 'group') {
@@ -412,16 +459,10 @@ export default function App() {
     }
     doCloseTab(closeConfirm.tabId);
     setCloseConfirm(null);
-  }, [closeConfirm, dontAskAgain, tabs, doCloseTab, destroyGroupTab]);
+  }, [closeConfirm, dontAskAgain, tabs, doCloseTab, destroyGroupTab, setSkipCloseConfirmPersisted]);
 
   const handleTabClick = useCallback((tabId) => {
     setActiveTabId(tabId);
-    setAttentionTabs((prev) => {
-      if (!prev.has(tabId)) return prev;
-      const next = new Set(prev);
-      next.delete(tabId);
-      return next;
-    });
   }, []);
 
   const handleTabExited = useCallback((tabId, exited) => {
@@ -445,7 +486,239 @@ export default function App() {
     ));
   }, []);
 
+  // Session hamburger menu: terminal + group (combo) tabs are listed
+  // vertically in the menu, while browser/remote/settings tabs stay horizontal.
+  // 表示モードは設定で切替: 'popup' (従来のポップアップ) | 'sidebar' (既定・
+  // 右ウィジェットと同じ挙動の左常時表示パネル。開閉・重ね表示は右と別フラグ)。
+  const sessionSidebarPrefs = useSessionSidebarPrefs();
+  const sessionSidebarMode = sessionSidebarPrefs.mode;
+  const sessionSidebarOpen = sessionSidebarPrefs.open;
+  const [sessionMenuOpen, setSessionMenuOpen] = useState(false);
+  const [serverSessions, setServerSessions] = useState([]);
+  const sessionsRefreshingRef = useRef(false);
+  const sessionsRefreshQueuedRef = useRef(false);
+  const fetchServerSessions = useCallback(async () => {
+    if (sessionsRefreshingRef.current) { sessionsRefreshQueuedRef.current = true; return; }
+    sessionsRefreshingRef.current = true;
+    try {
+      const res = await authFetch('/api/sessions');
+      if (!res.ok) return;
+      const data = await res.json();
+      // Same filter as DirectoryBrowser: group members attach only through
+      // the combo group's own sub-tab UI. Listing them here would detach
+      // the live socket inside the group.
+      setServerSessions((data.sessions || []).filter((s) => s.groupId == null));
+    } catch {
+      // supplementary panel: keep the last-known list on failure
+    } finally {
+      sessionsRefreshingRef.current = false;
+      if (sessionsRefreshQueuedRef.current) {
+        sessionsRefreshQueuedRef.current = false;
+        fetchServerSessions();
+      }
+    }
+  }, []);
+  // tabs全体ではなくセッション構成に影響する安定キーのみ監視する
+  // (手番ポーリング等の無関係なsetTabsで/api/sessionsを叩かない)。
+  // グループ一覧 (左セッション一覧の第3セクション用)。Files画面の
+  // .session-list 撤去に伴い、再オープン動線はこちらに移設した。
+  // セッション取得と同じタイミングで更新する。
+  const [serverGroups, setServerGroups] = useState([]);
+  const fetchServerGroups = useCallback(async () => {
+    try {
+      const res = await authFetch('/api/groups');
+      if (!res.ok) return;
+      const data = await res.json();
+      setServerGroups((data.groups || []).filter((g) => g.liveCount > 0 || g.memberCount > 0));
+    } catch {
+      // supplementary panel: keep the last-known list on failure
+    }
+  }, []);
+  const sessionTabsKey = tabs.map((t) => `${t.id}:${t.sessionId || ''}:${t.attachSessionId || ''}`).join(',');
+  // サイドバーモードではパネル開表示の間、ポップアップモードではメニュー開表示の間
+  // 一覧を更新する。タブ構成変化時も下段 (稼働中) との付け替えを反映する。
+  const sessionPanelOpen = sessionSidebarMode === 'sidebar' ? sessionSidebarOpen : sessionMenuOpen;
+  useEffect(() => {
+    if (sessionPanelOpen) {
+      fetchServerSessions();
+      fetchServerGroups();
+    }
+    // closing a tab moves its server-side session from the upper section
+    // to the lower one while the menu stays open, so the list must refresh
+    // on tab changes too.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionPanelOpen, sessionSidebarMode, fetchServerSessions, fetchServerGroups, groupsVersion, sessionTabsKey]);
+  const closeSessionMenu = useCallback(() => setSessionMenuOpen(false), []);
+  const toggleSessionMenu = useCallback(() => {
+    setSessionMenuOpen((v) => !v);
+  }, []);
+  // サイドバー表示中に開く操作をした際、重ね表示のときだけ閉じる。
+  // in-flow表示はCLIをリサイズ済みのため開いたままにする。重ね表示とは
+  // 設定ONのデスクトップオーバーレイと、狭幅ドロワー (NARROW_DRAWER_QUERY・
+  // 常時前面) の両方を指す。狭幅判定はクリック時に都度行う (リサイズ対応の
+  // ため購読はしない)。
+  const closeSessionSidebarIfOverlay = useCallback(() => {
+    if (sessionSidebarPrefs.overlay) {
+      sessionSidebarPrefs.setOpen(false);
+      return;
+    }
+    if (typeof window !== 'undefined' && window.matchMedia?.(NARROW_DRAWER_QUERY).matches) {
+      sessionSidebarPrefs.setOpen(false);
+    }
+  }, [sessionSidebarPrefs.overlay, sessionSidebarPrefs.setOpen]);
+  // ポップアップは選択で閉じる。サイドバーは重ね表示のときだけ閉じ、
+  // in-flow表示では常時表示のため閉じない (ターミナルタブとグループタブ共通)。
+  const handleSelectSessionTab = useCallback((tabId) => {
+    setActiveTabId(tabId);
+    if (sessionSidebarPrefs.mode !== 'sidebar') setSessionMenuOpen(false);
+    else closeSessionSidebarIfOverlay();
+  }, [sessionSidebarPrefs.mode, closeSessionSidebarIfOverlay]);
+  const handleCloseSessionTab = useCallback((tabId) => {
+    handleCloseTab(tabId);
+  }, [handleCloseTab]);
+  const handleOpenUnopenedSession = useCallback((session) => {
+    if (sessionSidebarPrefs.mode !== 'sidebar') setSessionMenuOpen(false);
+    else closeSessionSidebarIfOverlay();
+    handleSessionClick(session);
+  }, [handleSessionClick, sessionSidebarPrefs.mode, closeSessionSidebarIfOverlay]);
+  // グループ再オープン (Files画面のGroups一覧から移設)。セッションと同様、
+  // ポップアップでは選択で閉じる。サイドバーは重ね表示のときだけ閉じる。
+  const handleOpenGroupFromList = useCallback((groupId) => {
+    if (sessionSidebarPrefs.mode !== 'sidebar') setSessionMenuOpen(false);
+    else closeSessionSidebarIfOverlay();
+    handleOpenGroup(groupId);
+  }, [handleOpenGroup, sessionSidebarPrefs.mode, closeSessionSidebarIfOverlay]);
+  // Lower section's X: terminate the server-side session (tab close keeps
+  // the session alive, so this is the only destructive action here).
+  const handleTerminateUnopenedSession = useCallback(async (session) => {
+    const label = session.cwd || session.id;
+    if (!window.confirm(`セッションを終了しますか?\n${label}`)) return;
+    try {
+      const res = await authFetch(`/api/sessions/${session.id}`, { method: 'DELETE' });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.error || `HTTP ${res.status}`);
+      }
+    } catch (err) {
+      window.alert(`セッションを終了できませんでした: ${err.message}`);
+    }
+    fetchServerSessions();
+  }, [fetchServerSessions]);
+
+  // Close-confirm dialog's "セッションを終了": fully terminate the
+  // server-side session (DELETE /api/sessions/:id -- the same primitive as
+  // the lower-section X above) and close the tab as well. Unlike
+  // confirmCloseTab ("閉じる") the session does not linger for re-attach.
+  // Shown only for local terminal tabs with a known session id: group tabs
+  // already destroy their members on close, and remote tabs belong to another
+  // instance (a local DELETE would 404 or hit the wrong session).
+  // NOTE: this must stay below fetchServerSessions/follow-ups in source
+  // order -- the deps array below is evaluated during render, so referencing
+  // a later const would throw a TDZ ReferenceError and blank the whole app.
+  const terminateSessionAndCloseTab = useCallback(async () => {
+    if (!closeConfirm || isTerminatingRef.current) return;
+    const tab = tabs.find((t) => t.id === closeConfirm.tabId);
+    const sessionId = tab?.sessionId || tab?.attachSessionId || null;
+    if (!tab || !sessionId) return;
+    isTerminatingRef.current = true;
+    setIsTerminatingSession(true);
+    try {
+      const res = await authFetch(`/api/sessions/${sessionId}`, { method: 'DELETE' });
+      if (res.status === 404) {
+        // Session already gone server-side: termination is effectively done,
+        // fall through and close the tab.
+      } else if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.error || `HTTP ${res.status}`);
+      }
+    } catch (err) {
+      window.alert(`セッションを終了できませんでした: ${err.message}`);
+      return;
+    } finally {
+      isTerminatingRef.current = false;
+      setIsTerminatingSession(false);
+    }
+    // Persist "don't ask again" only after a successful termination: on
+    // failure the session is still alive, and a persisted skip would
+    // silently switch future closes to the keep-alive path.
+    if (dontAskAgain) {
+      setSkipCloseConfirmPersisted(true);
+    }
+    doCloseTab(closeConfirm.tabId);
+    setCloseConfirm(null);
+    fetchServerSessions();
+  }, [closeConfirm, dontAskAgain, tabs, doCloseTab, setSkipCloseConfirmPersisted, fetchServerSessions]);
+
+  // セッション表示名 (右クリック改名): サーバー保存の customLabel を
+  // sessionId で引くマップ。一覧の上段・ターミナルヘッダーで使う。
+  // 下段 (未オープン) は serverSessions 要素の customLabel を直接使う。
+  const labelBySessionId = new Map();
+  for (const s of serverSessions) {
+    if (s.customLabel) labelBySessionId.set(s.id, s.customLabel);
+  }
+  const resolveTabLabel = (tab) => {
+    const sid = tab.sessionId || tab.attachSessionId;
+    return (sid && labelBySessionId.get(sid)) || null;
+  };
+  // 右クリックメニューと改名ダイアログの表示状態。contextMenu: { x, y, id,
+  // currentLabel }、renameTarget: { id, currentLabel }。
+  const [contextMenu, setContextMenu] = useState(null);
+  const [renameTarget, setRenameTarget] = useState(null);
+  const closeContextMenu = useCallback(() => setContextMenu(null), []);
+  const handleRowContextMenu = useCallback((e, target) => {
+    setContextMenu({ x: e.clientX, y: e.clientY, id: target.id, currentLabel: target.currentLabel });
+  }, []);
+  const handleRenameSession = useCallback(async (id, name) => {
+    try {
+      const res = await authFetch(`/api/sessions/${id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ customLabel: name }),
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.error || `HTTP ${res.status}`);
+      }
+    } catch (err) {
+      window.alert(`セッション名を設定できませんでした: ${err.message}`);
+    }
+    setRenameTarget(null);
+    fetchServerSessions();
+  }, [fetchServerSessions]);
+  const handleClearSessionLabel = useCallback((id) => {
+    setContextMenu(null);
+    handleRenameSession(id, null);
+  }, [handleRenameSession]);
+  const handleOpenRenameDialog = useCallback(() => {
+    if (!contextMenu) return;
+    setRenameTarget({ id: contextMenu.id, currentLabel: contextMenu.currentLabel });
+    setContextMenu(null);
+  }, [contextMenu]);
+
+  const sessionTabs = tabs.filter((t) => t.type === 'terminal');
+  const groupTabs = tabs.filter((t) => t.type === 'group');
+  const openedTabCount = sessionTabs.length + groupTabs.length;
+  const barTabs = tabs.filter((t) => t.type === 'browser' || t.type === 'remote' || t.type === 'settings');
+  const openedSessionIds = new Set();
+  for (const t of tabs) {
+    if (t.sessionId) openedSessionIds.add(t.sessionId);
+    if (t.attachSessionId) openedSessionIds.add(t.attachSessionId);
+  }
+  const unopenedSessions = serverSessions.filter((s) => !openedSessionIds.has(s.id));
+  // 開き済みグループタブのあるグループを除いた未オープン一覧。
+  const openedGroupIds = new Set();
+  for (const t of tabs) {
+    if (t.type === 'group' && t.groupId) openedGroupIds.add(t.groupId);
+  }
+  const unopenedGroups = serverGroups.filter((g) => !openedGroupIds.has(g.groupId));
+
   const activeTab = tabs.find((t) => t.id === activeTabId);
+  // Close-confirm dialog's "セッションを終了" availability: local terminal
+  // tabs with a known server-side session id only (group tabs destroy their
+  // members on close already; remote tabs belong to another instance).
+  const closeConfirmTab = closeConfirm ? tabs.find((t) => t.id === closeConfirm.tabId) : null;
+  const canTerminateCloseConfirm = !!closeConfirmTab && closeConfirm?.kind === 'terminal'
+    && !closeConfirmTab.remote && !!(closeConfirmTab.sessionId || closeConfirmTab.attachSessionId);
   // Usage covers claude (Claude Code's /usage), codex (Codex's rate-limit
   // read) and opencode Go (the zen/go quota API); the popover itself has
   // tabs to switch between them, so the button is no longer tied to
@@ -474,6 +747,11 @@ export default function App() {
   const usageDefaultApp = (activeTabApp === 'codex' && codexAvailable) ? 'codex'
     : (activeTabApp === 'opencode' && opencodeGoAvailable) ? 'opencode'
     : (claudeAvailable ? 'claude' : (codexAvailable ? 'codex' : (opencodeGoAvailable ? 'opencode' : 'claude')));
+  const sidebarPrefs = useWidgetPrefs(WIDGET_DEFS);
+  const monitorWidgetsVisible = sidebarPrefs.open
+    && sidebarPrefs.visibleWidgets.some((w) => MONITOR_WIDGET_IDS.includes(w.id));
+  const statsActive = monitorWidgetsVisible;
+  const usageWidgetProps = { hidden: usageHidden, defaultApp: usageDefaultApp, availableApps: usagePrefs.availableApps, hiddenApps: usagePrefs.hiddenApps };
 
   return (
     <div className="app">
@@ -485,25 +763,53 @@ export default function App() {
           another ccserver instance can't be missed on any tab. */}
       <PairingRequestBanner />
       <div className="tab-bar">
+        {sessionSidebarMode === 'popup' ? (
+          <SessionTabMenu
+            open={sessionMenuOpen}
+            onToggle={toggleSessionMenu}
+            onClose={closeSessionMenu}
+            sessionTabs={sessionTabs}
+            groupTabs={groupTabs}
+            activeTabId={activeTabId}
+            unopenedSessions={unopenedSessions}
+            unopenedGroups={unopenedGroups}
+            onSelectTab={handleSelectSessionTab}
+            onCloseTab={handleCloseSessionTab}
+            onOpenSession={handleOpenUnopenedSession}
+            onTerminateSession={handleTerminateUnopenedSession}
+            onOpenGroup={handleOpenGroupFromList}
+            customLabels={labelBySessionId}
+            onRowContextMenu={handleRowContextMenu}
+          />
+        ) : (
+          <button
+            type="button"
+            className="btn session-menu-btn"
+            onClick={() => sessionSidebarPrefs.setOpen(!sessionSidebarOpen)}
+            title={openedTabCount > 0 ? `セッション (${openedTabCount})` : 'セッション'}
+            aria-label={sessionSidebarOpen ? 'セッションサイドバーを閉じる' : 'セッションサイドバーを開く'}
+            aria-expanded={sessionSidebarOpen}
+          >
+            <span aria-hidden="true">☰</span>
+            {openedTabCount > 0 && (
+              <span className="session-menu-count" aria-hidden="true">{openedTabCount}</span>
+            )}
+          </button>
+        )}
         <div className="tab-list">
-        {tabs.map((tab) => (
+        {barTabs.map((tab) => (
           <div
             key={tab.id}
-            className={`tab-item${tab.id === activeTabId ? ' active' : ''}${tab.type === 'terminal' && !tab.shell && !tab.sandbox ? ' no-sandbox' : ''}`}
-            title={tab.type === 'group' && tab.cwd ? tab.cwd : tab.remote ? `${tab.remote.label} — ${tab.cwd || ''}`.trim() : (tab.type === 'terminal' && tab.cwd ? tab.cwd : undefined)}
+            className={`tab-item${tab.id === activeTabId ? ' active' : ''}`}
+            title={tab.remote ? `${tab.remote.label} — ${tab.cwd || ''}`.trim() : undefined}
             onClick={() => handleTabClick(tab.id)}
           >
             <span className="tab-label">
               <TabIcon type={tab.type} app={tab.app} shell={tab.shell} isMetaAgent={!!tab.isMetaAgent} />
               {tab.label}
-              {tab.type === 'group' && tab.currentTurn && (
-                <span className="tab-turn-badge" title={`現在の手番: ${tab.currentTurn}`}>
-                  {tab.currentTurn === 'orchestrator' ? 'ORCH' : tab.currentTurn.toUpperCase()}
-                </span>
-              )}
-              {tab.type === 'terminal' && tab.remote && <span className="tab-remote-badge" title={`接続先: ${tab.remote.label} (${tab.remote.instanceId.slice(0, 8)})`}>⇄ {tab.remote.label}</span>}
+              {tab.remote && <span className="tab-remote-badge" title={`接続先: ${tab.remote.label} (${tab.remote.instanceId.slice(0, 8)})`}>⇄ {tab.remote.label}</span>}
             </span>
-            {tab.type !== 'browser' && tab.type !== 'monitor' && tab.type !== 'remote' && (
+            {tab.type !== 'browser' && tab.type !== 'remote' && (
               <button
                 className="tab-close"
                 onClick={(e) => {
@@ -520,20 +826,70 @@ export default function App() {
         <div className="tab-bar-spacer" />
         </div>
         <UsageButton hidden={usageHidden} defaultApp={usageDefaultApp} availableApps={usagePrefs.availableApps} hiddenApps={usagePrefs.hiddenApps} />
+        <button
+          type="button"
+          className="btn sidebar-toggle-btn"
+          onClick={() => sidebarPrefs.setOpen(!sidebarPrefs.open)}
+          title={sidebarPrefs.open ? 'サイドバーを閉じる' : 'サイドバーを開く'}
+          aria-label={sidebarPrefs.open ? 'サイドバーを閉じる' : 'サイドバーを開く'}
+          aria-expanded={sidebarPrefs.open}
+        >
+          {sidebarPrefs.open ? '▶' : '◀'}
+        </button>
       </div>
+      <SystemStatsProvider active={statsActive}>
+      <div className={`main-row${sidebarPrefs.open ? ' sidebar-open' : ''}${sidebarPrefs.overlay ? ' sidebar-overlay' : ''}${sessionSidebarMode === 'sidebar' && sessionSidebarOpen ? ' session-open' : ''}${sessionSidebarMode === 'sidebar' && sessionSidebarPrefs.overlay ? ' session-overlay' : ''}`}>
+      {sessionSidebarMode === 'sidebar' && sessionSidebarOpen && (
+        <button
+          type="button"
+          className="session-backdrop"
+          aria-label="セッションサイドバーを閉じる"
+          tabIndex={-1}
+          onClick={() => sessionSidebarPrefs.setOpen(false)}
+        />
+      )}
+      {sessionSidebarMode === 'sidebar' && (
+        <SessionSidebar
+          open={sessionSidebarOpen}
+          sessionTabs={sessionTabs}
+          groupTabs={groupTabs}
+          activeTabId={activeTabId}
+          unopenedSessions={unopenedSessions}
+          unopenedGroups={unopenedGroups}
+          onSelectTab={handleSelectSessionTab}
+          onCloseTab={handleCloseSessionTab}
+          onOpenSession={handleOpenUnopenedSession}
+          onTerminateSession={handleTerminateUnopenedSession}
+          onOpenGroup={handleOpenGroupFromList}
+          customLabels={labelBySessionId}
+          onRowContextMenu={handleRowContextMenu}
+        />
+      )}
       <div className="tab-content">
         <div style={{ display: activeTabId === 'browser' ? 'flex' : 'none', height: '100%', flexDirection: 'column' }}>
-          <DirectoryBrowser onOpen={handleOpen} onOpenShell={handleOpenShell} onOpenCombo={handleOpenCombo} onOpenGroup={handleOpenGroup} onSessionClick={handleSessionClick} onOpenSettings={openSettingsTab} initialPath={lastDir} groupsVersion={groupsVersion} metaAgentDir={metaAgentDir} onOpenMeta={handleOpenMeta} />
-        </div>
-        <div style={{ display: activeTabId === 'monitor' ? 'flex' : 'none', height: '100%', flexDirection: 'column' }}>
-          <SystemMonitor visible={activeTabId === 'monitor'} />
+          <DirectoryBrowser onOpen={handleOpen} onOpenShell={handleOpenShell} onOpenCombo={handleOpenCombo} onOpenSettings={openSettingsTab} initialPath={lastDir} metaAgentDir={metaAgentDir} onOpenMeta={handleOpenMeta} sandboxDefaults={sandboxDefaults} />
         </div>
         <div style={{ display: activeTabId === 'remote' ? 'flex' : 'none', height: '100%', flexDirection: 'column', overflow: 'auto' }}>
           <RemoteInstanceView onOpenRemoteTerminal={openRemoteTerminalTab} visible={activeTabId === 'remote'} />
         </div>
         {tabs.some((t) => t.type === 'settings') && (
           <div style={{ display: activeTabId === 'settings' ? 'flex' : 'none', height: '100%', flexDirection: 'column' }}>
-            <SettingsView />
+            <SettingsView
+              themeId={themeId}
+              onThemeChange={setThemeId}
+              confirmBeforeClose={!skipCloseConfirm}
+              onConfirmBeforeCloseChange={(v) => setSkipCloseConfirmPersisted(!v)}
+              sidebarOverlay={sidebarPrefs.overlay}
+              onSidebarOverlayChange={sidebarPrefs.setOverlay}
+              sessionMode={sessionSidebarPrefs.mode}
+              onSessionModeChange={sessionSidebarPrefs.setMode}
+              sessionOverlay={sessionSidebarPrefs.overlay}
+              onSessionOverlayChange={sessionSidebarPrefs.setOverlay}
+              sandboxDefaults={sandboxDefaults}
+              onSandboxDefaultsChange={setSandboxDefaultsPersisted}
+              navGuardMode={navGuardMode}
+              onNavGuardModeChange={setNavGuardModePersisted}
+            />
           </div>
         )}
         {tabs
@@ -557,6 +913,7 @@ export default function App() {
                   permissionMode={tab.permissionMode || 'standard'}
                   resume={!!tab.resume}
                   isMetaAgent={!!tab.isMetaAgent}
+                  customLabel={resolveTabLabel(tab)}
                   notify={notify}
                   notifyEnabled={notifyEnabled}
                   notifyPermission={notifyPermission}
@@ -566,8 +923,6 @@ export default function App() {
                   onExited={(exited) => handleTabExited(tab.id, exited)}
                   attachSessionId={tab.attachSessionId}
                   xtermTheme={getTheme(themeId).xterm}
-                  themeId={themeId}
-                  onThemeChange={setThemeId}
                   tabId={tab.id}
                   onFocusTab={() => handleTabClick(tab.id)}
                   remoteInstanceId={tab.remote?.instanceId || null}
@@ -589,8 +944,6 @@ export default function App() {
                 projectCwd={tab.cwd}
                 visible={activeTabId === tab.id}
                 xtermTheme={getTheme(themeId).xterm}
-                themeId={themeId}
-                onThemeChange={setThemeId}
                 notify={notify}
                 notifyEnabled={notifyEnabled}
                 notifyPermission={notifyPermission}
@@ -603,6 +956,35 @@ export default function App() {
             </div>
           ))}
       </div>
+      {sidebarPrefs.open && (
+        <button
+          type="button"
+          className="sidebar-backdrop"
+          aria-label="サイドバーを閉じる"
+          tabIndex={-1}
+          onClick={() => sidebarPrefs.setOpen(false)}
+        />
+      )}
+      <RightSidebar usageProps={usageWidgetProps} prefs={sidebarPrefs} />
+      </div>
+      </SystemStatsProvider>
+      {contextMenu && (
+        <SessionContextMenu
+          x={contextMenu.x}
+          y={contextMenu.y}
+          hasCustomLabel={!!contextMenu.currentLabel}
+          onRename={handleOpenRenameDialog}
+          onClear={() => handleClearSessionLabel(contextMenu.id)}
+          onClose={closeContextMenu}
+        />
+      )}
+      {renameTarget && (
+        <SessionRenameDialog
+          initialName={renameTarget.currentLabel}
+          onSubmit={(name) => handleRenameSession(renameTarget.id, name)}
+          onClose={() => setRenameTarget(null)}
+        />
+      )}
       {sandboxPrompt && (
         <div className="resume-overlay" onClick={cancelSandboxPrompt}>
           <div className="resume-dialog" onClick={(e) => e.stopPropagation()}>
@@ -651,7 +1033,7 @@ export default function App() {
         </div>
       )}
       {closeConfirm && (
-        <div className="resume-overlay" onClick={() => setCloseConfirm(null)}>
+        <div className="resume-overlay" onClick={() => { if (!isTerminatingSession) setCloseConfirm(null); }}>
           <div className="resume-dialog" onClick={(e) => e.stopPropagation()}>
             <h3>{closeConfirm.kind === 'group' ? 'グループを閉じますか?' : 'タブを閉じますか?'}</h3>
             <p>{closeConfirm.kind === 'group'
@@ -661,15 +1043,21 @@ export default function App() {
               <input
                 type="checkbox"
                 checked={dontAskAgain}
+                disabled={isTerminatingSession}
                 onChange={(e) => setDontAskAgain(e.target.checked)}
               />
               次回以降確認しない
             </label>
             <div className="resume-actions">
-              <button className="btn btn-secondary" onClick={() => setCloseConfirm(null)}>
+              {canTerminateCloseConfirm && (
+                <button className="btn btn-danger btn-left" onClick={terminateSessionAndCloseTab} disabled={isTerminatingSession}>
+                  {isTerminatingSession ? '終了中...' : 'セッションを終了'}
+                </button>
+              )}
+              <button className="btn btn-secondary" onClick={() => setCloseConfirm(null)} disabled={isTerminatingSession}>
                 キャンセル
               </button>
-              <button className="btn btn-primary" onClick={confirmCloseTab}>
+              <button className="btn btn-primary" onClick={confirmCloseTab} disabled={isTerminatingSession}>
                 閉じる
               </button>
             </div>
