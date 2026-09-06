@@ -3,7 +3,6 @@ import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { WebLinksAddon } from '@xterm/addon-web-links';
 import '@xterm/xterm/css/xterm.css';
-import { getThemeIds, getTheme } from '../themes.js';
 import { authWsUrl, authFetch } from '../auth.js';
 import { createOsc52Handler } from '../osc52.js';
 import { dewrapSelection } from '../dewrap.js';
@@ -236,9 +235,7 @@ function osc52Response(text) {
   return `\x1b]52;c;${btoa(bin)}\x07`;
 }
 
-const themeIds = getThemeIds();
-
-export default function TerminalView({ cwd, onClose, claudeSessionId, shell, sandbox, sandboxOpts, reuseSandboxHome = true, app = 'claude', model = null, permissionMode = 'standard', resume = false, isMetaAgent = false, notify, notifyEnabled, notifyPermission, onToggleNotify, visible, onSessionId, onExited, attachSessionId, xtermTheme, themeId, onThemeChange, tabId, onFocusTab, groupId, groupRole, projectCwd = null, remoteInstanceId = null, remoteInstanceLabel = null }) {
+export default function TerminalView({ cwd, onClose, claudeSessionId, shell, sandbox, sandboxOpts, reuseSandboxHome = true, app = 'claude', model = null, permissionMode = 'standard', resume = false, isMetaAgent = false, notify, notifyEnabled, notifyPermission, onToggleNotify, visible, onSessionId, onExited, attachSessionId, xtermTheme, tabId, onFocusTab, groupId, groupRole, projectCwd = null, remoteInstanceId = null, remoteInstanceLabel = null }) {
   const isMobile = useMemo(() => 'ontouchstart' in window, []);
   const terminalRef = useRef(null);
   const terminalViewRef = useRef(null);
@@ -298,8 +295,6 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
   useEffect(() => { notifyRef.current = notify; }, [notify]);
   const onFocusTabRef = useRef(onFocusTab);
   useEffect(() => { onFocusTabRef.current = onFocusTab; }, [onFocusTab]);
-  const [themeMenuOpen, setThemeMenuOpen] = useState(false);
-  const themeMenuRef = useRef(null);
   const [keyboardOpen, setKeyboardOpen] = useState(false);
   // $HOME from /api/dirs/home, only for display: `displayPath` turns the
   // prefix into `~` in the title/notifications while the raw cwd is kept
@@ -365,17 +360,6 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
 
   const xtermThemeRef = useRef(xtermTheme);
   useEffect(() => { xtermThemeRef.current = xtermTheme; }, [xtermTheme]);
-
-  useEffect(() => {
-    if (!themeMenuOpen) return;
-    const handleClick = (e) => {
-      if (themeMenuRef.current && !themeMenuRef.current.contains(e.target)) {
-        setThemeMenuOpen(false);
-      }
-    };
-    document.addEventListener('mousedown', handleClick);
-    return () => document.removeEventListener('mousedown', handleClick);
-  }, [themeMenuOpen]);
 
   useEffect(() => {
     if (xtermRef.current) {
@@ -1273,31 +1257,6 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
           title={projectCwd && projectCwd !== cwd ? `Project: ${projectCwd}\nWorktree: ${cwd}` : cwd}
         >{sandbox ? '🔒 ' : (!shell ? '⚠️ ' : '')}{shell ? 'Terminal' : appLabel(app)}{!shell && model ? ` · ${model}` : ''}{!shell && app === 'commandcode' && isElevatedPermissionMode(permissionMode) ? ` · ${permissionMode}` : ''} &mdash; {displayPath(cwd, homeDir)}</span>
         <div className="header-actions">
-          <div className="theme-picker" ref={themeMenuRef}>
-            <button
-              className="btn theme-btn"
-              onClick={() => setThemeMenuOpen((v) => !v)}
-              title="Theme"
-            >
-              <svg className="header-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><circle cx="8" cy="8" r="6"/><circle cx="8" cy="4.5" r="1" fill="currentColor" stroke="none"/><circle cx="5" cy="6.5" r="1" fill="currentColor" stroke="none"/><circle cx="11" cy="6.5" r="1" fill="currentColor" stroke="none"/><circle cx="6" cy="10" r="1" fill="currentColor" stroke="none"/></svg>
-            </button>
-            {themeMenuOpen && (
-              <div className="theme-menu">
-                {themeIds.map((id) => (
-                  <div
-                    key={id}
-                    className={`theme-menu-item${id === themeId ? ' active' : ''}`}
-                    onClick={() => {
-                      onThemeChange(id);
-                      setThemeMenuOpen(false);
-                    }}
-                  >
-                    {getTheme(id).name}
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
           {!shell && (
             <>
               <button

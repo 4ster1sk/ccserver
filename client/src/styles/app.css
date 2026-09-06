@@ -658,61 +658,6 @@ body {
   flex-shrink: 0;
 }
 
-.theme-picker {
-  position: relative;
-  flex-shrink: 0;
-}
-
-.theme-btn {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: transparent;
-  border: 1px solid transparent;
-  color: var(--text-secondary);
-  cursor: pointer;
-  padding: 6px 8px;
-  border-radius: 4px;
-  line-height: 1;
-}
-
-.theme-btn:hover {
-  background: var(--bg-surface);
-  border-color: var(--border);
-}
-
-.theme-menu {
-  position: absolute;
-  top: 100%;
-  right: 0;
-  margin-top: 4px;
-  background: var(--bg-secondary);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 4px 0;
-  min-width: 160px;
-  z-index: 100;
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
-}
-
-.theme-menu-item {
-  padding: 10px 14px;
-  font-size: 14px;
-  color: var(--text-secondary);
-  cursor: pointer;
-  white-space: nowrap;
-}
-
-.theme-menu-item:hover {
-  background: var(--bg-surface);
-  color: var(--text-primary);
-}
-
-.theme-menu-item.active {
-  color: var(--accent);
-  font-weight: 600;
-}
-
 .tab-content {
   flex: 1;
   overflow: hidden;
@@ -923,6 +868,25 @@ body {
   max-width: none;
 }
 
+/* Desktop overlay mode (sidebarOverlay ON in 一般設定): the sidebar floats
+   above the CLI without resizing it, at any viewport width. Narrow screens
+   (<=900px) already behave this way; this class extends it to desktop.
+   No backdrop here by design -- closing is via the toggle button only, so
+   the overlay stays inside .main-row (absolute, not fixed): a viewport-wide
+   fixed layer would also cover the tab bar and bury the toggle button. */
+.main-row.sidebar-overlay.sidebar-open {
+  position: relative;
+}
+.main-row.sidebar-overlay.sidebar-open .right-sidebar {
+  position: absolute;
+  right: 0;
+  top: 0;
+  bottom: 0;
+  width: min(320px, 85vw);
+  z-index: 60;
+  box-shadow: -8px 0 24px rgba(0, 0, 0, 0.35);
+}
+
 @media (max-width: 900px) {
   .right-sidebar {
     position: fixed;
@@ -1095,6 +1059,37 @@ body {
   .settings-menu-btn {
     flex-shrink: 0;
   }
+}
+
+/* General section rows */
+.general-setting-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 0;
+}
+
+.general-setting-row select {
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 8px;
+  font-size: 14px;
+}
+
+.general-setting-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 0 0;
+  cursor: pointer;
+}
+
+.settings-hint {
+  color: var(--text-secondary);
+  font-size: 12px;
+  margin: 2px 0 8px 24px;
 }
 
 .settings-section {
