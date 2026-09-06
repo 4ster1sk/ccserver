@@ -1,19 +1,26 @@
 import { useState } from 'react';
 import SandboxSection from './SandboxSection.jsx';
 import PairedInstancesSection from './PairedInstancesSection.jsx';
-import GeneralPlaceholderSection from './GeneralPlaceholderSection.jsx';
+import GeneralSection from './GeneralSection.jsx';
 
 // 左メニュー定義。項目追加時はここに1行＋対応コンポーネントの
 // 条件分岐を追加するだけで済む。選択状態は useState のみ
 // (Settingsタブを閉じたらリセット。localStorage/ハッシュ連動なし)。
 const SETTINGS_MENUS = [
+  { key: 'general', label: '一般' },
   { key: 'sandboxes', label: '作成済みサンドボックス' },
   { key: 'pairing', label: 'ペアリング済みインスタンス' },
-  { key: 'general', label: '一般' },
 ];
 
-export default function SettingsView() {
-  const [activeKey, setActiveKey] = useState('sandboxes');
+export default function SettingsView({
+  themeId,
+  onThemeChange,
+  confirmBeforeClose,
+  onConfirmBeforeCloseChange,
+  sidebarOverlay,
+  onSidebarOverlayChange,
+}) {
+  const [activeKey, setActiveKey] = useState('general');
 
   return (
     <div className="settings-view">
@@ -46,9 +53,18 @@ export default function SettingsView() {
           id={`settings-panel-${activeKey}`}
           aria-labelledby={`settings-tab-${activeKey}`}
         >
+          {activeKey === 'general' && (
+            <GeneralSection
+              themeId={themeId}
+              onThemeChange={onThemeChange}
+              confirmBeforeClose={confirmBeforeClose}
+              onConfirmBeforeCloseChange={onConfirmBeforeCloseChange}
+              sidebarOverlay={sidebarOverlay}
+              onSidebarOverlayChange={onSidebarOverlayChange}
+            />
+          )}
           {activeKey === 'sandboxes' && <SandboxSection />}
           {activeKey === 'pairing' && <PairedInstancesSection />}
-          {activeKey === 'general' && <GeneralPlaceholderSection />}
         </div>
       </div>
     </div>

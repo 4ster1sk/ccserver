@@ -38,9 +38,24 @@ export default function App() {
   // Bumped whenever a group is created / destroyed / re-opened, so the
   // directory browser's groups list refetches (it is otherwise fetch-on-mount).
   const [groupsVersion, setGroupsVersion] = useState(0);
-  const [skipCloseConfirm, setSkipCloseConfirm] = useState(
-    () => localStorage.getItem('ccserver-skip-close-confirm') === '1'
-  );
+  const [skipCloseConfirm, setSkipCloseConfirm] = useState(() => {
+    try {
+      return localStorage.getItem('ccserver-skip-close-confirm') === '1';
+    } catch {
+      return false;
+    }
+  });
+  // 終了確認スキップの永続化付き setter (一般設定タブと終了確認ダイアログ
+  // の「次回以降確認しない」から共有する)。
+  const setSkipCloseConfirmPersisted = useCallback((v) => {
+    setSkipCloseConfirm(v);
+    try {
+      if (v) localStorage.setItem('ccserver-skip-close-confirm', '1');
+      else localStorage.removeItem('ccserver-skip-close-confirm');
+    } catch {
+      // ignore (private mode etc.)
+    }
+  }, []);
   const pendingOpenRef = useRef(null);
   const { enabled: notifyEnabled, permission: notifyPermission, toggle: toggleNotify, notify } = useNotifications();
   // Server-side facts from /api/dirs/home: whether the Usage button is
@@ -404,8 +419,7 @@ export default function App() {
   const confirmCloseTab = useCallback(async () => {
     if (!closeConfirm) return;
     if (dontAskAgain) {
-      localStorage.setItem('ccserver-skip-close-confirm', '1');
-      setSkipCloseConfirm(true);
+      setSkipCloseConfirmPersisted(true);
     }
     const tab = tabs.find((t) => t.id === closeConfirm.tabId);
     if (tab?.type === 'group') {
@@ -413,7 +427,7 @@ export default function App() {
     }
     doCloseTab(closeConfirm.tabId);
     setCloseConfirm(null);
-  }, [closeConfirm, dontAskAgain, tabs, doCloseTab, destroyGroupTab]);
+  }, [closeConfirm, dontAskAgain, tabs, doCloseTab, destroyGroupTab, setSkipCloseConfirmPersisted]);
 
   const handleTabClick = useCallback((tabId) => {
     setActiveTabId(tabId);
@@ -532,7 +546,7 @@ export default function App() {
         </button>
       </div>
       <SystemStatsProvider active={statsActive}>
-      <div className={`main-row${sidebarPrefs.open ? ' sidebar-open' : ''}`}>
+      <div className={`main-row${sidebarPrefs.open ? ' sidebar-open' : ''}${sidebarPrefs.overlay ? ' sidebar-overlay' : ''}`}>
       <div className="tab-content">
         <div style={{ display: activeTabId === 'browser' ? 'flex' : 'none', height: '100%', flexDirection: 'column' }}>
           <DirectoryBrowser onOpen={handleOpen} onOpenShell={handleOpenShell} onOpenCombo={handleOpenCombo} onOpenGroup={handleOpenGroup} onSessionClick={handleSessionClick} onOpenSettings={openSettingsTab} initialPath={lastDir} groupsVersion={groupsVersion} metaAgentDir={metaAgentDir} onOpenMeta={handleOpenMeta} />
@@ -542,7 +556,14 @@ export default function App() {
         </div>
         {tabs.some((t) => t.type === 'settings') && (
           <div style={{ display: activeTabId === 'settings' ? 'flex' : 'none', height: '100%', flexDirection: 'column' }}>
-            <SettingsView />
+            <SettingsView
+              themeId={themeId}
+              onThemeChange={setThemeId}
+              confirmBeforeClose={!skipCloseConfirm}
+              onConfirmBeforeCloseChange={(v) => setSkipCloseConfirmPersisted(!v)}
+              sidebarOverlay={sidebarPrefs.overlay}
+              onSidebarOverlayChange={sidebarPrefs.setOverlay}
+            />
           </div>
         )}
         {tabs
@@ -575,8 +596,6 @@ export default function App() {
                   onExited={(exited) => handleTabExited(tab.id, exited)}
                   attachSessionId={tab.attachSessionId}
                   xtermTheme={getTheme(themeId).xterm}
-                  themeId={themeId}
-                  onThemeChange={setThemeId}
                   tabId={tab.id}
                   onFocusTab={() => handleTabClick(tab.id)}
                   remoteInstanceId={tab.remote?.instanceId || null}
@@ -598,8 +617,6 @@ export default function App() {
                 projectCwd={tab.cwd}
                 visible={activeTabId === tab.id}
                 xtermTheme={getTheme(themeId).xterm}
-                themeId={themeId}
-                onThemeChange={setThemeId}
                 notify={notify}
                 notifyEnabled={notifyEnabled}
                 notifyPermission={notifyPermission}

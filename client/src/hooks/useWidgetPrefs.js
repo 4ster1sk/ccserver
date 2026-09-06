@@ -1,6 +1,7 @@
 import { useState, useCallback, useEffect } from 'react';
 
 const SIDEBAR_OPEN_KEY = 'ccserver-sidebar-open';
+const SIDEBAR_OVERLAY_KEY = 'ccserver-sidebar-overlay';
 const ORDER_KEY = 'ccserver-widget-order';
 const VIS_KEY_PREFIX = 'ccserver-widget:';
 const VIS_SUFFIX = ':visible';
@@ -54,6 +55,16 @@ function loadVisibility(id, defaultVisible) {
 export function useWidgetPrefs(widgetDefs) {
   const defaultIds = widgetDefs.map((w) => w.id);
   const [open, setOpenState] = useState(loadOpen);
+  // デスクトップ幅でもサイドバーを in-flow ではなく前面オーバーレイで
+  // 表示する (CLI領域をリサイズしない)。狭幅 (<=900px) は従来通り常時
+  // オーバーレイのため、この設定は広幅時のみ効く。
+  const [overlay, setOverlayState] = useState(() => {
+    try {
+      return localStorage.getItem(SIDEBAR_OVERLAY_KEY) === '1';
+    } catch {
+      return false;
+    }
+  });
   const [order, setOrderState] = useState(() => loadOrder(defaultIds));
   const [hiddenIds, setHiddenIds] = useState(() => {
     const hidden = new Set();
@@ -67,6 +78,15 @@ export function useWidgetPrefs(widgetDefs) {
     setOpenState(v);
     try {
       localStorage.setItem(SIDEBAR_OPEN_KEY, v ? '1' : '0');
+    } catch {
+      // ignore
+    }
+  }, []);
+
+  const setOverlay = useCallback((v) => {
+    setOverlayState(v);
+    try {
+      localStorage.setItem(SIDEBAR_OVERLAY_KEY, v ? '1' : '0');
     } catch {
       // ignore
     }
@@ -120,5 +140,5 @@ export function useWidgetPrefs(widgetDefs) {
     .filter((w) => w && !hiddenIds.has(w.id));
   const hiddenWidgets = widgetDefs.filter((w) => hiddenIds.has(w.id));
 
-  return { open, setOpen, order, visibleWidgets, hiddenWidgets, setWidgetVisible, moveWidget };
+  return { open, setOpen, overlay, setOverlay, order, visibleWidgets, hiddenWidgets, setWidgetVisible, moveWidget };
 }

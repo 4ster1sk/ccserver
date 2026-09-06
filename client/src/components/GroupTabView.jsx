@@ -35,8 +35,6 @@ export default function GroupTabView({
   projectCwd,
   visible,
   xtermTheme,
-  themeId,
-  onThemeChange,
   notify,
   notifyEnabled,
   notifyPermission,
@@ -471,8 +469,6 @@ export default function GroupTabView({
                 groupId={groupId}
                 groupRole={m.role}
                 xtermTheme={xtermTheme}
-                themeId={themeId}
-                onThemeChange={onThemeChange}
                 notify={notify}
                 notifyEnabled={notifyEnabled}
                 notifyPermission={notifyPermission}

@@ -13,15 +13,19 @@ test.describe('Settings left menu', () => {
     const settings = page.locator('.settings-view');
     await expect(settings).toBeVisible();
 
-    // 左メニューの3項目がタブとして表示される。
+    // 左メニューの3項目がタブとして表示される (一般が先頭)。
     const sidebar = settings.locator('.settings-sidebar');
-    await expect(sidebar.getByRole('tab', { name: '作成済みサンドボックス' })).toBeVisible();
-    await expect(sidebar.getByRole('tab', { name: 'ペアリング済みインスタンス' })).toBeVisible();
-    await expect(sidebar.getByRole('tab', { name: '一般' })).toBeVisible();
+    const tabs = sidebar.getByRole('tab');
+    await expect(tabs).toHaveText(['一般', '作成済みサンドボックス', 'ペアリング済みインスタンス']);
     const panel = settings.locator('[role="tabpanel"]');
     await expect(panel).toBeVisible();
 
-    // 初期選択はサンドボックス。
+    // 初期選択は一般。
+    await expect(sidebar.getByRole('tab', { name: '一般' })).toHaveAttribute('aria-selected', 'true');
+    await expect(panel).toContainText('テーマ');
+
+    // サンドボックスに切り替え。
+    await sidebar.getByRole('tab', { name: '作成済みサンドボックス' }).click();
     await expect(sidebar.getByRole('tab', { name: '作成済みサンドボックス' })).toHaveAttribute('aria-selected', 'true');
     await expect(panel).toContainText('作成済みサンドボックス');
 
@@ -30,13 +34,8 @@ test.describe('Settings left menu', () => {
     await expect(sidebar.getByRole('tab', { name: 'ペアリング済みインスタンス' })).toHaveAttribute('aria-selected', 'true');
     await expect(panel).toContainText('ペアリング済みインスタンス');
 
-    // 一般 (プレースホルダ) に切り替え。
+    // 一般に戻れる。
     await sidebar.getByRole('tab', { name: '一般' }).click();
-    await expect(sidebar.getByRole('tab', { name: '一般' })).toHaveAttribute('aria-selected', 'true');
-    await expect(panel).toContainText('一般設定は準備中です');
-
-    // サンドボックスに戻れる。
-    await sidebar.getByRole('tab', { name: '作成済みサンドボックス' }).click();
-    await expect(panel).toContainText('作成済みサンドボックス');
+    await expect(panel).toContainText('テーマ');
   });
 });
