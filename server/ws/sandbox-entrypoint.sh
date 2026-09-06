@@ -4,7 +4,11 @@
 #   1. Optionally bring up a rootless dockerd in the background, confined to
 #      the sandbox's restricted filesystem view (so `docker run -v ...` cannot
 #      escape to unexposed host paths).
-#   2. exec the real target command (claude / shell), inheriting the pty.
+#   2. Optionally provision opt-in tools (rtk / code-review-graph) into the
+#      sandbox HOME (see sandbox-provision.sh). The provisioner echoes
+#      "[sandbox] … をインストール中…" status lines to the terminal so the CLI
+#      shows progress while it runs; its detailed output goes to provision.log.
+#   3. exec the real target command (claude / shell), inheriting the pty.
 #
 # Environment (set via bwrap --setenv):
 #   CCSANDBOX_DOCKER          "1" to start dockerd, else skip
@@ -12,6 +16,8 @@
 #   CCSANDBOX_DOCKERD_TAG     this launch's tag, recorded in the status file
 #                             below iff it wins the flock (see sandbox.js's
 #                             dockerdStatus/dockerAvailability)
+#   CCSANDBOX_PROVISION_RTK / CCSANDBOX_PROVISION_CRG  "1" to provision
+#   CCSANDBOX_RTK_VERSION / CCSANDBOX_RTK_URL / CCSANDBOX_RTK_SHA256 / CCSANDBOX_CRG_VERSION
 #   HOME, XDG_RUNTIME_DIR, PATH, DOCKER_HOST
 set -u
 
@@ -51,6 +57,15 @@ if [ "${CCSANDBOX_DOCKER:-0}" = "1" ]; then
         >"$LOG" 2>&1
     fi
   ) &
+fi
+
+# Opt-in tool provisioning (rtk / code-review-graph, see sandbox-provision.sh).
+# Runs after dockerd is up and before the target command so the agent finds
+# the tools ready. Failures are logged (never aborts the session).
+if [ "${CCSANDBOX_PROVISION_RTK:-0}" = "1" ] || [ "${CCSANDBOX_PROVISION_CRG:-0}" = "1" ]; then
+  if ! /ccserver-sandbox-provision.sh; then
+    echo "[sandbox] tool provisioning failed; see $HOME/.local/share/ccserver-tools/provision.log" >&2
+  fi
 fi
 
 exec "$@"
