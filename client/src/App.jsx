@@ -16,6 +16,7 @@ import { SystemStatsProvider } from './components/widgets/SystemStatsProvider.js
 import { useWidgetPrefs } from './hooks/useWidgetPrefs.js';
 import { useSessionSidebarPrefs } from './hooks/useSessionSidebarPrefs.js';
 import { useNotifications } from './hooks/useNotifications.js';
+import { loadNavGuardMode, saveNavGuardMode, useNavGuard } from './hooks/useNavGuard.js';
 import { authFetch } from './auth.js';
 import { getTheme, loadThemeId, saveThemeId, applyThemeCss } from './themes.js';
 import { loadSandboxDefaults, saveSandboxDefaults } from './sandboxDefaults.js';
@@ -63,6 +64,14 @@ export default function App() {
     }
   }, []);
   const pendingOpenRef = useRef(null);
+  // ブラウザの「戻る / 進む」履歴操作ガード (Settings > 一般で変更。
+  // confirm: 確認ダイアログ / suppress: 黙って抑制 / allow: 無効)。
+  const [navGuardMode, setNavGuardMode] = useState(loadNavGuardMode);
+  const setNavGuardModePersisted = useCallback((v) => {
+    setNavGuardMode(v);
+    saveNavGuardMode(v);
+  }, []);
+  useNavGuard(navGuardMode);
   // サンドボックス起動フラグのグローバル既定値 (Settings > 一般で変更。
   // ディレクトリ別記憶が無い場合の初期値として DirectoryBrowser が使う)。
   const [sandboxDefaults, setSandboxDefaults] = useState(loadSandboxDefaults);
@@ -802,6 +811,8 @@ export default function App() {
               onSessionOverlayChange={sessionSidebarPrefs.setOverlay}
               sandboxDefaults={sandboxDefaults}
               onSandboxDefaultsChange={setSandboxDefaultsPersisted}
+              navGuardMode={navGuardMode}
+              onNavGuardModeChange={setNavGuardModePersisted}
             />
           </div>
         )}

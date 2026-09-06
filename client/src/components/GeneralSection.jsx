@@ -1,6 +1,6 @@
 import { getThemeIds, getTheme } from '../themes.js';
 
-// "一般" メニュー: テーマ・終了確認・セッション表示・ウィジェット表示・サンドボックス既定値。
+// "一般" メニュー: テーマ・終了確認・戻る/進むガード・セッション表示・ウィジェット表示・サンドボックス既定値。
 // いずれも即時反映し、localStorage に永続化される (保存先の詳細は
 // 各 setter 側 = App.jsx / useWidgetPrefs.js / useSessionSidebarPrefs.js / themes.js / sandboxDefaults.js を参照)。
 export default function GeneralSection({
@@ -16,6 +16,8 @@ export default function GeneralSection({
   onSessionOverlayChange,
   sandboxDefaults,
   onSandboxDefaultsChange,
+  navGuardMode,
+  onNavGuardModeChange,
 }) {
   const updateSandboxDefault = (key, value) => {
     onSandboxDefaultsChange({ ...sandboxDefaults, [key]: value });
@@ -48,6 +50,23 @@ export default function GeneralSection({
       <p className="settings-hint">
         オフにすると、稼働中のタブも確認なしで閉じます
         (終了確認ダイアログの「次回以降確認しない」と同じ設定です)。
+      </p>
+      <div className="general-setting-row">
+        <label htmlFor="general-nav-guard-select">ブラウザの戻る・進む操作</label>
+        <select
+          id="general-nav-guard-select"
+          value={navGuardMode ?? 'confirm'}
+          onChange={(e) => onNavGuardModeChange(e.target.value)}
+        >
+          <option value="confirm">確認ダイアログを出す</option>
+          <option value="suppress">確認なしで抑制する</option>
+          <option value="allow">抑制しない</option>
+        </select>
+      </div>
+      <p className="settings-hint">
+        キー入力中の表示を残すため、ブラウザの履歴操作による離脱を抑止します。
+        入力欄・ターミナルにフォーカスがある間のショートカットは常に抑止され、
+        ターミナル操作として扱われます。
       </p>
       <div className="general-setting-row">
         <label htmlFor="general-session-mode-select">セッション表示</label>

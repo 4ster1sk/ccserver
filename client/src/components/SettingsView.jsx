@@ -25,6 +25,8 @@ export default function SettingsView({
   onSessionOverlayChange,
   sandboxDefaults,
   onSandboxDefaultsChange,
+  navGuardMode,
+  onNavGuardModeChange,
 }) {
   const [activeKey, setActiveKey] = useState('general');
 
@@ -73,6 +75,8 @@ export default function SettingsView({
               onSessionOverlayChange={onSessionOverlayChange}
               sandboxDefaults={sandboxDefaults}
               onSandboxDefaultsChange={onSandboxDefaultsChange}
+              navGuardMode={navGuardMode}
+              onNavGuardModeChange={onNavGuardModeChange}
             />
           )}
           {activeKey === 'sandboxes' && <SandboxSection />}

@@ -20,6 +20,7 @@ test.describe('Settings general section', () => {
       localStorage.removeItem('ccserver-default-sandbox-ssh-agent');
       localStorage.removeItem('ccserver-default-sandbox-rtk');
       localStorage.removeItem('ccserver-default-sandbox-code-review-graph');
+      localStorage.removeItem('ccserver-nav-guard');
     });
     await page.reload();
     await expect(page.getByRole('button', { name: 'Terminal', exact: true })).toBeVisible();
@@ -130,5 +131,29 @@ test.describe('Settings general section', () => {
     await expect(panel2.getByLabel('ssh-agentを転送する')).toBeChecked();
     await expect(panel2.getByLabel('rtk を導入する')).not.toBeChecked();
     await expect(panel2.getByLabel('code-review-graph MCP を導入する')).not.toBeChecked();
+  });
+
+  test('nav guard select defaults to confirm and persists', async ({ page }) => {
+    const panel = page.locator('[role="tabpanel"]');
+    const select = panel.getByLabel('ブラウザの戻る・進む操作');
+    await expect(select).toBeVisible();
+    await expect(select).toHaveValue('confirm');
+    await select.selectOption('suppress');
+    await expect
+      .poll(() => page.evaluate(() => localStorage.getItem('ccserver-nav-guard')))
+      .toBe('suppress');
+    // リロード後も復元される。
+    await page.reload();
+    await expect(page.getByRole('button', { name: 'Terminal', exact: true })).toBeVisible();
+    await page.getByRole('button', { name: 'Settings' }).click();
+    await expect(page.locator('[role="tabpanel"]').getByLabel('ブラウザの戻る・進む操作')).toHaveValue('suppress');
+  });
+
+  test('nav guard select falls back to confirm on invalid stored value', async ({ page }) => {
+    await page.evaluate(() => localStorage.setItem('ccserver-nav-guard', 'bogus'));
+    await page.reload();
+    await expect(page.getByRole('button', { name: 'Terminal', exact: true })).toBeVisible();
+    await page.getByRole('button', { name: 'Settings' }).click();
+    await expect(page.locator('[role="tabpanel"]').getByLabel('ブラウザの戻る・進む操作')).toHaveValue('confirm');
   });
 });
