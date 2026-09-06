@@ -15,6 +15,14 @@
 //                     claude sessions only (sessionManager never passes it
 //                     for opencode/copilot -- see usageMcp.js's
 //                     shouldInjectUsage).
+//   code-review-graph - the graph MCP (see sandbox.js resolveTools): when the
+//                     session is sandboxed and the opt-in tool is enabled, the
+//                     server is registered against the bare `code-review-graph`
+//                     console script the provisioner puts on the sandbox PATH
+//                     ($HOME/.local/bin). The repo's own .mcp.json /
+//                     opencode.jsonc may carry a host-only absolute path that
+//                     cannot resolve inside the sandbox; injecting the same
+//                     server name here overrides it for sandboxed sessions.
 //
 //   claude   -> CLI arg `--mcp-config '<inline JSON>'` (process-scoped, does
 //               not touch ~/.claude.json's shared projects key, so parallel
@@ -122,7 +130,20 @@ function reviewerInvocation(reviewer) {
   return { command: MCP_BRIDGE_COMMAND, args: REVIEWER_BRIDGE_ARG };
 }
 
-export function buildMcpConfigArgsAndEnv(app, { groupMcp = true, notify, usage, meta, reviewer } = {}) {
+// The code-review-graph MCP server registration for a sandboxed session that
+// enabled the opt-in tool (see resolveTools in sandbox.js). `command` is the
+// bare console script the provisioner symlinks into $HOME/.local/bin, which is
+// the first entry on the sandbox PATH; `--repo <cwd>` scopes the graph to the
+// session's project. Returns null when the tool is off or the session is not
+// sandboxed (injected only then, by the caller).
+function crgMcpServer(tools, cwd) {
+  if (!tools || !tools.codeReviewGraph) return null;
+  const args = ['serve'];
+  if (cwd) args.push('--repo', cwd);
+  return { command: 'code-review-graph', args };
+}
+
+export function buildMcpConfigArgsAndEnv(app, { groupMcp = true, notify, usage, meta, reviewer, tools = null, cwd = null } = {}) {
   const notifySockEnv = notify ? { CCSANDBOX_NOTIFY_MCP_SOCK: notify.sockPath } : {};
   const notifyIdentityEnv = notify?.identity ? { CCSERVER_NOTIFY_IDENTITY: JSON.stringify(notify.identity) } : {};
   const usageSockEnv = usage ? { CCSANDBOX_USAGE_MCP_SOCK: usage.sockPath } : {};
@@ -130,6 +151,7 @@ export function buildMcpConfigArgsAndEnv(app, { groupMcp = true, notify, usage, 
   const metaIdentityEnv = meta?.identity ? { CCSERVER_META_IDENTITY: JSON.stringify(meta.identity) } : {};
   const reviewerSockEnv = reviewer ? { CCSANDBOX_REVIEWER_MCP_SOCK: reviewer.sockPath } : {};
   const reviewerIdentityEnv = reviewer?.identity ? { CCSERVER_REVIEWER_IDENTITY: JSON.stringify(reviewer.identity) } : {};
+  const crg = crgMcpServer(tools, cwd);
 
   if (app === 'copilot' || app === 'commandcode') {
     return { args: [], env: {} };
@@ -181,6 +203,13 @@ export function buildMcpConfigArgsAndEnv(app, { groupMcp = true, notify, usage, 
         env_vars: ['CCSANDBOX_REVIEWER_MCP_SOCK', 'CCSERVER_REVIEWER_IDENTITY'],
       };
     }
+    if (crg) {
+      servers['code-review-graph'] = {
+        command: crg.command,
+        args: crg.args,
+        env_vars: [],
+      };
+    }
     const args = [];
     for (const [name, server] of Object.entries(servers)) {
       // JSON strings/arrays are valid TOML basic strings/arrays, which keeps
@@ -223,6 +252,7 @@ export function buildMcpConfigArgsAndEnv(app, { groupMcp = true, notify, usage, 
       const inv = reviewerInvocation(reviewer);
       mcp['ccserver-reviewer'] = { type: 'local', command: [inv.command, ...inv.args] };
     }
+    if (crg) mcp['code-review-graph'] = { type: 'local', command: [crg.command, ...crg.args] };
     return {
       args: [],
       env: {
@@ -259,6 +289,7 @@ export function buildMcpConfigArgsAndEnv(app, { groupMcp = true, notify, usage, 
     const inv = reviewerInvocation(reviewer);
     mcpServers['ccserver-reviewer'] = { type: 'stdio', command: inv.command, args: inv.args };
   }
+  if (crg) mcpServers['code-review-graph'] = { type: 'stdio', command: crg.command, args: crg.args };
   return {
     args: [
       '--mcp-config',

@@ -51,18 +51,29 @@ function loadComboApps() {
   return { ...COMBO_DEFAULT_APPS };
 }
 
-// Per-directory opt-in sandbox flags (gpg / sshAgent), remembered separately
-// per cwd rather than as one server-wide default -- see server/sandbox.config.json's
-// `gpg`/`sshAgent` for the fallback these override at launch.
+// Per-directory opt-in sandbox flags (gpg / sshAgent / tools), remembered
+// separately per cwd rather than as one server-wide default -- see
+// server/sandbox.config.json's `gpg`/`sshAgent`/`tools` for the fallback these
+// override at launch. `tools` (rtk / code-review-graph) provisions the tool
+// into the sandbox HOME at launch instead of installing it on the host. Unlike
+// gpg/sshAgent (opt-in), rtk / code-review-graph default to ON in the launch
+// menu; a stored explicit false turns them back off for that directory.
 function loadSandboxOpts(path) {
   try {
     const raw = localStorage.getItem(SANDBOX_OPTS_PREFIX + path);
     if (raw) {
       const parsed = JSON.parse(raw);
-      return { gpg: !!parsed.gpg, sshAgent: !!parsed.sshAgent };
+      return {
+        gpg: !!parsed.gpg,
+        sshAgent: !!parsed.sshAgent,
+        tools: {
+          rtk: parsed.tools?.rtk !== false,
+          codeReviewGraph: parsed.tools?.codeReviewGraph !== false,
+        },
+      };
     }
   } catch { /* ignore */ }
-  return { gpg: false, sshAgent: false };
+  return { gpg: false, sshAgent: false, tools: { rtk: true, codeReviewGraph: true } };
 }
 
 function saveSandboxOpts(path, opts) {
@@ -703,11 +714,27 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
           />
           ssh-agentを転送する
         </label>
+        <label className="open-menu-suboption">
+          <input
+            type="checkbox"
+            checked={sandboxOpts.tools.rtk}
+            onChange={(e) => updateSandboxOpts(currentPath, { ...sandboxOpts, tools: { ...sandboxOpts.tools, rtk: e.target.checked } })}
+          />
+          rtk を導入する (sandbox 内にインストール)
+        </label>
+        <label className="open-menu-suboption">
+          <input
+            type="checkbox"
+            checked={sandboxOpts.tools.codeReviewGraph}
+            onChange={(e) => updateSandboxOpts(currentPath, { ...sandboxOpts, tools: { ...sandboxOpts.tools, codeReviewGraph: e.target.checked } })}
+          />
+          code-review-graph MCP を導入する
+        </label>
       </div>
       <p className="open-menu-note">
         {forceSandbox
           ? 'サンドボックスがサーバー設定 (forceSandbox) で強制されています。通常起動はできません。'
-          : `サンドボックス: 隣接プロジェクトを隔離し、内部に rootless docker を用意。GPG/ssh-agentは既定オフ、このディレクトリ (${displayPath(currentPath, homeDir)}) に記憶されます。`}
+          : `サンドボックス: 隣接プロジェクトを隔離し、内部に rootless docker を用意。GPG/ssh-agentは既定オフ・ツール導入 (rtk / code-review-graph) は既定オンで、このディレクトリ (${displayPath(currentPath, homeDir)}) に記憶されます。`}
       </p>
     </>
   );
@@ -1076,6 +1103,22 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
                     />
                     ssh-agentを転送する (両ワーカー共通)
                   </label>
+                  <label className="open-menu-suboption">
+                    <input
+                      type="checkbox"
+                      checked={sandboxOpts.tools.rtk}
+                      onChange={(e) => updateSandboxOpts(currentPath, { ...sandboxOpts, tools: { ...sandboxOpts.tools, rtk: e.target.checked } })}
+                    />
+                    rtk を導入する (両ワーカー共通)
+                  </label>
+                  <label className="open-menu-suboption">
+                    <input
+                      type="checkbox"
+                      checked={sandboxOpts.tools.codeReviewGraph}
+                      onChange={(e) => updateSandboxOpts(currentPath, { ...sandboxOpts, tools: { ...sandboxOpts.tools, codeReviewGraph: e.target.checked } })}
+                    />
+                    code-review-graph MCP を導入する (両ワーカー共通)
+                  </label>
                 </div>
                 {(['workerA', 'workerB']).map((role) => (
                   <div key={role} className="open-menu-role-sandbox">
@@ -1113,6 +1156,28 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
                             }))}
                           />
                           {role} ssh-agent
+                        </label>
+                        <label className="open-menu-suboption">
+                          <input
+                            type="checkbox"
+                            checked={comboRoleSandbox[role].tools.rtk}
+                            onChange={(e) => setComboRoleSandbox((s) => ({
+                              ...s,
+                              [role]: { ...s[role], tools: { ...s[role].tools, rtk: e.target.checked } },
+                            }))}
+                          />
+                          {role} rtk を導入
+                        </label>
+                        <label className="open-menu-suboption">
+                          <input
+                            type="checkbox"
+                            checked={comboRoleSandbox[role].tools.codeReviewGraph}
+                            onChange={(e) => setComboRoleSandbox((s) => ({
+                              ...s,
+                              [role]: { ...s[role], tools: { ...s[role].tools, codeReviewGraph: e.target.checked } },
+                            }))}
+                          />
+                          {role} code-review-graph MCP を導入
                         </label>
                       </div>
                     )}
@@ -1178,6 +1243,28 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, onO
                           }))}
                         />
                         オーケストレーター ssh-agent
+                      </label>
+                      <label className="open-menu-suboption">
+                        <input
+                          type="checkbox"
+                          checked={comboRoleSandbox.orchestrator.tools.rtk}
+                          onChange={(e) => setComboRoleSandbox((s) => ({
+                            ...s,
+                            orchestrator: { ...s.orchestrator, tools: { ...s.orchestrator.tools, rtk: e.target.checked } },
+                          }))}
+                        />
+                        オーケストレーター rtk を導入
+                      </label>
+                      <label className="open-menu-suboption">
+                        <input
+                          type="checkbox"
+                          checked={comboRoleSandbox.orchestrator.tools.codeReviewGraph}
+                          onChange={(e) => setComboRoleSandbox((s) => ({
+                            ...s,
+                            orchestrator: { ...s.orchestrator, tools: { ...s.orchestrator.tools, codeReviewGraph: e.target.checked } },
+                          }))}
+                        />
+                        オーケストレーター code-review-graph MCP を導入
                       </label>
                     </div>
                   )}

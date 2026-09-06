@@ -4,7 +4,7 @@ import { execFileSync } from 'node:child_process';
 import { writeFileSync, readFileSync, unlinkSync, rmSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { buildSandboxSpawn, resolveApp, sandboxAvailable, loadSandboxConfig, persistentHomeDir, dockerSandboxAvailable, dockerdStatus, dockerdLockHeld } from './sandbox.js';
+import { buildSandboxSpawn, resolveApp, sandboxAvailable, loadSandboxConfig, persistentHomeDir, dockerSandboxAvailable, dockerdStatus, dockerdLockHeld, resolveTools } from './sandbox.js';
 import { getGroupFilesDir, ensureGroupFilesDir } from './groupFiles.js';
 import { buildMcpConfigArgsAndEnv } from './mcpConfig.js';
 import { shouldInjectNotify, notifyEnabled, getNotifySockPath, notifyBrokerRunning } from './notify.js';
@@ -394,6 +394,13 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox
   const forceSandbox = cfg.forceSandbox;
   const sandboxRequested = (forceSandbox || sandbox) && process.platform !== 'win32' && sandboxAvailable();
 
+  // Tool provisioning (rtk / code-review-graph): the server config supplies
+  // the fallback default and the client's per-session sandboxOpts.tools (which
+  // the launch menu defaults to ON for these, remembered per directory)
+  // overrides it. The tools are provisioned into the sandbox HOME at launch,
+  // so they are only ever injected when this session is actually sandboxed.
+  const tools = resolveTools(sandboxOpts);
+
   // MCP config injection -- never written to a file (see mcpConfig.js). Combo
   // sessions (groupId set) get their role's broker (ccserver); notify-enabled
   // sessions additionally get ccserver-notify, whose bridge command depends on
@@ -401,7 +408,7 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox
   // host node+bridge). The args must be in the target command before
   // buildSandboxSpawn runs, so the mode is derived from sandboxRequested.
   let mcpEnv = {};
-  if (sessionApp && (mcpSocketPath || useNotify || useUsage || useMeta || useReviewer)) {
+  if (sessionApp && (mcpSocketPath || useNotify || useUsage || useMeta || useReviewer || (sandboxRequested && tools.codeReviewGraph))) {
     const injected = buildMcpConfigArgsAndEnv(sessionApp, {
       // ccserver (the group broker) only when the session has a group socket:
       // standalone notify sessions must not get a broken ccserver entry (its
@@ -433,6 +440,10 @@ export function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox
         sockPath: reviewerSocketPath,
         identity: reviewerIdentity,
       } : undefined,
+      // code-review-graph MCP is injected only into sandboxed sessions (the
+      // tool is provisioned inside the sandbox, never on the host).
+      tools: sandboxRequested ? tools : null,
+      cwd,
     });
     mcpEnv = injected.env;
     args.push(...injected.args);
