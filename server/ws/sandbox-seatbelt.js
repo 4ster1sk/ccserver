@@ -188,6 +188,10 @@ export function buildSeatbeltLaunch({
   // resolve() normalizes spelling but not symlinks (same reason tmpDirs
   // carries the realpath of tmpdir()): rules below register both spellings
   // via subtrees() so a symlinked cwd still matches -- and denies hold.
+  // The XDG_RUNTIME_DIR override (see env below) must exist before the
+  // entrypoint's mkdir -p runs -- and before any tool reads it.
+  mkdirSync(join(dir, 'runtime'), { recursive: true });
+
   const projectDir = resolve(cwd);
   // Throwaway HOME (minimal/usage sandboxes, or persistentHome off): lives
   // inside the runtime dir so teardown stays a single rm -rf.
@@ -223,6 +227,12 @@ export function buildSeatbeltLaunch({
   const hostLocalBin = join(hostHome, '.local', 'bin');
   const env = {
     HOME: effectiveHome,
+    // bwrap sets XDG_RUNTIME_DIR via --setenv (hostRuntimeDir()). Without an
+    // override the shared entrypoint defaults it to /run/user/<uid>, which
+    // does not exist on macOS and is not writable under this profile. A
+    // per-launch dir inside `dir` is always writable and torn down with the
+    // rest (the entrypoint's mkdir -p succeeds there).
+    XDG_RUNTIME_DIR: join(dir, 'runtime'),
     PATH: [binDir, join(effectiveHome, '.local', 'bin'), hostLocalBin, sandboxPathBase,
       '/opt/homebrew/bin', '/opt/homebrew/sbin'].join(':'),
     CCSANDBOX_DOCKER: '0',

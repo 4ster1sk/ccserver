@@ -171,8 +171,9 @@ test('GET /dirs/home exposes availableApps.opencodeGo following toggle + key', a
   }
 });
 
-// GET /dirs/home exposes sandboxAvailable (bwrap presence) so the launch
-// modal can disable the sandbox choice where it cannot work.
+// GET /dirs/home exposes sandboxAvailable (backend presence: bwrap on Linux,
+// sandbox-exec on macOS) so the launch modal can disable the sandbox choice
+// where it cannot work.
 test('GET /dirs/home exposes sandboxAvailable as a boolean', async () => {
   const res = await app.inject({ method: 'GET', url: '/api/dirs/home' });
   assert.equal(res.statusCode, 200);

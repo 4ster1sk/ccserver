@@ -1872,6 +1872,10 @@ export function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, mcpSoc
       console.warn('[sandbox] rtk provisioning is disabled on macOS (no macOS binary pinned); launching without rtk.');
       sbTools = { ...tools, rtk: false, rtkSpec: null };
     }
+    if (sbTools.codeReviewGraph) {
+      console.warn('[sandbox] code-review-graph provisioning is disabled on macOS (sandbox-exec has no mounts, so /ccserver-sandbox-provision.sh is never present); launching without it.');
+      sbTools = { ...sbTools, codeReviewGraph: false, crgSpec: null };
+    }
     const sb = buildSeatbeltLaunch({
       cwd, hostHome: HOME, homeDir, sandboxPathBase: SANDBOX_PATH,
       nodeBin: realpathSync(process.execPath), serverDir: __dirname,
