@@ -410,6 +410,54 @@ test('sibling launch dirs are deny-pinned for read and write', () => {
   assert.ok(denyReads.includes('ccserver-seatbelt-'), 'read pin covers siblings');
 });
 
+// Minimal last-match-wins emulator for file-write* rules: returns the op of
+// the last rule whose regex selector matches the path ('deny' when nothing
+// matches, mirroring `(deny default)`).
+function finalWriteVerdict(text, path) {
+  let verdict = 'deny';
+  for (const m of text.matchAll(/^\s*\((allow|deny) file-write\*\s*(.*)\)$/gm)) {
+    const bodies = [...m[2].matchAll(/\(regex #"(.*?)"\)/g)].map((x) => x[1]);
+    if (bodies.some((r) => new RegExp(r).test(path))) verdict = m[1];
+  }
+  return verdict;
+}
+
+test('own launch dir stays writable: pin denies do not override the re-allow', () => {
+  const sb = buildSeatbeltLaunch(baseOpts());
+  trackDir(sb.dir);
+  const text = readFileSync(sb.profilePath, 'utf-8');
+  // runtime/ (XDG_RUNTIME_DIR) and the throwaway HOME must end as allow --
+  // the sibling prefix deny must not be repeated after the own-dir re-allow.
+  assert.equal(finalWriteVerdict(text, join(sb.dir, 'runtime', 'tool.sock')), 'allow');
+  assert.equal(finalWriteVerdict(text, join(sb.homeDir, 'some-project-file')), 'allow');
+  // ...while the read-only invariants and siblings stay denied.
+  assert.equal(finalWriteVerdict(text, join(sb.binDir, 'gh')), 'deny');
+  assert.equal(finalWriteVerdict(text, join(sb.profilePath)), 'deny');
+  assert.equal(
+    finalWriteVerdict(text, join(dirname(sb.dir), 'ccserver-seatbelt-sibling', 'sandbox.sb')),
+    'deny',
+  );
+});
+
+test('per-launch ssh-config is write-pinned when ssh.realSsh is set', () => {
+  const brokerDir = mkdtempSync(join(tmpdir(), 'ccserver-seatbelt-broker-'));
+  DIRS.push(brokerDir);
+  const sb = buildSeatbeltLaunch(baseOpts({
+    gitBroker: { sockPath: join(brokerDir, 'broker.sock'), allowlistPath: join(brokerDir, 'allow.json'), dir: brokerDir },
+    ssh: { realSsh: '/usr/bin/ssh', configFile: '/nonexistent-ssh-config', knownHostsDefault: '/nonexistent-known-hosts', userKnownHosts: null },
+  }));
+  trackDir(sb.dir);
+  const text = readFileSync(sb.profilePath, 'utf-8');
+  assert.equal(finalWriteVerdict(text, join(sb.dir, 'ssh-config')), 'deny');
+});
+
+test('no per-launch ssh-config is minted without ssh.realSsh', () => {
+  const sb = buildSeatbeltLaunch(baseOpts());
+  trackDir(sb.dir);
+  assert.ok(!existsSync(join(sb.dir, 'ssh-config')));
+  assert.equal(sb.env.CCSANDBOX_SSH_CONFIG, undefined);
+});
+
 test('deny lines are emitted after the allow lines (last-match-wins)', () => {
   const text = buildSeatbeltProfileText({
     readRegexes: ['^/srv/proj(/.*)?$'],

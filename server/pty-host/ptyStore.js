@@ -150,10 +150,10 @@ export class PtyStore {
         env,
       });
     } catch (err) {
-      // The sandbox (if any) was already built by this point -- unlike
-      // sessionManager.js's createSession() (which leaks stateDir/
-      // gitBrokerProc/gitBrokerDir on this exact failure path today), clean
-      // up what buildSandboxSpawn already created before reporting the error.
+      // The sandbox (if any) was already built by this point -- clean up
+      // what buildSandboxSpawn already created before reporting the error.
+      // Same cleanup as sessionManager.js's createSession() pty.spawn
+      // catch (which forwards the same "Failed to spawn" prefix).
       if (stateDir) { try { rmSync(stateDir, { recursive: true, force: true }); } catch { /* best effort */ } }
       if (gitBrokerProc) { try { gitBrokerProc.kill('SIGTERM'); } catch { /* already dead */ } }
       if (gitBrokerDir) { try { rmSync(gitBrokerDir, { recursive: true, force: true }); } catch { /* best effort */ } }
