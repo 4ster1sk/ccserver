@@ -15,6 +15,15 @@ test('getPtyHostSockPath: CCSERVER_PTY_HOST_SOCK wins, else XDG_RUNTIME_DIR, els
     delete process.env.CCSERVER_PTY_HOST_SOCK;
     process.env.XDG_RUNTIME_DIR = '/tmp/xdg-test-dir';
     assert.equal(getPtyHostSockPath(), '/tmp/xdg-test-dir/ccserver-pty-host.sock');
+
+    // No XDG_RUNTIME_DIR: Linux keeps /run/user/<uid> (macOS falls back to
+    // the per-user tmpdir instead -- untestable here, same shape as
+    // git-broker.js's hostRuntimeDir).
+    delete process.env.XDG_RUNTIME_DIR;
+    if (process.platform !== 'darwin') {
+      const uid = typeof process.getuid === 'function' ? process.getuid() : 0;
+      assert.equal(getPtyHostSockPath(), `/run/user/${uid}/ccserver-pty-host.sock`);
+    }
   } finally {
     if (prevSock === undefined) delete process.env.CCSERVER_PTY_HOST_SOCK; else process.env.CCSERVER_PTY_HOST_SOCK = prevSock;
     if (prevXdg === undefined) delete process.env.XDG_RUNTIME_DIR; else process.env.XDG_RUNTIME_DIR = prevXdg;
