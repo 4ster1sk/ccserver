@@ -20,7 +20,7 @@
 
 import * as pty from 'node-pty';
 import { randomUUID } from 'node:crypto';
-import { rmSync } from 'node:fs';
+import { rmSync, unlinkSync } from 'node:fs';
 import { buildSandboxSpawn } from '../ws/sandbox.js';
 import { resolveSessionTimeoutMs, resolveExitedTimeoutMs } from './timeouts.js';
 
@@ -111,6 +111,7 @@ export class PtyStore {
     let gitBrokerDir = null;
     let commitGuardDir = null;
     let seatbeltDir = null;
+    let seatbeltFiles = null;
     if (sandbox) {
       let built;
       try {
@@ -135,6 +136,8 @@ export class PtyStore {
       commitGuardDir = built.commitGuardDir || null;
       // Seatbelt profile/shim runtime dir (macOS only) -- same treatment.
       seatbeltDir = built.seatbeltDir || null;
+      // Orchestrator rule copies in the project dir (macOS only).
+      seatbeltFiles = built.seatbeltFiles || null;
     }
 
     let ptyProcess;
@@ -156,6 +159,9 @@ export class PtyStore {
       if (gitBrokerDir) { try { rmSync(gitBrokerDir, { recursive: true, force: true }); } catch { /* best effort */ } }
       if (commitGuardDir) { try { rmSync(commitGuardDir, { recursive: true, force: true }); } catch { /* best effort */ } }
       if (seatbeltDir) { try { rmSync(seatbeltDir, { recursive: true, force: true }); } catch { /* best effort */ } }
+      if (Array.isArray(seatbeltFiles)) {
+        for (const f of seatbeltFiles) { try { unlinkSync(f); } catch { /* best effort */ } }
+      }
       throw new Error(`Failed to spawn "${finalCommand}": ${err.message}`);
     }
 
@@ -175,7 +181,7 @@ export class PtyStore {
       subscribers: new Set(), // opaque connIds (see class doc above)
       timeoutTimer: null,
       createdAt: Date.now(),
-      sandbox: { active: sandbox, docker, stateDir, gitBrokerProc, gitBrokerDir, commitGuardDir, seatbeltDir },
+      sandbox: { active: sandbox, docker, stateDir, gitBrokerProc, gitBrokerDir, commitGuardDir, seatbeltDir, seatbeltFiles },
     };
 
     ptyProcess.onData((data) => this._handleData(entry, data));
@@ -322,6 +328,9 @@ export class PtyStore {
     }
     if (entry.sandbox.seatbeltDir) {
       try { rmSync(entry.sandbox.seatbeltDir, { recursive: true, force: true }); } catch { /* best effort */ }
+    }
+    if (Array.isArray(entry.sandbox.seatbeltFiles)) {
+      for (const f of entry.sandbox.seatbeltFiles) { try { unlinkSync(f); } catch { /* best effort */ } }
     }
     this._gitBrokerRegistry?.forget(id);
 

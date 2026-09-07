@@ -1690,6 +1690,7 @@ export function buildMinimalSandboxSpawn({ cwd, targetCommand, app = 'claude' })
       docker: false,
       stateDir: null,
       seatbeltDir: sb.dir,
+      seatbeltFiles: null, // minimal launches never request an orchestrator overlay
       gitBrokerProc: null,
       gitBrokerDir: null,
       commitGuardDir: null,
@@ -1901,6 +1902,9 @@ export function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, mcpSoc
       docker: false,
       stateDir: null,
       seatbeltDir: sb.dir,
+      // Orchestrator rule files materialized into the project dir (NOT under
+      // seatbeltDir) -- the caller removes them on teardown.
+      seatbeltFiles: sb.ruleCopies,
       gitBrokerProc: gitBroker ? gitBroker.proc : null,
       gitBrokerDir: gitBroker ? gitBroker.dir : null,
       commitGuardDir: commitGuard ? commitGuard.dir : null,
@@ -1924,6 +1928,9 @@ export function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, mcpSoc
     // No proc for the commit guard (see startCommitGuard) -- just a runtime
     // dir to remove on teardown, same as gitBrokerDir but with no process to kill.
     commitGuardDir: commitGuard ? commitGuard.dir : null,
+    // macOS-only teardown handles (always null on the bwrap path).
+    seatbeltDir: null,
+    seatbeltFiles: null,
   };
 
   if (docker) {
