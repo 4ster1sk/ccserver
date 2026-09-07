@@ -7,7 +7,7 @@ description: bwrap + rootless docker によるサンドボックスの仕組み�
 
 docker も安全に使えるよう、サンドボックス**内部**に rootless dockerd を起動します。`rootlesskit` (subuid マッピング) の内側で `bwrap` を動かす構成のため、`docker run -v ...` でもサンドボックス外へは到達できません (daemon 自身が制限された FS の中にいるため)。
 
-macOS では `sandbox-exec` (Seatbelt) バックエンドでサンドボックスが動作します。deny-by-default のファイルポリシーによる隔離のため、bwrap のマウント隔離より弱い点に注意してください: ホストの `/tmp` は共有されます (bwrap の tmpfs 隔離なし)、ネットワーク egress は開放されます (エージェント API・git・ツール取得のため)、docker (rootless dind) と rtk プロビジョニングは非対応です (起動時に警告し無効化)。`~/.ssh` と `~/.config/gh` は引き続き直接公開されず、git-broker 経由でのみ利用できます。Windows は非対応のままです。
+macOS では `sandbox-exec` (Seatbelt) バックエンドでサンドボックスが動作します。deny-by-default のファイルポリシーによる隔離のため、bwrap のマウント隔離より弱い点に注意してください: ホストの `/tmp` と `~/Library/Caches` は共有されます (bwrap の tmpfs 隔離なし。macOS のキャッシュ配置は `$HOME` を無視するため、他アプリのキャッシュへの読み書きも可能です)、ネットワーク egress は開放されます (エージェント API・git・ツール取得のため)、docker (rootless dind)・rtk・code-review-graph のプロビジョニングは非対応です (起動時に警告し無効化)。`~/.ssh` と `~/.config/gh` は引き続き直接公開されず、git-broker 経由でのみ利用できます。Windows は非対応のままです。
 
 ## サンドボックスの再利用 (永続 HOME)
 

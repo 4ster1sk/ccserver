@@ -494,7 +494,11 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
   // host node+bridge). The args must be in the target command before
   // buildSandboxSpawn runs, so the mode is derived from sandboxRequested.
   let mcpEnv = {};
-  if (sessionApp && (mcpSocketPath || useNotify || useUsage || useMeta || useReviewer || (sandboxRequested && tools.codeReviewGraph))) {
+  // code-review-graph is only provisionable under bwrap (mount-bound
+  // provisioner); seatbelt sandboxes never get the binary, so injecting the
+  // MCP server there would fail every session.
+  const crgInjectable = sandboxRequested && !seatbeltSandbox && tools.codeReviewGraph;
+  if (sessionApp && (mcpSocketPath || useNotify || useUsage || useMeta || useReviewer || crgInjectable)) {
     const injected = buildMcpConfigArgsAndEnv(sessionApp, {
       // ccserver (the group broker) only when the session has a group socket:
       // standalone notify sessions must not get a broken ccserver entry (its
@@ -530,9 +534,9 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
         sockPath: reviewerSocketPath,
         identity: reviewerIdentity,
       } : undefined,
-      // code-review-graph MCP is injected only into sandboxed sessions (the
-      // tool is provisioned inside the sandbox, never on the host).
-      tools: sandboxRequested ? tools : null,
+      // code-review-graph MCP is injected only into sandboxed sessions that
+      // can actually provision it (bwrap; never on the host, never seatbelt).
+      tools: crgInjectable ? tools : null,
       cwd,
     });
     mcpEnv = injected.env;

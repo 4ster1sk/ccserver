@@ -138,7 +138,7 @@ test('buildSeatbeltLaunch creates profile+bin+hooks and a throwaway HOME', () =>
   assert.ok(text.includes(subtreeRegex(join(HOME, '.codex'))));
 });
 
-test('agent config dirs and Caches are readable as well as writable (bwrap rw parity)', () => {
+test('agent config dirs and Caches are readable as well as writable (file-write* does not imply file-read*)', () => {
   // Seatbelt file-write* does not imply file-read*: a write-only entry would
   // leave CLIs unable to read back the auth/state they just wrote.
   const sb = buildSeatbeltLaunch(baseOpts());

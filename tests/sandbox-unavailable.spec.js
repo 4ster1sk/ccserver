@@ -1,6 +1,6 @@
 import { test, expect } from '@playwright/test';
 
-// bwrap missing on the server host (/api/dirs/home's sandboxAvailable):
+// No sandbox backend on the server host (/api/dirs/home's sandboxAvailable):
 // the sandbox choice (and combo mode, which always requires it) must be
 // unselectable instead of failing at launch time. Missing field = older
 // server: everything stays enabled (same fallback as availableApps).
@@ -12,7 +12,7 @@ const HOME_RESPONSE = {
   home: '/home/tester',
   defaultApp: 'claude',
   forceSandbox: false,
-  hostname: 'e2e-no-bwrap',
+  hostname: 'e2e-no-sandbox',
   showUsage: true,
   availableApps: { claude: true, opencode: true, copilot: true, codex: true },
   hiddenApps: [],
@@ -29,7 +29,7 @@ async function stubDirsHome(page, body = HOME_RESPONSE) {
 
 test('sandbox choice is disabled and a remembered sandbox default is corrected', async ({ page }) => {
   await stubDirsHome(page);
-  // A stale 'prefer sandbox' memory from a host that had bwrap must not
+  // A stale 'prefer sandbox' memory from a host that had a backend must not
   // survive: the fetch reconciliation forces 通常起動.
   await page.addInitScript(() => localStorage.setItem('ccserver-sandbox-default', '1'));
   await page.goto('/');
@@ -37,7 +37,7 @@ test('sandbox choice is disabled and a remembered sandbox default is corrected',
 
   const sandboxItem = page.locator('.open-menu-item', { hasText: 'サンドボックスで起動' });
   await expect(sandboxItem).toHaveClass(/open-menu-item-disabled/);
-  await expect(sandboxItem).toHaveAttribute('title', /bwrap/);
+  await expect(sandboxItem).toHaveAttribute('title', /サンドボックス/);
 
   // Clicking the disabled choice must not check it -- 通常起動 stays checked.
   await sandboxItem.click();
@@ -47,10 +47,10 @@ test('sandbox choice is disabled and a remembered sandbox default is corrected',
 
   // The explanatory note names the cause (scoped to the modal: the same
   // message also shows in the browser header box).
-  await expect(page.locator('.resume-dialog .open-menu-note', { hasText: 'bwrapがインストールされていないため' })).toBeVisible();
+  await expect(page.locator('.resume-dialog .open-menu-note', { hasText: 'サンドボックス機能が利用できないため' })).toBeVisible();
 });
 
-test('toolbar quick-launch drops the lock icon when bwrap is missing', async ({ page }) => {
+test('toolbar quick-launch drops the lock icon when the sandbox is unavailable', async ({ page }) => {
   await stubDirsHome(page);
   await page.addInitScript(() => localStorage.setItem('ccserver-sandbox-default', '1'));
   await page.goto('/');
@@ -59,7 +59,7 @@ test('toolbar quick-launch drops the lock icon when bwrap is missing', async ({ 
   await expect(main).toHaveAttribute('title', '通常起動');
 });
 
-test('combo mode is disabled when bwrap is missing', async ({ page }) => {
+test('combo mode is disabled when the sandbox is unavailable', async ({ page }) => {
   await stubDirsHome(page);
   await page.goto('/');
   await page.getByRole('button', { name: '起動方法を選択' }).click();
@@ -71,17 +71,17 @@ test('combo mode is disabled when bwrap is missing', async ({ page }) => {
   await expect(page.locator('.launch-mode-btn.active')).toHaveText('通常起動');
 });
 
-test('forceSandbox without bwrap shows a warning instead of a dead locked toggle', async ({ page }) => {
+test('forceSandbox without a backend shows a warning instead of a dead locked toggle', async ({ page }) => {
   await stubDirsHome(page, { ...HOME_RESPONSE, forceSandbox: true });
   await page.goto('/');
   await page.getByRole('button', { name: '起動方法を選択' }).click();
-  await expect(page.locator('.resume-dialog .open-menu-note', { hasText: 'bwrapが無いため起動できません' })).toBeVisible();
+  await expect(page.locator('.resume-dialog .open-menu-note', { hasText: 'サンドボックス機能を利用できません' })).toBeVisible();
   // The toggle stays locked on sandbox (no misleading check on 通常起動).
   const sandboxItem = page.locator('.open-menu-item', { hasText: 'サンドボックスで起動' });
   await expect(sandboxItem.locator('.open-menu-check')).toHaveText('✓');
 });
 
-test('browser header shows a warning box under the subtitle when bwrap is missing', async ({ page }) => {
+test('browser header shows a warning box under the subtitle when the sandbox is unavailable', async ({ page }) => {
   await stubDirsHome(page);
   await page.goto('/');
   const banner = page.locator('.directory-warning-banner');
@@ -91,12 +91,12 @@ test('browser header shows a warning box under the subtitle when bwrap is missin
   await expect(banner).not.toHaveClass(/is-error/);
 });
 
-test('browser header shows an error box when forceSandbox contradicts the missing bwrap', async ({ page }) => {
+test('browser header shows an error box when forceSandbox contradicts the missing backend', async ({ page }) => {
   await stubDirsHome(page, { ...HOME_RESPONSE, forceSandbox: true });
   await page.goto('/');
   const banner = page.locator('.directory-warning-banner.is-error');
   await expect(banner).toBeVisible();
-  await expect(banner).toContainText('bwrapが無いため起動できません');
+  await expect(banner).toContainText('サンドボックス機能を利用できません');
 });
 
 test('no header box while the capability is unknown or present', async ({ page }) => {
@@ -105,7 +105,7 @@ test('no header box while the capability is unknown or present', async ({ page }
   await page.goto('/');
   await expect(page.locator('.directory-warning-banner')).toHaveCount(0);
 
-  // Present (bwrap installed): no box and the sandbox choice works.
+  // Present (backend installed): no box and the sandbox choice works.
   await stubDirsHome(page, { ...HOME_RESPONSE, sandboxAvailable: true });
   await page.reload();
   await expect(page.locator('.directory-warning-banner')).toHaveCount(0);
@@ -139,7 +139,7 @@ test('double-click launch is also blocked when no launch can succeed', async ({ 
   expect(wsInits).toHaveLength(0);
 });
 
-test('forceSandbox without bwrap disables the launch buttons', async ({ page }) => {
+test('forceSandbox without a backend disables the launch buttons', async ({ page }) => {
   await stubDirsHome(page, { ...HOME_RESPONSE, forceSandbox: true, metaAgentEnabled: true });
   await page.goto('/');
   // Toolbar quick-launch, Terminal, and meta buttons: nothing can succeed.
