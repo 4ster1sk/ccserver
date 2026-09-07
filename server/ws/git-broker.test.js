@@ -301,3 +301,22 @@ describe('gh-exec PR-body guard (plan8)', () => {
     assert.equal(r.ok, true);
   });
 });
+
+// hostRuntimeDir (macOS Seatbelt support): XDG_RUNTIME_DIR wins when set;
+// otherwise Linux keeps /run/user/<uid> while darwin falls back to the
+// per-user tmpdir (macOS has no /run). The darwin branch itself can't run
+// here, so this locks the Linux behavior and the env-override precedence.
+test('hostRuntimeDir honors XDG_RUNTIME_DIR and defaults per platform', async () => {
+  const { hostRuntimeDir } = await import('./git-broker.js');
+  const prev = process.env.XDG_RUNTIME_DIR;
+  try {
+    process.env.XDG_RUNTIME_DIR = '/tmp/ccserver-test-runtime';
+    assert.equal(hostRuntimeDir(), '/tmp/ccserver-test-runtime');
+    delete process.env.XDG_RUNTIME_DIR;
+    const uid = typeof process.getuid === 'function' ? process.getuid() : 0;
+    assert.equal(hostRuntimeDir(), `/run/user/${uid}`);
+  } finally {
+    if (prev === undefined) delete process.env.XDG_RUNTIME_DIR;
+    else process.env.XDG_RUNTIME_DIR = prev;
+  }
+});

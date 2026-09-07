@@ -27,7 +27,7 @@ import { promisify } from 'node:util';
 import { randomUUID } from 'node:crypto';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { startGitBroker } from './git-broker.js';
+import { startGitBroker, hostRuntimeDir } from './git-broker.js';
 import { buildGuardConfig } from './commitGuard.js';
 import { buildSeatbeltLaunch, seatbeltEnvArgs } from './sandbox-seatbelt.js';
 import { recordSandboxHome as recordSandboxHomeDb, listSandboxRowsBySlug, forgetSandboxHome } from './projects.js';
@@ -126,10 +126,10 @@ const RTK_DEFAULT = RTK_ASSET ? {
 const CRG_DEFAULT = { version: '2.3.7' };
 
 const HOME = homedir();
-// process.getuid is undefined on Windows; the sandbox is Linux-only, but this
-// module is imported unconditionally, so guard the top-level access.
-const UID = typeof process.getuid === 'function' ? process.getuid() : 0;
-const XDG_RUNTIME_DIR = process.env.XDG_RUNTIME_DIR || `/run/user/${UID}`;
+// Host runtime dir (commit-guard state, rootlesskit state dirs). darwin-aware
+// via git-broker.js: macOS has no /run/user, so without XDG_RUNTIME_DIR this
+// falls back to the per-user tmpdir there instead of an uncreatable path.
+const XDG_RUNTIME_DIR = hostRuntimeDir();
 
 // RootlessKit's state dir (holds the API socket dockerd connects to) lives
 // under the runtime dir on the host; bwrap binds it in so dockerd can reach it.
@@ -1670,14 +1670,18 @@ function seatbeltSsh() {
 // (never the persistent per-project one -- this stays a throwaway read).
 export function buildMinimalSandboxSpawn({ cwd, targetCommand, app = 'claude' }) {
   if (IS_MACOS) {
-    const { command } = resolveApp(app);
+    // installDir is load-bearing here too (not just the full launch): without
+    // it, CLIs installed outside the default allow trees (~/.opencode/bin,
+    // Volta/mise shims, custom npm prefixes) are exec-denied, and the usage
+    // callers silently fall back to an unsandboxed direct launch.
+    const { command, installDir } = resolveApp(app);
     const sb = buildSeatbeltLaunch({
       cwd, hostHome: HOME, homeDir: null, sandboxPathBase: SANDBOX_PATH,
       nodeBin: realpathSync(process.execPath), serverDir: __dirname,
       scripts: seatbeltScripts(), ssh: seatbeltSsh(),
       gitBroker: null, commitGuard: null,
       sockets: {}, extraBinds: [], extraEnv: {}, authSock: null,
-      claudeDir: null, tools: null,
+      claudeDir: installDir, tools: null,
     });
     return {
       command: SANDBOX_EXEC,
