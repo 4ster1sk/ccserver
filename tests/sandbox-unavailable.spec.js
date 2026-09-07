@@ -45,8 +45,9 @@ test('sandbox choice is disabled and a remembered sandbox default is corrected',
   await expect(normalItem.locator('.open-menu-check')).toHaveText('✓');
   await expect(sandboxItem.locator('.open-menu-check')).toHaveText('');
 
-  // The explanatory note names the cause.
-  await expect(page.getByText('bwrapがインストールされていないため')).toBeVisible();
+  // The explanatory note names the cause (scoped to the modal: the same
+  // message also shows in the browser header box).
+  await expect(page.locator('.resume-dialog .open-menu-note', { hasText: 'bwrapがインストールされていないため' })).toBeVisible();
 });
 
 test('toolbar quick-launch drops the lock icon when bwrap is missing', async ({ page }) => {
@@ -74,10 +75,47 @@ test('forceSandbox without bwrap shows a warning instead of a dead locked toggle
   await stubDirsHome(page, { ...HOME_RESPONSE, forceSandbox: true });
   await page.goto('/');
   await page.getByRole('button', { name: '起動方法を選択' }).click();
-  await expect(page.getByText('bwrapが無いため起動できません')).toBeVisible();
+  await expect(page.locator('.resume-dialog .open-menu-note', { hasText: 'bwrapが無いため起動できません' })).toBeVisible();
   // The toggle stays locked on sandbox (no misleading check on 通常起動).
   const sandboxItem = page.locator('.open-menu-item', { hasText: 'サンドボックスで起動' });
   await expect(sandboxItem.locator('.open-menu-check')).toHaveText('✓');
+});
+
+test('browser header shows a warning box under the subtitle when bwrap is missing', async ({ page }) => {
+  await stubDirsHome(page);
+  await page.goto('/');
+  const banner = page.locator('.directory-warning-banner');
+  await expect(banner).toBeVisible();
+  await expect(banner).toHaveAttribute('role', 'alert');
+  await expect(banner).toContainText('サンドボックス起動・コンボ起動はできません');
+  await expect(banner).not.toHaveClass(/is-error/);
+});
+
+test('browser header shows an error box when forceSandbox contradicts the missing bwrap', async ({ page }) => {
+  await stubDirsHome(page, { ...HOME_RESPONSE, forceSandbox: true });
+  await page.goto('/');
+  const banner = page.locator('.directory-warning-banner.is-error');
+  await expect(banner).toBeVisible();
+  await expect(banner).toContainText('bwrapが無いため起動できません');
+});
+
+test('no header box while the capability is unknown or present', async ({ page }) => {
+  const { sandboxAvailable: _dropped, ...legacy } = HOME_RESPONSE;
+  await stubDirsHome(page, legacy);
+  await page.goto('/');
+  await expect(page.locator('.directory-warning-banner')).toHaveCount(0);
+});
+
+test('forceSandbox without bwrap disables the launch buttons', async ({ page }) => {
+  await stubDirsHome(page, { ...HOME_RESPONSE, forceSandbox: true, metaAgentEnabled: true });
+  await page.goto('/');
+  // Toolbar quick-launch, Terminal, and meta buttons: nothing can succeed.
+  await expect(page.locator('.open-split-main')).toBeDisabled();
+  await expect(page.locator('.toolbar-launch-group .launch-btn', { hasText: 'Terminal' })).toBeDisabled();
+  await expect(page.locator('.meta-launch-btn')).toBeDisabled();
+  // In-modal single-launch button too.
+  await page.getByRole('button', { name: '起動方法を選択' }).click();
+  await expect(page.locator('.resume-dialog .btn-primary', { hasText: '起動' })).toBeDisabled();
 });
 
 test('missing sandboxAvailable (older server) keeps the sandbox choice enabled', async ({ page }) => {
