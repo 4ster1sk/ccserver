@@ -14,6 +14,7 @@ import { join } from 'node:path';
 import {
   buildSeatbeltLaunch,
   buildSeatbeltProfileText,
+  escapeSeatbeltLiteral,
   escapeSeatbeltRegex,
   seatbeltEnvArgs,
   subtreeRegex,
@@ -84,6 +85,16 @@ test('escapeSeatbeltRegex quotes regex metacharacters but keeps slashes', () => 
   assert.equal(escapeSeatbeltRegex('/Users/oli/a+b (x)/y.md'), '/Users/oli/a\\+b\\ \\(x\\)/y\\.md');
 });
 
+test('escapeSeatbeltLiteral escapes only SBPL string metacharacters', () => {
+  assert.equal(escapeSeatbeltLiteral('/tmp/a"b\\c'), '/tmp/a\\"b\\\\c');
+  assert.equal(escapeSeatbeltLiteral('/tmp/plain.sock'), '/tmp/plain.sock');
+});
+
+test('buildSeatbeltProfileText escapes literals pasted into the profile', () => {
+  const text = buildSeatbeltProfileText({ readLiterals: ['/tmp/we"ird.sock'] });
+  assert.ok(text.includes('(literal "/tmp/we\\"ird.sock")'));
+});
+
 test('subtreeRegex matches the dir itself and everything below', () => {
   assert.equal(subtreeRegex('/srv/proj'), '^/srv/proj(/.*)?$');
 });
@@ -121,6 +132,23 @@ test('buildSeatbeltLaunch creates profile+bin+hooks and a throwaway HOME', () =>
   // opencode state dirs stay writable so launches don't error (see plan notes).
   assert.ok(text.includes(subtreeRegex(join(HOME, '.local', 'share', 'opencode'))));
   assert.ok(text.includes(subtreeRegex(join(HOME, '.codex'))));
+});
+
+test('agent config dirs and Caches are readable as well as writable (bwrap rw parity)', () => {
+  // Seatbelt file-write* does not imply file-read*: a write-only entry would
+  // leave CLIs unable to read back the auth/state they just wrote.
+  const sb = buildSeatbeltLaunch(baseOpts());
+  trackDir(sb.dir);
+  const text = readFileSync(sb.profilePath, 'utf-8');
+  const readLine = text.split('\n').find((l) => l.startsWith('  (allow file-read*'));
+  assert.ok(readLine, 'profile has a file-read rule');
+  for (const p of [
+    join(HOME, '.claude'), join(HOME, '.config', 'opencode'),
+    join(HOME, '.local', 'state', 'opencode'), join(HOME, '.codex'),
+    join(HOME, '.commandcode'), join(HOME, 'Library', 'Caches'),
+  ]) {
+    assert.ok(readLine.includes(subtreeRegex(p)), `${p} is readable`);
+  }
 });
 
 test('buildSeatbeltLaunch honors an explicit persistent homeDir', () => {

@@ -41,6 +41,13 @@ export function subtreeRegex(dir) {
   return `^${escapeSeatbeltRegex(dir)}(/.*)?$`;
 }
 
+// Escape a host path for embedding in an SBPL `(literal "...")` string.
+// Unlike escapeSeatbeltRegex (for `regex #"..."`), only the string-syntax
+// metacharacters need escaping here.
+export function escapeSeatbeltLiteral(s) {
+  return String(s).replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+}
+
 // Assemble the profile text. Each list holds ready-made `regex #"..."` bodies
 // (see subtreeRegex) or exact-path literals:
 //   readRegexes/writeRegexes    - allow file-read*/file-write* by pattern
@@ -55,7 +62,7 @@ export function buildSeatbeltProfileText({
 } = {}) {
   const line = (op, sel) => `  (${op} ${sel})`;
   const regexes = (list) => list.map((r) => `(regex #"${r}")`).join(' ');
-  const literals = (list) => list.map((p) => `(literal "${p}")`).join(' ');
+  const literals = (list) => list.map((p) => `(literal "${escapeSeatbeltLiteral(p)}")`).join(' ');
   const out = [
     '(version 1)',
     '',
@@ -160,9 +167,13 @@ export function buildSeatbeltLaunch({
   if (!homeDir) mkdirSync(effectiveHome, { recursive: true });
 
   // --- shims ---------------------------------------------------------------
+  // Quote for /bin/sh double quotes: paths here derive from server-side
+  // constants and runtime dirs, but never interpolate them raw -- a `"`/`$`
+  // in $TMPDIR today would otherwise break out of the exec line.
+  const shQuote = (s) => `"${String(s).replace(/(["$`\\])/g, '\\$1')}"`;
   const shim = (name, target) => {
     const p = join(binDir, name);
-    writeFileSync(p, `#!/bin/sh\nexec "${nodeBin}" "${target}" "$@"\n`, { mode: 0o755 });
+    writeFileSync(p, `#!/bin/sh\nexec ${shQuote(nodeBin)} ${shQuote(target)} "$@"\n`, { mode: 0o755 });
     return p;
   };
   let sshShim = null;
@@ -177,7 +188,7 @@ export function buildSeatbeltLaunch({
   }
   if (commitGuard) {
     const p = join(hooksDir, 'commit-msg');
-    writeFileSync(p, `#!/bin/sh\nexec "${nodeBin}" "${scripts.commitHook}" "$@"\n`, { mode: 0o755 });
+    writeFileSync(p, `#!/bin/sh\nexec ${shQuote(nodeBin)} ${shQuote(scripts.commitHook)} "$@"\n`, { mode: 0o755 });
   }
 
   // --- env (via /usr/bin/env, since sandbox-exec has no --setenv) ----------
@@ -253,6 +264,9 @@ export function buildSeatbeltLaunch({
   // Agent config dirs keep working when a CLI resolves the real home via
   // macOS APIs instead of $HOME (mirrors buildBwrapArgs' appBinds). Regexes
   // for absent paths are harmless, so no existsSync gating is needed.
+  // NOTE: these need read as well as write (bwrap binds them rw) -- Seatbelt
+  // file-write* does not imply file-read*, so a write-only entry would leave
+  // CLIs unable to read back the auth/state they just wrote.
   const appConfigDirs = [
     join(hostHome, '.claude'), join(hostHome, '.claude.json'),
     join(hostHome, '.local', 'share', 'claude'),
@@ -264,13 +278,15 @@ export function buildSeatbeltLaunch({
     join(hostHome, '.codex'),
     join(hostHome, '.commandcode'),
   ];
+  const cachesDir = join(hostHome, 'Library', 'Caches');
+  readRegexes.push(subtreeRegex(cachesDir), ...appConfigDirs.map(subtreeRegex));
   const writeRegexes = [
     subtreeRegex(projectDir),
     subtreeRegex(effectiveHome),
     subtreeRegex(dir),
     '^/tmp(/.*)?$', '^/private/tmp(/.*)?$',
     // macOS-API writers (NSSearchPath ignores $HOME): caches stay usable.
-    subtreeRegex(join(hostHome, 'Library', 'Caches')),
+    subtreeRegex(cachesDir),
     ...appConfigDirs.map(subtreeRegex),
   ];
   for (const t of tmpDirs) {
