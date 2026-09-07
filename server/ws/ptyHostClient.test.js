@@ -207,3 +207,27 @@ test('reconnect: client resubscribes from lastSeq after the pty-host connection 
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('spawn() wraps transport-level _request failures with an infra prefix, passes prefixed errors through', async () => {
+  const client = new PtyHostClient(sockPath);
+  try {
+    await client._ensureConnected();
+    const orig = client._request.bind(client);
+    try {
+      client._request = () => Promise.reject(new Error('pty-host RPC "spawn": not connected'));
+      await assert.rejects(
+        client.spawn(shellSpawnParams({ command: 'claude' })),
+        /Failed to spawn "claude": pty-host RPC failed \(pty-host RPC "spawn": not connected\)/,
+      );
+      client._request = () => Promise.reject(new Error('Failed to build sandbox: boom'));
+      await assert.rejects(
+        client.spawn(shellSpawnParams({ command: 'claude' })),
+        /^Error: Failed to build sandbox: boom$/,
+      );
+    } finally {
+      client._request = orig;
+    }
+  } finally {
+    client.close();
+  }
+});

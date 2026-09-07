@@ -140,7 +140,8 @@ export async function dirsRoute(fastify, opts) {
     // metaAgentEnabled: the launch modal's メタエージェント mode is disabled
     // (with an explanation) unless the privileged ccserver-meta feature is
     // explicitly opted into via sandbox.config.json. Extra field as well.
-    // sandboxAvailable: whether /usr/bin/bwrap exists on this host. The
+    // sandboxAvailable: whether a sandbox backend is usable on this host
+    // (bwrap on Linux, sandbox-exec on macOS). The
     // launch modal disables the sandbox choice (and combo mode, which always
     // requires the sandbox) when false. Extra field as well.
     return { home: homedir(), defaultApp, forceSandbox, hostname: resolvedHostname(), showUsage, availableApps: { ...installedApps(), opencodeGo: opencodeGoAvailable(cfg) }, hiddenApps, metaAgentEnabled: metaAgentEnabled(), metaAgentDir: metaAgentDir(), sandboxAvailable: sandboxAvailable() };
