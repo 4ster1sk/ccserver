@@ -1877,19 +1877,30 @@ export function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, mcpSoc
       console.warn('[sandbox] code-review-graph provisioning is disabled on macOS (sandbox-exec has no mounts, so /ccserver-sandbox-provision.sh is never present); launching without it.');
       sbTools = { ...sbTools, codeReviewGraph: false, crgSpec: null };
     }
-    const sb = buildSeatbeltLaunch({
-      cwd, hostHome: HOME, homeDir, sandboxPathBase: SANDBOX_PATH,
-      nodeBin: realpathSync(process.execPath), serverDir: __dirname,
-      scripts: seatbeltScripts(), ssh: seatbeltSsh(),
-      gitBroker,
-      commitGuard: commitGuard ? { configPath: commitGuard.configPath } : null,
-      sockets: {
-        mcp: mcpSocketPath, notify: notifySocketPath, usage: usageSocketPath,
-        meta: metaSocketPath, reviewer: reviewerSocketPath,
-      },
-      extraBinds: binds, extraEnv: env, authSock, gnupg: gpg, claudeDir: installDir,
-      orchestratorClaudeMdSrc, gitCommonDir, groupFilesDir, tools: sbTools,
-    });
+    let sb;
+    try {
+      sb = buildSeatbeltLaunch({
+        cwd, hostHome: HOME, homeDir, sandboxPathBase: SANDBOX_PATH,
+        nodeBin: realpathSync(process.execPath), serverDir: __dirname,
+        scripts: seatbeltScripts(), ssh: seatbeltSsh(),
+        gitBroker,
+        commitGuard: commitGuard ? { configPath: commitGuard.configPath } : null,
+        sockets: {
+          mcp: mcpSocketPath, notify: notifySocketPath, usage: usageSocketPath,
+          meta: metaSocketPath, reviewer: reviewerSocketPath,
+        },
+        extraBinds: binds, extraEnv: env, authSock, gnupg: gpg, claudeDir: installDir,
+        orchestratorClaudeMdSrc, gitCommonDir, groupFilesDir, tools: sbTools,
+      });
+    } catch (err) {
+      // buildSeatbeltLaunch threw AFTER startGitBroker/startCommitGuard
+      // above: their handles never reach the caller, so kill/remove them
+      // here or the live broker process and its runtime dir leak.
+      if (gitBroker) { try { gitBroker.proc.kill('SIGTERM'); } catch { /* already dead */ } }
+      if (gitBroker) { try { rmSync(gitBroker.dir, { recursive: true, force: true }); } catch { /* best effort */ } }
+      if (commitGuard) { try { rmSync(commitGuard.dir, { recursive: true, force: true }); } catch { /* best effort */ } }
+      throw err;
+    }
     // gpg needs no socket bind here (no mounts): the keyring is allow-listed
     // in the profile with GNUPGHOME pointed at it (see buildSeatbeltLaunch).
     // gpg-agent sockets are reached via gpgconf's socketdir like on Linux.
