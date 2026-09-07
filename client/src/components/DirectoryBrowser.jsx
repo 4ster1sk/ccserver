@@ -1528,13 +1528,16 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, ini
               key={dir.path}
               className="dir-item"
               onClick={() => navigateTo(dir.path)}
-              onDoubleClick={() => onOpen(dir.path, {
-                sandbox: sandboxDefault,
-                sandboxOpts: loadSandboxOpts(dir.path, sandboxDefaults),
-                app: appDefault,
-                model: modelForApp(appDefault),
-                permissionMode: permissionModeForApp(appDefault),
-              })}
+              onDoubleClick={() => {
+                if (launchesBlocked) return; // fail-closed UI: no launch can succeed
+                onOpen(dir.path, {
+                  sandbox: sandboxDefault,
+                  sandboxOpts: loadSandboxOpts(dir.path, sandboxDefaults),
+                  app: appDefault,
+                  model: modelForApp(appDefault),
+                  permissionMode: permissionModeForApp(appDefault),
+                });
+              }}
               role="button"
               tabIndex={0}
               onKeyDown={(e) => {
