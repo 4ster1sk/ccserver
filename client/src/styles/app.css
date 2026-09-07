@@ -373,8 +373,10 @@ body {
   background: var(--bg-surface);
 }
 
-/* longtap/押下中のハイライトは背景だけを行全体に広げる (active枠のoutlineは付けない)。 */
-.session-menu-item:active {
+/* longtap/押下中のハイライトは背景だけを行全体に広げる (active枠のoutlineは付けない)。
+   祖先divの :active はモバイルで発火が不安定なため、確実に付く内側ボタンの
+   :active を :has() で受けて外側を光らせる。×押下では光らせない。 */
+.session-menu-item:has(> .session-menu-select:active) {
   background: var(--bg-surface);
 }
 
