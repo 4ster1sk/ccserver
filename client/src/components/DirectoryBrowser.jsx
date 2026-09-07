@@ -675,6 +675,11 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, ini
   // forceSandbox the toggle stays locked on -- launches will fail
   // server-side, and the note below says so.
   const sandboxChoiceDisabled = sandboxAvailable === false && !forceSandbox;
+  // Contradictory server config (forceSandbox but no bwrap): no launch can
+  // succeed, so the launch buttons are disabled as well (fail-closed UI).
+  // null (fetch pending / older server) keeps everything enabled.
+  const launchesBlocked = forceSandbox && sandboxAvailable === false;
+  const launchesBlockedTitle = 'サーバー設定でサンドボックスが強制されていますが、このホストにbwrapが無いため起動できません';
   const sandboxPicker = (
     <>
       <div className="open-menu-sep" />
@@ -734,7 +739,7 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, ini
           : forceSandbox
             ? 'サンドボックスがサーバー設定 (forceSandbox) で強制されています。通常起動はできません。'
             : sandboxAvailable === false
-              ? 'このサーバーにはbwrapがインストールされていないため、サンドボックス起動はできません。通常起動をご利用ください。'
+              ? 'このサーバーにはbwrapがインストールされていないため、サンドボックス起動・コンボ起動はできません。通常起動をご利用ください。'
               : `サンドボックス: 隣接プロジェクトを隔離し、内部に rootless docker を用意。初期値は一般設定で変更でき、このディレクトリ (${displayPath(currentPath, homeDir)}) に記憶されます。`}
       </p>
     </>
@@ -752,6 +757,13 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, ini
         <div className="browser-header-title">
           <h1>Select a Directory</h1>
           <p className="subtitle">Choose a working directory</p>
+          {sandboxAvailable === false && (
+            <div className={`directory-warning-banner${forceSandbox ? ' is-error' : ''}`} role="alert">
+              {forceSandbox
+                ? 'サーバー設定 (forceSandbox) でサンドボックスが強制されていますが、このホストにbwrapが無いため起動できません。bwrapをインストールするか、サーバー設定を見直してください。'
+                : 'このサーバーにはbwrapがインストールされていないため、サンドボックス起動・コンボ起動はできません。通常起動をご利用ください。'}
+            </div>
+          )}
         </div>
       </div>
 
@@ -826,15 +838,20 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, ini
           </label>
         </div>
         <div className="toolbar-launch-group">
-          <button className="btn btn-secondary launch-btn" onClick={() => onOpenShell(currentPath)}>
+          <button
+            className="btn btn-secondary launch-btn"
+            onClick={() => onOpenShell(currentPath)}
+            disabled={launchesBlocked}
+            title={launchesBlocked ? launchesBlockedTitle : ''}
+          >
             Terminal
           </button>
           <div className="open-split">
             <button
               className="btn btn-primary open-split-main"
               onClick={() => onOpen(currentPath, { sandbox: sandboxDefault, sandboxOpts, app: appDefault, model: modelForApp(appDefault), permissionMode: permissionModeForApp(appDefault) })}
-              disabled={effectiveAppHidden}
-              title={effectiveAppHidden ? `${APP_LABELS[appDefault] || appDefault}は起動できません (非表示または未インストール)。起動方法を選択してください。` : (sandboxDefault ? 'サンドボックスで起動' : '通常起動')}
+              disabled={effectiveAppHidden || launchesBlocked}
+              title={effectiveAppHidden ? `${APP_LABELS[appDefault] || appDefault}は起動できません (非表示または未インストール)。起動方法を選択してください。` : (launchesBlocked ? launchesBlockedTitle : (sandboxDefault ? 'サンドボックスで起動' : '通常起動'))}
             >
               {sandboxDefault ? '🔒 ' : ''}{appDefault === 'claude' ? 'Claude Code' : appDefault === 'copilot' ? 'GitHub Copilot' : appDefault === 'codex' ? 'OpenAI Codex' : appDefault === 'commandcode' ? 'Command Code' : 'opencode'}
             </button>
@@ -850,9 +867,9 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, ini
           <button
             className="btn btn-secondary meta-launch-btn"
             onClick={() => setMetaDialogOpen(true)}
-            disabled={metaAgentEnabled !== true}
+            disabled={metaAgentEnabled !== true || launchesBlocked}
             aria-label="統括エージェント"
-            title={metaAgentEnabled === true ? '統括エージェントを起動' : 'サーバー設定 (sandbox.config.json) で "metaAgentMcp": true にすると使えます'}
+            title={launchesBlocked ? launchesBlockedTitle : (metaAgentEnabled === true ? '統括エージェントを起動' : 'サーバー設定 (sandbox.config.json) で "metaAgentMcp": true にすると使えます')}
           >
             <span className="meta-icon" aria-hidden="true">⌘</span><span className="meta-label"> 統括</span>
           </button>
@@ -1332,8 +1349,8 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, ini
                 <button
                   className="btn btn-primary"
                   onClick={() => { closeOpenMenu(); onOpen(currentPath, { sandbox: sandboxDefault, sandboxOpts, app: appDefault, model: modelForApp(appDefault), permissionMode: permissionModeForApp(appDefault) }); }}
-                  disabled={effectiveAppHidden}
-                  title={effectiveAppHidden ? `${APP_LABELS[appDefault] || appDefault}は起動できません (非表示または未インストール)` : ''}
+                  disabled={effectiveAppHidden || launchesBlocked}
+                  title={effectiveAppHidden ? `${APP_LABELS[appDefault] || appDefault}は起動できません (非表示または未インストール)` : (launchesBlocked ? launchesBlockedTitle : '')}
                 >
                   起動
                 </button>
