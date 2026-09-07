@@ -143,7 +143,18 @@ function crgMcpServer(tools, cwd) {
   return { command: 'code-review-graph', args };
 }
 
-export function buildMcpConfigArgsAndEnv(app, { groupMcp = true, notify, usage, meta, reviewer, tools = null, cwd = null } = {}) {
+// The { base, args } invocation for the group ccserver bridge: the fixed
+// in-sandbox path under bwrap, else the host node binary running the bridge
+// script directly (macOS seatbelt sandboxes never bind the fixed path -- the
+// host script is directly visible, like a non-sandboxed session).
+function groupInvocation(hostBridge) {
+  if (hostBridge) {
+    return { command: process.execPath, args: [NOTIFY_BRIDGE_SCRIPT] };
+  }
+  return { command: MCP_BRIDGE_COMMAND, args: [] };
+}
+
+export function buildMcpConfigArgsAndEnv(app, { groupMcp = true, notify, usage, meta, reviewer, tools = null, cwd = null, hostBridge = false } = {}) {
   const notifySockEnv = notify ? { CCSANDBOX_NOTIFY_MCP_SOCK: notify.sockPath } : {};
   const notifyIdentityEnv = notify?.identity ? { CCSERVER_NOTIFY_IDENTITY: JSON.stringify(notify.identity) } : {};
   const usageSockEnv = usage ? { CCSANDBOX_USAGE_MCP_SOCK: usage.sockPath } : {};
@@ -165,9 +176,10 @@ export function buildMcpConfigArgsAndEnv(app, { groupMcp = true, notify, usage, 
     // in sandboxed sessions (the fixed in-sandbox socket path) and the host
     // socket path in non-sandboxed sessions.
     if (groupMcp) {
+      const inv = groupInvocation(hostBridge);
       servers.ccserver = {
-        command: MCP_BRIDGE_COMMAND,
-        args: [],
+        command: inv.command,
+        args: inv.args,
         env_vars: ['CCSANDBOX_MCP_SOCK'],
       };
     }
@@ -235,7 +247,10 @@ export function buildMcpConfigArgsAndEnv(app, { groupMcp = true, notify, usage, 
 
   if (app === 'opencode') {
     const mcp = {};
-    if (groupMcp) mcp.ccserver = { type: 'local', command: [MCP_BRIDGE_COMMAND] };
+    if (groupMcp) {
+      const inv = groupInvocation(hostBridge);
+      mcp.ccserver = { type: 'local', command: [inv.command, ...inv.args] };
+    }
     if (notify) {
       const inv = notifyInvocation(notify);
       mcp['ccserver-notify'] = { type: 'local', command: [inv.command, ...inv.args] };
@@ -272,7 +287,10 @@ export function buildMcpConfigArgsAndEnv(app, { groupMcp = true, notify, usage, 
   }
 
   const mcpServers = {};
-  if (groupMcp) mcpServers.ccserver = { type: 'stdio', command: MCP_BRIDGE_COMMAND, args: [] };
+  if (groupMcp) {
+    const inv = groupInvocation(hostBridge);
+    mcpServers.ccserver = { type: 'stdio', command: inv.command, args: inv.args };
+  }
   if (notify) {
     const inv = notifyInvocation(notify);
     mcpServers['ccserver-notify'] = { type: 'stdio', command: inv.command, args: inv.args };

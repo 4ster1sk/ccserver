@@ -4,7 +4,7 @@ import { execFileSync } from 'node:child_process';
 import { writeFileSync, readFileSync, unlinkSync, rmSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { buildSandboxSpawn, resolveApp, sandboxAvailable, loadSandboxConfig, persistentHomeDir, dockerSandboxAvailable, dockerdStatus, dockerdLockHeld, resolveTools } from './sandbox.js';
+import { buildSandboxSpawn, resolveApp, sandboxAvailable, sandboxBackend, sandboxUnavailableReason, forceSandboxUnavailableReason, loadSandboxConfig, persistentHomeDir, dockerSandboxAvailable, dockerdStatus, dockerdLockHeld, resolveTools } from './sandbox.js';
 import { getGroupFilesDir, ensureGroupFilesDir } from './groupFiles.js';
 import { buildMcpConfigArgsAndEnv } from './mcpConfig.js';
 import { shouldInjectNotify, notifyEnabled, getNotifySockPath, notifyBrokerRunning } from './notify.js';
@@ -463,18 +463,20 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
   // (forceSandbox refusals keep their own message in the spawn branches
   // below, so this only covers the non-forced explicit request.)
   if (sandbox && !forceSandbox && !sandboxRequested) {
-    const reason = process.platform === 'win32'
-      ? 'the sandbox is Linux-only'
-      : 'bwrap is not available on this host';
-    const hint = process.platform === 'win32'
-      ? 'Launch without the sandbox.'
-      : 'Install bwrap (bubblewrap) or launch without the sandbox.';
+    const { reason, hint } = sandboxUnavailableReason();
     return {
       sessionId: id,
       session: null,
       error: `Failed to build sandbox: ${reason}. ${hint}`,
     };
   }
+
+  // Seatbelt (macOS) has no fixed in-sandbox paths: the host node/bridge and
+  // sockets are directly visible, so every MCP bridge invocation -- including
+  // the group ccserver bridge -- must use the host form. bwrap keeps the
+  // fixed-path form. Non-sandboxed launches keep their existing behavior.
+  const seatbeltSandbox = sandboxRequested && sandboxBackend() === 'seatbelt';
+  const mcpBridgeMode = seatbeltSandbox ? 'host' : (sandboxRequested ? 'sandbox' : 'host');
 
   // Tool provisioning (rtk / code-review-graph): the server config supplies
   // the fallback default and the client's per-session sandboxOpts.tools (which
@@ -498,17 +500,21 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
       // standalone notify sessions must not get a broken ccserver entry (its
       // bridge would point at a socket that is never bound for them).
       groupMcp: !!mcpSocketPath,
+      // Seatbelt sandboxes can't use the fixed in-sandbox bridge path (it is
+      // never bound there), so they take the host invocation like
+      // non-sandboxed sessions do (see seatbeltSandbox above).
+      hostBridge: seatbeltSandbox,
       notify: useNotify ? {
-        mode: sandboxRequested ? 'sandbox' : 'host',
+        mode: mcpBridgeMode,
         sockPath: notifySocketPath,
         identity: notifyIdentity,
       } : undefined,
       usage: useUsage ? {
-        mode: sandboxRequested ? 'sandbox' : 'host',
+        mode: mcpBridgeMode,
         sockPath: usageSocketPath,
       } : undefined,
       meta: useMeta ? {
-        mode: sandboxRequested ? 'sandbox' : 'host',
+        mode: mcpBridgeMode,
         sockPath: metaSocketPath,
         identity: {
           sessionId: id,
@@ -520,7 +526,7 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
         },
       } : undefined,
       reviewer: useReviewer ? {
-        mode: sandboxRequested ? 'sandbox' : 'host',
+        mode: mcpBridgeMode,
         sockPath: reviewerSocketPath,
         identity: reviewerIdentity,
       } : undefined,
@@ -533,9 +539,10 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
     args.push(...injected.args);
   }
 
-  // Optionally wrap the target in a filesystem sandbox (Linux only) so it can
-  // only see the project directory plus configured paths, with an isolated
-  // rootless docker inside. See sandbox.js.
+  // Optionally wrap the target in a filesystem sandbox (bwrap on Linux,
+  // sandbox-exec on macOS) so it can only see the project directory plus
+  // configured paths, with an isolated rootless docker inside on Linux.
+  // See sandbox.js.
   //
   // usePtyHost (plan5 Step2, section 2.1): pty-host's own spawn() builds the
   // sandbox itself (server/pty-host/ptyStore.js already imports
@@ -551,6 +558,7 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
   let sandboxGitBrokerProc = null;
   let sandboxGitBrokerDir = null;
   let sandboxCommitGuardDir = null;
+  let sandboxSeatbeltDir = null;
   let ptyProcess;
 
   if (usePtyHost) {
@@ -569,13 +577,11 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
         }
       }
     } else if (forceSandbox) {
-      const reason = process.platform === 'win32'
-        ? 'the sandbox is Linux-only'
-        : 'bwrap is not available on this host';
+      const { reason, hint } = forceSandboxUnavailableReason();
       return {
         sessionId: id,
         session: null,
-        error: `Cannot launch: sandbox.config.json sets "forceSandbox": true, but ${reason}. Install bwrap (bubblewrap) or disable forceSandbox.`,
+        error: `Cannot launch: sandbox.config.json sets "forceSandbox": true, but ${reason}. ${hint}`,
       };
     }
     let resolvedGroupFilesDir = groupFilesDir;
@@ -690,18 +696,17 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
         sandboxGitBrokerProc = spawn.gitBrokerProc || null;
         sandboxGitBrokerDir = spawn.gitBrokerDir || null;
         sandboxCommitGuardDir = spawn.commitGuardDir || null;
+        sandboxSeatbeltDir = spawn.seatbeltDir || null;
         useSandbox = true;
       } catch (err) {
         return { sessionId: id, session: null, error: `Failed to build sandbox: ${err.message}` };
       }
     } else if (forceSandbox) {
-      const reason = process.platform === 'win32'
-        ? 'the sandbox is Linux-only'
-        : 'bwrap is not available on this host';
+      const { reason, hint } = forceSandboxUnavailableReason();
       return {
         sessionId: id,
         session: null,
-        error: `Cannot launch: sandbox.config.json sets "forceSandbox": true, but ${reason}. Install bwrap (bubblewrap) or disable forceSandbox.`,
+        error: `Cannot launch: sandbox.config.json sets "forceSandbox": true, but ${reason}. ${hint}`,
       };
     }
 
@@ -774,6 +779,7 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
     sandboxGitBrokerProc, // host-side git-broker child process, killed on teardown
     sandboxGitBrokerDir, // its runtime dir (socket + allow-list), removed on teardown
     sandboxCommitGuardDir, // commit-msg guard's runtime dir (config json only, no process), removed on teardown
+    sandboxSeatbeltDir, // seatbelt profile/shim runtime dir (macOS only), removed on teardown
     reuseSandboxHome, // true = keep the previous persistent HOME, false = started fresh (wiped)
     ptyProcess,
     // Every attached viewer, mapped to the viewport it last reported. A
@@ -1992,6 +1998,13 @@ export function destroySession(id, { keepSchedule = true, reason = 'request' } =
     if (session.sandboxCommitGuardDir) {
       try {
         rmSync(session.sandboxCommitGuardDir, { recursive: true, force: true });
+      } catch {
+        // best effort
+      }
+    }
+    if (session.sandboxSeatbeltDir) {
+      try {
+        rmSync(session.sandboxSeatbeltDir, { recursive: true, force: true });
       } catch {
         // best effort
       }
