@@ -457,6 +457,25 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
   const forceSandbox = cfg.forceSandbox;
   const sandboxRequested = (forceSandbox || sandbox) && process.platform !== 'win32' && sandboxAvailable();
 
+  // An explicitly requested sandbox that cannot be built is refused instead
+  // of silently falling back to a direct (unsandboxed) spawn: running on the
+  // host while the client believes it is sandboxed is worse than an error.
+  // (forceSandbox refusals keep their own message in the spawn branches
+  // below, so this only covers the non-forced explicit request.)
+  if (sandbox && !forceSandbox && !sandboxRequested) {
+    const reason = process.platform === 'win32'
+      ? 'the sandbox is Linux-only'
+      : 'bwrap is not available on this host';
+    const hint = process.platform === 'win32'
+      ? 'Launch without the sandbox.'
+      : 'Install bwrap (bubblewrap) or launch without the sandbox.';
+    return {
+      sessionId: id,
+      session: null,
+      error: `Failed to build sandbox: ${reason}. ${hint}`,
+    };
+  }
+
   // Tool provisioning (rtk / code-review-graph): the server config supplies
   // the fallback default and the client's per-session sandboxOpts.tools (which
   // the launch menu defaults to ON for these, remembered per directory)
