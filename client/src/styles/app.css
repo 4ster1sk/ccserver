@@ -312,7 +312,8 @@ body {
   flex-direction: row;
   align-items: center;
   gap: 4px;
-  padding: 6px 8px 6px 12px;
+  /* paddingは内側ボタン側に持たせ、タップハイライトが行全体に広がるようにする */
+  padding: 0;
   border-radius: 6px;
   min-width: 0;
   /* 行はタップ操作用でありテキスト選択の対象ではないため、スマホ長押しでの
@@ -325,6 +326,7 @@ body {
 /* Row select button: a11y-wise the menuitem itself (the row container is
    role="none" so it never nests interactive elements). Resets native button
    chrome and behaves like the previous clickable row. */
+/* paddingを行全体分ここに持たせ、longtap時のハイライトが内側に縮まないようにする。 */
 .session-menu-select {
   flex: 1 1 auto;
   min-width: 0;
@@ -333,18 +335,24 @@ body {
   gap: 2px;
   background: none;
   border: none;
-  padding: 0;
+  padding: 6px 4px 6px 12px;
   margin: 0;
   font: inherit;
   color: inherit;
   text-align: left;
   cursor: pointer;
-  border-radius: 4px;
+  border-radius: 6px;
+  -webkit-tap-highlight-color: transparent;
 }
 
 .session-menu-select:focus-visible {
   outline: 1px solid var(--accent);
   outline-offset: 1px;
+}
+
+/* ×ボタンを持たない行（未オープンのグループ等）は内側が末端のため右余白を8pxに戻す */
+.session-menu-select:last-child {
+  padding-right: 8px;
 }
 
 /* Status line: a pure straight vertical line drawn with ::before instead of
@@ -362,6 +370,15 @@ body {
 }
 
 .session-menu-item:hover {
+  background: var(--bg-surface);
+}
+
+/* longtap/押下中のハイライトは背景だけを行全体に広げる (active枠のoutlineは付けない)。 */
+.session-menu-item:active {
+  background: var(--bg-surface);
+}
+
+.session-menu-select:active {
   background: var(--bg-surface);
 }
 
@@ -460,6 +477,8 @@ body {
 .session-menu-close {
   align-self: center;
   flex-shrink: 0;
+  /* 外側padding廃止分の肩代わり */
+  margin-right: 8px;
 }
 
 .session-menu-status {
