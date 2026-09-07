@@ -24,6 +24,13 @@ const COMBO_DEFAULT_APPS = { workerA: 'claude', workerB: 'opencode', orchestrato
 const COMBO_WORKER_APPS = ['claude', 'opencode', 'codex'];
 // Every launchable app id, in the order pickers list them.
 const ALL_APPS = ['claude', 'opencode', 'copilot', 'codex', 'commandcode'];
+// bwrap-missing warning copy shared by the sandbox picker note and the
+// browser header banner, so the two can't drift apart (see PR#135 review).
+// The short title variant is used for disabled launch-button tooltips.
+const SANDBOX_UNAVAILABLE_NOTE = 'このサーバーにはbwrapがインストールされていないため、サンドボックス起動・コンボ起動はできません。通常起動をご利用ください。';
+const FORCE_SANDBOX_UNAVAILABLE_NOTE = 'サーバー設定 (forceSandbox) でサンドボックスが強制されていますが、このホストにbwrapが無いため起動できません。bwrapをインストールするか、サーバー設定を見直してください。';
+const LAUNCHES_BLOCKED_TITLE = 'サーバー設定でサンドボックスが強制されていますが、このホストにbwrapが無いため起動できません';
+
 // Hard cap mirrored from the server (MAX_GROUP_MEMBERS - 1 orchestrator).
 const MAX_COMBO_WORKERS = 7;
 
@@ -679,7 +686,7 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, ini
   // succeed, so the launch buttons are disabled as well (fail-closed UI).
   // null (fetch pending / older server) keeps everything enabled.
   const launchesBlocked = forceSandbox && sandboxAvailable === false;
-  const launchesBlockedTitle = 'サーバー設定でサンドボックスが強制されていますが、このホストにbwrapが無いため起動できません';
+  const launchesBlockedTitle = LAUNCHES_BLOCKED_TITLE;
   const sandboxPicker = (
     <>
       <div className="open-menu-sep" />
@@ -735,11 +742,11 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, ini
       </div>
       <p className="open-menu-note">
         {forceSandbox && sandboxAvailable === false
-          ? 'サーバー設定 (forceSandbox) でサンドボックスが強制されていますが、このホストにbwrapが無いため起動できません。bwrapをインストールするか、サーバー設定を見直してください。'
+          ? FORCE_SANDBOX_UNAVAILABLE_NOTE
           : forceSandbox
             ? 'サンドボックスがサーバー設定 (forceSandbox) で強制されています。通常起動はできません。'
             : sandboxAvailable === false
-              ? 'このサーバーにはbwrapがインストールされていないため、サンドボックス起動・コンボ起動はできません。通常起動をご利用ください。'
+              ? SANDBOX_UNAVAILABLE_NOTE
               : `サンドボックス: 隣接プロジェクトを隔離し、内部に rootless docker を用意。初期値は一般設定で変更でき、このディレクトリ (${displayPath(currentPath, homeDir)}) に記憶されます。`}
       </p>
     </>
@@ -760,8 +767,8 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, ini
           {sandboxAvailable === false && (
             <div className={`directory-warning-banner${forceSandbox ? ' is-error' : ''}`} role="alert">
               {forceSandbox
-                ? 'サーバー設定 (forceSandbox) でサンドボックスが強制されていますが、このホストにbwrapが無いため起動できません。bwrapをインストールするか、サーバー設定を見直してください。'
-                : 'このサーバーにはbwrapがインストールされていないため、サンドボックス起動・コンボ起動はできません。通常起動をご利用ください。'}
+                ? FORCE_SANDBOX_UNAVAILABLE_NOTE
+                : SANDBOX_UNAVAILABLE_NOTE}
             </div>
           )}
         </div>
