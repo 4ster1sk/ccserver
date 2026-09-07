@@ -764,7 +764,18 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
       if (sandboxCommitGuardDir) { try { rmSync(sandboxCommitGuardDir, { recursive: true, force: true }); } catch { /* best effort */ } }
       if (sandboxSeatbeltDir) { try { rmSync(sandboxSeatbeltDir, { recursive: true, force: true }); } catch { /* best effort */ } }
       if (Array.isArray(sandboxSeatbeltFiles)) {
-        for (const f of sandboxSeatbeltFiles) { try { unlinkSync(f); } catch { /* best effort */ } }
+        // Same guard as destroySession(): a concurrent launch from the same
+        // orchestratorDir may already own these paths. (The failed session
+        // itself is not registered yet, so no self-exclusion is needed.)
+        const stillReferenced = new Set();
+        for (const other of sessions.values()) {
+          if (!Array.isArray(other.sandboxSeatbeltFiles)) continue;
+          for (const f of other.sandboxSeatbeltFiles) stillReferenced.add(f);
+        }
+        for (const f of sandboxSeatbeltFiles) {
+          if (stillReferenced.has(f)) continue;
+          try { unlinkSync(f); } catch { /* best effort */ }
+        }
       }
       return { sessionId: id, session: null, error: `Failed to spawn "${command}": ${err.message}` };
     }

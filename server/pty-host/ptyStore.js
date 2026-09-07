@@ -160,7 +160,17 @@ export class PtyStore {
       if (commitGuardDir) { try { rmSync(commitGuardDir, { recursive: true, force: true }); } catch { /* best effort */ } }
       if (seatbeltDir) { try { rmSync(seatbeltDir, { recursive: true, force: true }); } catch { /* best effort */ } }
       if (Array.isArray(seatbeltFiles)) {
-        for (const f of seatbeltFiles) { try { unlinkSync(f); } catch { /* best effort */ } }
+        // Same guard as destroy(): a concurrent launch from the same
+        // orchestratorDir may already own these paths.
+        const stillReferenced = new Set();
+        for (const other of this._sessions.values()) {
+          if (!Array.isArray(other.sandbox.seatbeltFiles)) continue;
+          for (const f of other.sandbox.seatbeltFiles) stillReferenced.add(f);
+        }
+        for (const f of seatbeltFiles) {
+          if (stillReferenced.has(f)) continue;
+          try { unlinkSync(f); } catch { /* best effort */ }
+        }
       }
       throw new Error(`Failed to spawn "${finalCommand}": ${err.message}`);
     }
