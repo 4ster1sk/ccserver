@@ -3,7 +3,7 @@ import { join, resolve, basename } from 'node:path';
 import { homedir } from 'node:os';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { loadSandboxConfig, installedApps } from '../ws/sandbox.js';
+import { loadSandboxConfig, installedApps, sandboxAvailable } from '../ws/sandbox.js';
 import { opencodeGoAvailable } from '../opencodeUsage.js';
 import { metaAgentEnabled, metaAgentDir } from '../ws/metaAgent.js';
 import { resolvedHostname } from '../ws/notify.js';
@@ -140,7 +140,10 @@ export async function dirsRoute(fastify, opts) {
     // metaAgentEnabled: the launch modal's メタエージェント mode is disabled
     // (with an explanation) unless the privileged ccserver-meta feature is
     // explicitly opted into via sandbox.config.json. Extra field as well.
-    return { home: homedir(), defaultApp, forceSandbox, hostname: resolvedHostname(), showUsage, availableApps: { ...installedApps(), opencodeGo: opencodeGoAvailable(cfg) }, hiddenApps, metaAgentEnabled: metaAgentEnabled(), metaAgentDir: metaAgentDir() };
+    // sandboxAvailable: whether /usr/bin/bwrap exists on this host. The
+    // launch modal disables the sandbox choice (and combo mode, which always
+    // requires the sandbox) when false. Extra field as well.
+    return { home: homedir(), defaultApp, forceSandbox, hostname: resolvedHostname(), showUsage, availableApps: { ...installedApps(), opencodeGo: opencodeGoAvailable(cfg) }, hiddenApps, metaAgentEnabled: metaAgentEnabled(), metaAgentDir: metaAgentDir(), sandboxAvailable: sandboxAvailable() };
   });
 
   fastify.get('/dirs', async (request, reply) => {
