@@ -75,6 +75,9 @@ test('forceSandbox without bwrap shows a warning instead of a dead locked toggle
   await page.goto('/');
   await page.getByRole('button', { name: '起動方法を選択' }).click();
   await expect(page.getByText('bwrapが無いため起動できません')).toBeVisible();
+  // The toggle stays locked on sandbox (no misleading check on 通常起動).
+  const sandboxItem = page.locator('.open-menu-item', { hasText: 'サンドボックスで起動' });
+  await expect(sandboxItem.locator('.open-menu-check')).toHaveText('✓');
 });
 
 test('missing sandboxAvailable (older server) keeps the sandbox choice enabled', async ({ page }) => {

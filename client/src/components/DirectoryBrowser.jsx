@@ -448,8 +448,14 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, ini
       if (typeof data.sandboxAvailable === 'boolean') {
         setSandboxAvailable(data.sandboxAvailable);
         if (data.sandboxAvailable === false) {
-          setSandboxDefault(false);
-          try { localStorage.setItem(SANDBOX_KEY, '0'); } catch { /* ignore */ }
+          // forceSandbox keeps the toggle locked on (launches fail
+          // server-side with the warning note); only correct the free
+          // choice, otherwise the checkmark would sit on 通常起動 while
+          // every launch is forced sandboxed.
+          if (!data.forceSandbox) {
+            setSandboxDefault(false);
+            try { localStorage.setItem(SANDBOX_KEY, '0'); } catch { /* ignore */ }
+          }
           setLaunchMode('single');
         }
       }
