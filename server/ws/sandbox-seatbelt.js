@@ -41,6 +41,23 @@ export function subtreeRegex(dir) {
   return `^${escapeSeatbeltRegex(dir)}(/.*)?$`;
 }
 
+// Seatbelt mediates the symlink-resolved path: register both the raw and the
+// realpath spelling so symlinked dirs still match their rules -- and so
+// denies can't be walked around via the other spelling. Best-effort: absent
+// paths keep just the raw spelling.
+export function pathVariants(p) {
+  try {
+    const r = realpathSync(p);
+    return r === p ? [p] : [p, r];
+  } catch {
+    return [p];
+  }
+}
+
+export function subtrees(p) {
+  return pathVariants(p).map(subtreeRegex);
+}
+
 // Escape a host path for embedding in an SBPL `(literal "...")` string.
 // Unlike escapeSeatbeltRegex (for `regex #"..."`), only the string-syntax
 // metacharacters need escaping here.
@@ -80,6 +97,10 @@ export function buildSeatbeltProfileText({
     '',
     ';; devices: the pty and /dev/null etc. must stay usable.',
     '(allow file-read* file-write* (regex #"^/dev(/.*)?$"))',
+    ';; the inherited controlling pty needs ioctls (isatty/tcgetattr), and',
+    ';; agent tool shells / script(1) / expect allocate nested ptys.',
+    '(allow pseudo-tty)',
+    '(allow file-ioctl (regex #"^/dev(/.*)?$"))',
     '',
   ];
   if (readRegexes.length > 0 || readLiterals.length > 0) {
@@ -127,6 +148,9 @@ function expandAgainstHome(p, hostHome) {
 //   extraBinds/extraEnv - raw operator config (binds become allow rules;
 //                    ~/.ssh and ~/.config/gh stay blocked, like bwrap)
 //   authSock       - forwarded ssh-agent socket | null
+//   gnupg          - true to expose the host ~/.gnupg keyring (opt-in, like
+//                    bwrap's gpg flag) with GNUPGHOME pointed at it ($HOME
+//                    inside is the sandbox home, so gpg needs the override)
 //   claudeDir      - extra agent install dir | null
 //   orchestratorClaudeMdSrc / gitCommonDir / groupFilesDir - like bwrap
 //   tools          - resolved opt-in tool specs | null
@@ -148,6 +172,7 @@ export function buildSeatbeltLaunch({
   extraBinds = [],
   extraEnv = {},
   authSock = null,
+  gnupg = false,
   claudeDir = null,
   orchestratorClaudeMdSrc = null,
   gitCommonDir = null,
@@ -160,6 +185,9 @@ export function buildSeatbeltLaunch({
   mkdirSync(binDir, { recursive: true });
   mkdirSync(hooksDir, { recursive: true });
 
+  // resolve() normalizes spelling but not symlinks (same reason tmpDirs
+  // carries the realpath of tmpdir()): rules below register both spellings
+  // via subtrees() so a symlinked cwd still matches -- and denies hold.
   const projectDir = resolve(cwd);
   // Throwaway HOME (minimal/usage sandboxes, or persistentHome off): lives
   // inside the runtime dir so teardown stays a single rm -rf.
@@ -201,6 +229,7 @@ export function buildSeatbeltLaunch({
   };
   if (sockets.mcp) env.CCSANDBOX_MCP_SOCK = sockets.mcp;
   if (authSock) env.SSH_AUTH_SOCK = authSock;
+  if (gnupg) env.GNUPGHOME = join(hostHome, '.gnupg');
 
   // GIT_CONFIG_COUNT merges credential.helper (gitBroker) and core.hooksPath
   // (commitGuard) into one env mechanism -- same rule as buildBwrapArgs'
@@ -249,11 +278,11 @@ export function buildSeatbeltLaunch({
     '^/System(/.*)?$', '^/Library(/.*)?$', '^/opt(/.*)?$',
     '^/private/etc(/.*)?$', '^/private/var(/.*)?$', '^/var(/.*)?$',
     '^/tmp(/.*)?$', '^/private/tmp(/.*)?$',
-    subtreeRegex(projectDir),
-    subtreeRegex(effectiveHome),
-    subtreeRegex(dir),
-    subtreeRegex(serverDir),
-    subtreeRegex(hostLocalBin),
+    ...subtrees(projectDir),
+    ...subtrees(effectiveHome),
+    ...subtrees(dir),
+    ...subtrees(serverDir),
+    ...subtrees(hostLocalBin),
   ];
   const tmpDirs = new Set([tmpdir()]);
   try { tmpDirs.add(realpathSync(tmpdir())); } catch { /* best effort */ }
@@ -279,32 +308,41 @@ export function buildSeatbeltLaunch({
     join(hostHome, '.commandcode'),
   ];
   const cachesDir = join(hostHome, 'Library', 'Caches');
-  readRegexes.push(subtreeRegex(cachesDir), ...appConfigDirs.map(subtreeRegex));
+  readRegexes.push(...subtrees(cachesDir), ...appConfigDirs.flatMap(subtrees));
+  // gpg opt-in (bwrap binds ~/.gnupg): with no mounts, allow the real
+  // keyring and point gpg at it ($HOME here is the sandbox home).
+  const gnupgHome = gnupg ? join(hostHome, '.gnupg') : null;
+  if (gnupgHome) readRegexes.push(...subtrees(gnupgHome));
   const writeRegexes = [
-    subtreeRegex(projectDir),
-    subtreeRegex(effectiveHome),
-    subtreeRegex(dir),
+    ...subtrees(projectDir),
+    ...subtrees(effectiveHome),
+    ...subtrees(dir),
     '^/tmp(/.*)?$', '^/private/tmp(/.*)?$',
     // macOS-API writers (NSSearchPath ignores $HOME): caches stay usable.
-    subtreeRegex(cachesDir),
-    ...appConfigDirs.map(subtreeRegex),
+    ...subtrees(cachesDir),
+    ...appConfigDirs.flatMap(subtrees),
   ];
   for (const t of tmpDirs) {
     const r = subtreeRegex(t);
     if (!writeRegexes.includes(r)) writeRegexes.push(r);
   }
-  if (claudeDir && existsSync(claudeDir)) readRegexes.push(subtreeRegex(claudeDir));
+  if (gnupgHome) writeRegexes.push(...subtrees(gnupgHome));
+  if (claudeDir && existsSync(claudeDir)) readRegexes.push(...subtrees(claudeDir));
   if (gitCommonDir) {
-    readRegexes.push(subtreeRegex(gitCommonDir));
-    writeRegexes.push(subtreeRegex(gitCommonDir));
+    readRegexes.push(...subtrees(gitCommonDir));
+    writeRegexes.push(...subtrees(gitCommonDir));
   }
-  if (groupFilesDir) readRegexes.push(subtreeRegex(groupFilesDir));
+  if (groupFilesDir) readRegexes.push(...subtrees(groupFilesDir));
 
   const readLiterals = [];
   const writeLiterals = [];
   const sockPaths = [sockets.mcp, sockets.notify, sockets.usage, sockets.meta, sockets.reviewer]
     .filter(Boolean);
   if (gitBroker) sockPaths.push(gitBroker.sockPath);
+  // A forwarded ssh-agent socket needs an explicit rule: connect() is a
+  // write, and custom locations (e.g. 1Password's ~/Library socket) fall
+  // outside every allow tree above.
+  if (authSock) sockPaths.push(authSock);
   for (const s of new Set(sockPaths)) {
     readLiterals.push(s);
     writeLiterals.push(s); // connect() needs write
@@ -319,14 +357,17 @@ export function buildSeatbeltLaunch({
   // Raw keys / gh tokens are never reachable (mirrors bwrap's
   // BLOCKED_BIND_PATHS, unconditionally even with gitBroker off).
   const denyWriteRegexes = [
-    subtreeRegex(join(hostHome, '.ssh')),
-    subtreeRegex(join(hostHome, '.config', 'gh')),
+    ...subtrees(join(hostHome, '.ssh')),
+    ...subtrees(join(hostHome, '.config', 'gh')),
   ];
   // Orchestrator rule overlay: bwrap shadows CLAUDE.md/AGENTS.md read-only;
-  // without mounts the equivalent is denying writes to those two files.
+  // without mounts the equivalent is denying writes to those two files, in
+  // both spellings so a symlinked cwd can't walk around the deny.
   if (orchestratorClaudeMdSrc) {
     for (const name of ['CLAUDE.md', 'AGENTS.md']) {
-      denyWriteRegexes.push(`^${escapeSeatbeltRegex(join(projectDir, name))}$`);
+      for (const base of pathVariants(projectDir)) {
+        denyWriteRegexes.push(`^${escapeSeatbeltRegex(join(base, name))}$`);
+      }
     }
   }
 
@@ -340,8 +381,8 @@ export function buildSeatbeltLaunch({
       console.warn(`[sandbox] ignoring configured bind of ${src}: raw ssh keys / gh config are no longer exposed to the sandbox (see the git broker)`);
       continue;
     }
-    readRegexes.push(subtreeRegex(src));
-    if (b.mode === 'rw') writeRegexes.push(subtreeRegex(src));
+    readRegexes.push(...subtrees(src));
+    if (b.mode === 'rw') writeRegexes.push(...subtrees(src));
   }
 
   const profileText = buildSeatbeltProfileText({

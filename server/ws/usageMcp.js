@@ -23,15 +23,14 @@
 import { join } from 'node:path';
 import { getUsage } from '../usage.js';
 import { loadSandboxConfig, resolveClaude } from './sandbox.js';
+import { hostRuntimeDir } from './git-broker.js';
 
 const USAGE_SOCKET_NAME = 'ccserver-usage.sock';
 
 let usageBroker = null; // { server, sockPath, dir, connections } | null
 
 export function getUsageSockPath() {
-  const base = process.env.XDG_RUNTIME_DIR
-    || (typeof process.getuid === 'function' ? `/run/user/${process.getuid()}` : '/tmp');
-  return join(base, USAGE_SOCKET_NAME);
+  return join(hostRuntimeDir(), USAGE_SOCKET_NAME);
 }
 
 // Whether the get_usage MCP tool should exist on this server at all: claude

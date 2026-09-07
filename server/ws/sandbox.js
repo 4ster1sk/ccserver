@@ -1882,11 +1882,12 @@ export function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, mcpSoc
         mcp: mcpSocketPath, notify: notifySocketPath, usage: usageSocketPath,
         meta: metaSocketPath, reviewer: reviewerSocketPath,
       },
-      extraBinds: binds, extraEnv: env, authSock, claudeDir: installDir,
+      extraBinds: binds, extraEnv: env, authSock, gnupg: gpg, claudeDir: installDir,
       orchestratorClaudeMdSrc, gitCommonDir, groupFilesDir, tools: sbTools,
     });
-    // gpg needs no extra wiring here: with no mounts the host agent/config
-    // paths stay reachable under the profile's allow rules.
+    // gpg needs no socket bind here (no mounts): the keyring is allow-listed
+    // in the profile with GNUPGHOME pointed at it (see buildSeatbeltLaunch).
+    // gpg-agent sockets are reached via gpgconf's socketdir like on Linux.
     const seatbeltCmd = app === 'commandcode'
       ? [MACOS_BASH, ENTRYPOINT, sb.nodeBin, ...withClaude(targetCommand, command)]
       : [MACOS_BASH, ENTRYPOINT, ...withClaude(targetCommand, command)];
