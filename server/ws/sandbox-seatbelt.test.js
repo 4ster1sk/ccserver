@@ -62,12 +62,13 @@ function baseOpts(over = {}) {
     homeDir: null,
     sandboxPathBase: `${HOME}/.local/bin:/usr/local/bin:/usr/bin:/bin`,
     nodeBin: process.execPath,
-    serverDir: import.meta.dirname,
     scripts: {
       ghWrapper: join(import.meta.dirname, 'sandbox-gh-wrapper.cjs'),
       credHelper: join(import.meta.dirname, 'sandbox-git-credential-helper.cjs'),
       sshWrapper: join(import.meta.dirname, 'sandbox-ssh-wrapper.cjs'),
       commitHook: join(import.meta.dirname, 'sandbox-commit-msg-hook.cjs'),
+      entrypoint: join(import.meta.dirname, 'sandbox-entrypoint.sh'),
+      mcpBridge: join(import.meta.dirname, 'sandbox-mcp-wrapper.cjs'),
     },
     ssh: { realSsh: null, configFile: '/nonexistent-ssh-config', knownHostsDefault: '/nonexistent-known-hosts', userKnownHosts: null },
     gitBroker: null,
@@ -358,6 +359,34 @@ test('buildSeatbeltLaunch cleans up its runtime dir when the overlay copy fails'
   );
   const after = existsSync(seatbeltTmp) ? readdirSync(seatbeltTmp) : [];
   assert.deepEqual(after.filter((n) => !before.has(n)), [], 'no leaked runtime dir');
+});
+
+test('only executed host files are readable, never the server tree', () => {
+  const sb = buildSeatbeltLaunch(baseOpts());
+  trackDir(sb.dir);
+  const text = readFileSync(sb.profilePath, 'utf-8');
+  const readLine = text.split('\n').find((l) => l.startsWith('  (allow file-read*'));
+  // serverDir itself must not appear as an allowed subtree...
+  assert.ok(!readLine.includes('server/ws(/.*)?$'), 'no server tree allow');
+  // ...while every executed host file is pinned exactly.
+  for (const f of ['sandbox-entrypoint.sh', 'sandbox-mcp-wrapper.cjs', 'sandbox-gh-wrapper.cjs',
+    'sandbox-git-credential-helper.cjs', 'sandbox-ssh-wrapper.cjs', 'sandbox-commit-msg-hook.cjs']) {
+    assert.ok(readLine.includes(`^${escapeSeatbeltRegex(join(import.meta.dirname, f))}$`), `${f} pinned`);
+  }
+});
+
+test('sibling launch dirs are deny-pinned for read and write', () => {
+  const sb = buildSeatbeltLaunch(baseOpts());
+  trackDir(sb.dir);
+  const text = readFileSync(sb.profilePath, 'utf-8');
+  // The negative lookahead excludes our own dir; siblings stay unreachable
+  // despite the broad tmpdir allow rules (0o700 is per-UID, not per-session).
+  assert.ok(text.includes('(?!'), 'sibling exclusion uses a lookahead');
+  assert.ok(text.includes('ccserver-seatbelt-(?!'), 'sibling launch dirs pinned');
+  const denyWrites = text.split('\n').filter((l) => l.includes('(deny file-write*')).join('\n');
+  const denyReads = text.split('\n').filter((l) => l.includes('(deny file-read*')).join('\n');
+  assert.ok(denyWrites.includes('ccserver-seatbelt-(?!'), 'write pin covers siblings');
+  assert.ok(denyReads.includes('ccserver-seatbelt-(?!'), 'read pin covers siblings');
 });
 
 test('seatbeltEnvArgs serializes K=V pairs for /usr/bin/env', () => {

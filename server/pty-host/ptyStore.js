@@ -330,7 +330,15 @@ export class PtyStore {
       try { rmSync(entry.sandbox.seatbeltDir, { recursive: true, force: true }); } catch { /* best effort */ }
     }
     if (Array.isArray(entry.sandbox.seatbeltFiles)) {
-      for (const f of entry.sandbox.seatbeltFiles) { try { unlinkSync(f); } catch { /* best effort */ } }
+      const stillReferenced = new Set();
+      for (const other of this._sessions.values()) {
+        if (other === entry || !Array.isArray(other.sandbox.seatbeltFiles)) continue;
+        for (const f of other.sandbox.seatbeltFiles) stillReferenced.add(f);
+      }
+      for (const f of entry.sandbox.seatbeltFiles) {
+        if (stillReferenced.has(f)) continue;
+        try { unlinkSync(f); } catch { /* best effort */ }
+      }
     }
     this._gitBrokerRegistry?.forget(id);
 

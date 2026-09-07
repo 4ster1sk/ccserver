@@ -1637,14 +1637,18 @@ function buildBwrapArgs({ cwd, docker, gpg, extraBinds, extraEnv, authSock, stat
   return args;
 }
 
-// Shared seatbelt wiring (macOS): the wrapper scripts all live next to this
-// module, so one serverDir read-rule in the profile covers every one of them.
+// Shared seatbelt wiring (macOS): the host files this backend executes or
+// reads inside the sandbox. bwrap ro-binds these individually; with no
+// mounts they are allow-listed as exact literals instead of the whole
+// server tree (which would expose the server implementation to the agent).
 function seatbeltScripts() {
   return {
     ghWrapper: GH_WRAPPER_SCRIPT,
     credHelper: CRED_HELPER_SCRIPT,
     sshWrapper: SSH_WRAPPER_SCRIPT,
     commitHook: COMMIT_MSG_HOOK_SCRIPT,
+    entrypoint: ENTRYPOINT,
+    mcpBridge: MCP_BRIDGE_SCRIPT,
   };
 }
 
@@ -1677,7 +1681,7 @@ export function buildMinimalSandboxSpawn({ cwd, targetCommand, app = 'claude' })
     const { command, installDir } = resolveApp(app);
     const sb = buildSeatbeltLaunch({
       cwd, hostHome: HOME, homeDir: null, sandboxPathBase: SANDBOX_PATH,
-      nodeBin: realpathSync(process.execPath), serverDir: __dirname,
+      nodeBin: realpathSync(process.execPath),
       scripts: seatbeltScripts(), ssh: seatbeltSsh(),
       gitBroker: null, commitGuard: null,
       sockets: {}, extraBinds: [], extraEnv: {}, authSock: null,
@@ -1881,7 +1885,7 @@ export function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, mcpSoc
     try {
       sb = buildSeatbeltLaunch({
         cwd, hostHome: HOME, homeDir, sandboxPathBase: SANDBOX_PATH,
-        nodeBin: realpathSync(process.execPath), serverDir: __dirname,
+        nodeBin: realpathSync(process.execPath),
         scripts: seatbeltScripts(), ssh: seatbeltSsh(),
         gitBroker,
         commitGuard: commitGuard ? { configPath: commitGuard.configPath } : null,

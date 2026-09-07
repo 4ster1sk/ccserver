@@ -76,6 +76,7 @@ export function buildSeatbeltProfileText({
   readLiterals = [],
   writeLiterals = [],
   denyWriteRegexes = [],
+  denyReadRegexes = [],
 } = {}) {
   const line = (op, sel) => `  (${op} ${sel})`;
   const regexes = (list) => list.map((r) => `(regex #"${r}")`).join(' ');
@@ -119,6 +120,13 @@ export function buildSeatbeltProfileText({
       '',
     );
   }
+  if (denyReadRegexes.length > 0) {
+    out.push(
+      ';; never readable, even when a broader allow above would match.',
+      line('deny file-read*', regexes(denyReadRegexes)),
+      '',
+    );
+  }
   return out.join('\n');
 }
 
@@ -139,8 +147,10 @@ function expandAgainstHome(p, hostHome) {
 //                    created inside the runtime dir (single teardown unit)
 //   sandboxPathBase- SANDBOX_PATH value from sandbox.js
 //   nodeBin        - host node binary (realpath of process.execPath)
-//   serverDir      - sandbox.js's own dir (all wrapper scripts live under it)
-//   scripts        - { ghWrapper, credHelper, sshWrapper, commitHook }
+//   scripts        - { ghWrapper, credHelper, sshWrapper, commitHook,
+//                    entrypoint, mcpBridge }: every host file this launch
+//                    executes/reads inside the sandbox, allow-listed as
+//                    exact literals (parity with bwrap's per-file ro-binds)
 //   ssh            - { realSsh|null, configFile, knownHostsDefault, userKnownHosts|null }
 //   gitBroker      - { sockPath, allowlistPath, dir } | null
 //   commitGuard    - { configPath } | null
@@ -166,7 +176,6 @@ export function buildSeatbeltLaunch({
   homeDir = null,
   sandboxPathBase,
   nodeBin,
-  serverDir,
   scripts,
   ssh = {},
   gitBroker = null,
@@ -182,7 +191,8 @@ export function buildSeatbeltLaunch({
   groupFilesDir = null,
   tools = null,
 }) {
-  const dir = join(seatbeltBaseDir(), `ccserver-seatbelt-${randomUUID()}`);
+  const launchId = randomUUID();
+  const dir = join(seatbeltBaseDir(), `ccserver-seatbelt-${launchId}`);
   const binDir = join(dir, 'bin');
   const hooksDir = join(dir, 'hooks');
   const profilePath = join(dir, 'sandbox.sb');
@@ -320,12 +330,18 @@ export function buildSeatbeltLaunch({
       '^/System(/.*)?$', '^/Library(/.*)?$', '^/opt(/.*)?$',
       '^/private/etc(/.*)?$', '^/private/var(/.*)?$', '^/var(/.*)?$',
       '^/tmp(/.*)?$', '^/private/tmp(/.*)?$',
-      ...subtrees(projectDir),
-      ...subtrees(effectiveHome),
-      ...subtrees(dir),
-      ...subtrees(serverDir),
-      ...subtrees(hostLocalBin),
-    ];
+    ...subtrees(projectDir),
+    ...subtrees(effectiveHome),
+    ...subtrees(dir),
+    // Only the individual host files this launch executes/reads -- parity
+    // with bwrap's per-file ro-binds. A serverDir subtree would expose the
+    // whole server implementation to the sandboxed agent (open egress +
+    // prompt injection make that reconnaissance material).
+    ...[scripts.entrypoint, scripts.mcpBridge, scripts.ghWrapper,
+      scripts.credHelper, scripts.sshWrapper, scripts.commitHook]
+      .filter(Boolean).flatMap((f) => pathVariants(f).map((p) => `^${escapeSeatbeltRegex(p)}$`)),
+    ...subtrees(hostLocalBin),
+  ];
     const tmpDirs = new Set([tmpdir()]);
     try { tmpDirs.add(realpathSync(tmpdir())); } catch { /* best effort */ }
     for (const t of tmpDirs) {
@@ -428,6 +444,18 @@ export function buildSeatbeltLaunch({
       ...subtrees(binDir),
       ...subtrees(hooksDir),
       ...pathVariants(profilePath).map((p) => `^${escapeSeatbeltRegex(p)}$`),
+      // Sibling seatbelt launch dirs are same-UID writable under the broad
+      // tmp rules (0o700 is per-UID, not per-session): without this pin one
+      // sandboxed session can rewrite another session's shims/hooks/profile
+      // -- the dirs' contents are exec'd by that session's git/gh/commit
+      // invocations. The negative lookahead excludes our own dir; the
+      // pattern also covers dirs created after this profile was built.
+      `^${escapeSeatbeltRegex(seatbeltBaseDir())}/ccserver-seatbelt-(?!${escapeSeatbeltRegex(launchId)}([/]|$))`,
+    ];
+    // Same pin for reads: sibling profiles reveal host paths and broker
+    // socket locations that have no business crossing sessions.
+    const denyReadRegexes = [
+      `^${escapeSeatbeltRegex(seatbeltBaseDir())}/ccserver-seatbelt-(?!${escapeSeatbeltRegex(launchId)}([/]|$))`,
     ];
     // Orchestrator rule overlay: bwrap shadows CLAUDE.md/AGENTS.md read-only by
     // ro-binding the generated file over cwd's copies. Seatbelt has no mounts,
@@ -466,9 +494,9 @@ export function buildSeatbeltLaunch({
       if (b.mode === 'rw') writeRegexes.push(...subtrees(src));
     }
 
-    const profileText = buildSeatbeltProfileText({
-      readRegexes, writeRegexes, readLiterals, writeLiterals, denyWriteRegexes,
-    });
+  const profileText = buildSeatbeltProfileText({
+    readRegexes, writeRegexes, readLiterals, writeLiterals, denyWriteRegexes, denyReadRegexes,
+  });
     writeFileSync(profilePath, profileText, { mode: 0o600 });
     return { dir, profilePath, binDir, hooksDir, homeDir: effectiveHome, ruleCopies: ruleCopies.length > 0 ? ruleCopies : null, nodeBin, env };
   } catch (err) {
