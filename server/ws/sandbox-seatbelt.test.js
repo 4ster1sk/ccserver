@@ -87,7 +87,7 @@ function baseOpts(over = {}) {
 }
 
 test('escapeSeatbeltRegex quotes regex metacharacters but keeps slashes', () => {
-  assert.equal(escapeSeatbeltRegex('/Users/oli/a+b (x)/y.md'), '/Users/oli/a\\+b\\ \\(x\\)/y\\.md');
+  assert.equal(escapeSeatbeltRegex('/Users/oli/a+b (x)/y.md'), '/Users/oli/a\\+b \\(x\\)/y\\.md');
 });
 
 test('escapeSeatbeltLiteral escapes only SBPL string metacharacters', () => {
@@ -187,9 +187,12 @@ test('buildSeatbeltLaunch wires gitBroker shims and merges GIT_CONFIG_COUNT', ()
   assert.equal(sb.env.GIT_CONFIG_KEY_0, 'credential.useHttpPath');
   assert.equal(sb.env.GIT_CONFIG_VALUE_0, 'true');
   assert.equal(sb.env.GIT_CONFIG_KEY_1, 'credential.helper');
+  // Shim paths are sh-quoted: git runs both through a shell, so spaces in
+  // $TMPDIR cannot split them.
+  assert.equal(sb.env.GIT_CONFIG_VALUE_1, `"${join(sb.binDir, 'ccserver-git-credential-helper')}"`);
   assert.equal(sb.env.GIT_CONFIG_KEY_2, 'core.hooksPath');
   assert.equal(sb.env.GIT_CONFIG_VALUE_2, sb.hooksDir);
-  assert.equal(sb.env.GIT_SSH_COMMAND, join(sb.binDir, 'ccserver-git-ssh'));
+  assert.equal(sb.env.GIT_SSH_COMMAND, `"${join(sb.binDir, 'ccserver-git-ssh')}"`);
   assert.equal(sb.env.CCSANDBOX_MCP_SOCK, undefined);
   assert.ok(sb.env.PATH.includes(sb.binDir));
 
@@ -379,14 +382,26 @@ test('sibling launch dirs are deny-pinned for read and write', () => {
   const sb = buildSeatbeltLaunch(baseOpts());
   trackDir(sb.dir);
   const text = readFileSync(sb.profilePath, 'utf-8');
-  // The negative lookahead excludes our own dir; siblings stay unreachable
+  // POSIX ERE has no lookahead: all launch dirs are denied, then our own is
+  // re-allowed after the deny (last-match-wins). Siblings stay unreachable
   // despite the broad tmpdir allow rules (0o700 is per-UID, not per-session).
-  assert.ok(text.includes('(?!'), 'sibling exclusion uses a lookahead');
-  assert.ok(text.includes('ccserver-seatbelt-(?!'), 'sibling launch dirs pinned');
+  assert.ok(!text.includes('(?!'), 'no lookahead: not valid Seatbelt ERE');
+  assert.ok(text.includes('ccserver-seatbelt-'), 'sibling launch dirs pinned');
   const denyWrites = text.split('\n').filter((l) => l.includes('(deny file-write*')).join('\n');
   const denyReads = text.split('\n').filter((l) => l.includes('(deny file-read*')).join('\n');
-  assert.ok(denyWrites.includes('ccserver-seatbelt-(?!'), 'write pin covers siblings');
-  assert.ok(denyReads.includes('ccserver-seatbelt-(?!'), 'read pin covers siblings');
+  assert.ok(denyWrites.includes('ccserver-seatbelt-'), 'write pin covers siblings');
+  assert.ok(denyReads.includes('ccserver-seatbelt-'), 'read pin covers siblings');
+});
+
+test('deny lines are emitted after the allow lines (last-match-wins)', () => {
+  const text = buildSeatbeltProfileText({
+    readRegexes: ['^/srv/proj(/.*)?$'],
+    writeRegexes: ['^/srv/proj(/.*)?$'],
+    denyWriteRegexes: ['^/home/u/.ssh(/.*)?$'],
+  });
+  const allowWriteIdx = text.indexOf('(allow file-write*');
+  const denyWriteIdx = text.indexOf('(deny file-write*');
+  assert.ok(allowWriteIdx !== -1 && denyWriteIdx !== -1 && allowWriteIdx < denyWriteIdx, 'pins must land after the allows');
 });
 
 test('sibling deny pins cover both raw and realpath spellings of the base', () => {
@@ -403,11 +418,11 @@ test('sibling deny pins cover both raw and realpath spellings of the base', () =
     trackDir(sb.dir);
     const text = readFileSync(sb.profilePath, 'utf-8');
     assert.ok(
-      text.includes(`^${escapeSeatbeltRegex(linkBase)}/ccserver-seatbelt-(?!`),
+      text.includes(`^${escapeSeatbeltRegex(linkBase)}/ccserver-seatbelt-`),
       'raw base spelling pinned',
     );
     assert.ok(
-      text.includes(`^${escapeSeatbeltRegex(realBase)}/ccserver-seatbelt-(?!`),
+      text.includes(`^${escapeSeatbeltRegex(realBase)}/ccserver-seatbelt-`),
       'realpath base spelling pinned',
     );
   } finally {
