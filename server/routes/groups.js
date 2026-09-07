@@ -27,7 +27,7 @@ import { basename, join, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import * as groupManager from '../ws/groupManager.js';
 import { createSession, getSession, isInfrastructureError } from '../ws/sessionManager.js';
-import { sandboxAvailable } from '../ws/sandbox.js';
+import { sandboxAvailable, sandboxUnavailableReason } from '../ws/sandbox.js';
 import { isValidApp } from '../ws/appLaunch.js';
 import { projectHashForCwd } from '../ws/projectHash.js';
 import { normalizePresetInput } from '../ws/workerPresets.js';
@@ -226,7 +226,8 @@ export async function launchGroupFromSpec(body) {
     };
   }
   if (!sandboxAvailable()) {
-    return { ok: false, code: 'validation', message: 'combo launch requires the sandbox (bwrap not found on this host)' };
+    const { reason, hint } = sandboxUnavailableReason();
+    return { ok: false, code: 'validation', message: `combo launch requires the sandbox (${reason}. ${hint})` };
   }
 
   // Canonical workers[] snapshot or the legacy workerA/workerB adapter --

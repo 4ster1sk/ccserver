@@ -10,7 +10,7 @@
 
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir, homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import {
@@ -347,6 +347,17 @@ test('host node binary dir stays readable (nvm-style installs)', () => {
   const text = readFileSync(sb.profilePath, 'utf-8');
   const readLine = text.split('\n').find((l) => l.startsWith('  (allow file-read*'));
   assert.ok(readLine.includes(subtreeRegex(dirname(process.execPath))));
+});
+
+test('buildSeatbeltLaunch cleans up its runtime dir when the overlay copy fails', () => {
+  const seatbeltTmp = join(tmpRoot, 'seatbelt');
+  const before = new Set(existsSync(seatbeltTmp) ? readdirSync(seatbeltTmp) : []);
+  assert.throws(
+    () => buildSeatbeltLaunch(baseOpts({ orchestratorClaudeMdSrc: join(tmpRoot, 'absent.md') })),
+    /cannot copy rules/,
+  );
+  const after = existsSync(seatbeltTmp) ? readdirSync(seatbeltTmp) : [];
+  assert.deepEqual(after.filter((n) => !before.has(n)), [], 'no leaked runtime dir');
 });
 
 test('seatbeltEnvArgs serializes K=V pairs for /usr/bin/env', () => {
