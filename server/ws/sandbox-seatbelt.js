@@ -80,6 +80,8 @@ export function escapeSeatbeltLiteral(s) {
 //   denyWriteRegexes            - pin denies, emitted last so they beat the
 //                    re-allows above
 //   denyReadRegexes             - read pin denies, emitted last
+//   denyExecLiterals            - exact paths denied for process-exec
+//                    (emitted after the broad process-exec allow)
 export function buildSeatbeltProfileText({
   readRegexes = [],
   writeRegexes = [],
@@ -112,16 +114,18 @@ export function buildSeatbeltProfileText({
     '(deny process-exec (literal "/usr/bin/pbcopy"))',
     '(deny process-exec (literal "/usr/bin/pbpaste"))',
     '(deny process-exec (literal "/usr/bin/open"))',
-  '(deny process-exec (literal "/usr/bin/screencapture"))',
-  // Real gh binaries are denied so gh is reachable only via the PATH shim
-  // (the wrapper relays to the git broker; nothing execs gh in-sandbox).
-  // Deny beats allow in Seatbelt regardless of position, so these pins work
-  // both before and after the broad process-exec allow above.
-  ...(denyExecLiterals.length > 0
-    ? [`(deny process-exec ${denyExecLiterals.map((p) => `(literal "${escapeSeatbeltLiteral(p)}")`).join(' ')})`]
-    : []),
-  '(allow signal (target self))',
-  '(allow sysctl-read)',
+    '(deny process-exec (literal "/usr/bin/screencapture"))',
+    // Real gh binaries are denied so gh is reachable only via the PATH shim
+    // (the wrapper relays to the git broker; nothing execs gh in-sandbox).
+    // Seatbelt is last-match-wins (see the contract above), so these pins
+    // work because they are emitted AFTER the broad process-exec allow --
+    // keep every pin after the allows it must beat when extending the
+    // profile.
+    ...(denyExecLiterals.length > 0
+      ? [`(deny process-exec ${denyExecLiterals.map((p) => `(literal "${escapeSeatbeltLiteral(p)}")`).join(' ')})`]
+      : []),
+    '(allow signal (target self))',
+    '(allow sysctl-read)',
     '(allow mach-lookup)',
     '(allow network*)',
     '',
@@ -527,18 +531,22 @@ export function buildSeatbeltLaunch({
         ...exactPins(join('.config', 'git', 'config'), effectiveHome),
       ] : []),
       // Pin the read-only invariant explicitly: the runtime dir lives under
-      // TMPDIR, which the broad tmp write rules above also match -- deny wins
-      // over allow, so shims/hooks/profile stay immutable even so.
+      // TMPDIR, which the broad tmp write rules above also match -- these
+      // last-match-wins pins keep shims/hooks/profile immutable even so.
       ...subtrees(binDir),
       ...subtrees(hooksDir),
       ...exactPins(basename(profilePath), dir),
-      // Sibling seatbelt launch dirs are same-UID writable under the broad
-      // tmp rules (0o700 is per-UID, not per-session): without this pin one
-      // sandboxed session can rewrite another session's shims/hooks/profile
-      // -- the dirs' contents are exec'd by that session's git/gh/commit
-      // invocations. Our own dir is re-allowed afterwards (see below); the
-      // pattern also covers dirs created after this profile was built.
-      ...siblingDeny,
+      // The per-launch ssh-config (CCSANDBOX_SSH_CONFIG, minted when
+      // ssh.realSsh) must stay immutable like bwrap's --ro-bind'ed
+      // sandbox-ssh-config: an agent-writable copy could weaken
+      // StrictHostKeyChecking / UserKnownHostsFile for brokered git ssh.
+      ...(ssh.realSsh ? exactPins(basename(sshConfigPath), dir) : []),
+      // NOTE: sibling launch dirs are intentionally NOT repeated here.
+      // They are already denied by siblingDenyWriteRegexes BEFORE the
+      // own-dir re-allow (and future siblings never match that re-allow),
+      // so repeating the sibling prefix in this final deny would match our
+      // own dir too and -- under last-match-wins -- override its re-allow,
+      // making dir/runtime and the throwaway HOME write-denied.
     ];
     // Orchestrator rule overlay: bwrap shadows CLAUDE.md/AGENTS.md read-only by
     // ro-binding the generated file over cwd's copies. Seatbelt has no mounts,
