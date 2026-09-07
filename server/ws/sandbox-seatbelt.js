@@ -13,9 +13,9 @@
 // The git/ssh/gh/commit-guard wrappers use a `#!/ccserver-sandbox-node`
 // shebang that only resolves inside bwrap. On macOS the host node binary is
 // directly visible, so this module mints per-launch `#!/bin/sh` shims that
-// exec the real host node with the real wrapper script (no spaces/quoting
-// hazards in GIT_SSH_COMMAND or credential.helper), plus a `hooks/`
-// directory for core.hooksPath.
+// exec the real host node with the real wrapper script (the shim bodies and
+// the GIT_SSH_COMMAND / credential.helper values are all quoted for /bin/sh),
+// plus a `hooks/` directory for core.hooksPath.
 
 import { copyFileSync, existsSync, mkdirSync, realpathSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -30,10 +30,11 @@ export function seatbeltBaseDir() {
 }
 
 // Quote a host path for embedding in a Seatbelt `regex #"..."` literal.
-// Seatbelt regexes follow ICU syntax; escaping every non-alphanumeric keeps
-// paths like `/Users/oli/a+b (x)/` from becoming accidental alternations.
+// Seatbelt regexes are a POSIX-ERE-family dialect (AppleMatch), not ICU:
+// escape only regex metacharacters (+ the SBPL string quotes). Escaping
+// ordinary characters (spaces, '-', non-ASCII) is undefined behavior there.
 export function escapeSeatbeltRegex(s) {
-  return String(s).replace(/[^a-zA-Z0-9/]/g, (c) => `\\${c}`);
+  return String(s).replace(/[.*+?^${}()|[\]\\"]/g, (c) => `\\${c}`);
 }
 
 // `^<dir>(/.*)?$` matches the dir itself plus everything underneath it.
@@ -66,15 +67,28 @@ export function escapeSeatbeltLiteral(s) {
 }
 
 // Assemble the profile text. Each list holds ready-made `regex #"..."` bodies
-// (see subtreeRegex) or exact-path literals:
+// (see subtreeRegex) or exact-path literals. Seatbelt is last-match-wins:
+// the deny lines beat the allow lines ONLY because they are emitted AFTER
+// them -- keep the ordering (allows, sibling denies, re-allows, pin denies)
+// when extending this profile.
 //   readRegexes/writeRegexes    - allow file-read*/file-write* by pattern
 //   readLiterals/writeLiterals  - allow by exact path (sockets, single files)
-//   denyWriteRegexes            - deny file-write* (deny wins over allow)
+//   siblingDenyWriteRegexes / siblingDenyReadRegexes - deny sibling launch
+//                    dirs (broad patterns covering own dir too)
+//   reAllowWriteRegexes / reAllowReadRegexes - re-allow our own dir AFTER
+//                    the sibling deny (last-match-wins)
+//   denyWriteRegexes            - pin denies, emitted last so they beat the
+//                    re-allows above
+//   denyReadRegexes             - read pin denies, emitted last
 export function buildSeatbeltProfileText({
   readRegexes = [],
   writeRegexes = [],
   readLiterals = [],
   writeLiterals = [],
+  siblingDenyWriteRegexes = [],
+  siblingDenyReadRegexes = [],
+  reAllowWriteRegexes = [],
+  reAllowReadRegexes = [],
   denyWriteRegexes = [],
   denyReadRegexes = [],
 } = {}) {
@@ -85,12 +99,19 @@ export function buildSeatbeltProfileText({
     '(version 1)',
     '',
     ';; deny-by-default: everything not explicitly allowed below is refused.',
-    ';; A deny rule always wins over an allow rule when both match.',
     '(deny default)',
     '',
     ';; process + network. Egress stays open (agent APIs, git, tool',
     ';; provisioning) -- file scope is what this sandbox restricts.',
     '(allow process-exec process-fork)',
+    ';; macOS GUI / IPC channels the sandboxed agent has no use for:',
+    ';; clipboard exfil/injection, AppleScript automation, document/app',
+    ';; opening, screen capture.',
+    '(deny process-exec (literal "/usr/bin/osascript"))',
+    '(deny process-exec (literal "/usr/bin/pbcopy"))',
+    '(deny process-exec (literal "/usr/bin/pbpaste"))',
+    '(deny process-exec (literal "/usr/bin/open"))',
+    '(deny process-exec (literal "/usr/bin/screencapture"))',
     '(allow signal (target self))',
     '(allow sysctl-read)',
     '(allow mach-lookup)',
@@ -112,17 +133,23 @@ export function buildSeatbeltProfileText({
     const sels = [regexes(writeRegexes), literals(writeLiterals)].filter(Boolean).join(' ');
     out.push(';; writable trees and files (project, sandbox HOME, sockets).', line('allow file-write*', sels), '');
   }
+  // POSIX ERE (AppleMatch) has no lookahead: express sibling exclusion as
+  // "deny all launch dirs -> re-allow our own (last-match-wins) -> pins".
+  if (siblingDenyWriteRegexes.length > 0) out.push(line('deny file-write*', regexes(siblingDenyWriteRegexes)), '');
+  if (siblingDenyReadRegexes.length > 0) out.push(line('deny file-read*', regexes(siblingDenyReadRegexes)), '');
+  if (reAllowWriteRegexes.length > 0) out.push(line('allow file-write*', regexes(reAllowWriteRegexes)), '');
+  if (reAllowReadRegexes.length > 0) out.push(line('allow file-read*', regexes(reAllowReadRegexes)), '');
   if (denyWriteRegexes.length > 0) {
     out.push(
-      ';; never writable, even when a broader allow above would match',
-      ';; (raw keys / gh tokens stay behind the git broker).',
+      ';; pin denies (emitted last so they beat the re-allows above):',
+      ';; raw keys / gh tokens stay behind the git broker.',
       line('deny file-write*', regexes(denyWriteRegexes)),
       '',
     );
   }
   if (denyReadRegexes.length > 0) {
     out.push(
-      ';; never readable, even when a broader allow above would match.',
+      ';; read pin denies, emitted last.',
       line('deny file-read*', regexes(denyReadRegexes)),
       '',
     );
@@ -289,14 +316,17 @@ export function buildSeatbeltLaunch({
       if (ssh.realSsh) {
         env.CCSANDBOX_REAL_SSH = ssh.realSsh;
         env.CCSANDBOX_SSH_CONFIG = ssh.configFile;
-        env.GIT_SSH_COMMAND = sshShim;
+        // git runs this through sh -c: quote the shim path so spaces in
+        // $TMPDIR / CCSERVER_SANDBOX_SEATBELT_TMP cannot split it.
+        env.GIT_SSH_COMMAND = shQuote(sshShim);
       }
       // useHttpPath is supplied by the ro-bound GENERATED_GITCONFIG on the
       // bwrap path; there is no mount here, so it rides GIT_CONFIG too.
       // Without it git drops the path from the credential description and
       // the broker's host+path allowlist match always denies.
       gitConfigKeys.push(['credential.useHttpPath', 'true']);
-      gitConfigKeys.push(['credential.helper', credHelperShim]);
+      // Same shell-parsing hazard as GIT_SSH_COMMAND above: quote it too.
+      gitConfigKeys.push(['credential.helper', shQuote(credHelperShim)]);
     }
     if (commitGuard) {
       env.CCSANDBOX_COMMIT_GUARD_CONFIG = commitGuard.configPath;
@@ -429,9 +459,13 @@ export function buildSeatbeltLaunch({
     // spellings from the existing parent dir instead.
     const exactPins = (name, existingParent) =>
       pathVariants(existingParent).map((p) => `^${escapeSeatbeltRegex(join(p, name))}$`);
-    // Sibling launch-dir denies need both spellings of the base dir as well.
+    // Sibling launch-dir denies need both spellings of the base dir as
+    // well. POSIX ERE has no lookahead: deny ALL launch dirs (own
+    // included), then re-allow our own subtree afterwards
+    // (last-match-wins). Future sibling dirs stay covered by the deny.
     const siblingDeny = pathVariants(seatbeltBaseDir()).map((base) =>
-      `^${escapeSeatbeltRegex(base)}/ccserver-seatbelt-(?!${escapeSeatbeltRegex(launchId)}([/]|$))`);
+      `^${escapeSeatbeltRegex(base)}/ccserver-seatbelt-`);
+    const ownReAllow = subtrees(dir);
     // Raw keys / gh tokens are never reachable (mirrors bwrap's
     // BLOCKED_BIND_PATHS, unconditionally even with gitBroker off).
     const denyWriteRegexes = [
@@ -457,13 +491,10 @@ export function buildSeatbeltLaunch({
       // tmp rules (0o700 is per-UID, not per-session): without this pin one
       // sandboxed session can rewrite another session's shims/hooks/profile
       // -- the dirs' contents are exec'd by that session's git/gh/commit
-      // invocations. The negative lookahead excludes our own dir; the
+      // invocations. Our own dir is re-allowed afterwards (see below); the
       // pattern also covers dirs created after this profile was built.
       ...siblingDeny,
     ];
-    // Same pin for reads: sibling profiles reveal host paths and broker
-    // socket locations that have no business crossing sessions.
-    const denyReadRegexes = [...siblingDeny];
     // Orchestrator rule overlay: bwrap shadows CLAUDE.md/AGENTS.md read-only by
     // ro-binding the generated file over cwd's copies. Seatbelt has no mounts,
     // so materialize the generated rules into the orchestrator's managed cwd
@@ -502,7 +533,10 @@ export function buildSeatbeltLaunch({
     }
 
   const profileText = buildSeatbeltProfileText({
-    readRegexes, writeRegexes, readLiterals, writeLiterals, denyWriteRegexes, denyReadRegexes,
+    readRegexes, writeRegexes, readLiterals, writeLiterals,
+    siblingDenyWriteRegexes: siblingDeny, siblingDenyReadRegexes: siblingDeny,
+    reAllowWriteRegexes: ownReAllow, reAllowReadRegexes: ownReAllow,
+    denyWriteRegexes, denyReadRegexes: [],
   });
     writeFileSync(profilePath, profileText, { mode: 0o600 });
     return { dir, profilePath, binDir, hooksDir, homeDir: effectiveHome, ruleCopies: ruleCopies.length > 0 ? ruleCopies : null, nodeBin, env };
