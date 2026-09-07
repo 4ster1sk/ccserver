@@ -10,7 +10,7 @@
 
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir, homedir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -203,14 +203,49 @@ test('buildSeatbeltLaunch sets CCSANDBOX_MCP_SOCK for group sessions', () => {
 
 test('buildSeatbeltLaunch denies CLAUDE.md/AGENTS.md writes for orchestrators', () => {
   const opts = baseOpts();
+  const src = join(tmpRoot, 'orchestrator.md');
+  writeFileSync(src, '# rules\n');
   const sb = buildSeatbeltLaunch(baseOpts({
     cwd: opts.cwd,
-    orchestratorClaudeMdSrc: join(tmpRoot, 'orchestrator.md'),
+    orchestratorClaudeMdSrc: src,
   }));
   trackDir(sb.dir);
   const text = readFileSync(sb.profilePath, 'utf-8');
   assert.ok(text.includes(`^${escapeSeatbeltRegex(join(opts.cwd, 'CLAUDE.md'))}$`));
   assert.ok(text.includes(`^${escapeSeatbeltRegex(join(opts.cwd, 'AGENTS.md'))}$`));
+});
+
+test('buildSeatbeltLaunch allows gitCommonDir rw and groupFilesDir ro', () => {
+  const sb = buildSeatbeltLaunch(baseOpts({
+    gitCommonDir: '/srv/common-git',
+    groupFilesDir: '/srv/group-files',
+  }));
+  trackDir(sb.dir);
+  const text = readFileSync(sb.profilePath, 'utf-8');
+  assert.ok(text.includes(subtreeRegex('/srv/common-git')), 'git common dir is allowed');
+  assert.ok(text.includes(subtreeRegex('/srv/group-files')), 'group files dir is readable');
+  // group files stay read-only (bwrap ro-binds them): no write rule.
+  const writeLine = text.split('\n').find((l) => l.startsWith('  (allow file-write*'));
+  assert.ok(!writeLine.includes(subtreeRegex('/srv/group-files')), 'group files dir is not writable');
+  // ...while the git common dir needs writes (index lock, refs).
+  assert.ok(writeLine.includes(subtreeRegex('/srv/common-git')), 'git common dir is writable');
+  // The host blob dir is exposed for future tooling via env.
+  assert.equal(sb.env.CCSANDBOX_GROUP_FILES_DIR, '/srv/group-files');
+});
+
+test('buildSeatbeltLaunch materializes the orchestrator overlay and tracks it for teardown', () => {
+  const srcDir = mkdtempSync(join(tmpdir(), 'ccserver-seatbelt-orchsrc-'));
+  DIRS.push(srcDir);
+  const src = join(srcDir, 'rules.md');
+  writeFileSync(src, '# rules\n');
+  const cwd = mkdtempSync(join(tmpdir(), 'ccserver-seatbelt-orchcwd-'));
+  DIRS.push(cwd);
+  const sb = buildSeatbeltLaunch(baseOpts({ cwd, orchestratorClaudeMdSrc: src }));
+  trackDir(sb.dir);
+  for (const name of ['CLAUDE.md', 'AGENTS.md']) {
+    assert.equal(readFileSync(join(cwd, name), 'utf-8'), '# rules\n', `${name} materialized`);
+  }
+  assert.deepEqual(sb.ruleCopies, [join(cwd, 'CLAUDE.md'), join(cwd, 'AGENTS.md')]);
 });
 
 test('buildSeatbeltLaunch skips blocked extra binds like bwrap does', () => {

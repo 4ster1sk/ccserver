@@ -17,7 +17,7 @@
 // hazards in GIT_SSH_COMMAND or credential.helper), plus a `hooks/`
 // directory for core.hooksPath.
 
-import { existsSync, mkdirSync, realpathSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, realpathSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -155,8 +155,11 @@ function expandAgainstHome(p, hostHome) {
 //   orchestratorClaudeMdSrc / gitCommonDir / groupFilesDir - like bwrap
 //   tools          - resolved opt-in tool specs | null
 //
-// Returns { dir, profilePath, binDir, hooksDir, homeDir, env }. `dir` is the
-// single teardown unit (also covers the throwaway HOME when homeDir was null).
+// Returns { dir, profilePath, binDir, hooksDir, homeDir, ruleCopies, nodeBin,
+// env }. `dir` is the single teardown unit (also covers the throwaway HOME
+// when homeDir was null). ruleCopies lists orchestrator rule files
+// materialized into the project dir -- NOT under `dir`, so the caller must
+// remove them separately on teardown (null when no overlay was requested).
 export function buildSeatbeltLaunch({
   cwd,
   hostHome,
@@ -182,15 +185,19 @@ export function buildSeatbeltLaunch({
   const dir = join(seatbeltBaseDir(), `ccserver-seatbelt-${randomUUID()}`);
   const binDir = join(dir, 'bin');
   const hooksDir = join(dir, 'hooks');
-  mkdirSync(binDir, { recursive: true });
-  mkdirSync(hooksDir, { recursive: true });
+  // 0o700 like git-broker's dir: shims/hook/profile must be private to this
+  // launch -- sandbox.sb reveals host paths, and a same-UID session sharing
+  // the base dir must not reach them.
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  mkdirSync(binDir, { recursive: true, mode: 0o700 });
+  mkdirSync(hooksDir, { recursive: true, mode: 0o700 });
 
   // resolve() normalizes spelling but not symlinks (same reason tmpDirs
   // carries the realpath of tmpdir()): rules below register both spellings
   // via subtrees() so a symlinked cwd still matches -- and denies hold.
   // The XDG_RUNTIME_DIR override (see env below) must exist before the
   // entrypoint's mkdir -p runs -- and before any tool reads it.
-  mkdirSync(join(dir, 'runtime'), { recursive: true });
+  mkdirSync(join(dir, 'runtime'), { recursive: true, mode: 0o700 });
 
   const projectDir = resolve(cwd);
   // Throwaway HOME (minimal/usage sandboxes, or persistentHome off): lives
@@ -238,6 +245,12 @@ export function buildSeatbeltLaunch({
     CCSANDBOX_DOCKER: '0',
   };
   if (sockets.mcp) env.CCSANDBOX_MCP_SOCK = sockets.mcp;
+  // Seatbelt has no mounts: there is no /ccserver-group-files. Expose the
+  // host blob dir the established way (env, like the socket paths) so tool
+  // responses can one day report a path that actually resolves. NOTE: the
+  // group_files tools still return the fixed /ccserver-group-files path, so
+  // receiving shared files does NOT work on macOS seatbelt yet (see docs).
+  if (groupFilesDir) env.CCSANDBOX_GROUP_FILES_DIR = groupFilesDir;
   if (authSock) env.SSH_AUTH_SOCK = authSock;
   if (gnupg) env.GNUPGHOME = join(hostHome, '.gnupg');
 
@@ -326,7 +339,12 @@ export function buildSeatbeltLaunch({
   const writeRegexes = [
     ...subtrees(projectDir),
     ...subtrees(effectiveHome),
-    ...subtrees(dir),
+    // Only the mutable part of the runtime dir is writable. bin/ (gh/ssh/
+    // credential-helper shims), hooks/ (the core.hooksPath target) and
+    // sandbox.sb must stay read-only -- bwrap ro-binds their equivalents at
+    // fixed paths, and a writable shim is attacker-chosen code on the next
+    // git/gh/commit invocation.
+    ...subtrees(join(dir, 'runtime')),
     '^/tmp(/.*)?$', '^/private/tmp(/.*)?$',
     // macOS-API writers (NSSearchPath ignores $HOME): caches stay usable.
     ...subtrees(cachesDir),
@@ -370,11 +388,24 @@ export function buildSeatbeltLaunch({
     ...subtrees(join(hostHome, '.ssh')),
     ...subtrees(join(hostHome, '.config', 'gh')),
   ];
-  // Orchestrator rule overlay: bwrap shadows CLAUDE.md/AGENTS.md read-only;
-  // without mounts the equivalent is denying writes to those two files, in
-  // both spellings so a symlinked cwd can't walk around the deny.
+  // Orchestrator rule overlay: bwrap shadows CLAUDE.md/AGENTS.md read-only by
+  // ro-binding the generated file over cwd's copies. Seatbelt has no mounts,
+  // so materialize the generated rules into the orchestrator's managed cwd
+  // instead -- that dir never persists CLAUDE.md/AGENTS.md (see
+  // routes/groups.js), so the copies are launch-scoped by construction -- and
+  // deny writes below so they stay immutable for the session. A copy failure
+  // throws (fail-closed like a failed bwrap bind: never boot an orchestrator
+  // with no rules). Teardown removes the copies (see ruleCopies below).
+  const ruleCopies = [];
   if (orchestratorClaudeMdSrc) {
     for (const name of ['CLAUDE.md', 'AGENTS.md']) {
+      const dest = join(projectDir, name);
+      try {
+        copyFileSync(orchestratorClaudeMdSrc, dest);
+      } catch (err) {
+        throw new Error(`seatbelt orchestrator overlay: cannot copy rules to ${dest}: ${err.message}`);
+      }
+      ruleCopies.push(dest);
       for (const base of pathVariants(projectDir)) {
         denyWriteRegexes.push(`^${escapeSeatbeltRegex(join(base, name))}$`);
       }
@@ -399,8 +430,8 @@ export function buildSeatbeltLaunch({
     readRegexes, writeRegexes, readLiterals, writeLiterals, denyWriteRegexes,
   });
   const profilePath = join(dir, 'sandbox.sb');
-  writeFileSync(profilePath, profileText);
-  return { dir, profilePath, binDir, hooksDir, homeDir: effectiveHome, nodeBin, env };
+  writeFileSync(profilePath, profileText, { mode: 0o600 });
+  return { dir, profilePath, binDir, hooksDir, homeDir: effectiveHome, ruleCopies: ruleCopies.length > 0 ? ruleCopies : null, nodeBin, env };
 }
 
 // Serialize the seatbelt env object for `sandbox-exec -f profile

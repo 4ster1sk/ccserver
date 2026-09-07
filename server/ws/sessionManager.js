@@ -563,6 +563,7 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
   let sandboxGitBrokerDir = null;
   let sandboxCommitGuardDir = null;
   let sandboxSeatbeltDir = null;
+  let sandboxSeatbeltFiles = null;
   let ptyProcess;
 
   if (usePtyHost) {
@@ -701,6 +702,7 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
         sandboxGitBrokerDir = spawn.gitBrokerDir || null;
         sandboxCommitGuardDir = spawn.commitGuardDir || null;
         sandboxSeatbeltDir = spawn.seatbeltDir || null;
+        sandboxSeatbeltFiles = spawn.seatbeltFiles || null;
         useSandbox = true;
       } catch (err) {
         return { sessionId: id, session: null, error: `Failed to build sandbox: ${err.message}` };
@@ -761,6 +763,9 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
       if (sandboxGitBrokerDir) { try { rmSync(sandboxGitBrokerDir, { recursive: true, force: true }); } catch { /* best effort */ } }
       if (sandboxCommitGuardDir) { try { rmSync(sandboxCommitGuardDir, { recursive: true, force: true }); } catch { /* best effort */ } }
       if (sandboxSeatbeltDir) { try { rmSync(sandboxSeatbeltDir, { recursive: true, force: true }); } catch { /* best effort */ } }
+      if (Array.isArray(sandboxSeatbeltFiles)) {
+        for (const f of sandboxSeatbeltFiles) { try { unlinkSync(f); } catch { /* best effort */ } }
+      }
       return { sessionId: id, session: null, error: `Failed to spawn "${command}": ${err.message}` };
     }
   }
@@ -793,6 +798,7 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
     sandboxGitBrokerDir, // its runtime dir (socket + allow-list), removed on teardown
     sandboxCommitGuardDir, // commit-msg guard's runtime dir (config json only, no process), removed on teardown
     sandboxSeatbeltDir, // seatbelt profile/shim runtime dir (macOS only), removed on teardown
+    sandboxSeatbeltFiles, // orchestrator rule copies in the project dir (macOS only), unlinked on teardown
     reuseSandboxHome, // true = keep the previous persistent HOME, false = started fresh (wiped)
     ptyProcess,
     // Every attached viewer, mapped to the viewport it last reported. A
@@ -2020,6 +2026,13 @@ export function destroySession(id, { keepSchedule = true, reason = 'request' } =
         rmSync(session.sandboxSeatbeltDir, { recursive: true, force: true });
       } catch {
         // best effort
+      }
+    }
+    // Orchestrator rule files materialized into the project dir by the
+    // seatbelt backend (NOT under seatbeltDir -- unlink each best-effort).
+    if (Array.isArray(session.sandboxSeatbeltFiles)) {
+      for (const f of session.sandboxSeatbeltFiles) {
+        try { unlinkSync(f); } catch { /* best effort */ }
       }
     }
   }
