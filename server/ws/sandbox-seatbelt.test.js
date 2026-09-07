@@ -10,9 +10,9 @@
 
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir, homedir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import {
   buildSeatbeltLaunch,
   buildSeatbeltProfileText,
@@ -182,10 +182,12 @@ test('buildSeatbeltLaunch wires gitBroker shims and merges GIT_CONFIG_COUNT', ()
   }
   const hook = join(sb.hooksDir, 'commit-msg');
   assert.ok(existsSync(hook), 'commit-msg hook shim exists');
-  assert.equal(sb.env.GIT_CONFIG_COUNT, '2');
-  assert.equal(sb.env.GIT_CONFIG_KEY_0, 'credential.helper');
-  assert.equal(sb.env.GIT_CONFIG_KEY_1, 'core.hooksPath');
-  assert.equal(sb.env.GIT_CONFIG_VALUE_1, sb.hooksDir);
+  assert.equal(sb.env.GIT_CONFIG_COUNT, '3');
+  assert.equal(sb.env.GIT_CONFIG_KEY_0, 'credential.useHttpPath');
+  assert.equal(sb.env.GIT_CONFIG_VALUE_0, 'true');
+  assert.equal(sb.env.GIT_CONFIG_KEY_1, 'credential.helper');
+  assert.equal(sb.env.GIT_CONFIG_KEY_2, 'core.hooksPath');
+  assert.equal(sb.env.GIT_CONFIG_VALUE_2, sb.hooksDir);
   assert.equal(sb.env.GIT_SSH_COMMAND, join(sb.binDir, 'ccserver-git-ssh'));
   assert.equal(sb.env.CCSANDBOX_MCP_SOCK, undefined);
   assert.ok(sb.env.PATH.includes(sb.binDir));
@@ -293,6 +295,58 @@ test('forwarded ssh-agent socket gets an explicit allow rule', () => {
   assert.equal(sb.env.SSH_AUTH_SOCK, '/tmp/custom-agent.sock');
   const text = readFileSync(sb.profilePath, 'utf-8');
   assert.ok(text.includes('(literal "/tmp/custom-agent.sock")'));
+});
+
+test('gitBroker env carries credential.useHttpPath (bwrap parity)', () => {
+  const brokerDir = mkdtempSync(join(tmpdir(), 'ccserver-seatbelt-httppath-'));
+  DIRS.push(brokerDir);
+  const sb = buildSeatbeltLaunch(baseOpts({
+    gitBroker: { sockPath: join(brokerDir, 'b.sock'), allowlistPath: join(brokerDir, 'a.json'), dir: brokerDir },
+  }));
+  trackDir(sb.dir);
+  const keys = Object.entries(sb.env)
+    .filter(([k]) => k.startsWith('GIT_CONFIG_KEY_'))
+    .map(([, v]) => v);
+  const vals = Object.entries(sb.env)
+    .filter(([k]) => k.startsWith('GIT_CONFIG_VALUE_'))
+    .map(([, v]) => v);
+  const pairs = Object.fromEntries(keys.map((k, i) => [k, vals[i]]));
+  assert.equal(pairs['credential.useHttpPath'], 'true', 'broker matching needs the path');
+  assert.ok(Object.values(pairs).some((v) => String(v).includes('credential-helper')));
+});
+
+test('sandbox HOME gitconfig is deny-pinned (no agent helper injection)', () => {
+  const sb = buildSeatbeltLaunch(baseOpts());
+  trackDir(sb.dir);
+  const text = readFileSync(sb.profilePath, 'utf-8');
+  assert.ok(text.includes(`^${escapeSeatbeltRegex(join(sb.homeDir, '.gitconfig'))}$`));
+});
+
+test('bin/hooks/profile are deny-pinned despite the TMPDIR write rules', () => {
+  const sb = buildSeatbeltLaunch(baseOpts());
+  trackDir(sb.dir);
+  const text = readFileSync(sb.profilePath, 'utf-8');
+  assert.ok(text.includes(subtreeRegex(join(sb.dir, 'bin'))), 'shim dir pinned');
+  assert.ok(text.includes(subtreeRegex(join(sb.dir, 'hooks'))), 'hooks dir pinned');
+});
+
+test('agent CLIs resolve the real config via env (HOME is remapped)', () => {
+  const fakeHome = mkdtempSync(join(tmpdir(), 'ccserver-seatbelt-realhome-'));
+  DIRS.push(fakeHome);
+  mkdirSync(join(fakeHome, '.claude'));
+  mkdirSync(join(fakeHome, '.codex'));
+  const sb = buildSeatbeltLaunch(baseOpts({ hostHome: fakeHome }));
+  trackDir(sb.dir);
+  assert.equal(sb.env.CLAUDE_CONFIG_DIR, join(fakeHome, '.claude'));
+  assert.equal(sb.env.CODEX_HOME, join(fakeHome, '.codex'));
+});
+
+test('host node binary dir stays readable (nvm-style installs)', () => {
+  const sb = buildSeatbeltLaunch(baseOpts());
+  trackDir(sb.dir);
+  const text = readFileSync(sb.profilePath, 'utf-8');
+  const readLine = text.split('\n').find((l) => l.startsWith('  (allow file-read*'));
+  assert.ok(readLine.includes(subtreeRegex(dirname(process.execPath))));
 });
 
 test('seatbeltEnvArgs serializes K=V pairs for /usr/bin/env', () => {

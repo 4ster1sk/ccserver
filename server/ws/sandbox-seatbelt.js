@@ -19,7 +19,7 @@
 
 import { copyFileSync, existsSync, mkdirSync, realpathSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 
 // Base dir for per-launch seatbelt runtime dirs. os.tmpdir() honors $TMPDIR,
@@ -185,6 +185,7 @@ export function buildSeatbeltLaunch({
   const dir = join(seatbeltBaseDir(), `ccserver-seatbelt-${randomUUID()}`);
   const binDir = join(dir, 'bin');
   const hooksDir = join(dir, 'hooks');
+  const profilePath = join(dir, 'sandbox.sb');
   // 0o700 like git-broker's dir: shims/hook/profile must be private to this
   // launch -- sandbox.sb reveals host paths, and a same-UID session sharing
   // the base dir must not reach them.
@@ -253,6 +254,13 @@ export function buildSeatbeltLaunch({
   if (groupFilesDir) env.CCSANDBOX_GROUP_FILES_DIR = groupFilesDir;
   if (authSock) env.SSH_AUTH_SOCK = authSock;
   if (gnupg) env.GNUPGHOME = join(hostHome, '.gnupg');
+  // HOME is remapped to the sandbox home, so $HOME-relative config resolution
+  // would miss the real auth/state (bwrap instead overlays the real dirs at
+  // the real $HOME path). Point the CLIs that support it at the real dirs
+  // (gated on existence, like the appBinds binds). opencode/copilot have no
+  // equivalent override and keep working only via absolute-path resolution.
+  if (existsSync(join(hostHome, '.claude'))) env.CLAUDE_CONFIG_DIR = join(hostHome, '.claude');
+  if (existsSync(join(hostHome, '.codex'))) env.CODEX_HOME = join(hostHome, '.codex');
 
   // GIT_CONFIG_COUNT merges credential.helper (gitBroker) and core.hooksPath
   // (commitGuard) into one env mechanism -- same rule as buildBwrapArgs'
@@ -267,6 +275,11 @@ export function buildSeatbeltLaunch({
       env.CCSANDBOX_SSH_CONFIG = ssh.configFile;
       env.GIT_SSH_COMMAND = sshShim;
     }
+    // useHttpPath is supplied by the ro-bound GENERATED_GITCONFIG on the
+    // bwrap path; there is no mount here, so it rides GIT_CONFIG too.
+    // Without it git drops the path from the credential description and
+    // the broker's host+path allowlist match always denies.
+    gitConfigKeys.push(['credential.useHttpPath', 'true']);
     gitConfigKeys.push(['credential.helper', credHelperShim]);
   }
   if (commitGuard) {
@@ -356,6 +369,11 @@ export function buildSeatbeltLaunch({
   }
   if (gnupgHome) writeRegexes.push(...subtrees(gnupgHome));
   if (claudeDir && existsSync(claudeDir)) readRegexes.push(...subtrees(claudeDir));
+  // The shims, the commit-msg hook and the MCP bridge all exec through the
+  // host node binary: guarantee it stays readable (and executable) even when
+  // it lives outside the default trees (nvm/Volta/fnm under $HOME), the same
+  // way bwrap ro-binds SANDBOX_NODE_PATH.
+  if (nodeBin) readRegexes.push(...subtrees(dirname(nodeBin)));
   if (gitCommonDir) {
     readRegexes.push(...subtrees(gitCommonDir));
     writeRegexes.push(...subtrees(gitCommonDir));
@@ -387,6 +405,17 @@ export function buildSeatbeltLaunch({
   const denyWriteRegexes = [
     ...subtrees(join(hostHome, '.ssh')),
     ...subtrees(join(hostHome, '.config', 'gh')),
+    // The sandbox HOME's own gitconfig stays unwritable (bwrap ro-binds
+    // GENERATED_GITCONFIG over it for the same reason): an agent-written
+    // credential.helper would otherwise receive broker-issued tokens via
+    // `credential store`, exfiltrating them past the allowlist.
+    ...pathVariants(join(effectiveHome, '.gitconfig')).map((p) => `^${escapeSeatbeltRegex(p)}$`),
+    // Pin the read-only invariant explicitly: the runtime dir lives under
+    // TMPDIR, which the broad tmp write rules above also match -- deny wins
+    // over allow, so shims/hooks/profile stay immutable even so.
+    ...subtrees(binDir),
+    ...subtrees(hooksDir),
+    ...pathVariants(profilePath).map((p) => `^${escapeSeatbeltRegex(p)}$`),
   ];
   // Orchestrator rule overlay: bwrap shadows CLAUDE.md/AGENTS.md read-only by
   // ro-binding the generated file over cwd's copies. Seatbelt has no mounts,
@@ -429,7 +458,6 @@ export function buildSeatbeltLaunch({
   const profileText = buildSeatbeltProfileText({
     readRegexes, writeRegexes, readLiterals, writeLiterals, denyWriteRegexes,
   });
-  const profilePath = join(dir, 'sandbox.sb');
   writeFileSync(profilePath, profileText, { mode: 0o600 });
   return { dir, profilePath, binDir, hooksDir, homeDir: effectiveHome, ruleCopies: ruleCopies.length > 0 ? ruleCopies : null, nodeBin, env };
 }

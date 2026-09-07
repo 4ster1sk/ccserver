@@ -8,24 +8,20 @@
 //
 // Run directly: `node server/pty-host/index.js`.
 
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PtyStore } from './ptyStore.js';
 import { createRpcServer } from './rpcServer.js';
 import { GitBrokerRegistry } from './gitBrokerRegistry.js';
+// Shared runtime-dir convention (leaf module: no sessionManager/server
+// dependency, so the standalone-runnable constraint above still holds).
+import { hostRuntimeDir } from '../ws/git-broker.js';
 
 const SOCK_NAME = 'ccserver-pty-host.sock';
 
-// Same convention as server/ws/git-broker.js's hostRuntimeDir(): prefer
-// XDG_RUNTIME_DIR, fall back to /run/user/<uid> on Linux, the per-user
-// tmpdir on macOS (which has no /run), then /tmp.
+// Same base as every other broker socket path.
 export function getPtyHostSockPath() {
   if (process.env.CCSERVER_PTY_HOST_SOCK) return process.env.CCSERVER_PTY_HOST_SOCK;
-  const uid = typeof process.getuid === 'function' ? process.getuid() : 0;
-  const base = process.env.XDG_RUNTIME_DIR
-    || (process.platform === 'darwin' ? join(tmpdir(), `ccserver-runtime-${uid}`)
-      : (typeof process.getuid === 'function' ? `/run/user/${process.getuid()}` : '/tmp'));
-  return join(base, SOCK_NAME);
+  return join(hostRuntimeDir(), SOCK_NAME);
 }
 
 // Starts pty-host and returns its live handles. Exported (rather than only
