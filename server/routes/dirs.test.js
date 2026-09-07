@@ -171,6 +171,14 @@ test('GET /dirs/home exposes availableApps.opencodeGo following toggle + key', a
   }
 });
 
+// GET /dirs/home exposes sandboxAvailable (bwrap presence) so the launch
+// modal can disable the sandbox choice where it cannot work.
+test('GET /dirs/home exposes sandboxAvailable as a boolean', async () => {
+  const res = await app.inject({ method: 'GET', url: '/api/dirs/home' });
+  assert.equal(res.statusCode, 200);
+  assert.equal(typeof res.json().sandboxAvailable, 'boolean');
+});
+
 // GET /dirs/home also exposes hiddenApps (issue #105) so every launch picker
 // can remove those apps entirely, regardless of install status. Same
 // live-following-sandbox.config.json contract as metaAgentEnabled above.

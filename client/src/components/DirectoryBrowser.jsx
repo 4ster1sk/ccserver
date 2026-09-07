@@ -122,6 +122,12 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, ini
   // the sandbox toggle is overridden -- every launch is sandboxed and the
   // "通常起動" choice is disabled. Set from /api/dirs/home.
   const [forceSandbox, setForceSandbox] = useState(false);
+  // Whether bwrap exists on the server host (/api/dirs/home's
+  // sandboxAvailable). false disables the sandbox choice (and combo mode,
+  // which always requires the sandbox). null until the fetch resolves;
+  // while null everything stays enabled (old-server fallback, same as
+  // availableApps).
+  const [sandboxAvailable, setSandboxAvailable] = useState(null);
   // Which agent CLIs the server can actually launch ({ claude, opencode,
   // copilot, codex, commandcode } booleans), from /api/dirs/home. null until
   // the fetch resolves; while null every picker entry stays enabled
@@ -223,9 +229,10 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, ini
 
   const chooseSandbox = useCallback((val) => {
     if (forceSandbox) return; // server forbids unsandboxed launches
+    if (val && sandboxAvailable === false) return; // no bwrap on the server host
     setSandboxDefault(val);
     localStorage.setItem(SANDBOX_KEY, val ? '1' : '0');
-  }, [forceSandbox]);
+  }, [forceSandbox, sandboxAvailable]);
 
   const chooseApp = useCallback((val) => {
     if (hiddenApps.includes(val)) return; // operator hid this app
@@ -433,6 +440,18 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, ini
       if (data.forceSandbox) {
         setForceSandbox(true);
         setSandboxDefault(true);
+      }
+      // bwrap missing on the server host: the sandbox choice (and combo
+      // mode, which always requires it) cannot work. Correct a remembered
+      // sandbox default the same way stale app defaults are corrected
+      // below. Missing field = older server: leave everything enabled.
+      if (typeof data.sandboxAvailable === 'boolean') {
+        setSandboxAvailable(data.sandboxAvailable);
+        if (data.sandboxAvailable === false) {
+          setSandboxDefault(false);
+          try { localStorage.setItem(SANDBOX_KEY, '0'); } catch { /* ignore */ }
+          setLaunchMode('single');
+        }
       }
       // The privileged meta-agent feature is opt-in server-side; anything but
       // an explicit true (missing field = older server) keeps the mode
@@ -645,6 +664,11 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, ini
   // Sandbox choice + gpg/sshAgent suboptions for the single-launch pane.
   // The meta agent has no separate picker -- it inherits the global
   // sandboxDefault via the dedicated MetaLaunchDialog (see App.handleOpenMeta).
+  // Sandbox choice unavailable when bwrap is missing on the server host
+  // (combo mode is covered separately at its own toggle/button). Under
+  // forceSandbox the toggle stays locked on -- launches will fail
+  // server-side, and the note below says so.
+  const sandboxChoiceDisabled = sandboxAvailable === false && !forceSandbox;
   const sandboxPicker = (
     <>
       <div className="open-menu-sep" />
@@ -657,9 +681,9 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, ini
         通常起動
       </div>
       <div
-        className="open-menu-item"
+        className={`open-menu-item${sandboxChoiceDisabled ? ' open-menu-item-disabled' : ''}`}
         onClick={() => chooseSandbox(true)}
-        title={forceSandbox ? 'サーバー設定で強制' : ''}
+        title={forceSandbox ? 'サーバー設定で強制' : (sandboxChoiceDisabled ? 'サーバーにbwrapがインストールされていないため使えません' : '')}
       >
         <span className="open-menu-check">{sandboxDefault ? '✓' : ''}</span>
         🔒 サンドボックスで起動
@@ -699,9 +723,13 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, ini
         </label>
       </div>
       <p className="open-menu-note">
-        {forceSandbox
-          ? 'サンドボックスがサーバー設定 (forceSandbox) で強制されています。通常起動はできません。'
-          : `サンドボックス: 隣接プロジェクトを隔離し、内部に rootless docker を用意。初期値は一般設定で変更でき、このディレクトリ (${displayPath(currentPath, homeDir)}) に記憶されます。`}
+        {forceSandbox && sandboxAvailable === false
+          ? 'サーバー設定 (forceSandbox) でサンドボックスが強制されていますが、このホストにbwrapが無いため起動できません。bwrapをインストールするか、サーバー設定を見直してください。'
+          : forceSandbox
+            ? 'サンドボックスがサーバー設定 (forceSandbox) で強制されています。通常起動はできません。'
+            : sandboxAvailable === false
+              ? 'このサーバーにはbwrapがインストールされていないため、サンドボックス起動はできません。通常起動をご利用ください。'
+              : `サンドボックス: 隣接プロジェクトを隔離し、内部に rootless docker を用意。初期値は一般設定で変更でき、このディレクトリ (${displayPath(currentPath, homeDir)}) に記憶されます。`}
       </p>
     </>
   );
@@ -844,7 +872,9 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, ini
               </button>
               <button
                 className={`launch-mode-btn${launchMode === 'combo' ? ' active' : ''}`}
-                onClick={() => setLaunchMode('combo')}
+                onClick={() => { if (sandboxAvailable === false) return; setLaunchMode('combo'); }}
+                disabled={sandboxAvailable === false}
+                title={sandboxAvailable === false ? 'コンボ起動は常時サンドボックス必須ですが、サーバーにbwrapがありません' : ''}
               >
                 コンボ起動
               </button>
@@ -1246,8 +1276,8 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, ini
               {launchMode === 'combo' ? (
                 <button
                   className="btn btn-primary"
-                  disabled={comboHasHiddenAppSelected}
-                  title={comboHasHiddenAppSelected ? '非表示に設定されたアプリが選択されています。ロールのアプリを選び直してください。' : ''}
+                  disabled={comboHasHiddenAppSelected || sandboxAvailable === false}
+                  title={sandboxAvailable === false ? 'コンボ起動は常時サンドボックス必須ですが、サーバーにbwrapがありません' : (comboHasHiddenAppSelected ? '非表示に設定されたアプリが選択されています。ロールのアプリを選び直してください。' : '')}
                   onClick={() => {
                     // Build the payload BEFORE closing the menu: closeOpenMenu
                     // resets the draft model/sandbox state, and React state
