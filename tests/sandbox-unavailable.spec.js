@@ -104,6 +104,29 @@ test('no header box while the capability is unknown or present', async ({ page }
   await stubDirsHome(page, legacy);
   await page.goto('/');
   await expect(page.locator('.directory-warning-banner')).toHaveCount(0);
+
+  // Present (bwrap installed): no box and the sandbox choice works.
+  await stubDirsHome(page, { ...HOME_RESPONSE, sandboxAvailable: true });
+  await page.reload();
+  await expect(page.locator('.directory-warning-banner')).toHaveCount(0);
+  await page.getByRole('button', { name: '起動方法を選択' }).click();
+  const sandboxItem = page.locator('.open-menu-item', { hasText: 'サンドボックスで起動' });
+  await expect(sandboxItem).not.toHaveClass(/open-menu-item-disabled/);
+});
+
+test('double-click launch is also blocked when no launch can succeed', async ({ page }) => {
+  await stubDirsHome(page, { ...HOME_RESPONSE, forceSandbox: true });
+  const posts = [];
+  await page.route('**/api/sessions', async (route) => {
+    if (route.request().method() !== 'POST') return route.fallback();
+    posts.push(route.request().postDataJSON());
+    return route.abort();
+  });
+  await page.goto('/');
+  // Double-clicking a directory must not attempt a doomed launch.
+  await page.locator('.dir-item').first().dblclick();
+  await page.waitForTimeout(500);
+  expect(posts).toHaveLength(0);
 });
 
 test('forceSandbox without bwrap disables the launch buttons', async ({ page }) => {
