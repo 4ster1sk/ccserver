@@ -1,7 +1,7 @@
 {
   "//": "Copy to server/sandbox.config.json (or set CCSERVER_SANDBOX_CONFIG) to customize the sandbox.",
 
-  "//docker": "true (default): start an isolated rootless dockerd inside the sandbox. false: no docker (lighter, no rootlesskit).",
+  "//docker": "true (default): start an isolated rootless dockerd inside the sandbox. false: no docker (lighter, no rootlesskit). Ignored on macOS: sandbox-exec cannot host a nested dockerd, so macOS launches always run without docker (with a warning when this is true).",
   "docker": true,
 
   "//persistentHome": "true (default): keep a persistent writable HOME per project (under ~/.local/share/ccserver-sandbox/home/<project>) so tools/caches installed inside the sandbox survive a session relaunch. A launch dialog offers to reuse the previous sandbox or start fresh (which wipes that HOME). false: legacy fresh-tmpfs HOME every session.",
@@ -19,7 +19,7 @@
     "blockedPatterns": []
   },
 
-  "//forceSandbox": "false (default): the client decides per session whether to run inside the sandbox (bwrap). true: forbid launching the agent or a shell outside the sandbox entirely -- every session is forced sandboxed, the per-session UI toggle is overridden, and a launch is REFUSED (instead of falling back to a direct unsandboxed spawn) when the sandbox is unavailable (bwrap not installed, or Windows). It also blocks the /usage background capture's direct-launch fallback. bwrap (bubblewrap) must be installed on the host for any session to start.",
+  "//forceSandbox": "false (default): the client decides per session whether to run inside the sandbox (bwrap on Linux, sandbox-exec on macOS). true: forbid launching the agent or a shell outside the sandbox entirely -- every session is forced sandboxed, the per-session UI toggle is overridden, and a launch is REFUSED (instead of falling back to a direct unsandboxed spawn) when the sandbox is unavailable (bwrap not installed, sandbox-exec not available on macOS, or Windows). It also blocks the /usage background capture's direct-launch fallback. The sandbox backend (bwrap on Linux / sandbox-exec on macOS) must be available on the host for any session to start.",
   "forceSandbox": false,
 
   "//sshAgent": "true: forward the host's ssh-agent socket (auto-discovered, preferring one with keys loaded; override with env.SSH_AUTH_SOCK) into the sandbox as SSH_AUTH_SOCK. Only needed for SSH git remotes or running `ssh` directly inside the sandbox -- HTTPS git is already fully brokered by gitBroker without it, and commit signing is the separate gpg flag above. Default false: a forwarded agent is standing access to the host's real keys for the whole sandboxed process, not just git, so leave it off unless you actually need it. See README 'Known limitations' for the docker+gitBroker+sshAgent bypass.",

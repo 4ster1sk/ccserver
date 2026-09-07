@@ -14,6 +14,10 @@
 // The ordering matters: bwrap creating the user namespace would break
 // newuidmap (no subuid mapping -> single uid), so rootlesskit must be the
 // outer layer. See memory: sandbox-dind-recipe.
+//
+// Architecture (macOS): sandbox-exec (Seatbelt) -> entrypoint -> target, with
+// no docker (see sandbox-seatbelt.js). A deny-by-default file policy replaces
+// bwrap's bind mounts -- strictly weaker isolation, no mount hiding.
 
 import { homedir } from 'node:os';
 import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
@@ -25,6 +29,7 @@ import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { startGitBroker } from './git-broker.js';
 import { buildGuardConfig } from './commitGuard.js';
+import { buildSeatbeltLaunch, seatbeltEnvArgs } from './sandbox-seatbelt.js';
 import { recordSandboxHome as recordSandboxHomeDb, listSandboxRowsBySlug, forgetSandboxHome } from './projects.js';
 import { APPS } from './appLaunch.js';
 
@@ -44,6 +49,14 @@ const SSH_CONFIG_FILE = join(__dirname, 'sandbox-ssh-config');
 const BWRAP = '/usr/bin/bwrap';
 const ROOTLESSKIT = '/usr/bin/rootlesskit';
 const BASH = '/usr/bin/bash';
+
+// macOS Seatbelt backend (see sandbox-seatbelt.js): sandbox-exec mediates
+// file access by policy instead of bwrap's bind mounts, so there is no mount
+// isolation and no nested dockerd. The bash lived at /bin/bash on macOS
+// (there is no /usr/bin/bash).
+export const IS_MACOS = process.platform === 'darwin';
+const SANDBOX_EXEC = '/usr/bin/sandbox-exec';
+const MACOS_BASH = '/bin/bash';
 
 // Fixed in-sandbox paths for the git-broker machinery (see buildBwrapArgs).
 const SANDBOX_NODE_PATH = '/ccserver-sandbox-node';
@@ -1082,13 +1095,73 @@ export function discoverSshAuthSock() {
 }
 
 // Check that the tools needed for the docker-enabled sandbox are present.
+// Never true on macOS: sandbox-exec cannot host a nested rootless dockerd,
+// so the darwin branch of buildSandboxSpawn() always launches docker: false.
 export function dockerSandboxAvailable() {
+  if (IS_MACOS) return false;
   return [BWRAP, ROOTLESSKIT, '/usr/bin/slirp4netns', '/usr/bin/newuidmap']
     .every((p) => existsSync(p));
 }
 
+export function seatbeltAvailable() {
+  return existsSync(SANDBOX_EXEC);
+}
+
 export function sandboxAvailable() {
+  if (IS_MACOS) return seatbeltAvailable();
   return existsSync(BWRAP);
+}
+
+// Which isolation backend a sandboxed launch would use on this host:
+// 'bwrap' (Linux), 'seatbelt' (macOS via sandbox-exec), or 'none'.
+// sessionManager uses this to pick the MCP bridge invocation (fixed
+// in-sandbox paths only exist under bwrap) and platform-aware errors.
+export function sandboxBackend() {
+  if (process.platform === 'win32') return 'none';
+  if (IS_MACOS) return seatbeltAvailable() ? 'seatbelt' : 'none';
+  return sandboxAvailable() ? 'bwrap' : 'none';
+}
+
+// Platform-aware refusal text shared by sessionManager's three sandbox
+// guards, so the install hint can't drift between them.
+export function sandboxUnavailableReason() {
+  if (process.platform === 'win32') {
+    return {
+      reason: 'the sandbox is Linux-only',
+      hint: 'Launch without the sandbox.',
+    };
+  }
+  if (IS_MACOS) {
+    return {
+      reason: 'sandbox-exec is not available on this host',
+      hint: 'Launch without the sandbox.',
+    };
+  }
+  return {
+    reason: 'bwrap is not available on this host',
+    hint: 'Install bwrap (bubblewrap) or launch without the sandbox.',
+  };
+}
+
+export function forceSandboxUnavailableReason() {
+  // Keeps the historical Linux/Windows suffix byte-identical (asserted by
+  // routes/groups.test.js); only macOS gets its own hint.
+  if (IS_MACOS) {
+    return {
+      reason: 'sandbox-exec is not available on this host',
+      hint: 'Disable forceSandbox.',
+    };
+  }
+  if (process.platform === 'win32') {
+    return {
+      reason: 'the sandbox is Linux-only',
+      hint: 'Install bwrap (bubblewrap) or disable forceSandbox.',
+    };
+  }
+  return {
+    reason: 'bwrap is not available on this host',
+    hint: 'Install bwrap (bubblewrap) or disable forceSandbox.',
+  };
 }
 
 // Writes this launch's commit-message guard config (built-in patterns +
@@ -1564,6 +1637,27 @@ function buildBwrapArgs({ cwd, docker, gpg, extraBinds, extraEnv, authSock, stat
   return args;
 }
 
+// Shared seatbelt wiring (macOS): the wrapper scripts all live next to this
+// module, so one serverDir read-rule in the profile covers every one of them.
+function seatbeltScripts() {
+  return {
+    ghWrapper: GH_WRAPPER_SCRIPT,
+    credHelper: CRED_HELPER_SCRIPT,
+    sshWrapper: SSH_WRAPPER_SCRIPT,
+    commitHook: COMMIT_MSG_HOOK_SCRIPT,
+  };
+}
+
+function seatbeltSsh() {
+  const userKnownHosts = join(HOME, '.ssh', 'known_hosts');
+  return {
+    realSsh: which('ssh'),
+    configFile: SSH_CONFIG_FILE,
+    knownHostsDefault: DEFAULT_KNOWN_HOSTS,
+    userKnownHosts: existsSync(userKnownHosts) ? userKnownHosts : null,
+  };
+}
+
 // Minimal sandbox: just enough to launch an agent CLI in an isolated
 // filesystem, with NO docker, gpg, ssh, or extra binds. bwrap creates its own
 // user namespace (--unshare-user) and network stays shared with the host (so
@@ -1572,7 +1666,31 @@ function buildBwrapArgs({ cwd, docker, gpg, extraBinds, extraEnv, authSock, stat
 // server/usage.js) and Codex's `account/rateLimits/read` JSON-RPC call (see
 // server/codexUsage.js). `app` selects which CLI's config/install dir gets
 // resolved; defaults to 'claude' for the original caller.
+// On macOS the same shape runs under sandbox-exec with a throwaway HOME
+// (never the persistent per-project one -- this stays a throwaway read).
 export function buildMinimalSandboxSpawn({ cwd, targetCommand, app = 'claude' }) {
+  if (IS_MACOS) {
+    const { command } = resolveApp(app);
+    const sb = buildSeatbeltLaunch({
+      cwd, hostHome: HOME, homeDir: null, sandboxPathBase: SANDBOX_PATH,
+      nodeBin: realpathSync(process.execPath), serverDir: __dirname,
+      scripts: seatbeltScripts(), ssh: seatbeltSsh(),
+      gitBroker: null, commitGuard: null,
+      sockets: {}, extraBinds: [], extraEnv: {}, authSock: null,
+      claudeDir: null, tools: null,
+    });
+    return {
+      command: SANDBOX_EXEC,
+      args: ['-f', sb.profilePath, '/usr/bin/env', ...seatbeltEnvArgs(sb.env),
+        MACOS_BASH, ENTRYPOINT, ...withClaude(targetCommand, command)],
+      docker: false,
+      stateDir: null,
+      seatbeltDir: sb.dir,
+      gitBrokerProc: null,
+      gitBrokerDir: null,
+      commitGuardDir: null,
+    };
+  }
   const { command, installDir } = resolveApp(app);
   const bwrapArgs = buildBwrapArgs({
     cwd,
@@ -1735,6 +1853,51 @@ export function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, mcpSoc
   }
 
   const { command, installDir } = resolveApp(app, claudeBin);
+
+  // macOS: sandbox-exec (Seatbelt) instead of bwrap/rootlesskit. No mount
+  // isolation (deny-by-default file policy instead), no nested dockerd, and
+  // the host node/scripts/sockets are directly visible, so fixed in-sandbox
+  // paths become host paths (see buildSeatbeltLaunch). The persistent-HOME /
+  // git-broker / commit-guard setup above is shared with the Linux path.
+  if (IS_MACOS) {
+    if (cfgDocker) {
+      console.warn('[sandbox] docker is disabled on macOS (sandbox-exec cannot host a nested dockerd); launching without docker.');
+    }
+    let sbTools = tools;
+    if (tools.rtk) {
+      console.warn('[sandbox] rtk provisioning is disabled on macOS (no macOS binary pinned); launching without rtk.');
+      sbTools = { ...tools, rtk: false, rtkSpec: null };
+    }
+    const sb = buildSeatbeltLaunch({
+      cwd, hostHome: HOME, homeDir, sandboxPathBase: SANDBOX_PATH,
+      nodeBin: realpathSync(process.execPath), serverDir: __dirname,
+      scripts: seatbeltScripts(), ssh: seatbeltSsh(),
+      gitBroker,
+      commitGuard: commitGuard ? { configPath: commitGuard.configPath } : null,
+      sockets: {
+        mcp: mcpSocketPath, notify: notifySocketPath, usage: usageSocketPath,
+        meta: metaSocketPath, reviewer: reviewerSocketPath,
+      },
+      extraBinds: binds, extraEnv: env, authSock, claudeDir: installDir,
+      orchestratorClaudeMdSrc, gitCommonDir, groupFilesDir, tools: sbTools,
+    });
+    // gpg needs no extra wiring here: with no mounts the host agent/config
+    // paths stay reachable under the profile's allow rules.
+    const seatbeltCmd = app === 'commandcode'
+      ? [MACOS_BASH, ENTRYPOINT, sb.nodeBin, ...withClaude(targetCommand, command)]
+      : [MACOS_BASH, ENTRYPOINT, ...withClaude(targetCommand, command)];
+    return {
+      command: SANDBOX_EXEC,
+      args: ['-f', sb.profilePath, '/usr/bin/env', ...seatbeltEnvArgs(sb.env), ...seatbeltCmd],
+      docker: false,
+      stateDir: null,
+      seatbeltDir: sb.dir,
+      gitBrokerProc: gitBroker ? gitBroker.proc : null,
+      gitBrokerDir: gitBroker ? gitBroker.dir : null,
+      commitGuardDir: commitGuard ? commitGuard.dir : null,
+    };
+  }
+
   const bwrapArgs = buildBwrapArgs({ cwd, docker, gpg, extraBinds: binds, extraEnv: env, authSock, stateDir, claudeDir: installDir, gitBroker, commitGuard, mcpSocketPath, notifySocketPath, usageSocketPath, metaSocketPath, reviewerSocketPath, homeDir, orchestratorClaudeMdSrc, gitCommonDir, groupFilesDir, app, tools });
   // command-code's launcher is a Node script. Run it explicitly via the
   // sandbox's node binary, bypassing the #!/usr/bin/env shebang which would
