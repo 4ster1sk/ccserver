@@ -175,12 +175,22 @@ test('buildSeatbeltLaunch wires gitBroker shims and merges GIT_CONFIG_COUNT', ()
     sockets: { notify: join(brokerDir, 'notify.sock') },
   }));
   trackDir(sb.dir);
-  for (const name of ['gh', 'ccserver-git-ssh', 'ccserver-git-credential-helper']) {
+  for (const name of ['gh', 'ssh', 'ccserver-git-ssh', 'ccserver-git-credential-helper']) {
     const p = join(sb.binDir, name);
     assert.ok(existsSync(p), `${name} shim exists`);
     assert.ok(statSync(p).mode & 0o111, `${name} shim is executable`);
     assert.ok(readFileSync(p, 'utf-8').includes(process.execPath), `${name} shim execs the host node`);
   }
+  // The per-launch ssh config points UserKnownHostsFile at host paths (the
+  // shared sandbox-ssh-config pins bwrap's fixed in-sandbox paths, which no
+  // mount provides here), and CCSANDBOX_SSH_CONFIG follows it.
+  const sshConfig = join(sb.dir, 'ssh-config');
+  assert.ok(existsSync(sshConfig), 'per-launch ssh config exists');
+  const sshConfigText = readFileSync(sshConfig, 'utf-8');
+  assert.ok(sshConfigText.includes('UserKnownHostsFile /nonexistent-known-hosts'), 'known_hosts uses host paths');
+  assert.ok(sshConfigText.includes('StrictHostKeyChecking yes'));
+  assert.ok(!sshConfigText.includes('/ccserver-sandbox-known-hosts'), 'no bwrap fixed paths');
+  assert.equal(sb.env.CCSANDBOX_SSH_CONFIG, sshConfig);
   const hook = join(sb.hooksDir, 'commit-msg');
   assert.ok(existsSync(hook), 'commit-msg hook shim exists');
   assert.equal(sb.env.GIT_CONFIG_COUNT, '3');
@@ -199,6 +209,7 @@ test('buildSeatbeltLaunch wires gitBroker shims and merges GIT_CONFIG_COUNT', ()
   const text = readFileSync(sb.profilePath, 'utf-8');
   assert.ok(text.includes(`(literal "${join(brokerDir, 'broker.sock')}")`), 'broker socket is reachable');
   assert.ok(text.includes(`(literal "${join(brokerDir, 'notify.sock')}")`), 'notify socket is reachable');
+  assert.ok(text.includes(`(literal "${sshConfig}")`), 'ssh config is readable');
 });
 
 test('buildSeatbeltLaunch sets CCSANDBOX_MCP_SOCK for group sessions', () => {
@@ -320,7 +331,13 @@ test('gitBroker env carries credential.useHttpPath (bwrap parity)', () => {
 });
 
 test('sandbox HOME gitconfig is deny-pinned (no agent helper injection)', () => {
-  const sb = buildSeatbeltLaunch(baseOpts());
+  // Pins apply while the broker is on (broker-issued tokens must not land in
+  // an agent-written helper); without a broker both files stay writable.
+  const brokerDir = mkdtempSync(join(tmpdir(), 'ccserver-seatbelt-broker-'));
+  DIRS.push(brokerDir);
+  const sb = buildSeatbeltLaunch(baseOpts({
+    gitBroker: { sockPath: join(brokerDir, 'broker.sock'), allowlistPath: join(brokerDir, 'allow.json'), dir: brokerDir },
+  }));
   trackDir(sb.dir);
   const text = readFileSync(sb.profilePath, 'utf-8');
   assert.ok(text.includes(`^${escapeSeatbeltRegex(join(sb.homeDir, '.gitconfig'))}$`));
@@ -438,7 +455,12 @@ test('gitconfig deny pins cover both spellings of a symlinked HOME', () => {
   symlinkSync(realHome, linkHome);
   const homeDir = join(linkHome, 'home');
   mkdirSync(homeDir, { recursive: true });
-  const sb = buildSeatbeltLaunch(baseOpts({ homeDir }));
+  const brokerDir = mkdtempSync(join(tmpdir(), 'ccserver-seatbelt-broker-'));
+  DIRS.push(brokerDir);
+  const sb = buildSeatbeltLaunch(baseOpts({
+    homeDir,
+    gitBroker: { sockPath: join(brokerDir, 'broker.sock'), allowlistPath: join(brokerDir, 'allow.json'), dir: brokerDir },
+  }));
   trackDir(sb.dir);
   const text = readFileSync(sb.profilePath, 'utf-8');
   assert.ok(text.includes(`^${escapeSeatbeltRegex(join(homeDir, '.gitconfig'))}$`), 'raw spelling pinned');
@@ -446,6 +468,40 @@ test('gitconfig deny pins cover both spellings of a symlinked HOME', () => {
     text.includes(`^${escapeSeatbeltRegex(join(realHome, 'home', '.gitconfig'))}$`),
     'realpath spelling pinned',
   );
+});
+
+test('gitconfig deny pins apply only while the git broker is on', () => {
+  // Without a broker there are no broker-issued tokens to steal, and bwrap
+  // leaves both files agent-writable -- `git config --global` must keep
+  // working in a persistent HOME.
+  const homeDir = mkdtempSync(join(tmpdir(), 'ccserver-seatbelt-home-'));
+  DIRS.push(homeDir);
+  const sb = buildSeatbeltLaunch(baseOpts({ homeDir, gitBroker: null }));
+  trackDir(sb.dir);
+  const text = readFileSync(sb.profilePath, 'utf-8');
+  assert.ok(!text.includes('/\\.gitconfig$")'), 'no .gitconfig pin without a broker');
+  assert.ok(!text.includes('git/config'), 'no xdg git config pin without a broker');
+});
+
+test('buildSeatbeltProfileText denies real gh binaries for process-exec', () => {
+  const text = buildSeatbeltProfileText({ denyExecLiterals: ['/opt/homebrew/bin/gh', '/tmp/we"ird/gh'] });
+  assert.ok(text.includes('(deny process-exec (literal "/opt/homebrew/bin/gh") (literal "/tmp/we\\"ird/gh"))'));
+});
+
+test('buildSeatbeltLaunch pins ghPaths only while the git broker is on', () => {
+  const brokerDir = mkdtempSync(join(tmpdir(), 'ccserver-seatbelt-broker-'));
+  DIRS.push(brokerDir);
+  const gitBroker = { sockPath: join(brokerDir, 'broker.sock'), allowlistPath: join(brokerDir, 'allow.json'), dir: brokerDir };
+  const sb = buildSeatbeltLaunch(baseOpts({ gitBroker, ghPaths: ['/opt/homebrew/bin/gh', '/usr/bin/gh'] }));
+  trackDir(sb.dir);
+  const text = readFileSync(sb.profilePath, 'utf-8');
+  assert.ok(text.includes('(deny process-exec (literal "/opt/homebrew/bin/gh") (literal "/usr/bin/gh"))'), 'real gh denied');
+  const denyExecs = text.split('\n').filter((l) => l.includes('deny process-exec')).join('\n');
+  assert.ok(!denyExecs.includes(join(sb.binDir, 'gh')), 'PATH shim itself is never denied');
+  const sbOff = buildSeatbeltLaunch(baseOpts({ gitBroker: null, ghPaths: ['/opt/homebrew/bin/gh'] }));
+  trackDir(sbOff.dir);
+  const textOff = readFileSync(sbOff.profilePath, 'utf-8');
+  assert.ok(!textOff.includes('(literal "/opt/homebrew/bin/gh")'), 'no gh pin without a broker');
 });
 
 test('seatbeltEnvArgs serializes K=V pairs for /usr/bin/env', () => {

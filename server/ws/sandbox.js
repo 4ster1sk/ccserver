@@ -1662,6 +1662,17 @@ function seatbeltSsh() {
   };
 }
 
+function seatbeltGhPaths() {
+  // Same candidate set buildBwrapArgs ro-binds the gh wrapper over: deny the
+  // real binaries for process-exec while the git broker is on, so gh is only
+  // reachable through the PATH shim (the wrapper relays to the git broker on
+  // the host and never execs gh in-sandbox, so the pins cannot break
+  // brokered gh).
+  return [...new Set(
+    [which('gh'), '/usr/bin/gh', '/usr/local/bin/gh', '/opt/homebrew/bin/gh', join(HOME, '.local', 'bin', 'gh')].filter(Boolean),
+  )].filter((p) => existsSync(p));
+}
+
 // Minimal sandbox: just enough to launch an agent CLI in an isolated
 // filesystem, with NO docker, gpg, ssh, or extra binds. bwrap creates its own
 // user namespace (--unshare-user) and network stays shared with the host (so
@@ -1887,6 +1898,7 @@ export function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, mcpSoc
         cwd, hostHome: HOME, homeDir, sandboxPathBase: SANDBOX_PATH,
         nodeBin: realpathSync(process.execPath),
         scripts: seatbeltScripts(), ssh: seatbeltSsh(),
+        ghPaths: seatbeltGhPaths(),
         gitBroker,
         commitGuard: commitGuard ? { configPath: commitGuard.configPath } : null,
         sockets: {

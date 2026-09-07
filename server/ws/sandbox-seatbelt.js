@@ -91,6 +91,7 @@ export function buildSeatbeltProfileText({
   reAllowReadRegexes = [],
   denyWriteRegexes = [],
   denyReadRegexes = [],
+  denyExecLiterals = [],
 } = {}) {
   const line = (op, sel) => `  (${op} ${sel})`;
   const regexes = (list) => list.map((r) => `(regex #"${r}")`).join(' ');
@@ -111,9 +112,16 @@ export function buildSeatbeltProfileText({
     '(deny process-exec (literal "/usr/bin/pbcopy"))',
     '(deny process-exec (literal "/usr/bin/pbpaste"))',
     '(deny process-exec (literal "/usr/bin/open"))',
-    '(deny process-exec (literal "/usr/bin/screencapture"))',
-    '(allow signal (target self))',
-    '(allow sysctl-read)',
+  '(deny process-exec (literal "/usr/bin/screencapture"))',
+  // Real gh binaries are denied so gh is reachable only via the PATH shim
+  // (the wrapper relays to the git broker; nothing execs gh in-sandbox).
+  // Deny beats allow in Seatbelt regardless of position, so these pins work
+  // both before and after the broad process-exec allow above.
+  ...(denyExecLiterals.length > 0
+    ? [`(deny process-exec ${denyExecLiterals.map((p) => `(literal "${escapeSeatbeltLiteral(p)}")`).join(' ')})`]
+    : []),
+  '(allow signal (target self))',
+  '(allow sysctl-read)',
     '(allow mach-lookup)',
     '(allow network*)',
     '',
@@ -191,6 +199,10 @@ function expandAgainstHome(p, hostHome) {
 //   claudeDir      - extra agent install dir | null
 //   orchestratorClaudeMdSrc / gitCommonDir / groupFilesDir - like bwrap
 //   tools          - resolved opt-in tool specs | null
+//   ghPaths        - real gh binary candidates (from sandbox.js, same set
+//                    buildBwrapArgs ro-binds the wrapper over): denied for
+//                    process-exec while the git broker is on, so gh is
+//                    reachable only via the PATH shim
 //
 // Returns { dir, profilePath, binDir, hooksDir, homeDir, ruleCopies, nodeBin,
 // env }. `dir` is the single teardown unit (also covers the throwaway HOME
@@ -217,6 +229,7 @@ export function buildSeatbeltLaunch({
   gitCommonDir = null,
   groupFilesDir = null,
   tools = null,
+  ghPaths = [],
 }) {
   const launchId = randomUUID();
   const dir = join(seatbeltBaseDir(), `ccserver-seatbelt-${launchId}`);
@@ -268,6 +281,29 @@ export function buildSeatbeltLaunch({
       shim('gh', scripts.ghWrapper);
       credHelperShim = shim('ccserver-git-credential-helper', scripts.credHelper);
       if (ssh.realSsh) sshShim = shim('ccserver-git-ssh', scripts.sshWrapper);
+      // bwrap binds the ssh wrapper OVER the real ssh binary, so every ssh
+      // invocation (not just git's) passes the allowlist gate. Seatbelt has
+      // no mounts: the PATH-prepended binDir is the closest equivalent, so
+      // cover plain `ssh` resolution too. An absolute-path launch of the
+      // real ssh still bypasses the gate (documented in docs-site).
+      if (ssh.realSsh) shim('ssh', scripts.sshWrapper);
+    }
+    // The shared sandbox-ssh-config pins UserKnownHostsFile at bwrap's fixed
+    // in-sandbox paths, which no mount provides here -- every host would
+    // fail StrictHostKeyChecking. Emit a seatbelt variant pointing at the
+    // host known_hosts paths (registered as read literals below).
+    let sshConfigPath = ssh.configFile;
+    if (ssh.realSsh) {
+      sshConfigPath = join(dir, 'ssh-config');
+      writeFileSync(sshConfigPath, [
+        '# Seatbelt variant of sandbox-ssh-config: same skip-system-config',
+        '# posture, but UserKnownHostsFile uses host paths (there are no',
+        "# mounts to provide bwrap's fixed in-sandbox paths).",
+        'Host *',
+        `\tUserKnownHostsFile ${[ssh.userKnownHosts, ssh.knownHostsDefault].filter(Boolean).join(' ') || '/dev/null'}`,
+        '\tStrictHostKeyChecking yes',
+        '',
+      ].join('\n'), { mode: 0o600 });
     }
     if (commitGuard) {
       const p = join(hooksDir, 'commit-msg');
@@ -315,7 +351,7 @@ export function buildSeatbeltLaunch({
       env.GIT_CONFIG_NOSYSTEM = '1';
       if (ssh.realSsh) {
         env.CCSANDBOX_REAL_SSH = ssh.realSsh;
-        env.CCSANDBOX_SSH_CONFIG = ssh.configFile;
+        env.CCSANDBOX_SSH_CONFIG = sshConfigPath;
         // git runs this through sh -c: quote the shim path so spaces in
         // $TMPDIR / CCSERVER_SANDBOX_SEATBELT_TMP cannot split it.
         env.GIT_SSH_COMMAND = shQuote(sshShim);
@@ -439,17 +475,21 @@ export function buildSeatbeltLaunch({
     if (gitBroker) sockPaths.push(gitBroker.sockPath);
     // A forwarded ssh-agent socket needs an explicit rule: connect() is a
     // write, and custom locations (e.g. 1Password's ~/Library socket) fall
-    // outside every allow tree above.
-    if (authSock) sockPaths.push(authSock);
+    // outside every allow tree above. Both spellings (see pathVariants).
+    if (authSock) sockPaths.push(...pathVariants(authSock));
     for (const s of new Set(sockPaths)) {
       readLiterals.push(s);
       writeLiterals.push(s); // connect() needs write
     }
     if (gitBroker) readLiterals.push(gitBroker.allowlistPath);
     if (commitGuard) readLiterals.push(commitGuard.configPath);
-    if (ssh.userKnownHosts) readLiterals.push(ssh.userKnownHosts);
-    if (ssh.knownHostsDefault) readLiterals.push(ssh.knownHostsDefault);
-    if (ssh.configFile) readLiterals.push(ssh.configFile);
+    // Both spellings (see pathVariants): a server tree or HOME under a
+    // symlink would otherwise read-deny these via the other spelling.
+    if (ssh.userKnownHosts) readLiterals.push(...pathVariants(ssh.userKnownHosts));
+    if (ssh.knownHostsDefault) readLiterals.push(...pathVariants(ssh.knownHostsDefault));
+    // The per-launch seatbelt ssh config above (or the shared file when no
+    // real ssh exists, kept for completeness though nothing reads it then).
+    if (sshConfigPath) readLiterals.push(...pathVariants(sshConfigPath));
     if (orchestratorClaudeMdSrc) readLiterals.push(orchestratorClaudeMdSrc);
 
     // Every deny pin must cover both spellings Seatbelt may see: under the
@@ -471,16 +511,21 @@ export function buildSeatbeltLaunch({
     const denyWriteRegexes = [
       ...subtrees(join(hostHome, '.ssh')),
       ...subtrees(join(hostHome, '.config', 'gh')),
-    // The sandbox HOME's own gitconfig stays unwritable (bwrap ro-binds
-    // GENERATED_GITCONFIG over it for the same reason): an agent-written
-    // credential.helper there would otherwise receive broker-issued tokens
-    // via `credential store`, exfiltrating them past the allowlist. git
-    // also reads $XDG_CONFIG_HOME/git/config (default ~/.config/git/config,
-    // checked BEFORE ~/.gitconfig): without this deny, the .gitconfig pin
-    // above is trivially bypassed. (Repo-local .git/config and GIT_CONFIG_*
-    // overrides stay agent-reachable by design -- same as bwrap.)
-    ...exactPins('.gitconfig', effectiveHome),
-    ...exactPins(join('.config', 'git', 'config'), effectiveHome),
+      // With the git broker on, the sandbox HOME's gitconfig stays
+      // unwritable (bwrap ro-binds GENERATED_GITCONFIG over it for the same
+      // reason): an agent-written credential.helper there would otherwise
+      // receive broker-issued tokens via `credential store`, exfiltrating
+      // them past the allowlist. git also reads ~/.config/git/config
+      // (checked BEFORE ~/.gitconfig): without this deny the .gitconfig pin
+      // is trivially bypassed. With gitBroker off there are no
+      // broker-issued tokens to steal and bwrap leaves both files
+      // agent-writable -- match it, so `git config --global` keeps working
+      // in a persistent HOME. (Repo-local .git/config and GIT_CONFIG_*
+      // overrides stay agent-reachable by design -- same as bwrap.)
+      ...(gitBroker ? [
+        ...exactPins('.gitconfig', effectiveHome),
+        ...exactPins(join('.config', 'git', 'config'), effectiveHome),
+      ] : []),
       // Pin the read-only invariant explicitly: the runtime dir lives under
       // TMPDIR, which the broad tmp write rules above also match -- deny wins
       // over allow, so shims/hooks/profile stay immutable even so.
@@ -537,6 +582,13 @@ export function buildSeatbeltLaunch({
     siblingDenyWriteRegexes: siblingDeny, siblingDenyReadRegexes: siblingDeny,
     reAllowWriteRegexes: ownReAllow, reAllowReadRegexes: ownReAllow,
     denyWriteRegexes, denyReadRegexes: [],
+    // Mirror bwrap (gh wrapper bound over the real binaries only while the
+    // broker is on): with gitBroker off the agent may use its own gh, so the
+    // pins must not apply. The binDir shim itself is never in ghPaths, but
+    // filter it defensively so the PATH shim cannot be denied by mistake.
+    denyExecLiterals: gitBroker
+      ? [...new Set(ghPaths)].filter((p) => p && p !== join(binDir, 'gh'))
+      : [],
   });
     writeFileSync(profilePath, profileText, { mode: 0o600 });
     return { dir, profilePath, binDir, hooksDir, homeDir: effectiveHome, ruleCopies: ruleCopies.length > 0 ? ruleCopies : null, nodeBin, env };
