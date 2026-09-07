@@ -46,6 +46,7 @@ test('isInfrastructureError: infra failures surface as 500, request rejections s
   assert.equal(isInfrastructureError('Failed to build sandbox: bwrap not found'), true);
   assert.equal(isInfrastructureError('Failed to spawn "claude": spawn ENOENT'), true);
   assert.equal(isInfrastructureError('Cannot launch: sandbox.config.json sets "forceSandbox": true, but bwrap is not available on this host. Install bwrap (bubblewrap) or disable forceSandbox.'), true);
+  assert.equal(isInfrastructureError('Failed to build sandbox: bwrap is not available on this host. Install bwrap (bubblewrap) or launch without the sandbox.'), true);
   // Request-as-given rejections must keep mapping to 400.
   assert.equal(isInfrastructureError('Cannot launch: copilot is hidden on this server (sandbox.config.json\'s "hiddenApps"). Remove it from hiddenApps to allow launches.'), false);
   assert.equal(isInfrastructureError('Cannot launch: codex is not installed on this server (searched /usr/bin).'), false);
@@ -63,6 +64,7 @@ test('orchestratorRestartFailureStatus: infra faults are 500, request rejections
   assert.equal(orchestratorRestartFailureStatus('Failed to build sandbox: bwrap not found'), 500);
   assert.equal(orchestratorRestartFailureStatus('Failed to spawn "claude": spawn ENOENT'), 500);
   assert.equal(orchestratorRestartFailureStatus('Cannot launch: sandbox.config.json sets "forceSandbox": true, but bwrap is not available.'), 500);
+  assert.equal(orchestratorRestartFailureStatus('Failed to build sandbox: bwrap is not available on this host. Install bwrap (bubblewrap) or launch without the sandbox.'), 500);
   // Request-as-given rejections -- including the sandbox-home conflict, which
   // is a state conflict (close the using tab first), not an infra fault.
   assert.equal(orchestratorRestartFailureStatus('Cannot launch: copilot is hidden on this server.'), 400);
@@ -81,6 +83,7 @@ test('launchFailureCode: POST /groups launch failures split internal/validation 
   assert.equal(launchFailureCode('Failed to build sandbox: bwrap not found'), 'internal');
   assert.equal(launchFailureCode('Failed to spawn "codex": spawn ENOENT'), 'internal');
   assert.equal(launchFailureCode('Cannot launch: sandbox.config.json sets "forceSandbox": true, but bwrap is not available.'), 'internal');
+  assert.equal(launchFailureCode('Failed to build sandbox: bwrap is not available on this host. Install bwrap (bubblewrap) or launch without the sandbox.'), 'internal');
   assert.equal(launchFailureCode('Cannot launch: copilot is hidden on this server.'), 'validation');
   assert.equal(launchFailureCode('Cannot launch: codex is not installed on this server (searched /usr/bin).'), 'validation');
   assert.equal(launchFailureCode('Cannot launch in the filesystem root (/) -- claude aborts immediately there. Choose a working directory first.'), 'validation');
