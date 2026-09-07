@@ -19,7 +19,7 @@
 
 import { copyFileSync, existsSync, mkdirSync, realpathSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 
 // Base dir for per-launch seatbelt runtime dirs. os.tmpdir() honors $TMPDIR,
@@ -422,6 +422,16 @@ export function buildSeatbeltLaunch({
     if (ssh.configFile) readLiterals.push(ssh.configFile);
     if (orchestratorClaudeMdSrc) readLiterals.push(orchestratorClaudeMdSrc);
 
+    // Every deny pin must cover both spellings Seatbelt may see: under the
+    // per-user TMPDIR, macOS resolves /var/... to /private/var/..., and a
+    // pin built from a not-yet-existing file (profile, .gitconfig) would
+    // silently keep only the raw spelling via pathVariants(). Derive both
+    // spellings from the existing parent dir instead.
+    const exactPins = (name, existingParent) =>
+      pathVariants(existingParent).map((p) => `^${escapeSeatbeltRegex(join(p, name))}$`);
+    // Sibling launch-dir denies need both spellings of the base dir as well.
+    const siblingDeny = pathVariants(seatbeltBaseDir()).map((base) =>
+      `^${escapeSeatbeltRegex(base)}/ccserver-seatbelt-(?!${escapeSeatbeltRegex(launchId)}([/]|$))`);
     // Raw keys / gh tokens are never reachable (mirrors bwrap's
     // BLOCKED_BIND_PATHS, unconditionally even with gitBroker off).
     const denyWriteRegexes = [
@@ -435,28 +445,25 @@ export function buildSeatbeltLaunch({
     // checked BEFORE ~/.gitconfig): without this deny, the .gitconfig pin
     // above is trivially bypassed. (Repo-local .git/config and GIT_CONFIG_*
     // overrides stay agent-reachable by design -- same as bwrap.)
-    ...pathVariants(join(effectiveHome, '.gitconfig')).map((p) => `^${escapeSeatbeltRegex(p)}$`),
-    ...pathVariants(join(effectiveHome, '.config', 'git', 'config'))
-      .map((p) => `^${escapeSeatbeltRegex(p)}$`),
+    ...exactPins('.gitconfig', effectiveHome),
+    ...exactPins(join('.config', 'git', 'config'), effectiveHome),
       // Pin the read-only invariant explicitly: the runtime dir lives under
       // TMPDIR, which the broad tmp write rules above also match -- deny wins
       // over allow, so shims/hooks/profile stay immutable even so.
       ...subtrees(binDir),
       ...subtrees(hooksDir),
-      ...pathVariants(profilePath).map((p) => `^${escapeSeatbeltRegex(p)}$`),
+      ...exactPins(basename(profilePath), dir),
       // Sibling seatbelt launch dirs are same-UID writable under the broad
       // tmp rules (0o700 is per-UID, not per-session): without this pin one
       // sandboxed session can rewrite another session's shims/hooks/profile
       // -- the dirs' contents are exec'd by that session's git/gh/commit
       // invocations. The negative lookahead excludes our own dir; the
       // pattern also covers dirs created after this profile was built.
-      `^${escapeSeatbeltRegex(seatbeltBaseDir())}/ccserver-seatbelt-(?!${escapeSeatbeltRegex(launchId)}([/]|$))`,
+      ...siblingDeny,
     ];
     // Same pin for reads: sibling profiles reveal host paths and broker
     // socket locations that have no business crossing sessions.
-    const denyReadRegexes = [
-      `^${escapeSeatbeltRegex(seatbeltBaseDir())}/ccserver-seatbelt-(?!${escapeSeatbeltRegex(launchId)}([/]|$))`,
-    ];
+    const denyReadRegexes = [...siblingDeny];
     // Orchestrator rule overlay: bwrap shadows CLAUDE.md/AGENTS.md read-only by
     // ro-binding the generated file over cwd's copies. Seatbelt has no mounts,
     // so materialize the generated rules into the orchestrator's managed cwd

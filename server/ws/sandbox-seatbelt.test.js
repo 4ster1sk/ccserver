@@ -10,7 +10,7 @@
 
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir, homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import {
@@ -387,6 +387,50 @@ test('sibling launch dirs are deny-pinned for read and write', () => {
   const denyReads = text.split('\n').filter((l) => l.includes('(deny file-read*')).join('\n');
   assert.ok(denyWrites.includes('ccserver-seatbelt-(?!'), 'write pin covers siblings');
   assert.ok(denyReads.includes('ccserver-seatbelt-(?!'), 'read pin covers siblings');
+});
+
+test('sibling deny pins cover both raw and realpath spellings of the base', () => {
+  // seatbeltBaseDir() under a symlink: deny pins must carry both spellings,
+  // or the other spelling walks around the pin via the broad tmp allows.
+  const realBase = mkdtempSync(join(tmpdir(), 'ccserver-seatbelt-realbase-'));
+  DIRS.push(realBase);
+  const linkBase = join(tmpRoot, 'base-link');
+  symlinkSync(realBase, linkBase);
+  const prev = process.env.CCSERVER_SANDBOX_SEATBELT_TMP;
+  process.env.CCSERVER_SANDBOX_SEATBELT_TMP = linkBase;
+  try {
+    const sb = buildSeatbeltLaunch(baseOpts());
+    trackDir(sb.dir);
+    const text = readFileSync(sb.profilePath, 'utf-8');
+    assert.ok(
+      text.includes(`^${escapeSeatbeltRegex(linkBase)}/ccserver-seatbelt-(?!`),
+      'raw base spelling pinned',
+    );
+    assert.ok(
+      text.includes(`^${escapeSeatbeltRegex(realBase)}/ccserver-seatbelt-(?!`),
+      'realpath base spelling pinned',
+    );
+  } finally {
+    if (prev === undefined) delete process.env.CCSERVER_SANDBOX_SEATBELT_TMP;
+    else process.env.CCSERVER_SANDBOX_SEATBELT_TMP = prev;
+  }
+});
+
+test('gitconfig deny pins cover both spellings of a symlinked HOME', () => {
+  const realHome = mkdtempSync(join(tmpdir(), 'ccserver-seatbelt-realhome-'));
+  DIRS.push(realHome);
+  const linkHome = join(tmpRoot, 'home-link');
+  symlinkSync(realHome, linkHome);
+  const homeDir = join(linkHome, 'home');
+  mkdirSync(homeDir, { recursive: true });
+  const sb = buildSeatbeltLaunch(baseOpts({ homeDir }));
+  trackDir(sb.dir);
+  const text = readFileSync(sb.profilePath, 'utf-8');
+  assert.ok(text.includes(`^${escapeSeatbeltRegex(join(homeDir, '.gitconfig'))}$`), 'raw spelling pinned');
+  assert.ok(
+    text.includes(`^${escapeSeatbeltRegex(join(realHome, 'home', '.gitconfig'))}$`),
+    'realpath spelling pinned',
+  );
 });
 
 test('seatbeltEnvArgs serializes K=V pairs for /usr/bin/env', () => {
