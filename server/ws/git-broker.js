@@ -48,6 +48,7 @@
 // before plan8.
 
 import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { createServer } from 'node:net';
 import { execFileSync, spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
@@ -63,8 +64,18 @@ const GH_EXEC_MAX_BYTES = 10 * 1024 * 1024;
 const __filename = fileURLToPath(import.meta.url);
 
 const UID = typeof process.getuid === 'function' ? process.getuid() : 0;
+// Host runtime dir for broker sockets and other per-launch state.
+// XDG_RUNTIME_DIR wins when set; otherwise Linux uses /run/user/<uid> while
+// macOS -- which has no /run -- falls back to the per-user tmpdir (same
+// precedent as seatbeltBaseDir in sandbox-seatbelt.js). Without the darwin
+// branch every git-backed sandbox launch on macOS would fail at mkdir.
+export function hostRuntimeDir() {
+  if (process.env.XDG_RUNTIME_DIR) return process.env.XDG_RUNTIME_DIR;
+  if (process.platform === 'darwin') return join(tmpdir(), `ccserver-runtime-${UID}`);
+  return `/run/user/${UID}`;
+}
 function runtimeBase() {
-  return process.env.XDG_RUNTIME_DIR || `/run/user/${UID}`;
+  return hostRuntimeDir();
 }
 
 function fetchToken() {
