@@ -748,6 +748,15 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
       },
     });
     } catch (err) {
+      // The sandbox (if any) was already built by this point -- clean up what
+      // buildSandboxSpawn created (brokers, guard/profile dirs), mirroring
+      // pty-host's own spawn-failure path (see ptyStore.js). Otherwise a
+      // failed launch leaks a live broker process and its runtime dirs.
+      if (sandboxStateDir) { try { rmSync(sandboxStateDir, { recursive: true, force: true }); } catch { /* best effort */ } }
+      if (sandboxGitBrokerProc) { try { sandboxGitBrokerProc.kill('SIGTERM'); } catch { /* already dead */ } }
+      if (sandboxGitBrokerDir) { try { rmSync(sandboxGitBrokerDir, { recursive: true, force: true }); } catch { /* best effort */ } }
+      if (sandboxCommitGuardDir) { try { rmSync(sandboxCommitGuardDir, { recursive: true, force: true }); } catch { /* best effort */ } }
+      if (sandboxSeatbeltDir) { try { rmSync(sandboxSeatbeltDir, { recursive: true, force: true }); } catch { /* best effort */ } }
       return { sessionId: id, session: null, error: `Failed to spawn "${command}": ${err.message}` };
     }
   }

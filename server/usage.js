@@ -257,6 +257,9 @@ function capture() {
         env: { ...cleanEnv, TERM: 'xterm-256color', COLORTERM: 'truecolor' },
       });
     } catch (err) {
+      if (seatbeltDir) {
+        try { rmSync(seatbeltDir, { recursive: true, force: true }); } catch { /* best effort */ }
+      }
       resolve({ error: `Failed to launch claude: ${err.message}`, sandboxed });
       return;
     }

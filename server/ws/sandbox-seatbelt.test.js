@@ -1,7 +1,9 @@
 // macOS Seatbelt backend (sandbox-exec): profile generation, per-launch shim
 // layout, and env assembly. All pure assembly -- no sandbox-exec/pty runs --
 // and platform-independent, so this runs on Linux CI too (buildSeatbeltLaunch
-// itself never checks process.platform; only buildSandboxSpawn branches on it).
+// itself never checks process.platform; only buildSandboxSpawn branches on
+// it). The one exception is the final Linux-only backend-text test, which
+// carries an explicit skip guard (it would fail on macOS by design).
 //
 // Isolated via CCSERVER_SANDBOX_SEATBELT_TMP: every launch dir lands under a
 // temp root removed in after().
@@ -16,8 +18,10 @@ import {
   buildSeatbeltProfileText,
   escapeSeatbeltLiteral,
   escapeSeatbeltRegex,
+  pathVariants,
   seatbeltEnvArgs,
   subtreeRegex,
+  subtrees,
 } from './sandbox-seatbelt.js';
 import { forceSandboxUnavailableReason, sandboxBackend, sandboxUnavailableReason } from './sandbox.js';
 
@@ -218,6 +222,44 @@ test('buildSeatbeltLaunch skips blocked extra binds like bwrap does', () => {
   assert.ok(text.includes(subtreeRegex('/srv/shared')), 'legit extra bind is allowed');
 });
 
+test('profile allows pty ioctls and nested pty allocation', () => {
+  // isatty()/tcgetattr() on the inherited pty are file-ioctl operations;
+  // without these rules interactive CLIs cannot detect their TTY.
+  const text = buildSeatbeltProfileText({});
+  assert.ok(text.includes('(allow pseudo-tty)'));
+  assert.ok(text.includes('(allow file-ioctl (regex #"^/dev(/.*)?$"))'));
+});
+
+test('pathVariants registers both raw and realpath spellings', () => {
+  assert.deepEqual(pathVariants('/definitely-absent-path-xyz'), ['/definitely-absent-path-xyz']);
+  assert.ok(subtrees(tmpRoot).length >= 1);
+  assert.ok(subtrees(tmpRoot).every((r) => r.startsWith('^') && r.endsWith('(/.*)?$')));
+});
+
+test('gnupg opt-in exposes the keyring and sets GNUPGHOME', () => {
+  const sb = buildSeatbeltLaunch(baseOpts({ gnupg: true }));
+  trackDir(sb.dir);
+  assert.equal(sb.env.GNUPGHOME, join(HOME, '.gnupg'));
+  const text = readFileSync(sb.profilePath, 'utf-8');
+  assert.ok(text.includes(subtreeRegex(join(HOME, '.gnupg'))));
+});
+
+test('gnupg off by default: no keyring rule, no GNUPGHOME', () => {
+  const sb = buildSeatbeltLaunch(baseOpts());
+  trackDir(sb.dir);
+  assert.equal(sb.env.GNUPGHOME, undefined);
+  const text = readFileSync(sb.profilePath, 'utf-8');
+  assert.ok(!text.includes(subtreeRegex(join(HOME, '.gnupg'))));
+});
+
+test('forwarded ssh-agent socket gets an explicit allow rule', () => {
+  const sb = buildSeatbeltLaunch(baseOpts({ authSock: '/tmp/custom-agent.sock' }));
+  trackDir(sb.dir);
+  assert.equal(sb.env.SSH_AUTH_SOCK, '/tmp/custom-agent.sock');
+  const text = readFileSync(sb.profilePath, 'utf-8');
+  assert.ok(text.includes('(literal "/tmp/custom-agent.sock")'));
+});
+
 test('seatbeltEnvArgs serializes K=V pairs for /usr/bin/env', () => {
   assert.deepEqual(
     seatbeltEnvArgs({ HOME: '/tmp/h', PATH: '/a:/b c' }),
@@ -225,7 +267,7 @@ test('seatbeltEnvArgs serializes K=V pairs for /usr/bin/env', () => {
   );
 });
 
-test('sandboxBackend/sandboxUnavailableReason stay bwrap-flavored on Linux', () => {
+test('sandboxBackend/sandboxUnavailableReason stay bwrap-flavored on Linux', { skip: process.platform !== 'linux' }, () => {
   // This host is Linux: backend is bwrap when installed, else none -- never
   // seatbelt -- and the refusal text keeps its historical wording (asserted
   // byte-identically by routes/groups.test.js).

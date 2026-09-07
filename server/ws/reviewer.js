@@ -70,6 +70,7 @@ import { basename, dirname, join } from 'node:path';
 import { getDb } from '../db.js';
 import { projectHashForCwd } from './projectHash.js';
 import { loadSandboxConfig, persistentHomeDir, deleteSandboxHome } from './sandbox.js';
+import { hostRuntimeDir } from './git-broker.js';
 import { stripAnsi } from './mcpTools.js';
 // A plain in-process call, not the MCP path -- mirrors groupManager.js's
 // notifyWorktreeDataLoss (same "call sendNotification() directly on a
@@ -107,9 +108,7 @@ let reviewerBroker = null; // { server, sockPath, dir, connections } | null
 let stopBrokerFn = null;
 
 export function getReviewerSockPath() {
-  const base = process.env.XDG_RUNTIME_DIR
-    || (typeof process.getuid === 'function' ? `/run/user/${process.getuid()}` : '/tmp');
-  return join(base, REVIEWER_SOCKET_NAME);
+  return join(hostRuntimeDir(), REVIEWER_SOCKET_NAME);
 }
 
 // Whether the reviewer feature is on at all: an explicit opt-in flag in

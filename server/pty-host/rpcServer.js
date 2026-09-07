@@ -11,7 +11,8 @@
 // crashing the process.
 
 import { createServer } from 'node:net';
-import { rmSync } from 'node:fs';
+import { mkdirSync, rmSync } from 'node:fs';
+import { dirname } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { encodeFrame, FrameDecoder } from './protocol.js';
 
@@ -69,6 +70,10 @@ function dispatch(ptyStore, connId, { type, ...params }) {
 }
 
 export async function createRpcServer(ptyStore, { sockPath }) {
+  // The darwin default sock lives under tmpdir()/ccserver-runtime-<uid>,
+  // which nothing else creates (unlike Linux's logind-made /run/user/<uid>).
+  // 0o700 like git-broker's broker dir: keep the RPC socket private.
+  try { mkdirSync(dirname(sockPath), { recursive: true, mode: 0o700 }); } catch { /* listen() below reports real problems */ }
   try {
     rmSync(sockPath, { force: true });
   } catch {

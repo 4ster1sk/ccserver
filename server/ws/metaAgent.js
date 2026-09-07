@@ -28,6 +28,7 @@ import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { mkdirSync, chmodSync } from 'node:fs';
 import { loadSandboxConfig } from './sandbox.js';
+import { hostRuntimeDir } from './git-broker.js';
 
 const META_SOCKET_NAME = 'ccserver-meta.sock';
 
@@ -35,9 +36,7 @@ let metaBroker = null; // { server, sockPath, dir, connections } | null
 let stopBrokerFn = null;
 
 export function getMetaSockPath() {
-  const base = process.env.XDG_RUNTIME_DIR
-    || (typeof process.getuid === 'function' ? `/run/user/${process.getuid()}` : '/tmp');
-  return join(base, META_SOCKET_NAME);
+  return join(hostRuntimeDir(), META_SOCKET_NAME);
 }
 
 // The fixed, project-outside directory every meta-agent session runs in.

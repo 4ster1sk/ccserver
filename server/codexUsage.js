@@ -149,6 +149,9 @@ function capture() {
         env: { ...cleanEnv },
       });
     } catch (err) {
+      if (seatbeltDir) {
+        try { rmSync(seatbeltDir, { recursive: true, force: true }); } catch { /* best effort */ }
+      }
       resolve({ error: `Failed to launch codex: ${err.message}`, sandboxed });
       return;
     }
