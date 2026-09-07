@@ -116,17 +116,27 @@ test('no header box while the capability is unknown or present', async ({ page }
 
 test('double-click launch is also blocked when no launch can succeed', async ({ page }) => {
   await stubDirsHome(page, { ...HOME_RESPONSE, forceSandbox: true });
-  const posts = [];
-  await page.route('**/api/sessions', async (route) => {
-    if (route.request().method() !== 'POST') return route.fallback();
-    posts.push(route.request().postDataJSON());
-    return route.abort();
+  // The browser UI never uses POST /api/sessions for directory opens: it
+  // creates a local tab (App.openTerminalTab) and the new TerminalView sends
+  // a WS `init` to /ws/terminal. Intercepting POST would pass vacuously even
+  // with the launchesBlocked guard removed, so assert on the real effects:
+  // no terminal tab opens and no WS init is sent.
+  const wsInits = [];
+  page.on('websocket', (ws) => {
+    ws.on('framesent', (frame) => {
+      try {
+        const msg = JSON.parse(frame.payload);
+        if (msg?.type === 'init') wsInits.push(msg);
+      } catch { /* non-JSON control frames */ }
+    });
   });
   await page.goto('/');
+  await expect(page.locator('.dir-item').first()).toBeVisible();
   // Double-clicking a directory must not attempt a doomed launch.
   await page.locator('.dir-item').first().dblclick();
   await page.waitForTimeout(500);
-  expect(posts).toHaveLength(0);
+  await expect(page.locator('.terminal-container')).toHaveCount(0);
+  expect(wsInits).toHaveLength(0);
 });
 
 test('forceSandbox without bwrap disables the launch buttons', async ({ page }) => {
