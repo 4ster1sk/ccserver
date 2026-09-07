@@ -4,7 +4,7 @@ import { execFileSync } from 'node:child_process';
 import { writeFileSync, readFileSync, unlinkSync, rmSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { buildSandboxSpawn, resolveApp, sandboxAvailable, loadSandboxConfig, persistentHomeDir, dockerSandboxAvailable, dockerdStatus, dockerdLockHeld, resolveTools } from './sandbox.js';
+import { buildSandboxSpawn, resolveApp, sandboxAvailable, sandboxUnavailableReason, loadSandboxConfig, persistentHomeDir, dockerSandboxAvailable, dockerdStatus, dockerdLockHeld, resolveTools } from './sandbox.js';
 import { getGroupFilesDir, ensureGroupFilesDir } from './groupFiles.js';
 import { buildMcpConfigArgsAndEnv } from './mcpConfig.js';
 import { shouldInjectNotify, notifyEnabled, getNotifySockPath, notifyBrokerRunning } from './notify.js';
@@ -463,12 +463,7 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
   // (forceSandbox refusals keep their own message in the spawn branches
   // below, so this only covers the non-forced explicit request.)
   if (sandbox && !forceSandbox && !sandboxRequested) {
-    const reason = process.platform === 'win32'
-      ? 'the sandbox is Linux-only'
-      : 'bwrap is not available on this host';
-    const hint = process.platform === 'win32'
-      ? 'Launch without the sandbox.'
-      : 'Install bwrap (bubblewrap) or launch without the sandbox.';
+    const { reason, hint } = sandboxUnavailableReason();
     return {
       sessionId: id,
       session: null,
@@ -569,9 +564,7 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
         }
       }
     } else if (forceSandbox) {
-      const reason = process.platform === 'win32'
-        ? 'the sandbox is Linux-only'
-        : 'bwrap is not available on this host';
+      const { reason } = sandboxUnavailableReason();
       return {
         sessionId: id,
         session: null,
@@ -695,9 +688,7 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
         return { sessionId: id, session: null, error: `Failed to build sandbox: ${err.message}` };
       }
     } else if (forceSandbox) {
-      const reason = process.platform === 'win32'
-        ? 'the sandbox is Linux-only'
-        : 'bwrap is not available on this host';
+      const { reason } = sandboxUnavailableReason();
       return {
         sessionId: id,
         session: null,
