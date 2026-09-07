@@ -2030,8 +2030,18 @@ export function destroySession(id, { keepSchedule = true, reason = 'request' } =
     }
     // Orchestrator rule files materialized into the project dir by the
     // seatbelt backend (NOT under seatbeltDir -- unlink each best-effort).
+    // A successor launched from the same deterministic orchestratorDir
+    // (restart / scheduled auto-resume) owns the same paths: only unlink
+    // files no other registered session still references, or the successor's
+    // overlay is deleted out from under it mid-session.
     if (Array.isArray(session.sandboxSeatbeltFiles)) {
+      const stillReferenced = new Set();
+      for (const other of sessions.values()) {
+        if (other === session || !Array.isArray(other.sandboxSeatbeltFiles)) continue;
+        for (const f of other.sandboxSeatbeltFiles) stillReferenced.add(f);
+      }
       for (const f of session.sandboxSeatbeltFiles) {
+        if (stillReferenced.has(f)) continue;
         try { unlinkSync(f); } catch { /* best effort */ }
       }
     }

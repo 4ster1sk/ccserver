@@ -26,7 +26,7 @@ import { mkdirSync, statSync, rmSync, existsSync } from 'node:fs';
 import { basename, join, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import * as groupManager from '../ws/groupManager.js';
-import { createSession, getSession, isInfrastructureError } from '../ws/sessionManager.js';
+import { createSession, destroySession, getSession, isInfrastructureError } from '../ws/sessionManager.js';
 import { sandboxAvailable, sandboxUnavailableReason } from '../ws/sandbox.js';
 import { isValidApp } from '../ws/appLaunch.js';
 import { projectHashForCwd } from '../ws/projectHash.js';
@@ -441,6 +441,13 @@ export async function groupsRoute(fastify, opts) {
       if (s && !s.exited) {
         return reply.code(409).send({ error: 'orchestrator is still running' });
       }
+      // macOS seatbelt materializes the rule overlay as real files in the
+      // shared, deterministic orchestratorDir. An exited-but-not-yet-reaped
+      // session still references those paths and would unlink the successor's
+      // copies in its own teardown (destroySession's sandboxSeatbeltFiles
+      // block). It is already exited, so retiring it first breaks no
+      // atomicity guarantee (that only protects a live predecessor).
+      if (s) destroySession(existing, { keepSchedule: false, reason: 'orchestrator-restart' });
     }
 
     // Prefer the persisted launch app; fall back to the restored member's
