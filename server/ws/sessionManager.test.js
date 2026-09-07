@@ -21,7 +21,7 @@ import { randomUUID } from 'node:crypto';
 import { spawn as spawnProcess } from 'node:child_process';
 import Fastify from 'fastify';
 import { sessionsRoute } from '../routes/sessions.js';
-import { persistentHomeDir } from './sandbox.js';
+import { persistentHomeDir, sandboxAvailable, loadSandboxConfig } from './sandbox.js';
 import { metaAgentDir } from './metaAgent.js';
 import { findSessionLimitReset } from './sessionLimitDetect.js';
 import { getLatestSessionLimitReset } from '../sessionLimitState.js';
@@ -152,6 +152,18 @@ test('createSession stores the effective model (normalized); shells never carry 
   } finally {
     sessionManager.destroySession(res.sessionId, { keepSchedule: false });
   }
+});
+
+// An explicitly requested sandbox that cannot be built (bwrap missing) is
+// refused instead of silently falling back to a direct spawn -- running on
+// the host while the client believes it is sandboxed is worse than an error.
+// Runs only where bwrap is absent (mirrors the skip-unless-available sandbox
+// spawn tests); the refusal message keeps the 'Failed to build sandbox'
+// prefix so HTTP layers classify it as an infra fault.
+test('explicit sandbox request without bwrap is refused, not silently unsandboxed', { skip: sandboxAvailable() || loadSandboxConfig().forceSandbox }, async () => {
+  const res = await sessionManager.createSession({ cwd: '/tmp', cols: 80, rows: 24, shell: true, sandbox: true });
+  assert.equal(res.session, null, 'no session must be created');
+  assert.match(res.error, /^Failed to build sandbox: /);
 });
 
 // Permission mode state on sessions: any value normalizes to one of

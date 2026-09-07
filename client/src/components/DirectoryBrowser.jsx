@@ -24,6 +24,13 @@ const COMBO_DEFAULT_APPS = { workerA: 'claude', workerB: 'opencode', orchestrato
 const COMBO_WORKER_APPS = ['claude', 'opencode', 'codex'];
 // Every launchable app id, in the order pickers list them.
 const ALL_APPS = ['claude', 'opencode', 'copilot', 'codex', 'commandcode'];
+// bwrap-missing warning copy shared by the sandbox picker note and the
+// browser header banner, so the two can't drift apart (see PR#135 review).
+// The short title variant is used for disabled launch-button tooltips.
+const SANDBOX_UNAVAILABLE_NOTE = 'このサーバーにはbwrapがインストールされていないため、サンドボックス起動・コンボ起動はできません。通常起動をご利用ください。';
+const FORCE_SANDBOX_UNAVAILABLE_NOTE = 'サーバー設定 (forceSandbox) でサンドボックスが強制されていますが、このホストにbwrapが無いため起動できません。bwrapをインストールするか、サーバー設定を見直してください。';
+const LAUNCHES_BLOCKED_TITLE = 'サーバー設定でサンドボックスが強制されていますが、このホストにbwrapが無いため起動できません';
+
 // Hard cap mirrored from the server (MAX_GROUP_MEMBERS - 1 orchestrator).
 const MAX_COMBO_WORKERS = 7;
 
@@ -122,6 +129,12 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, ini
   // the sandbox toggle is overridden -- every launch is sandboxed and the
   // "通常起動" choice is disabled. Set from /api/dirs/home.
   const [forceSandbox, setForceSandbox] = useState(false);
+  // Whether bwrap exists on the server host (/api/dirs/home's
+  // sandboxAvailable). false disables the sandbox choice (and combo mode,
+  // which always requires the sandbox). null until the fetch resolves;
+  // while null everything stays enabled (old-server fallback, same as
+  // availableApps).
+  const [sandboxAvailable, setSandboxAvailable] = useState(null);
   // Which agent CLIs the server can actually launch ({ claude, opencode,
   // copilot, codex, commandcode } booleans), from /api/dirs/home. null until
   // the fetch resolves; while null every picker entry stays enabled
@@ -223,9 +236,10 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, ini
 
   const chooseSandbox = useCallback((val) => {
     if (forceSandbox) return; // server forbids unsandboxed launches
+    if (val && sandboxAvailable === false) return; // no bwrap on the server host
     setSandboxDefault(val);
     localStorage.setItem(SANDBOX_KEY, val ? '1' : '0');
-  }, [forceSandbox]);
+  }, [forceSandbox, sandboxAvailable]);
 
   const chooseApp = useCallback((val) => {
     if (hiddenApps.includes(val)) return; // operator hid this app
@@ -433,6 +447,24 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, ini
       if (data.forceSandbox) {
         setForceSandbox(true);
         setSandboxDefault(true);
+      }
+      // bwrap missing on the server host: the sandbox choice (and combo
+      // mode, which always requires it) cannot work. Correct a remembered
+      // sandbox default the same way stale app defaults are corrected
+      // below. Missing field = older server: leave everything enabled.
+      if (typeof data.sandboxAvailable === 'boolean') {
+        setSandboxAvailable(data.sandboxAvailable);
+        if (data.sandboxAvailable === false) {
+          // forceSandbox keeps the toggle locked on (launches fail
+          // server-side with the warning note); only correct the free
+          // choice, otherwise the checkmark would sit on 通常起動 while
+          // every launch is forced sandboxed.
+          if (!data.forceSandbox) {
+            setSandboxDefault(false);
+            try { localStorage.setItem(SANDBOX_KEY, '0'); } catch { /* ignore */ }
+          }
+          setLaunchMode('single');
+        }
       }
       // The privileged meta-agent feature is opt-in server-side; anything but
       // an explicit true (missing field = older server) keeps the mode
@@ -645,6 +677,16 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, ini
   // Sandbox choice + gpg/sshAgent suboptions for the single-launch pane.
   // The meta agent has no separate picker -- it inherits the global
   // sandboxDefault via the dedicated MetaLaunchDialog (see App.handleOpenMeta).
+  // Sandbox choice unavailable when bwrap is missing on the server host
+  // (combo mode is covered separately at its own toggle/button). Under
+  // forceSandbox the toggle stays locked on -- launches will fail
+  // server-side, and the note below says so.
+  const sandboxChoiceDisabled = sandboxAvailable === false && !forceSandbox;
+  // Contradictory server config (forceSandbox but no bwrap): no launch can
+  // succeed, so the launch buttons are disabled as well (fail-closed UI).
+  // null (fetch pending / older server) keeps everything enabled.
+  const launchesBlocked = forceSandbox && sandboxAvailable === false;
+  const launchesBlockedTitle = LAUNCHES_BLOCKED_TITLE;
   const sandboxPicker = (
     <>
       <div className="open-menu-sep" />
@@ -657,9 +699,9 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, ini
         通常起動
       </div>
       <div
-        className="open-menu-item"
+        className={`open-menu-item${sandboxChoiceDisabled ? ' open-menu-item-disabled' : ''}`}
         onClick={() => chooseSandbox(true)}
-        title={forceSandbox ? 'サーバー設定で強制' : ''}
+        title={forceSandbox ? 'サーバー設定で強制' : (sandboxChoiceDisabled ? 'サーバーにbwrapがインストールされていないため使えません' : '')}
       >
         <span className="open-menu-check">{sandboxDefault ? '✓' : ''}</span>
         🔒 サンドボックスで起動
@@ -699,9 +741,13 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, ini
         </label>
       </div>
       <p className="open-menu-note">
-        {forceSandbox
-          ? 'サンドボックスがサーバー設定 (forceSandbox) で強制されています。通常起動はできません。'
-          : `サンドボックス: 隣接プロジェクトを隔離し、内部に rootless docker を用意。初期値は一般設定で変更でき、このディレクトリ (${displayPath(currentPath, homeDir)}) に記憶されます。`}
+        {forceSandbox && sandboxAvailable === false
+          ? FORCE_SANDBOX_UNAVAILABLE_NOTE
+          : forceSandbox
+            ? 'サンドボックスがサーバー設定 (forceSandbox) で強制されています。通常起動はできません。'
+            : sandboxAvailable === false
+              ? SANDBOX_UNAVAILABLE_NOTE
+              : `サンドボックス: 隣接プロジェクトを隔離し、内部に rootless docker を用意。初期値は一般設定で変更でき、このディレクトリ (${displayPath(currentPath, homeDir)}) に記憶されます。`}
       </p>
     </>
   );
@@ -718,6 +764,13 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, ini
         <div className="browser-header-title">
           <h1>Select a Directory</h1>
           <p className="subtitle">Choose a working directory</p>
+          {sandboxAvailable === false && (
+            <div className={`directory-warning-banner${forceSandbox ? ' is-error' : ''}`} role="alert">
+              {forceSandbox
+                ? FORCE_SANDBOX_UNAVAILABLE_NOTE
+                : SANDBOX_UNAVAILABLE_NOTE}
+            </div>
+          )}
         </div>
       </div>
 
@@ -792,15 +845,20 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, ini
           </label>
         </div>
         <div className="toolbar-launch-group">
-          <button className="btn btn-secondary launch-btn" onClick={() => onOpenShell(currentPath)}>
+          <button
+            className="btn btn-secondary launch-btn"
+            onClick={() => onOpenShell(currentPath)}
+            disabled={launchesBlocked}
+            title={launchesBlocked ? launchesBlockedTitle : ''}
+          >
             Terminal
           </button>
           <div className="open-split">
             <button
               className="btn btn-primary open-split-main"
               onClick={() => onOpen(currentPath, { sandbox: sandboxDefault, sandboxOpts, app: appDefault, model: modelForApp(appDefault), permissionMode: permissionModeForApp(appDefault) })}
-              disabled={effectiveAppHidden}
-              title={effectiveAppHidden ? `${APP_LABELS[appDefault] || appDefault}は起動できません (非表示または未インストール)。起動方法を選択してください。` : (sandboxDefault ? 'サンドボックスで起動' : '通常起動')}
+              disabled={effectiveAppHidden || launchesBlocked}
+              title={effectiveAppHidden ? `${APP_LABELS[appDefault] || appDefault}は起動できません (非表示または未インストール)。起動方法を選択してください。` : (launchesBlocked ? launchesBlockedTitle : (sandboxDefault ? 'サンドボックスで起動' : '通常起動'))}
             >
               {sandboxDefault ? '🔒 ' : ''}{appDefault === 'claude' ? 'Claude Code' : appDefault === 'copilot' ? 'GitHub Copilot' : appDefault === 'codex' ? 'OpenAI Codex' : appDefault === 'commandcode' ? 'Command Code' : 'opencode'}
             </button>
@@ -816,9 +874,9 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, ini
           <button
             className="btn btn-secondary meta-launch-btn"
             onClick={() => setMetaDialogOpen(true)}
-            disabled={metaAgentEnabled !== true}
+            disabled={metaAgentEnabled !== true || launchesBlocked}
             aria-label="統括エージェント"
-            title={metaAgentEnabled === true ? '統括エージェントを起動' : 'サーバー設定 (sandbox.config.json) で "metaAgentMcp": true にすると使えます'}
+            title={launchesBlocked ? launchesBlockedTitle : (metaAgentEnabled === true ? '統括エージェントを起動' : 'サーバー設定 (sandbox.config.json) で "metaAgentMcp": true にすると使えます')}
           >
             <span className="meta-icon" aria-hidden="true">⌘</span><span className="meta-label"> 統括</span>
           </button>
@@ -844,7 +902,9 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, ini
               </button>
               <button
                 className={`launch-mode-btn${launchMode === 'combo' ? ' active' : ''}`}
-                onClick={() => setLaunchMode('combo')}
+                onClick={() => { if (sandboxAvailable === false) return; setLaunchMode('combo'); }}
+                disabled={sandboxAvailable === false}
+                title={sandboxAvailable === false ? 'コンボ起動は常時サンドボックス必須ですが、サーバーにbwrapがありません' : ''}
               >
                 コンボ起動
               </button>
@@ -1246,8 +1306,8 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, ini
               {launchMode === 'combo' ? (
                 <button
                   className="btn btn-primary"
-                  disabled={comboHasHiddenAppSelected}
-                  title={comboHasHiddenAppSelected ? '非表示に設定されたアプリが選択されています。ロールのアプリを選び直してください。' : ''}
+                  disabled={comboHasHiddenAppSelected || sandboxAvailable === false}
+                  title={sandboxAvailable === false ? 'コンボ起動は常時サンドボックス必須ですが、サーバーにbwrapがありません' : (comboHasHiddenAppSelected ? '非表示に設定されたアプリが選択されています。ロールのアプリを選び直してください。' : '')}
                   onClick={() => {
                     // Build the payload BEFORE closing the menu: closeOpenMenu
                     // resets the draft model/sandbox state, and React state
@@ -1296,8 +1356,8 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, ini
                 <button
                   className="btn btn-primary"
                   onClick={() => { closeOpenMenu(); onOpen(currentPath, { sandbox: sandboxDefault, sandboxOpts, app: appDefault, model: modelForApp(appDefault), permissionMode: permissionModeForApp(appDefault) }); }}
-                  disabled={effectiveAppHidden}
-                  title={effectiveAppHidden ? `${APP_LABELS[appDefault] || appDefault}は起動できません (非表示または未インストール)` : ''}
+                  disabled={effectiveAppHidden || launchesBlocked}
+                  title={effectiveAppHidden ? `${APP_LABELS[appDefault] || appDefault}は起動できません (非表示または未インストール)` : (launchesBlocked ? launchesBlockedTitle : '')}
                 >
                   起動
                 </button>
@@ -1475,13 +1535,16 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, ini
               key={dir.path}
               className="dir-item"
               onClick={() => navigateTo(dir.path)}
-              onDoubleClick={() => onOpen(dir.path, {
-                sandbox: sandboxDefault,
-                sandboxOpts: loadSandboxOpts(dir.path, sandboxDefaults),
-                app: appDefault,
-                model: modelForApp(appDefault),
-                permissionMode: permissionModeForApp(appDefault),
-              })}
+              onDoubleClick={() => {
+                if (launchesBlocked) return; // fail-closed UI: no launch can succeed
+                onOpen(dir.path, {
+                  sandbox: sandboxDefault,
+                  sandboxOpts: loadSandboxOpts(dir.path, sandboxDefaults),
+                  app: appDefault,
+                  model: modelForApp(appDefault),
+                  permissionMode: permissionModeForApp(appDefault),
+                });
+              }}
               role="button"
               tabIndex={0}
               onKeyDown={(e) => {

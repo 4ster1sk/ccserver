@@ -686,6 +686,23 @@ body {
   font-size: 12px;
 }
 
+/* Directory browser header notice (bwrap missing on the server host).
+   Warning tone normally; error tone when forceSandbox makes the state
+   contradictory (no launch can succeed). */
+.directory-warning-banner {
+  margin: 8px 0 0;
+  padding: 8px 12px;
+  background: rgba(249, 226, 175, 0.12);
+  color: var(--warning, #f9e2af);
+  border: 1px solid currentColor;
+  border-radius: 4px;
+  font-size: 12px;
+}
+.directory-warning-banner.is-error {
+  background: var(--error-bg, rgba(255, 80, 80, 0.12));
+  color: var(--error);
+}
+
 /* Group file exchange: trigger + modal (replaces always-mounted panel).
    Stacking relies on .resume-overlay's z-index: 100, shared by every
    fullscreen overlay in this file. */

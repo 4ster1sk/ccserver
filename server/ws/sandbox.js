@@ -1091,6 +1091,20 @@ export function sandboxAvailable() {
   return existsSync(BWRAP);
 }
 
+// Reason + hint for refusing an explicitly requested sandbox when no backend
+// is available. Shared by sessionManager.js (production refusal messages) and
+// routes/groups.test.js (pins the hint suffix + infra classification on the
+// real production shape instead of a second hardcoded same-prefix string).
+export function sandboxUnavailableReason() {
+  const reason = process.platform === 'win32'
+    ? 'the sandbox is Linux-only'
+    : 'bwrap is not available on this host';
+  const hint = process.platform === 'win32'
+    ? 'Launch without the sandbox.'
+    : 'Install bwrap (bubblewrap) or launch without the sandbox.';
+  return { reason, hint };
+}
+
 // Writes this launch's commit-message guard config (built-in patterns +
 // sandbox.config.json's commitMessageGuard.blockedPatterns, see
 // commitGuard.js) to a fresh runtime-dir JSON file that
