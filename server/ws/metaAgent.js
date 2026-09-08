@@ -29,19 +29,17 @@ import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { mkdirSync, chmodSync } from 'node:fs';
 import { loadSandboxConfig } from './sandbox.js';
+import { hostRuntimeDir, META_SOCKET_DIR_NAME } from './git-broker.js';
 
 // Issue #143 problem 1: a dedicated directory holding only `sock`, bound into
 // the sandbox as a directory rather than the socket file itself -- see
-// mcpBroker.js's header comment for why.
-const META_SOCKET_DIR_NAME = 'ccserver-meta.d';
-
+// mcpBroker.js's header comment for why (dir name lives in git-broker.js so
+// sandbox.js's seatbelt pins stay in sync).
 let metaBroker = null; // { server, sockPath, dir, connections } | null
 let stopBrokerFn = null;
 
 export function getMetaSockPath() {
-  const base = process.env.XDG_RUNTIME_DIR
-    || (typeof process.getuid === 'function' ? `/run/user/${process.getuid()}` : '/tmp');
-  return join(base, META_SOCKET_DIR_NAME, 'sock');
+  return join(hostRuntimeDir(), META_SOCKET_DIR_NAME, 'sock');
 }
 
 // The fixed, project-outside directory every meta-agent session runs in.

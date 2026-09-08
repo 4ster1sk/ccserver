@@ -47,7 +47,8 @@
 // commitMessageGuard.enabled); omitted entirely, this is a no-op, same as
 // before plan8.
 
-import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, statSync, unlinkSync, writeFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { createServer } from 'node:net';
 import { execFileSync, spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
@@ -63,8 +64,52 @@ const GH_EXEC_MAX_BYTES = 10 * 1024 * 1024;
 const __filename = fileURLToPath(import.meta.url);
 
 const UID = typeof process.getuid === 'function' ? process.getuid() : 0;
+// Canonical control-plane socket filenames (single source of truth): the
+// seatbelt profile's network-outbound deny pins must keep matching
+// pty-host/index.js's SOCK_NAME and metaAgent.js's socket path -- a
+// rename in either place would silently void the pin (both modules import
+// these from here, so a rename updates the pin automatically).
+// pty-host stays a single file; meta uses a dedicated `.d/sock` directory
+// (Issue #143 problem 1: directory bind survives a server restart, see
+// mcpBroker.js) so its pin is a directory + 'sock', not a single filename.
+export const PTY_HOST_SOCK_NAME = 'ccserver-pty-host.sock';
+export const META_SOCK_NAME = 'ccserver-meta.sock';
+export const META_SOCKET_DIR_NAME = 'ccserver-meta.d';
+// Host runtime dir for broker sockets and other per-launch state.
+// XDG_RUNTIME_DIR wins when set; otherwise Linux uses /run/user/<uid> while
+// macOS -- which has no /run -- falls back to a short /tmp base. NOT the
+// per-user tmpdir (/var/folders/... is ~50 chars on its own): broker socket
+// names (ccserver-git-broker-<uuid>/broker.sock,
+// ccserver-mcp-<id>-<tag>) appended to it would exceed darwin's 104-byte
+// sockaddr_un.sun_path limit and every bind would fail. /tmp is sticky
+// (1777); every caller mkdirs the per-UID dir 0o700.
+export function hostRuntimeDir() {
+  if (process.env.XDG_RUNTIME_DIR) return process.env.XDG_RUNTIME_DIR;
+  if (process.platform === 'darwin') return `/tmp/ccserver-runtime-${UID}`;
+  return `/run/user/${UID}`;
+}
+
+// Create (and verify) the per-UID runtime dir. mkdirSync's mode option never
+// fixes a pre-existing dir: on darwin the fallback base lives under the
+// sticky, world-writable /tmp, where another local user can pre-create it
+// (e.g. 0777) before our first bind -- the window reopens after every reboot
+// and macOS's periodic /tmp cleanup. Binding sockets into a hostile dir lets
+// its owner unlink/replace them (broker impersonation, credential theft), so
+// fail closed unless THIS uid owns a private 0700 dir. Linux's
+// /run/user/<uid> is root-owned via logind and needs no check (and an
+// XDG_RUNTIME_DIR override is the operator's explicit responsibility).
+export function ensureHostRuntimeDir() {
+  const base = hostRuntimeDir();
+  if (process.platform !== 'darwin' || process.env.XDG_RUNTIME_DIR) return base;
+  mkdirSync(base, { recursive: true, mode: 0o700 });
+  const st = statSync(base);
+  if (st.uid !== UID || (st.mode & 0o777) !== 0o700) {
+    throw new Error(`host runtime dir is not a private 0700 dir owned by uid ${UID}: ${base}`);
+  }
+  return base;
+}
 function runtimeBase() {
-  return process.env.XDG_RUNTIME_DIR || `/run/user/${UID}`;
+  return hostRuntimeDir();
 }
 
 function fetchToken() {
@@ -373,6 +418,7 @@ export function startGitBroker({ cwd, blockedPatterns = null }) {
 
   const dir = join(runtimeBase(), `ccserver-git-broker-${randomUUID()}`);
   try {
+    ensureHostRuntimeDir();
     mkdirSync(dir, { recursive: true, mode: 0o700 });
   } catch (e) {
     throw new Error(`git broker failed to start for ${cwd}: ${e.message}`);

@@ -5,17 +5,17 @@
 // client's top-bar Usage button can show it instantly; a forced refresh
 // re-captures on demand.
 //
-// The capture runs in a *minimal* filesystem sandbox when bwrap is available
-// (only Claude's own config is exposed — no project, no docker), falling back to
-// launching claude directly otherwise -- unless sandbox.config.json sets
-// "forceSandbox": true, in which case the capture fails rather than run
-// unsandboxed. Viewing /usage makes no API call, so this does not itself
-// consume plan usage.
+// The capture runs in a *minimal* filesystem sandbox when one is available
+// (bwrap on Linux, sandbox-exec on macOS; only Claude's own config is exposed
+// — no project, no docker), falling back to launching claude directly
+// otherwise -- unless sandbox.config.json sets "forceSandbox": true, in which
+// case the capture fails rather than run unsandboxed. Viewing /usage makes no
+// API call, so this does not itself consume plan usage.
 import * as pty from 'node-pty';
 import { homedir } from 'node:os';
-import { mkdirSync } from 'node:fs';
+import { mkdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
-import { buildMinimalSandboxSpawn, resolveClaude, sandboxAvailable, loadSandboxConfig, isAppHidden } from './ws/sandbox.js';
+import { buildMinimalSandboxSpawn, resolveClaude, sandboxAvailable, loadSandboxConfig, isAppHidden, forceSandboxUnavailableReason } from './ws/sandbox.js';
 import { recordSessionLimitReset } from './sessionLimitState.js';
 import { buildSessionEnv } from './ws/sessionEnv.js';
 
@@ -213,6 +213,7 @@ function capture() {
     let args = ['--ax-screen-reader'];
     let spawnCwd = homedir();
     let sandboxed = false;
+    let seatbeltDir = null;
 
     if (process.platform !== 'win32' && sandboxAvailable()) {
       try {
@@ -225,6 +226,9 @@ function capture() {
         args = spawn.args;
         spawnCwd = USAGE_CWD;
         sandboxed = true;
+        // macOS seatbelt launches mint a runtime dir (profile + throwaway
+        // HOME); removed in finish() below. Null on every other backend.
+        seatbeltDir = spawn.seatbeltDir || null;
       } catch {
         // bwrap launch failed; fall through to the forceSandbox / direct path.
       }
@@ -234,7 +238,8 @@ function capture() {
     // the sandbox, so the direct-launch fallback below is not allowed -- fail
     // the capture with a clear error instead of running claude unsandboxed.
     if (!sandboxed && loadSandboxConfig().forceSandbox) {
-      resolve({ error: 'Cannot read usage: "forceSandbox": true but the sandbox is unavailable (bwrap missing / Windows)' });
+      const { reason } = forceSandboxUnavailableReason();
+      resolve({ error: `Cannot read usage: "forceSandbox": true but the sandbox is unavailable (${reason})` });
       return;
     }
 
@@ -252,6 +257,9 @@ function capture() {
         env: { ...cleanEnv, TERM: 'xterm-256color', COLORTERM: 'truecolor' },
       });
     } catch (err) {
+      if (seatbeltDir) {
+        try { rmSync(seatbeltDir, { recursive: true, force: true }); } catch { /* best effort */ }
+      }
       resolve({ error: `Failed to launch claude: ${err.message}`, sandboxed });
       return;
     }
@@ -271,6 +279,9 @@ function capture() {
       clearTimeout(settleTimer);
       clearTimeout(hardTimer);
       try { ptyProc.kill(); } catch { /* already gone */ }
+      if (seatbeltDir) {
+        try { rmSync(seatbeltDir, { recursive: true, force: true }); } catch { /* best effort */ }
+      }
       resolve({ ...res, sandboxed });
     };
 

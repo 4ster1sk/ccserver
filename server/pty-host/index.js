@@ -19,12 +19,16 @@ import { GitBrokerRegistry } from './gitBrokerRegistry.js';
 // limits, not every module server本体 happens to also use).
 import { appLaunchArgs } from '../ws/appLaunch.js';
 import { loadPtyHostSessionMeta } from '../ws/ptyHostSessionMeta.js';
+// Shared runtime-dir convention (leaf module: no sessionManager/server
+// dependency, so the standalone-runnable constraint above still holds).
+import { hostRuntimeDir, PTY_HOST_SOCK_NAME } from '../ws/git-broker.js';
 
-const SOCK_NAME = 'ccserver-pty-host.sock';
+const SOCK_NAME = PTY_HOST_SOCK_NAME;
 
-// Same convention as server/ws/notify.js's getNotifySockPath(): prefer
-// XDG_RUNTIME_DIR, fall back to /run/user/<uid>, then /tmp.
-//
+// Darwin-aware via hostRuntimeDir() (macOS has no /run/user -- see
+// git-broker.js); same convention as server/ws/notify.js's
+// getNotifySockPath().
+
 // Plan5 Step5 (partitioning): shardIndex 0 (the default, and the only value
 // that existed before Step5) resolves to exactly the same path as before --
 // single-instance deployments and every existing CCSERVER_PTY_HOST_SOCK
@@ -42,8 +46,7 @@ export function getPtyHostSockPath(shardIndex = 0) {
       ? process.env.CCSERVER_PTY_HOST_SOCK
       : `${process.env.CCSERVER_PTY_HOST_SOCK}-${shardIndex}`;
   }
-  const base = process.env.XDG_RUNTIME_DIR
-    || (typeof process.getuid === 'function' ? `/run/user/${process.getuid()}` : '/tmp');
+  const base = hostRuntimeDir();
   return join(base, shardIndex === 0 ? SOCK_NAME : `ccserver-pty-host-${shardIndex}.sock`);
 }
 

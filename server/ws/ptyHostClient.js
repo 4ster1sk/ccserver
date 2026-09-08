@@ -417,7 +417,19 @@ export class PtyHostClient {
     } catch (err) {
       throw new Error(`Failed to spawn "${params.command}": pty-host unreachable (${err.message})`);
     }
-    const res = await this._request('spawn', params);
+    let res;
+    try {
+      res = await this._request('spawn', params);
+    } catch (err) {
+      const msg = String(err?.message || err);
+      // pty-host's own spawn failures already carry an INFRA_ERROR_PREFIXES
+      // prefix ("Failed to build sandbox" / "Failed to spawn") -- only wrap
+      // transport-level failures (e.g. "not connected" if the socket dropped
+      // between _ensureConnected and here) so groups.js classifies them 500.
+      throw new Error(
+        msg.startsWith('Failed to') ? msg : `Failed to spawn "${params.command}": pty-host RPC failed (${msg})`,
+      );
+    }
     const rpty = new RemotePty(this, res.id, { cols: res.cols, rows: res.rows, pid: res.pid, sandbox: res.sandbox });
     this._remotePtys.set(res.id, rpty);
     return rpty;

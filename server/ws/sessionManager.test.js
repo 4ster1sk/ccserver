@@ -166,6 +166,27 @@ test('explicit sandbox request without bwrap is refused, not silently unsandboxe
   assert.match(res.error, /^Failed to build sandbox: /);
 });
 
+// Filesystem-root launches: claude/opencode abort immediately there (opaque
+// SIGABRT, no output), and a SANDBOXED shell at / would get a fail-open
+// sandbox -- the project subtree rule becomes "^/(/.*)?$" (seatbelt's
+// subtrees('/')) or a "/" bind (bwrap), silently granting the whole
+// filesystem. Plain unsandboxed shells are fine at /.
+test('createSession refuses cwd=/ for agents and sandboxed shells, not plain shells', async () => {
+  const agent = await sessionManager.createSession({ cwd: '/', cols: 80, rows: 24, shell: false, app: 'claude', sandbox: false });
+  assert.equal(agent.session, null, 'agent launch at / is refused');
+  assert.match(agent.error, /^Cannot launch in the filesystem root/);
+
+  const sbShell = await sessionManager.createSession({ cwd: '/', cols: 80, rows: 24, shell: true, sandbox: true });
+  assert.equal(sbShell.session, null, 'sandboxed shell at / is refused (fail-open profile)');
+  assert.match(sbShell.error, /^Cannot launch a sandboxed shell in the filesystem root/);
+
+  if (!loadSandboxConfig().forceSandbox) {
+    const plain = await sessionManager.createSession({ cwd: '/', cols: 80, rows: 24, shell: true, sandbox: false });
+    assert.ok(plain.session, 'plain unsandboxed shell at / still spawns');
+    sessionManager.destroySession(plain.sessionId, { keepSchedule: false });
+  }
+});
+
 // Permission mode state on sessions: any value normalizes to one of
 // 'standard' | 'auto-accept' | 'yolo' (unknown -> 'standard'); shells always
 // carry 'standard'. The CLI flag itself is commandcode-only (see
@@ -988,6 +1009,42 @@ test('fireSchedule auto-resume of a dead orchestrator regenerates its CLAUDE.md 
   assert.ok(existsSync(generatedPath), 'the CLAUDE.md/AGENTS.md overlay source was (re)generated for the resume');
   const template = readFileSync(join(import.meta.dirname, 'orchestrator-template.md'), 'utf-8');
   assert.equal(readFileSync(generatedPath, 'utf-8'), template);
+
+  sessionManager.destroySession(member, { keepSchedule: false });
+  sessionManager.destroySession(workerKeepAlive.id, { keepSchedule: false });
+  groupManager.destroyGroup(gid);
+});
+
+// Retire-first ordering for the seatbelt overlay: an exited-but-not-reaped
+// orchestrator still owns its materialized CLAUDE.md/AGENTS.md
+// (sandboxSeatbeltFiles). fireSchedule must retire it before the successor
+// launches -- otherwise the successor sees the files as pre-existing, claims
+// no ownership, and the predecessor's later teardown unlinks the live
+// successor's overlay mid-session. Here the pty is killed directly so onExit
+// marks it exited while it stays registered (open viewer tab).
+test('fireSchedule retires an exited seatbelt-overlay predecessor before auto-resume', async () => {
+  const gid = randomUUID();
+  const orchestratorDir = join(runtimeDir, `orch-retire-${gid}`);
+  await groupManager.createGroup({ groupId: gid, cwd: '/tmp', orchestratorDir });
+
+  const workerKeepAlive = await shellMember('/tmp', gid, 'workerA');
+  const deadOrch = await shellMember('/tmp', gid, 'orchestrator');
+  const deadOrchId = deadOrch.id;
+
+  mkdirSync(orchestratorDir, { recursive: true });
+  writeFileSync(join(orchestratorDir, 'CLAUDE.md'), '# live rules\n');
+  deadOrch.sandboxSeatbeltFiles = [join(orchestratorDir, 'CLAUDE.md')];
+  deadOrch.ptyProcess.kill();
+  const t0 = Date.now();
+  while (!deadOrch.exited && Date.now() - t0 < 5000) await sleep(100);
+  assert.ok(deadOrch.exited, 'predecessor pty exited but stays registered');
+
+  assert.ok(sessionManager.setScheduledPrompt(deadOrchId, Date.now() + 700, 'MARKER_ORCH_RETIRE'));
+  await sleep(2500); // branch 3: retire-first + resolvers + createSession
+
+  assert.equal(sessionManager.getSession(deadOrchId), undefined, 'exited predecessor retired before resume');
+  const member = groupManager.getGroup(gid).members.get('orchestrator');
+  assert.ok(member && member !== deadOrchId, 'role rebound to the resumed session');
 
   sessionManager.destroySession(member, { keepSchedule: false });
   sessionManager.destroySession(workerKeepAlive.id, { keepSchedule: false });

@@ -26,8 +26,8 @@ import { mkdirSync, statSync, rmSync, existsSync } from 'node:fs';
 import { basename, join, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import * as groupManager from '../ws/groupManager.js';
-import { createSession, getSession, isInfrastructureError } from '../ws/sessionManager.js';
-import { sandboxAvailable } from '../ws/sandbox.js';
+import { createSession, destroySession, getSession, isInfrastructureError } from '../ws/sessionManager.js';
+import { sandboxAvailable, sandboxUnavailableReason } from '../ws/sandbox.js';
 import { isValidApp } from '../ws/appLaunch.js';
 import { projectHashForCwd } from '../ws/projectHash.js';
 import { normalizePresetInput } from '../ws/workerPresets.js';
@@ -226,7 +226,8 @@ export async function launchGroupFromSpec(body) {
     };
   }
   if (!sandboxAvailable()) {
-    return { ok: false, code: 'validation', message: 'combo launch requires the sandbox (bwrap not found on this host)' };
+    const { reason, hint } = sandboxUnavailableReason();
+    return { ok: false, code: 'validation', message: `combo launch requires the sandbox (${reason}. ${hint})` };
   }
 
   // Canonical workers[] snapshot or the legacy workerA/workerB adapter --
@@ -440,6 +441,17 @@ export async function groupsRoute(fastify, opts) {
       if (s && !s.exited) {
         return reply.code(409).send({ error: 'orchestrator is still running' });
       }
+      // macOS seatbelt materializes the rule overlay as real files in the
+      // shared, deterministic orchestratorDir. An exited-but-not-yet-reaped
+      // session still references those paths and would unlink the successor's
+      // copies in its own teardown (destroySession's sandboxSeatbeltFiles
+      // block). It is already exited, so retiring it first breaks no
+      // atomicity guarantee (that only protects a live predecessor).
+      // keepSchedule defaults to true: a pending scheduled prompt outlives
+      // the retire and fires into the restarted orchestrator
+      // (matchesScheduleTarget matches the same group+role), matching the
+      // pre-retire behavior and destroySession's documented policy.
+      if (s) destroySession(existing, { reason: 'orchestrator-restart' });
     }
 
     // Prefer the persisted launch app; fall back to the restored member's

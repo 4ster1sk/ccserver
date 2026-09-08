@@ -1,0 +1,807 @@
+// macOS Seatbelt backend for `sandbox-exec` (see sandbox.js's darwin branch).
+//
+// Unlike bwrap (Linux), sandbox-exec has no bind mounts, mount namespaces or
+// chroot: the sandboxed process sees the whole host filesystem and access is
+// mediated by a deny-by-default Seatbelt policy instead ("visible but
+// untouchable"). This is strictly weaker isolation than bwrap -- a regex gap
+// is a live escape -- and docker (rootless dind) is unsupported, so every
+// seatbelt launch runs with docker: false.
+//
+// sandbox-exec also has no `--setenv`: sandbox.js prepends `/usr/bin/env
+// K=V ...` to the spawn argv from the `env` object returned here.
+//
+// The git/ssh/gh/commit-guard wrappers use a `#!/ccserver-sandbox-node`
+// shebang that only resolves inside bwrap. On macOS the host node binary is
+// directly visible, so this module mints per-launch `#!/bin/sh` shims that
+// exec the real host node with the real wrapper script (the shim bodies and
+// GIT_SSH_COMMAND are quoted for /bin/sh; credential.helper is
+// backslash-escaped as a bare word: git classifies a leading `"` as a
+// helper NAME (never executed), and the assembled command line -- the
+// value plus the operation -- is still run via `sh -c` (git's
+// run_credential_helper uses use_shell=1), so $TMPDIR spaces need
+// bare-word escaping),
+// plus a `hooks/` directory for core.hooksPath.
+
+import { copyFileSync, existsSync, mkdirSync, realpathSync, renameSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { basename, dirname, join, resolve } from 'node:path';
+import { randomUUID } from 'node:crypto';
+
+// Base dir for per-launch seatbelt runtime dirs. os.tmpdir() honors $TMPDIR,
+// which on macOS is the per-user /var/folders/... path. Overridable via
+// CCSERVER_SANDBOX_SEATBELT_TMP for tests.
+export function seatbeltBaseDir() {
+  return process.env.CCSERVER_SANDBOX_SEATBELT_TMP || tmpdir();
+}
+
+// Quote a host path for embedding in a Seatbelt `regex #"..."` literal.
+// Seatbelt regexes are a POSIX-ERE-family dialect (AppleMatch), not ICU:
+// escape only regex metacharacters (+ the SBPL string quotes). Escaping
+// ordinary characters (spaces, '-', non-ASCII) is undefined behavior there.
+export function escapeSeatbeltRegex(s) {
+  return String(s).replace(/[.*+?^${}()|[\]\\"]/g, (c) => `\\${c}`);
+}
+
+// `^<dir>(/.*)?$` matches the dir itself plus everything underneath it.
+export function subtreeRegex(dir) {
+  return `^${escapeSeatbeltRegex(dir)}(/.*)?$`;
+}
+
+// Seatbelt mediates the symlink-resolved path: register both the raw and the
+// realpath spelling so symlinked dirs still match their rules -- and so
+// denies can't be walked around via the other spelling. Best-effort: absent
+// paths keep just the raw spelling.
+export function pathVariants(p) {
+  try {
+    const r = realpathSync(p);
+    return r === p ? [p] : [p, r];
+  } catch {
+    return [p];
+  }
+}
+
+export function subtrees(p) {
+  return pathVariants(p).map(subtreeRegex);
+}
+
+// Exact-match reads on every ancestor directory up to (excluding) "/".
+// Userspace realpath/lstat walks each ancestor component, and Seatbelt
+// mediates every one of them: subtree rules (^/a/b/...) do NOT cover the
+// ancestors themselves, so without these, node/vite/npm/git die with EPERM
+// the moment they resolve anything under an allowed tree (verified on macOS
+// hardware: EPERM lstat '/Volumes', '/Users', '/private' from project- and
+// HOME-relative realpath). Exact match only, never subtree: siblings'
+// contents stay closed. Both raw and realpath spellings (Seatbelt mediates
+// the resolved path). "/" itself is allowed as a literal elsewhere, so it
+// is excluded here.
+export function ancestorExactRegexes(paths) {
+  const out = [];
+  const seen = new Set();
+  for (const p of paths.filter(Boolean)) {
+    for (const v of pathVariants(p)) {
+      let d = dirname(v);
+      while (d && d !== '/' && d !== '.') {
+        if (!seen.has(d)) {
+          seen.add(d);
+          out.push(`^${escapeSeatbeltRegex(d)}$`);
+        }
+        d = dirname(d);
+      }
+    }
+  }
+  return out;
+}
+
+// Escape a host path for embedding in an SBPL `(literal "...")` string.
+// Unlike escapeSeatbeltRegex (for `regex #"..."`), only the string-syntax
+// metacharacters need escaping here.
+export function escapeSeatbeltLiteral(s) {
+  return String(s).replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+}
+
+// Assemble the profile text. Each list holds ready-made `regex #"..."` bodies
+// (see subtreeRegex) or exact-path literals. Seatbelt is last-match-wins:
+// the deny lines beat the allow lines ONLY because they are emitted AFTER
+// them -- keep the ordering (allows, sibling denies, re-allows, pin denies)
+// when extending this profile.
+//   readRegexes/writeRegexes    - allow file-read*/file-write* by pattern
+//   readLiterals/writeLiterals  - allow by exact path (sockets, single files)
+//   siblingDenyWriteRegexes / siblingDenyReadRegexes - deny sibling launch
+//                    dirs (broad patterns covering own dir too)
+//   reAllowWriteRegexes / reAllowReadRegexes - re-allow our own dir AFTER
+//                    the sibling deny (last-match-wins)
+//   denyWriteRegexes            - pin denies, emitted last so they beat the
+//                    re-allows above
+//   denyExecLiterals            - exact paths denied for process-exec
+//                    (emitted after the broad process-exec allow)
+//   denyNetOutboundLiterals     - unix-socket paths denied for connect()
+//                    (emitted after the broad network allow; connect() is
+//                    mediated as network-outbound, so file-write* pins
+//                    cannot stop it)
+export function buildSeatbeltProfileText({
+  readRegexes = [],
+  writeRegexes = [],
+  readLiterals = [],
+  writeLiterals = [],
+  siblingDenyWriteRegexes = [],
+  siblingDenyReadRegexes = [],
+  reAllowWriteRegexes = [],
+  reAllowReadRegexes = [],
+  denyWriteRegexes = [],
+  denyExecLiterals = [],
+  denyNetOutboundLiterals = [],
+} = {}) {
+  const line = (op, sel) => `  (${op} ${sel})`;
+  const regexes = (list) => list.map((r) => `(regex #"${r}")`).join(' ');
+  const literals = (list) => list.map((p) => `(literal "${escapeSeatbeltLiteral(p)}")`).join(' ');
+  const out = [
+    '(version 1)',
+    '',
+    ';; deny-by-default: everything not explicitly allowed below is refused.',
+    '(deny default)',
+    '',
+    ';; process + network. Egress stays open (agent APIs, git, tool',
+    ';; provisioning) -- file scope is what this sandbox restricts.',
+    '(allow process-exec process-fork)',
+    ';; macOS GUI / IPC channels the sandboxed agent has no use for:',
+    ';; clipboard exfil/injection, AppleScript automation, document/app',
+    ';; opening, screen capture.',
+    '(deny process-exec (literal "/usr/bin/osascript"))',
+    '(deny process-exec (literal "/usr/bin/pbcopy"))',
+    '(deny process-exec (literal "/usr/bin/pbpaste"))',
+    '(deny process-exec (literal "/usr/bin/open"))',
+    // These pins target Apple's fixed binary paths (no symlinks there) --
+    // unlike ghPaths/controlSockDenies, no pathVariants needed. Note
+    // screencapture(1) lives in /usr/sbin, not /usr/bin.
+    '(deny process-exec (literal "/usr/sbin/screencapture"))',
+    // Real gh binaries are denied so gh is reachable only via the PATH shim
+    // (the wrapper relays to the git broker; nothing execs gh in-sandbox).
+    // Seatbelt is last-match-wins (see the contract above), so these pins
+    // work because they are emitted AFTER the broad process-exec allow --
+    // keep every pin after the allows it must beat when extending the
+    // profile.
+    ...(denyExecLiterals.length > 0
+      ? [`(deny process-exec ${denyExecLiterals.map((p) => `(literal "${escapeSeatbeltLiteral(p)}")`).join(' ')})`]
+      : []),
+    // Signals: self covers the agent process itself. Every descendant
+    // inherits this same profile, so same-sandbox covers the timeout /
+    // job-control kills (SIGTERM/SIGKILL to git, npm, shells...) that CLIs
+    // issue in-sandbox, without opening signals to host processes outside
+    // the tree. (Verify on macOS hardware: a missing allow here turns
+    // child-process management into EPERM.)
+    '(allow signal (target self))',
+    '(allow signal (target same-sandbox))',
+    '(allow sysctl-read)',
+    '(allow mach-lookup)',
+    '(allow network*)',
+    // Host control-plane unix sockets (pty-host RPC, meta broker) live under
+    // hostRuntimeDir() -- inside the broad tmp write rules on darwin.
+    // connect() is mediated as network-outbound (a file-write* pin cannot
+    // stop it), and neither socket may be reachable from a sandboxed
+    // process: the pty-host RPC accepts `spawn` with sandbox:false
+    // (unsandboxed host exec) and the meta socket is the privileged meta
+    // toolset's channel. NOTE: the path filter MUST be path-literal (not
+    // regex/literal/subpath) -- per Apple's Sandbox Guide, unix-socket
+    // network filters accept only path-literal. Emitted AFTER (allow
+    // network*) per last-match-wins (verify on macOS hardware if touched:
+    // a compile error here is fail-closed for every seatbelt launch).
+    ...(denyNetOutboundLiterals.length > 0
+      ? [`(deny network-outbound ${denyNetOutboundLiterals.map((p) => `(remote unix-socket (path-literal "${escapeSeatbeltLiteral(p)}"))`).join(' ')})`]
+      : []),
+    '',
+    ';; devices: the pty and /dev/null etc. must stay usable.',
+    '(allow file-read* file-write* (regex #"^/dev(/.*)?$"))',
+    ';; the inherited controlling pty needs ioctls (isatty/tcgetattr), and',
+    ';; agent tool shells / script(1) / expect allocate nested ptys.',
+    '(allow pseudo-tty)',
+    '(allow file-ioctl (regex #"^/dev(/.*)?$"))',
+    '',
+    ';; macOS requires reading the root directory itself during process',
+    ';; startup (path resolution touches "/" as a directory); without this,',
+    ';; every child dies at startup and sandbox-exec surfaces it as an abort',
+    ';; (see docs/seatbelt-root-read-abort-diagnosis.md). This grants only the',
+    ';; root directory entry, not any tree underneath it.',
+    '(allow file-read* (literal "/"))',
+    '',
+  ];
+  if (readRegexes.length > 0 || readLiterals.length > 0) {
+    const sels = [regexes(readRegexes), literals(readLiterals)].filter(Boolean).join(' ');
+    out.push(';; readable trees and files (system, project, tooling, scripts).', line('allow file-read*', sels), '');
+  }
+  if (writeRegexes.length > 0 || writeLiterals.length > 0) {
+    const sels = [regexes(writeRegexes), literals(writeLiterals)].filter(Boolean).join(' ');
+    out.push(';; writable trees and files (project, sandbox HOME, sockets).', line('allow file-write*', sels), '');
+  }
+  // POSIX ERE (AppleMatch) has no lookahead: express sibling exclusion as
+  // "deny all launch dirs -> re-allow our own (last-match-wins) -> pins".
+  if (siblingDenyWriteRegexes.length > 0) out.push(line('deny file-write*', regexes(siblingDenyWriteRegexes)), '');
+  if (siblingDenyReadRegexes.length > 0) out.push(line('deny file-read*', regexes(siblingDenyReadRegexes)), '');
+  if (reAllowWriteRegexes.length > 0) out.push(line('allow file-write*', regexes(reAllowWriteRegexes)), '');
+  if (reAllowReadRegexes.length > 0) out.push(line('allow file-read*', regexes(reAllowReadRegexes)), '');
+  if (denyWriteRegexes.length > 0) {
+    out.push(
+      ';; pin denies (emitted last so they beat the re-allows above):',
+      ';; raw keys / gh tokens stay behind the git broker.',
+      line('deny file-write*', regexes(denyWriteRegexes)),
+      '',
+    );
+  }
+  return out.join('\n');
+}
+
+function expandAgainstHome(p, hostHome) {
+  if (p === '~') return hostHome;
+  if (p.startsWith('~/')) return join(hostHome, p.slice(2));
+  return p;
+}
+
+// Full darwin launch assembly (mirrors buildBwrapArgs' recipe, translated
+// from binds to allow-rules). All host paths are directly visible inside the
+// sandbox, so "binds" become Seatbelt allow entries and fixed in-sandbox
+// paths become host paths (sockets, shims, hooks dir).
+//
+//   cwd            - project dir (resolved here)
+//   hostHome       - the real host $HOME (config/agent dirs live under it)
+//   homeDir        - effective sandbox HOME, or null for a throwaway dir
+//                    created inside the runtime dir (single teardown unit)
+//   sandboxPathBase- SANDBOX_PATH value from sandbox.js
+//   nodeBin        - host node binary (realpath of process.execPath)
+//   scripts        - { ghWrapper, credHelper, sshWrapper, commitHook,
+//                    entrypoint, mcpBridge }: every host file this launch
+//                    executes/reads inside the sandbox, allow-listed as
+//                    exact literals (parity with bwrap's per-file ro-binds)
+//   ssh            - { realSsh|null, configFile, knownHostsDefault, userKnownHosts|null }
+//   gitBroker      - { sockPath, allowlistPath, dir } | null
+//   commitGuard    - { configPath } | null
+//   sockets        - { mcp, notify, usage, meta, reviewer } host paths | null
+//   extraBinds/extraEnv - raw operator config (binds become allow rules;
+//                    ~/.ssh and ~/.config/gh stay blocked, like bwrap)
+//   authSock       - forwarded ssh-agent socket | null
+//   gnupg          - true to expose the host ~/.gnupg keyring (opt-in, like
+//                    bwrap's gpg flag) with GNUPGHOME pointed at it ($HOME
+//                    inside is the sandbox home, so gpg needs the override)
+//   app            - agent id ('claude' | 'opencode' | 'copilot' | 'codex' |
+//                    'commandcode') | null: opencode sessions get the host
+//                    XDG dirs (see env below); other apps resolve their
+//                    config from the sandbox HOME as before
+//   claudeDir      - extra agent install dir | null
+//   orchestratorClaudeMdSrc / gitCommonDir / groupFilesDir - like bwrap
+//   tools          - resolved opt-in tool specs | null. Call-shape parity
+//                    only: rtk/CRG provisioning is bwrap-only (mount-bound
+//                    provisioner) and every caller strips the flags before
+//                    passing this -- nothing reads it here.
+//   ghPaths        - real gh binary candidates (from sandbox.js, same set
+//                    buildBwrapArgs ro-binds the wrapper over): denied for
+//                    process-exec while the git broker is on, so gh is
+//                    reachable only via the PATH shim
+//   controlSockDenies - host control-plane unix-socket paths (pty-host RPC,
+//                    meta broker, from sandbox.js): denied for
+//                    network-outbound connect() -- file-write* pins cannot
+//                    stop connect(), and both sockets live inside the broad
+//                    tmp write rules on darwin
+//
+// Returns { dir, profilePath, binDir, hooksDir, homeDir, ruleCopies, nodeBin,
+// env }. `dir` is the single teardown unit (also covers the throwaway HOME
+// when homeDir was null). ruleCopies lists orchestrator rule files
+// materialized into the project dir -- NOT under `dir`, so the caller must
+// remove them separately on teardown (null when no overlay was requested).
+export function buildSeatbeltLaunch({
+  cwd,
+  hostHome,
+  homeDir = null,
+  sandboxPathBase,
+  nodeBin,
+  scripts,
+  ssh = {},
+  gitBroker = null,
+  commitGuard = null,
+  sockets = {},
+  extraBinds = [],
+  extraEnv = {},
+  authSock = null,
+  gnupg = false,
+  app = null,
+  claudeDir = null,
+  orchestratorClaudeMdSrc = null,
+  gitCommonDir = null,
+  groupFilesDir = null,
+  tools = null,
+  ghPaths = [],
+  controlSockDenies = [],
+}) {
+  const launchId = randomUUID();
+  const dir = join(seatbeltBaseDir(), `ccserver-seatbelt-${launchId}`);
+  const binDir = join(dir, 'bin');
+  const hooksDir = join(dir, 'hooks');
+  const profilePath = join(dir, 'sandbox.sb');
+  // The caller only learns `dir` on a successful return, so any throw
+  // between here and the return at the bottom would leak the minted dir
+  // under $TMPDIR. Remove it (and any rule copies made so far) before
+  // rethrowing -- still fail-closed.
+  const ruleCopies = [];
+  try {
+    // 0o700 like git-broker's dir: shims/hook/profile must be private to
+    // this launch -- sandbox.sb reveals host paths, and a same-UID session
+    // sharing the base dir must not reach them. Inside the try so a failure
+    // here is cleaned up like every later throw (see the catch below).
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    mkdirSync(binDir, { recursive: true, mode: 0o700 });
+    mkdirSync(hooksDir, { recursive: true, mode: 0o700 });
+    // resolve() normalizes spelling but not symlinks (same reason tmpDirs
+    // carries the realpath of tmpdir()): rules below register both spellings
+    // via subtrees() so a symlinked cwd still matches -- and denies hold.
+    // The XDG_RUNTIME_DIR override (see env below) must exist before the
+    // entrypoint's mkdir -p runs -- and before any tool reads it.
+    mkdirSync(join(dir, 'runtime'), { recursive: true, mode: 0o700 });
+
+    const projectDir = resolve(cwd);
+    // Throwaway HOME (minimal/usage sandboxes, or persistentHome off): lives
+    // inside the runtime dir so teardown stays a single rm -rf.
+    const effectiveHome = homeDir || join(dir, 'home');
+    if (!homeDir) mkdirSync(effectiveHome, { recursive: true });
+
+    // --- shims ---------------------------------------------------------------
+    // Quote for /bin/sh double quotes: paths here derive from server-side
+    // constants and runtime dirs, but never interpolate them raw -- a `"`/`$`
+    // in $TMPDIR today would otherwise break out of the exec line.
+    const shQuote = (s) => `"${String(s).replace(/(["$`\\])/g, '\\$1')}"`;
+    // credential.helper is not a free-form shell command string the way
+    // GIT_SSH_COMMAND is: git (credential_do) classifies the value as a
+    // `!`-shell command, an absolute path, or a helper NAME (`git
+    // credential-"<value>"`, which never executes). A leading `"` would
+    // fall into the NAME class. The value IS still shell-parsed at
+    // execution time (run_credential_helper spawns `sh -c "<value> <op>"`,
+    // use_shell=1) -- which is exactly why bare-word backslash escaping
+    // (`/a\ b/c`, leading `/` keeps the path class) works and a raw
+    // unescaped path with spaces would not.
+    const shEscapeWord = (s) => String(s).replace(/[^A-Za-z0-9_@%+=:,./-]/g, '\\$&');
+    const shim = (name, target) => {
+      const p = join(binDir, name);
+      writeFileSync(p, `#!/bin/sh\nexec ${shQuote(nodeBin)} ${shQuote(target)} "$@"\n`, { mode: 0o755 });
+      return p;
+    };
+    let sshShim = null;
+    let credHelperShim = null;
+    if (gitBroker) {
+      // The `gh` shim is reached via the PATH prepend (binDir is first), so no
+      // reference is needed here -- unlike the ssh/credential-helper shims,
+      // which are pointed at by absolute-path env (GIT_SSH_COMMAND / helper).
+      shim('gh', scripts.ghWrapper);
+      credHelperShim = shim('ccserver-git-credential-helper', scripts.credHelper);
+      if (ssh.realSsh) sshShim = shim('ccserver-git-ssh', scripts.sshWrapper);
+      // bwrap binds the ssh wrapper OVER the real ssh binary's path, so a
+      // plain `ssh` resolution passes the allowlist gate (the real binary
+      // stays reachable there too via $CCSANDBOX_REAL_SSH -- same bypass
+      // class). Seatbelt has no mounts: the PATH-prepended binDir is the
+      // closest equivalent, so cover plain `ssh` resolution too. An
+      // absolute-path launch of the real ssh still bypasses the gate
+      // (documented in docs-site).
+      if (ssh.realSsh) shim('ssh', scripts.sshWrapper);
+    }
+    // The shared sandbox-ssh-config pins UserKnownHostsFile at bwrap's fixed
+    // in-sandbox paths, which no mount provides here -- every host would
+    // fail StrictHostKeyChecking. Emit a seatbelt variant pointing at the
+    // host known_hosts paths (registered as read literals below). Only a
+    // brokered launch consumes it (CCSANDBOX_SSH_CONFIG / GIT_SSH_COMMAND /
+    // the ssh shims are wired under gitBroker), so minimal launches
+    // (usage capture, gitBroker: null) must not mint it.
+    let sshConfigPath = ssh.configFile;
+    let knownHostsCopy = null;
+    if (gitBroker && ssh.realSsh) {
+      // UserKnownHostsFile is a whitespace-separated list with no quoting:
+      // the server-tree default known_hosts (the install dir may contain
+      // spaces) must live at a space-free path. Copy it into the launch dir
+      // (under tmpdir, never spaced on macOS). ~/.ssh/known_hosts needs no
+      // copy: macOS HOME paths never contain spaces.
+      if (ssh.knownHostsDefault) {
+        try {
+          copyFileSync(ssh.knownHostsDefault, join(dir, 'known-hosts'));
+          knownHostsCopy = join(dir, 'known-hosts');
+        } catch { /* no known_hosts -> /dev/null (fail-closed) */ }
+      }
+      sshConfigPath = join(dir, 'ssh-config');
+      writeFileSync(sshConfigPath, [
+        '# Seatbelt variant of sandbox-ssh-config: same skip-system-config',
+        '# posture, but UserKnownHostsFile uses host paths (there are no',
+        "# mounts to provide bwrap's fixed in-sandbox paths).",
+        'Host *',
+        `\tUserKnownHostsFile ${[ssh.userKnownHosts, knownHostsCopy].filter(Boolean).join(' ') || '/dev/null'}`,
+        '\tStrictHostKeyChecking yes',
+        '',
+      ].join('\n'), { mode: 0o600 });
+    }
+    if (commitGuard) {
+      const p = join(hooksDir, 'commit-msg');
+      writeFileSync(p, `#!/bin/sh\nexec ${shQuote(nodeBin)} ${shQuote(scripts.commitHook)} "$@"\n`, { mode: 0o755 });
+    }
+
+    // --- env (via /usr/bin/env, since sandbox-exec has no --setenv) ----------
+    const hostLocalBin = join(hostHome, '.local', 'bin');
+    const env = {
+      HOME: effectiveHome,
+      // bwrap sets XDG_RUNTIME_DIR via --setenv (hostRuntimeDir()). Without an
+      // override the shared entrypoint defaults it to /run/user/<uid>, which
+      // does not exist on macOS and is not writable under this profile. A
+      // per-launch dir inside `dir` is always writable and torn down with the
+      // rest (the entrypoint's mkdir -p succeeds there).
+      XDG_RUNTIME_DIR: join(dir, 'runtime'),
+      PATH: [binDir, join(effectiveHome, '.local', 'bin'), hostLocalBin, sandboxPathBase,
+        '/opt/homebrew/bin', '/opt/homebrew/sbin'].join(':'),
+      CCSANDBOX_DOCKER: '0',
+    };
+    if (sockets.mcp) env.CCSANDBOX_MCP_SOCK = sockets.mcp;
+    // Seatbelt has no mounts: there is no /ccserver-group-files. Expose the
+    // host blob dir the established way (env, like the socket paths) so tool
+    // responses can one day report a path that actually resolves. NOTE: the
+    // group_files tools still return the fixed /ccserver-group-files path, so
+    // receiving shared files does NOT work on macOS seatbelt yet (see docs).
+    if (groupFilesDir) env.CCSANDBOX_GROUP_FILES_DIR = groupFilesDir;
+    if (authSock) env.SSH_AUTH_SOCK = authSock;
+    if (gnupg) env.GNUPGHOME = join(hostHome, '.gnupg');
+    // HOME is remapped to the sandbox home, so $HOME-relative config resolution
+    // would miss the real auth/state (bwrap instead overlays the real dirs at
+    // the real $HOME path). Point the CLIs that support it at the real dirs
+    // (gated on existence, like the appBinds binds). opencode resolves its
+    // config/data/state via $HOME-relative XDG dirs and copilot/commandcode
+    // resolve via $HOME (no env override exists) -- under seatbelt they see
+    // the sandbox home, so their login / model / --continue state does NOT
+    // carry over from the host (unlike bwrap, where $HOME IS the host home
+    // path with the persistent home mounted there). See docs-site.
+    if (existsSync(join(hostHome, '.claude'))) env.CLAUDE_CONFIG_DIR = join(hostHome, '.claude');
+    if (existsSync(join(hostHome, '.codex'))) env.CODEX_HOME = join(hostHome, '.codex');
+    // opencode resolves config/data/state via $HOME-relative XDG dirs (no
+    // dedicated override like CLAUDE_CONFIG_DIR exists), so point the XDG
+    // base dirs at the host ones: login (auth.json under share), model/state
+    // memory and --continue history then carry over from the host, like the
+    // bwrap appBinds. Gated on existence so a host that never ran opencode
+    // keeps a sandbox-local (throwaway/persistent-HOME) setup instead of
+    // materializing host dirs from inside the sandbox. The profile already
+    // allows these three host trees read+write (see appConfigDirs); other
+    // tools resolving XDG dirs stay fail-closed because only the opencode
+    // subtrees are allow-listed -- notably host ~/.config/git stays denied,
+    // so sandboxed git keeps the sandbox gitconfig + broker pins.
+    if (app === 'opencode') {
+      const xdg = [
+        ['XDG_CONFIG_HOME', join(hostHome, '.config')],
+        ['XDG_DATA_HOME', join(hostHome, '.local', 'share')],
+        ['XDG_STATE_HOME', join(hostHome, '.local', 'state')],
+      ];
+      const opencodeDir = {
+        XDG_CONFIG_HOME: join(hostHome, '.config', 'opencode'),
+        XDG_DATA_HOME: join(hostHome, '.local', 'share', 'opencode'),
+        XDG_STATE_HOME: join(hostHome, '.local', 'state', 'opencode'),
+      };
+      for (const [key, base] of xdg) {
+        if (existsSync(opencodeDir[key])) env[key] = base;
+      }
+    }
+
+    // GIT_CONFIG_COUNT merges credential.helper (gitBroker) and core.hooksPath
+    // (commitGuard) into one env mechanism -- same rule as buildBwrapArgs'
+    // comment: a future feature reusing it must extend the count here.
+    const gitConfigKeys = [];
+    if (gitBroker) {
+      env.CCSANDBOX_GIT_BROKER_SOCK = gitBroker.sockPath;
+      env.CCSANDBOX_GIT_ALLOWLIST = gitBroker.allowlistPath;
+      env.GIT_CONFIG_NOSYSTEM = '1';
+      if (ssh.realSsh) {
+        env.CCSANDBOX_REAL_SSH = ssh.realSsh;
+        env.CCSANDBOX_SSH_CONFIG = sshConfigPath;
+        // git runs this through sh -c: quote the shim path so spaces in
+        // $TMPDIR / CCSERVER_SANDBOX_SEATBELT_TMP cannot split it.
+        env.GIT_SSH_COMMAND = shQuote(sshShim);
+      }
+      // useHttpPath is supplied by the ro-bound GENERATED_GITCONFIG on the
+      // bwrap path; there is no mount here, so it rides GIT_CONFIG too.
+      // Without it git drops the path from the credential description and
+      // the broker's host+path allowlist match always denies.
+      gitConfigKeys.push(['credential.useHttpPath', 'true']);
+      // NOT shell-quoted: git treats a leading `"` as a helper name and never
+      // executes the helper. Backslash-escape as a bare word instead.
+      gitConfigKeys.push(['credential.helper', shEscapeWord(credHelperShim)]);
+    }
+    if (commitGuard) {
+      env.CCSANDBOX_COMMIT_GUARD_CONFIG = commitGuard.configPath;
+      gitConfigKeys.push(['core.hooksPath', hooksDir]);
+    }
+    if (gitConfigKeys.length > 0) {
+      env.GIT_CONFIG_COUNT = String(gitConfigKeys.length);
+      gitConfigKeys.forEach(([k, v], i) => {
+        env[`GIT_CONFIG_KEY_${i}`] = k;
+        env[`GIT_CONFIG_VALUE_${i}`] = v;
+      });
+    }
+
+    // NOTE: `tools` (rtk / code-review-graph provisioning) is accepted for
+    // call-shape parity with buildBwrapArgs but is bwrap-only there: rtk is
+    // stripped by buildSandboxSpawn's darwin branch and CRG by its
+    // "no mounts -> no /ccserver-sandbox-provision.sh" warning, while
+    // buildMinimalSandboxSpawn passes null. Nothing provision-related is
+    // read or emitted here.
+
+    // Operator env last, so it overrides the defaults above (like bwrap).
+    for (const [k, v] of Object.entries(extraEnv || {})) {
+      if (typeof k === 'string' && k) env[k] = expandAgainstHome(String(v), hostHome);
+    }
+
+    // --- profile allow/deny lists (binds translated to rules) ----------------
+    const readRegexes = [
+      '^/usr(/.*)?$', '^/bin(/.*)?$', '^/sbin(/.*)?$', '^/etc(/.*)?$',
+      '^/System(/.*)?$', '^/Library(/.*)?$', '^/opt(/.*)?$',
+      '^/private/etc(/.*)?$', '^/private/var(/.*)?$', '^/var(/.*)?$',
+      '^/tmp(/.*)?$', '^/private/tmp(/.*)?$',
+    ...subtrees(projectDir),
+    ...subtrees(effectiveHome),
+    ...subtrees(dir),
+    // Only the individual host files this launch executes/reads -- parity
+    // with bwrap's per-file ro-binds. A serverDir subtree would expose the
+    // whole server implementation to the sandboxed agent (open egress +
+    // prompt injection make that reconnaissance material).
+    ...[scripts.entrypoint, scripts.mcpBridge, scripts.ghWrapper,
+      scripts.credHelper, scripts.sshWrapper, scripts.commitHook]
+      .filter(Boolean).flatMap((f) => pathVariants(f).map((p) => `^${escapeSeatbeltRegex(p)}$`)),
+    ...subtrees(hostLocalBin),
+  ];
+    const tmpDirs = new Set([tmpdir()]);
+    try { tmpDirs.add(realpathSync(tmpdir())); } catch { /* best effort */ }
+    for (const t of tmpDirs) {
+      const r = subtreeRegex(t);
+      if (!readRegexes.includes(r)) readRegexes.push(r);
+    }
+    // Ancestor metadata (lstat) for userspace realpath: node/vite/npm/git
+    // resolve paths component-by-component, and subtree rules don't cover
+    // the ancestors themselves. Exact-match only -- siblings stay closed.
+    // Bases mirror the trees tools resolve within (project, sandbox HOME,
+    // launch dir, tmp, node binary).
+    readRegexes.push(...ancestorExactRegexes([projectDir, effectiveHome, dir, ...tmpDirs, nodeBin]));
+    // Agent config dirs keep working when a CLI resolves the real home via
+    // macOS APIs instead of $HOME (mirrors buildBwrapArgs' appBinds). Regexes
+    // for absent paths are harmless, so no existsSync gating is needed.
+    // NOTE: these need read as well as write (bwrap binds them rw) -- Seatbelt
+    // file-write* does not imply file-read*, so a write-only entry would leave
+    // CLIs unable to read back the auth/state they just wrote.
+    const appConfigDirs = [
+      join(hostHome, '.claude'), join(hostHome, '.claude.json'),
+      join(hostHome, '.local', 'share', 'claude'),
+      join(hostHome, '.config', 'opencode'),
+      join(hostHome, '.local', 'share', 'opencode'),
+      join(hostHome, '.local', 'state', 'opencode'),
+      join(hostHome, '.config', 'github-copilot'),
+      join(hostHome, '.copilot'),
+      join(hostHome, '.codex'),
+      join(hostHome, '.commandcode'),
+    ];
+    const cachesDir = join(hostHome, 'Library', 'Caches');
+    readRegexes.push(...subtrees(cachesDir), ...appConfigDirs.flatMap(subtrees));
+    // gpg opt-in (bwrap binds ~/.gnupg): with no mounts, allow the real
+    // keyring and point gpg at it ($HOME here is the sandbox home).
+    const gnupgHome = gnupg ? join(hostHome, '.gnupg') : null;
+    if (gnupgHome) readRegexes.push(...subtrees(gnupgHome));
+    const writeRegexes = [
+      ...subtrees(projectDir),
+      ...subtrees(effectiveHome),
+      // Only the mutable part of the runtime dir is writable. bin/ (gh/ssh/
+      // credential-helper shims), hooks/ (the core.hooksPath target) and
+      // sandbox.sb must stay read-only -- bwrap ro-binds their equivalents at
+      // fixed paths, and a writable shim is attacker-chosen code on the next
+      // git/gh/commit invocation.
+      ...subtrees(join(dir, 'runtime')),
+      '^/tmp(/.*)?$', '^/private/tmp(/.*)?$',
+      // macOS-API writers (NSSearchPath ignores $HOME): caches stay usable.
+      ...subtrees(cachesDir),
+      ...appConfigDirs.flatMap(subtrees),
+    ];
+    for (const t of tmpDirs) {
+      const r = subtreeRegex(t);
+      if (!writeRegexes.includes(r)) writeRegexes.push(r);
+    }
+    if (gnupgHome) writeRegexes.push(...subtrees(gnupgHome));
+    if (claudeDir && existsSync(claudeDir)) readRegexes.push(...subtrees(claudeDir));
+    // The shims, the commit-msg hook and the MCP bridge all exec through the
+    // host node binary: guarantee it stays readable (and executable) even when
+    // it lives outside the default trees (nvm/Volta/fnm under $HOME), the same
+    // way bwrap ro-binds SANDBOX_NODE_PATH.
+    if (nodeBin) readRegexes.push(...subtrees(dirname(nodeBin)));
+    if (gitCommonDir) {
+      readRegexes.push(...subtrees(gitCommonDir));
+      writeRegexes.push(...subtrees(gitCommonDir));
+    }
+    if (groupFilesDir) readRegexes.push(...subtrees(groupFilesDir));
+
+    const readLiterals = [];
+    const writeLiterals = [];
+    const sockPaths = [sockets.mcp, sockets.notify, sockets.usage, sockets.meta, sockets.reviewer]
+      .filter(Boolean);
+    if (gitBroker) sockPaths.push(gitBroker.sockPath);
+    // A forwarded ssh-agent socket needs an explicit rule: connect() is a
+    // write, and custom locations (e.g. 1Password's ~/Library socket) fall
+    // outside every allow tree above. Both spellings (see pathVariants).
+    if (authSock) sockPaths.push(...pathVariants(authSock));
+    for (const s of new Set(sockPaths)) {
+      readLiterals.push(s);
+      writeLiterals.push(s); // connect() needs write
+    }
+    if (gitBroker) readLiterals.push(gitBroker.allowlistPath);
+    if (commitGuard) readLiterals.push(commitGuard.configPath);
+    // Both spellings (see pathVariants): a server tree or HOME under a
+    // symlink would otherwise read-deny these via the other spelling.
+    // (The server-tree knownHostsDefault needs no literal: it is copied into
+    // the launch dir when the brokered ssh config is minted, and that dir
+    // is readable via subtrees(dir) above.)
+    if (ssh.userKnownHosts) readLiterals.push(...pathVariants(ssh.userKnownHosts));
+    // The per-launch seatbelt ssh config above (or the shared file when no
+    // real ssh exists, kept for completeness though nothing reads it then).
+    // Only brokered launches mint (and read) the per-launch copy.
+    if (gitBroker && sshConfigPath) readLiterals.push(...pathVariants(sshConfigPath));
+    if (orchestratorClaudeMdSrc) readLiterals.push(...pathVariants(orchestratorClaudeMdSrc));
+
+    // Every deny pin must cover both spellings Seatbelt may see: under the
+    // per-user TMPDIR, macOS resolves /var/... to /private/var/..., and a
+    // pin built from a not-yet-existing file (profile, .gitconfig) would
+    // silently keep only the raw spelling via pathVariants(). Derive both
+    // spellings from the existing parent dir instead.
+    const exactPins = (name, existingParent) =>
+      pathVariants(existingParent).map((p) => `^${escapeSeatbeltRegex(join(p, name))}$`);
+    // Sibling launch-dir denies need both spellings of the base dir as
+    // well. POSIX ERE has no lookahead: deny ALL launch dirs (own
+    // included), then re-allow our own subtree afterwards
+    // (last-match-wins). Future sibling dirs stay covered by the deny.
+    const siblingDeny = pathVariants(seatbeltBaseDir()).map((base) =>
+      `^${escapeSeatbeltRegex(base)}/ccserver-seatbelt-`);
+    const ownReAllow = subtrees(dir);
+    // Raw keys / gh tokens are never reachable (mirrors bwrap's
+    // BLOCKED_BIND_PATHS, unconditionally even with gitBroker off).
+    const denyWriteRegexes = [
+      ...subtrees(join(hostHome, '.ssh')),
+      ...subtrees(join(hostHome, '.config', 'gh')),
+      // With the git broker on, the sandbox HOME's gitconfig stays
+      // unwritable (bwrap ro-binds GENERATED_GITCONFIG over it for the same
+      // reason): an agent-written credential.helper there would otherwise
+      // receive broker-issued tokens via `credential store`, exfiltrating
+      // them past the allowlist. git also reads ~/.config/git/config
+      // (checked BEFORE ~/.gitconfig): without this deny the .gitconfig pin
+      // is trivially bypassed. With gitBroker off there are no
+      // broker-issued tokens to steal and bwrap leaves both files
+      // agent-writable -- match it, so `git config --global` keeps working
+      // in a persistent HOME. (Repo-local .git/config and GIT_CONFIG_*
+      // overrides stay agent-reachable by design -- same as bwrap.)
+      ...(gitBroker ? [
+        ...exactPins('.gitconfig', effectiveHome),
+        ...exactPins(join('.config', 'git', 'config'), effectiveHome),
+      ] : []),
+      // Pin the read-only invariant explicitly: the runtime dir lives under
+      // TMPDIR, which the broad tmp write rules above also match -- these
+      // last-match-wins pins keep shims/hooks/profile immutable even so.
+      ...subtrees(binDir),
+      ...subtrees(hooksDir),
+      ...exactPins(basename(profilePath), dir),
+      // The commit-msg guard config lives under hostRuntimeDir() (short /tmp
+      // base on darwin, inside the broad tmp write rules) and the in-sandbox
+      // hook re-reads it on every commit -- bwrap ro-binds it, so deny-write
+      // it here too or the agent can empty blockedPatterns mid-session. Same
+      // for the broker allowlist (read once at broker boot, but pinning it
+      // matches bwrap's ro-bind parity). NOTE: these pins cover THIS launch's
+      // files only -- sibling sessions' runtime-dir files (broker sockets,
+      // allowlists, commit-guard configs) stay reachable, exactly as
+      // documented in docs-site (sandbox/overview.md).
+      ...(commitGuard
+        ? exactPins(basename(commitGuard.configPath), dirname(commitGuard.configPath))
+        : []),
+      ...(gitBroker
+        ? exactPins(basename(gitBroker.allowlistPath), dirname(gitBroker.allowlistPath))
+        : []),
+      // The per-launch ssh-config (CCSANDBOX_SSH_CONFIG, minted for brokered
+      // launches when ssh.realSsh) must stay immutable like bwrap's
+      // --ro-bind'ed sandbox-ssh-config: an agent-writable copy could weaken
+      // StrictHostKeyChecking / UserKnownHostsFile for brokered git ssh.
+      ...(gitBroker && ssh.realSsh ? exactPins(basename(sshConfigPath), dir) : []),
+      // The known_hosts copy is as security-sensitive as the ssh-config
+      // itself: an agent-writable known_hosts weakens host key verification.
+      ...(knownHostsCopy ? exactPins(basename(knownHostsCopy), dir) : []),
+      // NOTE: sibling launch dirs are intentionally NOT repeated here.
+      // They are already denied by siblingDenyWriteRegexes BEFORE the
+      // own-dir re-allow (and future siblings never match that re-allow),
+      // so repeating the sibling prefix in this final deny would match our
+      // own dir too and -- under last-match-wins -- override its re-allow,
+      // making dir/runtime and the throwaway HOME write-denied.
+    ];
+    // Orchestrator rule overlay: bwrap shadows CLAUDE.md/AGENTS.md read-only by
+    // ro-binding the generated file over cwd's copies. Seatbelt has no mounts,
+    // so materialize the generated rules into the orchestrator's managed cwd
+    // instead -- that dir never persists CLAUDE.md/AGENTS.md (see
+    // routes/groups.js), so the copies are launch-scoped by construction -- and
+    // deny writes below so they stay immutable for the session. A copy failure
+    // throws (fail-closed like a failed bwrap bind: never boot an orchestrator
+    // with no rules). Teardown removes the copies (see ruleCopies below).
+    if (orchestratorClaudeMdSrc) {
+      for (const name of ['CLAUDE.md', 'AGENTS.md']) {
+        const dest = join(projectDir, name);
+        // A concurrent launch from the same deterministic orchestratorDir may
+        // have already materialized these paths for a LIVE session -- the
+        // same scenario the stillReferenced teardown guards protect. Copy
+        // through a temp file + rename so a failed build never truncates a
+        // live overlay, and track ownership so teardown only unlinks files
+        // THIS launch created (a failed build must not delete a live
+        // session's overlay out from under it).
+        const preExisting = existsSync(dest);
+        const tmpDest = `${dest}.ccserver-overlay-tmp-${launchId}`;
+        try {
+          copyFileSync(orchestratorClaudeMdSrc, tmpDest);
+          renameSync(tmpDest, dest);
+        } catch (err) {
+          try { unlinkSync(tmpDest); } catch { /* best effort */ }
+          throw new Error(`seatbelt orchestrator overlay: cannot copy rules to ${dest}: ${err.message}`);
+        }
+        if (!preExisting) ruleCopies.push(dest);
+        for (const base of pathVariants(projectDir)) {
+          denyWriteRegexes.push(`^${escapeSeatbeltRegex(join(base, name))}$`);
+        }
+      }
+    }
+
+    // Operator extra binds become allow rules (no remount, so src is used
+    // as-is; dest is ignored). Blocked paths are skipped with a warning.
+    const BLOCKED = [join(hostHome, '.ssh'), join(hostHome, '.config', 'gh')];
+    for (const b of extraBinds || []) {
+      if (!b || !b.src) continue;
+      const src = expandAgainstHome(String(b.src), hostHome);
+      if (BLOCKED.some((p) => src === p || src.startsWith(`${p}/`))) {
+        console.warn(`[sandbox] ignoring configured bind of ${src}: raw ssh keys / gh config are no longer exposed to the sandbox (see the git broker)`);
+        continue;
+      }
+      readRegexes.push(...subtrees(src));
+      if (b.mode === 'rw') writeRegexes.push(...subtrees(src));
+    }
+
+    // Control-plane sockets may not exist yet (pty-host/meta boot lazily),
+    // and their parent runtime dir may not either. When it does exist,
+    // pathVariants(parent) yields both spellings; when it does not, keep
+    // the raw spelling and resolve via the grandparent (/tmp) so the
+    // symlink-resolved /private/tmp spelling is pinned too -- Seatbelt
+    // mediates the resolved path, and a raw-only pin would silently miss
+    // every connect().
+    const netDenyLiterals = [...new Set(
+      (controlSockDenies || []).filter(Boolean).flatMap((s) => {
+        const parent = dirname(s);
+        const parentVariants = existsSync(parent)
+          ? pathVariants(parent)
+          : [parent, ...pathVariants(dirname(parent)).map((d) => join(d, basename(parent)))];
+        return parentVariants.map((d) => join(d, basename(s)));
+      }),
+    )];
+    // The pinned sockets' files themselves must also stay unwritable:
+    // file-write* covers unlink/rename, so without these pins the agent can
+    // delete or replace a pinned socket at its fixed path (DoS the server's
+    // control plane, or impersonate pty-host/meta for future host-side
+    // connects). Same list as the network-outbound pins -- the meta
+    // session's own socket is excluded there, so it stays fully usable here.
+    denyWriteRegexes.push(...netDenyLiterals.map((s) => `^${escapeSeatbeltRegex(s)}$`));
+    const profileText = buildSeatbeltProfileText({
+      readRegexes, writeRegexes, readLiterals, writeLiterals,
+      siblingDenyWriteRegexes: siblingDeny, siblingDenyReadRegexes: siblingDeny,
+      reAllowWriteRegexes: ownReAllow, reAllowReadRegexes: ownReAllow,
+      denyWriteRegexes,
+      // Mirror bwrap (gh wrapper bound over the real binaries only while the
+      // broker is on): with gitBroker off the agent may use its own gh, so the
+      // pins must not apply. The binDir shim itself is never in ghPaths, but
+      // filter it defensively so the PATH shim cannot be denied by mistake.
+      denyExecLiterals: gitBroker
+        ? [...new Set(ghPaths)].filter((p) => p && p !== join(binDir, 'gh'))
+        : [],
+      denyNetOutboundLiterals: netDenyLiterals,
+    });
+    writeFileSync(profilePath, profileText, { mode: 0o600 });
+    return { dir, profilePath, binDir, hooksDir, homeDir: effectiveHome, ruleCopies: ruleCopies.length > 0 ? ruleCopies : null, nodeBin, env };
+  } catch (err) {
+    try { rmSync(dir, { recursive: true, force: true }); } catch { /* best effort */ }
+    for (const f of ruleCopies) { try { unlinkSync(f); } catch { /* best effort */ } }
+    throw err;
+  }
+}
+
+// Serialize the seatbelt env object for `sandbox-exec -f profile
+// /usr/bin/env K=V ... <cmd>` (sandbox-exec has no --setenv). Array-form
+// spawn passes each `K=V` literally, so values with spaces are safe.
+export function seatbeltEnvArgs(env) {
+  return Object.entries(env || {}).map(([k, v]) => `${k}=${v}`);
+}
