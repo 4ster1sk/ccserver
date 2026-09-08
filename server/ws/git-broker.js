@@ -47,7 +47,7 @@
 // commitMessageGuard.enabled); omitted entirely, this is a no-op, same as
 // before plan8.
 
-import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, statSync, unlinkSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { createServer } from 'node:net';
 import { execFileSync, spawn } from 'node:child_process';
@@ -83,6 +83,26 @@ export function hostRuntimeDir() {
   if (process.env.XDG_RUNTIME_DIR) return process.env.XDG_RUNTIME_DIR;
   if (process.platform === 'darwin') return `/tmp/ccserver-runtime-${UID}`;
   return `/run/user/${UID}`;
+}
+
+// Create (and verify) the per-UID runtime dir. mkdirSync's mode option never
+// fixes a pre-existing dir: on darwin the fallback base lives under the
+// sticky, world-writable /tmp, where another local user can pre-create it
+// (e.g. 0777) before our first bind -- the window reopens after every reboot
+// and macOS's periodic /tmp cleanup. Binding sockets into a hostile dir lets
+// its owner unlink/replace them (broker impersonation, credential theft), so
+// fail closed unless THIS uid owns a private 0700 dir. Linux's
+// /run/user/<uid> is root-owned via logind and needs no check (and an
+// XDG_RUNTIME_DIR override is the operator's explicit responsibility).
+export function ensureHostRuntimeDir() {
+  const base = hostRuntimeDir();
+  if (process.platform !== 'darwin' || process.env.XDG_RUNTIME_DIR) return base;
+  mkdirSync(base, { recursive: true, mode: 0o700 });
+  const st = statSync(base);
+  if (st.uid !== UID || (st.mode & 0o777) !== 0o700) {
+    throw new Error(`host runtime dir is not a private 0700 dir owned by uid ${UID}: ${base}`);
+  }
+  return base;
 }
 function runtimeBase() {
   return hostRuntimeDir();
@@ -394,6 +414,7 @@ export function startGitBroker({ cwd, blockedPatterns = null }) {
 
   const dir = join(runtimeBase(), `ccserver-git-broker-${randomUUID()}`);
   try {
+    ensureHostRuntimeDir();
     mkdirSync(dir, { recursive: true, mode: 0o700 });
   } catch (e) {
     throw new Error(`git broker failed to start for ${cwd}: ${e.message}`);

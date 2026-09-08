@@ -2,12 +2,17 @@
 // to a file on the host or in the repo. Which servers are registered:
 //   ccserver        - the group's control/handoff broker (combo sessions only,
 //                     i.e. when `groupMcp` is true and mcpSocketPath was set).
-//                     The CLI runs the bridge script at the fixed in-sandbox
-//                     path; which broker it reaches is decided solely by which
-//                     host socket got bound to /ccserver-sandbox-mcp.sock in
-//                     the sandbox (see sandbox.js / mcpBroker.js). Absent for
-//                     standalone sessions -- they have no group socket, so
-//                     registering it would hand the agent a broken server.
+//                     Under bwrap the CLI runs the bridge script at the fixed
+//                     in-sandbox path; which broker it reaches is decided
+//                     solely by which host socket got bound to
+//                     /ccserver-sandbox-mcp.sock in the sandbox (see
+//                     sandbox.js / mcpBroker.js). macOS seatbelt sandboxes
+//                     pass `hostBridge: true` and run the host node + bridge
+//                     script instead (no fixed path is ever bound there);
+//                     non-sandboxed and bwrap launches keep the fixed-path
+//                     form. Absent for standalone sessions -- they have no
+//                     group socket, so registering it would hand the agent a
+//                     broken server.
 //   ccserver-notify - the process-global notification server (see notify.js),
 //                     registered when the `{ notify }` descriptor is passed.
 //   ccserver-usage  - the process-global usage server (see usageMcp.js),

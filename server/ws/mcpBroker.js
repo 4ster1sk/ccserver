@@ -18,7 +18,7 @@ import { createServer } from 'node:net';
 import { mkdirSync, rmSync, existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { SocketTransport, buildControlMcpServer, buildHandoffMcpServer, buildNotifyMcpServer, buildUsageMcpServer, buildMetaMcpServer, buildReviewerMcpServer, MAX_TRANSPORT_BUFFER_CHARS } from './mcpServer.js';
-import { hostRuntimeDir } from './git-broker.js';
+import { hostRuntimeDir, ensureHostRuntimeDir } from './git-broker.js';
 
 // Darwin-aware via git-broker.js (macOS has no /run/user): the same
 // hostRuntimeDir() every other broker socket path uses.
@@ -69,8 +69,12 @@ function waitForSocketFile(sockPath, timeoutMs) {
 async function listenMcp({ groupId, tag, buildServer, sockPath }) {
   const target = sockPath || sockPathFor(groupId, tag);
   // darwin's hostRuntimeDir() base is not pre-created by anything else
-  // (unlike Linux's logind-made /run/user/<uid>).
-  try { mkdirSync(dirname(target), { recursive: true, mode: 0o700 }); } catch { /* listen() below reports real problems */ }
+  // (unlike Linux's logind-made /run/user/<uid>); ensureHostRuntimeDir()
+  // additionally fails closed if a hostile other-UID dir squatted on it.
+  try {
+    ensureHostRuntimeDir();
+    mkdirSync(dirname(target), { recursive: true, mode: 0o700 });
+  } catch { /* listen() below reports real problems */ }
   // A socket file left over from a crash (teardown never ran) would make
   // listen() fail with EADDRINUSE. The path is group-scoped and derived, so
   // a stale file can never belong to a live listener -- safe to drop. The

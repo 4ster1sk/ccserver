@@ -17,7 +17,7 @@ import { execFileSync } from 'node:child_process';
 import { mkdtempSync, mkdirSync, writeFileSync, chmodSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { startGitBroker } from './git-broker.js';
+import { startGitBroker, ensureHostRuntimeDir } from './git-broker.js';
 
 let root;
 let repoDir;
@@ -343,5 +343,20 @@ test('darwin socket paths stay within the 104-byte sun_path limit', () => {
   ];
   for (const p of longest) {
     assert.ok(Buffer.byteLength(p) < 104, `${p} fits in sun_path`);
+  }
+});
+
+test('ensureHostRuntimeDir is a no-op outside the darwin /tmp fallback', () => {
+  // The verification branch only runs on darwin without XDG_RUNTIME_DIR
+  // (untestable on this Linux CI host): everywhere else the helper must be
+  // a pure passthrough that never throws.
+  const prev = process.env.XDG_RUNTIME_DIR;
+  delete process.env.XDG_RUNTIME_DIR;
+  try {
+    const base = ensureHostRuntimeDir();
+    assert.equal(base, `/run/user/${typeof process.getuid === 'function' ? process.getuid() : 0}`);
+  } finally {
+    if (prev === undefined) delete process.env.XDG_RUNTIME_DIR;
+    else process.env.XDG_RUNTIME_DIR = prev;
   }
 });

@@ -10,9 +10,10 @@
 
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir, homedir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { randomUUID } from 'node:crypto';
 import {
   buildSeatbeltLaunch,
   buildSeatbeltProfileText,
@@ -666,6 +667,32 @@ test('buildSeatbeltLaunch pins controlSockDenies for network-outbound', () => {
   trackDir(sb.dir);
   const text = readFileSync(sb.profilePath, 'utf-8');
   assert.ok(text.includes(`(remote unix-socket (path-literal "${ptySock}"))`), 'pty-host socket pinned');
+  // The socket FILE itself must also be write-denied (file-write* covers
+  // unlink/rename -- otherwise the agent could replace the pinned socket at
+  // its fixed path and impersonate the control plane for host-side connects).
+  assert.equal(finalWriteVerdict(text, ptySock), 'deny', 'pinned socket file unwritable');
+});
+
+test('control-socket pins cover both /tmp spellings even when the dir is absent', () => {
+  // The runtime dir may not exist yet (nothing booted a broker); the anchor
+  // must fall back to the always-existing parent so the /private/tmp
+  // spelling (Seatbelt mediates the resolved path) is pinned too.
+  const absentDir = join(tmpdir(), `ccserver-seatbelt-absent-${randomUUID()}`);
+  const sock = join(absentDir, 'ccserver-pty-host.sock');
+  const prev = process.env.CCSERVER_SANDBOX_SEATBELT_TMP;
+  // Keep the launch dir OUT of the absent dir (fresh boots put it there).
+  process.env.CCSERVER_SANDBOX_SEATBELT_TMP = tmpRoot;
+  try {
+    const sb = buildSeatbeltLaunch(baseOpts({ controlSockDenies: [sock] }));
+    trackDir(sb.dir);
+    const text = readFileSync(sb.profilePath, 'utf-8');
+    assert.ok(text.includes(`(path-literal "${sock}")`), 'raw spelling pinned');
+    const priv = sock.replace(tmpdir(), realpathSync(tmpdir()));
+    assert.ok(text.includes(`(path-literal "${priv}")`), 'symlink-resolved spelling pinned');
+  } finally {
+    if (prev === undefined) delete process.env.CCSERVER_SANDBOX_SEATBELT_TMP;
+    else process.env.CCSERVER_SANDBOX_SEATBELT_TMP = prev;
+  }
 });
 
 test('control-plane pin paths track the producers (rename-safe)', () => {
