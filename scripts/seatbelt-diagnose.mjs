@@ -2,6 +2,9 @@
 // Phase 1 diagnostic for "Terminal exits immediately (code 0) under /Users
 // but works under /" on the macOS seatbelt backend. READ-ONLY on the repo:
 // it only generates profiles into /tmp and prints commands to run by hand.
+// Root cause found and fixed: macOS startup requires reading "/" itself
+// (see docs/seatbelt-root-read-abort-diagnosis.md); this script remains as
+// a profile-delta repro tool for future seatbelt launch issues.
 //
 // Usage (on the Mac, from the repo root):
 //   node scripts/seatbelt-diagnose.mjs [cwd-that-fails]
@@ -21,13 +24,16 @@
 import { mkdirSync, readFileSync, writeFileSync, realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const failCwd = resolve(process.argv[2] || join(homedir(), 'Documents'));
 const outDir = '/tmp/ccserver-seatbelt-diag';
 mkdirSync(outDir, { recursive: true });
 
-// Same script paths seatbeltScripts() wires up in sandbox.js.
-const wsDir = new URL('../server/ws/', import.meta.url).pathname;
+// Same script paths seatbeltScripts() wires up in sandbox.js. fileURLToPath
+// (not URL.pathname) so spaces in the repo path stay spaces -- URL.pathname
+// percent-encodes them and the resulting profile rules would never match.
+const wsDir = fileURLToPath(new URL('../server/ws/', import.meta.url));
 const scripts = {
   ghWrapper: join(wsDir, 'sandbox-gh-wrapper.cjs'),
   credHelper: join(wsDir, 'sandbox-git-credential-helper.cjs'),

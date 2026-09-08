@@ -166,6 +166,27 @@ test('explicit sandbox request without bwrap is refused, not silently unsandboxe
   assert.match(res.error, /^Failed to build sandbox: /);
 });
 
+// Filesystem-root launches: claude/opencode abort immediately there (opaque
+// SIGABRT, no output), and a SANDBOXED shell at / would get a fail-open
+// sandbox -- the project subtree rule becomes "^/(/.*)?$" (seatbelt's
+// subtrees('/')) or a "/" bind (bwrap), silently granting the whole
+// filesystem. Plain unsandboxed shells are fine at /.
+test('createSession refuses cwd=/ for agents and sandboxed shells, not plain shells', async () => {
+  const agent = await sessionManager.createSession({ cwd: '/', cols: 80, rows: 24, shell: false, app: 'claude', sandbox: false });
+  assert.equal(agent.session, null, 'agent launch at / is refused');
+  assert.match(agent.error, /^Cannot launch in the filesystem root/);
+
+  const sbShell = await sessionManager.createSession({ cwd: '/', cols: 80, rows: 24, shell: true, sandbox: true });
+  assert.equal(sbShell.session, null, 'sandboxed shell at / is refused (fail-open profile)');
+  assert.match(sbShell.error, /^Cannot launch a sandboxed shell in the filesystem root/);
+
+  if (!loadSandboxConfig().forceSandbox) {
+    const plain = await sessionManager.createSession({ cwd: '/', cols: 80, rows: 24, shell: true, sandbox: false });
+    assert.ok(plain.session, 'plain unsandboxed shell at / still spawns');
+    sessionManager.destroySession(plain.sessionId, { keepSchedule: false });
+  }
+});
+
 // Permission mode state on sessions: any value normalizes to one of
 // 'standard' | 'auto-accept' | 'yolo' (unknown -> 'standard'); shells always
 // carry 'standard'. The CLI flag itself is commandcode-only (see
