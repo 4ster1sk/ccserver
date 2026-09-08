@@ -315,16 +315,33 @@ test('hostRuntimeDir honors XDG_RUNTIME_DIR and defaults per platform', async ()
     delete process.env.XDG_RUNTIME_DIR;
     const uid = typeof process.getuid === 'function' ? process.getuid() : 0;
     // No XDG_RUNTIME_DIR: Linux keeps /run/user/<uid>; macOS has no /run and
-    // falls back to the per-user tmpdir (same shape as the implementation's
-    // darwin branch -- assert both so the fallback stays covered wherever
-    // the suite runs).
+    // falls back to a short /tmp base: the per-user tmpdir (~50 chars) plus
+    // broker socket names would exceed darwin's 104-byte sun_path limit.
     if (process.platform === 'darwin') {
-      assert.equal(hostRuntimeDir(), join(tmpdir(), `ccserver-runtime-${uid}`));
+      assert.equal(hostRuntimeDir(), `/tmp/ccserver-runtime-${uid}`);
     } else {
       assert.equal(hostRuntimeDir(), `/run/user/${uid}`);
     }
   } finally {
     if (prev === undefined) delete process.env.XDG_RUNTIME_DIR;
     else process.env.XDG_RUNTIME_DIR = prev;
+  }
+});
+
+test('darwin socket paths stay within the 104-byte sun_path limit', () => {
+  // darwin caps sockaddr_un.sun_path at 104 bytes (Linux: 108). The darwin
+  // fallback base is a short /tmp dir precisely so the longest broker
+  // socket names still fit -- verify the budget with worst-case widths
+  // (max UID, full UUIDs). Runs everywhere: it guards the shape, not the
+  // live platform.
+  const base = '/tmp/ccserver-runtime-2147483647';
+  const longest = [
+    `${base}/ccserver-git-broker-00000000-0000-0000-0000-000000000000/broker.sock`,
+    `${base}/ccserver-mcp-0123456789abcdef0123456789abcdef-control`,
+    `${base}/ccserver-pty-host.sock`,
+    `${base}/ccserver-meta.sock`,
+  ];
+  for (const p of longest) {
+    assert.ok(Buffer.byteLength(p) < 104, `${p} fits in sun_path`);
   }
 });

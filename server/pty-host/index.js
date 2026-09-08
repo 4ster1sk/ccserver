@@ -14,9 +14,9 @@ import { createRpcServer } from './rpcServer.js';
 import { GitBrokerRegistry } from './gitBrokerRegistry.js';
 // Shared runtime-dir convention (leaf module: no sessionManager/server
 // dependency, so the standalone-runnable constraint above still holds).
-import { hostRuntimeDir } from '../ws/git-broker.js';
+import { hostRuntimeDir, PTY_HOST_SOCK_NAME } from '../ws/git-broker.js';
 
-const SOCK_NAME = 'ccserver-pty-host.sock';
+const SOCK_NAME = PTY_HOST_SOCK_NAME;
 
 // Same base as every other broker socket path.
 export function getPtyHostSockPath() {

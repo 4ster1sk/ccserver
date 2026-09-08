@@ -23,7 +23,10 @@ import {
   subtreeRegex,
   subtrees,
 } from './sandbox-seatbelt.js';
-import { forceSandboxUnavailableReason, sandboxBackend, sandboxUnavailableReason } from './sandbox.js';
+import { forceSandboxUnavailableReason, sandboxBackend, sandboxUnavailableReason, seatbeltControlSockPaths } from './sandbox.js';
+import { PTY_HOST_SOCK_NAME, META_SOCK_NAME, hostRuntimeDir } from './git-broker.js';
+import { getPtyHostSockPath } from '../pty-host/index.js';
+import { getMetaSockPath } from './metaAgent.js';
 
 const HOME = homedir();
 
@@ -663,6 +666,50 @@ test('buildSeatbeltLaunch pins controlSockDenies for network-outbound', () => {
   trackDir(sb.dir);
   const text = readFileSync(sb.profilePath, 'utf-8');
   assert.ok(text.includes(`(remote unix-socket (path-literal "${ptySock}"))`), 'pty-host socket pinned');
+});
+
+test('control-plane pin paths track the producers (rename-safe)', () => {
+  // The network-outbound deny is only as good as its path: if pty-host or
+  // meta renames its socket, the pin must follow. Both producers build from
+  // git-broker.js's shared constants, and so does the pin list.
+  const prevPty = process.env.CCSERVER_PTY_HOST_SOCK;
+  const prevXdg = process.env.XDG_RUNTIME_DIR;
+  delete process.env.CCSERVER_PTY_HOST_SOCK;
+  delete process.env.XDG_RUNTIME_DIR;
+  try {
+    assert.equal(getPtyHostSockPath(), join(hostRuntimeDir(), PTY_HOST_SOCK_NAME));
+    assert.equal(getMetaSockPath(), join(hostRuntimeDir(), META_SOCK_NAME));
+    const pins = seatbeltControlSockPaths(null);
+    assert.ok(pins.includes(getPtyHostSockPath()), 'pty-host socket pinned');
+    assert.ok(pins.includes(getMetaSockPath()), 'meta socket pinned');
+    const metaPins = seatbeltControlSockPaths(getMetaSockPath());
+    assert.ok(!metaPins.includes(getMetaSockPath()), 'meta session keeps its channel');
+    assert.ok(metaPins.includes(getPtyHostSockPath()), 'pty-host pinned even for meta');
+  } finally {
+    if (prevPty === undefined) delete process.env.CCSERVER_PTY_HOST_SOCK;
+    else process.env.CCSERVER_PTY_HOST_SOCK = prevPty;
+    if (prevXdg === undefined) delete process.env.XDG_RUNTIME_DIR;
+    else process.env.XDG_RUNTIME_DIR = prevXdg;
+  }
+});
+
+test('commit-guard config and broker allowlist are write-pinned', () => {
+  // The in-sandbox commit-msg hook re-reads its config on every commit;
+  // bwrap ro-binds it, so seatbelt must deny-write it (and the allowlist).
+  const brokerDir = mkdtempSync(join(tmpdir(), 'ccserver-seatbelt-broker-'));
+  DIRS.push(brokerDir);
+  const allowlistPath = join(brokerDir, 'allow.json');
+  writeFileSync(allowlistPath, '{}');
+  const guardPath = join(brokerDir, 'guard.json');
+  writeFileSync(guardPath, '{}');
+  const sb = buildSeatbeltLaunch(baseOpts({
+    gitBroker: { sockPath: join(brokerDir, 'broker.sock'), allowlistPath, dir: brokerDir },
+    commitGuard: { configPath: guardPath },
+  }));
+  trackDir(sb.dir);
+  const text = readFileSync(sb.profilePath, 'utf-8');
+  assert.equal(finalWriteVerdict(text, guardPath), 'deny', 'guard config immutable');
+  assert.equal(finalWriteVerdict(text, allowlistPath), 'deny', 'allowlist immutable');
 });
 
 test('buildSeatbeltLaunch pins ghPaths only while the git broker is on', () => {

@@ -586,6 +586,19 @@ export function buildSeatbeltLaunch({
       ...subtrees(binDir),
       ...subtrees(hooksDir),
       ...exactPins(basename(profilePath), dir),
+      // The commit-msg guard config lives under hostRuntimeDir() (short /tmp
+      // base on darwin, inside the broad tmp write rules) and the in-sandbox
+      // hook re-reads it on every commit -- bwrap ro-binds it, so deny-write
+      // it here too or the agent can empty blockedPatterns mid-session. Same
+      // for the broker allowlist (read once at broker boot, but pinning it
+      // matches bwrap's ro-bind parity and closes the cross-session rewrite
+      // of a sibling session's allowlist file).
+      ...(commitGuard
+        ? exactPins(basename(commitGuard.configPath), dirname(commitGuard.configPath))
+        : []),
+      ...(gitBroker
+        ? exactPins(basename(gitBroker.allowlistPath), dirname(gitBroker.allowlistPath))
+        : []),
       // The per-launch ssh-config (CCSANDBOX_SSH_CONFIG, minted for brokered
       // launches when ssh.realSsh) must stay immutable like bwrap's
       // --ro-bind'ed sandbox-ssh-config: an agent-writable copy could weaken
