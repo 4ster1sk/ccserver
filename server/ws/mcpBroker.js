@@ -13,10 +13,25 @@
 // derived from the full dashless groupId so each group's channels are unique
 // without a fresh UUID per channel -- Unix socket paths are limited to ~104
 // chars, and a per-channel random UUID pushed control/handoff paths over it.
+//
+// Issue #143 problem 1: every socket this module hosts (group control/handoff
+// via sockPathFor(), and the process-global notify/usage/meta/reviewer
+// sockets passed in explicitly by their own modules) lives alone inside its
+// own dedicated directory (`<name>.d/sock`), and listenMcp() below binds a
+// FRESH one into every sandbox as a directory (see sandbox.js's
+// buildBwrapArgs), not the socket file itself. bwrap's --bind-try snapshots
+// whatever it binds by inode; a plain file bind means a server本体 restart
+// (rmSync + re-listen(), right below) leaves already-sandboxed sessions
+// holding a bind to the now-unlinked old inode forever. A directory bind
+// mounts the directory ENTRY instead, so a file recreated inside it is picked
+// up immediately by every sandbox with that directory bound in -- as long as
+// the directory holds exactly that one file, this is exactly as narrow a
+// bind as the old file-level one, just immune to the old file being replaced
+// underneath it.
 
 import { createServer } from 'node:net';
-import { rmSync, existsSync } from 'node:fs';
-import { join } from 'node:path';
+import { rmSync, rmdirSync, existsSync, mkdirSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { SocketTransport, buildControlMcpServer, buildHandoffMcpServer, buildNotifyMcpServer, buildUsageMcpServer, buildMetaMcpServer, buildReviewerMcpServer, MAX_TRANSPORT_BUFFER_CHARS } from './mcpServer.js';
 
 const UID = typeof process.getuid === 'function' ? process.getuid() : 0;
@@ -35,7 +50,7 @@ const IDENTITY_FRAME_GRACE_MS = 1000;
 
 function sockPathFor(groupId, tag) {
   const id = String(groupId).replace(/-/g, '');
-  return join(RUNTIME_BASE, `ccserver-mcp-${id}-${tag}`);
+  return join(RUNTIME_BASE, `ccserver-mcp-${id}-${tag}.d`, 'sock');
 }
 
 // bwrap's --bind-try snapshots the socket file at mount time, so the file
@@ -66,6 +81,16 @@ function waitForSocketFile(sockPath, timeoutMs) {
 // otherwise the path is derived from groupId + tag.
 async function listenMcp({ groupId, tag, buildServer, sockPath }) {
   const target = sockPath || sockPathFor(groupId, tag);
+  // Issue #143 problem 1: the directory this socket lives alone in must exist
+  // before bwrap can bind it into a sandbox (buildSandboxSpawn/createSession
+  // run after this resolves, same ordering constraint as the socket file
+  // itself below). Idempotent -- a second listenMcp() for the same target
+  // (e.g. a restart) finds it already there.
+  try {
+    mkdirSync(dirname(target), { recursive: true });
+  } catch {
+    // best effort
+  }
   // A socket file left over from a crash (teardown never ran) would make
   // listen() fail with EADDRINUSE. The path is group-scoped and derived, so
   // a stale file can never belong to a live listener -- safe to drop. The
@@ -277,7 +302,23 @@ export async function startReviewerBroker({ reviewerApi, sockPath }) {
   });
 }
 
-export function stopBroker({ server, sockPath, connections }) {
+// removeDir must stay opt-in (default false), never the default: the four
+// process-global brokers (notify/usage/meta/reviewer) call this from their
+// stopXBroker() at server本体 shutdown -- exactly the restart Issue #143
+// problem 1 is about -- and a pty-host-owned sandbox that survives the
+// restart still holds a directory bind to the dedicated `.d` dir this would
+// remove. rmdirSync-ing it here would unlink that directory from the host's
+// namespace; listenMcp()'s mkdirSync on the next startup then creates a
+// BRAND NEW directory (a new inode) at the same path, which the surviving
+// sandbox's bind mount never sees -- reintroducing this Issue's own bug one
+// level up (directory identity instead of socket-file identity). Only pass
+// removeDir:true from a call site that can prove no OTHER live sandbox can
+// still be depending on this exact directory (see groupManager.js's call
+// sites for which ones qualify -- notably NOT the role-replacement flow's
+// prevChannel, whose whole point is that the retiring occupant's sandbox is
+// still alive and may need this same directory back if the replacement
+// fails).
+export function stopBroker({ server, sockPath, connections }, { removeDir = false } = {}) {
   // Drop established connections too: server.close() only stops accepting
   // new ones, and a lingering connected socket would keep its McpServer
   // (and its queued handoffs/waits) alive for as long as the client holds
@@ -303,6 +344,25 @@ export function stopBroker({ server, sockPath, connections }) {
       rmSync(sockPath, { force: true });
     } catch {
       // best effort
+    }
+    if (removeDir) {
+      // Issue #143 problem 1: production sockPaths (sockPathFor/
+      // getNotifySockPath and friends) each live alone in a directory
+      // dedicated to that one socket, so it can be bound into a sandbox as a
+      // directory -- once the file above is gone AND the caller has proven
+      // this directory is truly done for good (see the removeDir contract
+      // above), reclaim it too, or a dead role/group's control/handoff
+      // directory would accumulate forever across this server本体 process's
+      // uptime. rmdirSync only removes an EMPTY directory and throws
+      // otherwise -- this module's own tests supply bare sockPaths under a
+      // shared tmp dir with siblings still in it, and this must never touch
+      // those. mkdirSync(recursive) in listenMcp() recreates a reclaimed
+      // directory on demand.
+      try {
+        rmdirSync(dirname(sockPath));
+      } catch {
+        // not empty, doesn't exist, or shared with other files -- leave it
+      }
     }
   }
 }
