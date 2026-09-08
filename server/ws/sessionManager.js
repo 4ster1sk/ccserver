@@ -654,6 +654,14 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
       useSandbox = !!sandboxRequested;
       sandboxDocker = !!rpty.sandboxInfo?.docker;
       sandboxStateDir = rpty.sandboxInfo?.stateDir || null;
+      // Read-only ownership reference for fireSchedule's retire-first guard:
+      // teardown itself stays pty-host's (the destroy path below is skipped
+      // in this mode), but an exited predecessor must still be recognisable
+      // as the overlay owner before a scheduled auto-resume spawns a
+      // successor into the same deterministic orchestratorDir.
+      sandboxSeatbeltFiles = Array.isArray(rpty.sandboxInfo?.seatbeltFiles)
+        ? rpty.sandboxInfo.seatbeltFiles
+        : null;
       // sandboxGitBrokerProc/sandboxGitBrokerDir/sandboxCommitGuardDir stay
       // null: pty-host itself owns and tears down whatever it built --
       // git-broker's process/dir (plan5 2.1) and, since this branch's own
@@ -1545,7 +1553,7 @@ async function fireSchedule(scheduleId) {
     for (const s of [...sessions.values()]) {
       if (s.exited && s.groupId === entry.groupId && s.groupRole === entry.groupRole
           && Array.isArray(s.sandboxSeatbeltFiles)) {
-        destroySession(s.id, { keepSchedule: false, reason: 'schedule-auto-resume' });
+        destroySession(s.id, { keepSchedule: true, reason: 'schedule-auto-resume' });
       }
     }
   }
