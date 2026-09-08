@@ -994,6 +994,42 @@ test('fireSchedule auto-resume of a dead orchestrator regenerates its CLAUDE.md 
   groupManager.destroyGroup(gid);
 });
 
+// Retire-first ordering for the seatbelt overlay: an exited-but-not-reaped
+// orchestrator still owns its materialized CLAUDE.md/AGENTS.md
+// (sandboxSeatbeltFiles). fireSchedule must retire it before the successor
+// launches -- otherwise the successor sees the files as pre-existing, claims
+// no ownership, and the predecessor's later teardown unlinks the live
+// successor's overlay mid-session. Here the pty is killed directly so onExit
+// marks it exited while it stays registered (open viewer tab).
+test('fireSchedule retires an exited seatbelt-overlay predecessor before auto-resume', async () => {
+  const gid = randomUUID();
+  const orchestratorDir = join(runtimeDir, `orch-retire-${gid}`);
+  await groupManager.createGroup({ groupId: gid, cwd: '/tmp', orchestratorDir });
+
+  const workerKeepAlive = await shellMember('/tmp', gid, 'workerA');
+  const deadOrch = await shellMember('/tmp', gid, 'orchestrator');
+  const deadOrchId = deadOrch.id;
+
+  mkdirSync(orchestratorDir, { recursive: true });
+  writeFileSync(join(orchestratorDir, 'CLAUDE.md'), '# live rules\n');
+  deadOrch.sandboxSeatbeltFiles = [join(orchestratorDir, 'CLAUDE.md')];
+  deadOrch.ptyProcess.kill();
+  const t0 = Date.now();
+  while (!deadOrch.exited && Date.now() - t0 < 5000) await sleep(100);
+  assert.ok(deadOrch.exited, 'predecessor pty exited but stays registered');
+
+  assert.ok(sessionManager.setScheduledPrompt(deadOrchId, Date.now() + 700, 'MARKER_ORCH_RETIRE'));
+  await sleep(2500); // branch 3: retire-first + resolvers + createSession
+
+  assert.equal(sessionManager.getSession(deadOrchId), undefined, 'exited predecessor retired before resume');
+  const member = groupManager.getGroup(gid).members.get('orchestrator');
+  assert.ok(member && member !== deadOrchId, 'role rebound to the resumed session');
+
+  sessionManager.destroySession(member, { keepSchedule: false });
+  sessionManager.destroySession(workerKeepAlive.id, { keepSchedule: false });
+  groupManager.destroyGroup(gid);
+});
+
 // Fail-closed counterpart of the above: when the overlay can't be generated
 // (here, simulated by a group with no orchestratorDir -- generateOrchestratorClaudeMdSrc
 // returns null in that case, same as a torn-down group), the resume must be

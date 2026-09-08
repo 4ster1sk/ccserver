@@ -15,8 +15,11 @@
 // directly visible, so this module mints per-launch `#!/bin/sh` shims that
 // exec the real host node with the real wrapper script (the shim bodies and
 // GIT_SSH_COMMAND are quoted for /bin/sh; credential.helper is
-// backslash-escaped as a bare word because git never shell-parses it -- a
-// leading `"` would be treated as a helper NAME, never executed),
+// backslash-escaped as a bare word: git classifies a leading `"` as a
+// helper NAME (never executed), and the assembled command line -- the
+// value plus the operation -- is still run via `sh -c` (git's
+// run_credential_helper uses use_shell=1), so $TMPDIR spaces need
+// bare-word escaping),
 // plus a `hooks/` directory for core.hooksPath.
 
 import { copyFileSync, existsSync, mkdirSync, realpathSync, renameSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
@@ -258,19 +261,19 @@ export function buildSeatbeltLaunch({
   const binDir = join(dir, 'bin');
   const hooksDir = join(dir, 'hooks');
   const profilePath = join(dir, 'sandbox.sb');
-  // 0o700 like git-broker's dir: shims/hook/profile must be private to this
-  // launch -- sandbox.sb reveals host paths, and a same-UID session sharing
-  // the base dir must not reach them.
-  mkdirSync(dir, { recursive: true, mode: 0o700 });
-  mkdirSync(binDir, { recursive: true, mode: 0o700 });
-  mkdirSync(hooksDir, { recursive: true, mode: 0o700 });
   // The caller only learns `dir` on a successful return, so any throw
   // between here and the return at the bottom would leak the minted dir
   // under $TMPDIR. Remove it (and any rule copies made so far) before
   // rethrowing -- still fail-closed.
   const ruleCopies = [];
   try {
-
+    // 0o700 like git-broker's dir: shims/hook/profile must be private to
+    // this launch -- sandbox.sb reveals host paths, and a same-UID session
+    // sharing the base dir must not reach them. Inside the try so a failure
+    // here is cleaned up like every later throw (see the catch below).
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    mkdirSync(binDir, { recursive: true, mode: 0o700 });
+    mkdirSync(hooksDir, { recursive: true, mode: 0o700 });
     // resolve() normalizes spelling but not symlinks (same reason tmpDirs
     // carries the realpath of tmpdir()): rules below register both spellings
     // via subtrees() so a symlinked cwd still matches -- and denies hold.
@@ -289,12 +292,15 @@ export function buildSeatbeltLaunch({
     // constants and runtime dirs, but never interpolate them raw -- a `"`/`$`
     // in $TMPDIR today would otherwise break out of the exec line.
     const shQuote = (s) => `"${String(s).replace(/(["$`\\])/g, '\\$1')}"`;
-    // credential.helper is NOT a shell command string (unlike
-    // GIT_SSH_COMMAND): git passes the value verbatim, and a value not
-    // starting with `!` or `/` is treated as a helper NAME (`git
-    // credential-"<value>"`), which never executes. Escape shell
-    // metacharacters as a bare word instead (`/a\ b/c`), keeping the
-    // leading `/` so git runs it directly.
+    // credential.helper is not a free-form shell command string the way
+    // GIT_SSH_COMMAND is: git (credential_do) classifies the value as a
+    // `!`-shell command, an absolute path, or a helper NAME (`git
+    // credential-"<value>"`, which never executes). A leading `"` would
+    // fall into the NAME class. The value IS still shell-parsed at
+    // execution time (run_credential_helper spawns `sh -c "<value> <op>"`,
+    // use_shell=1) -- which is exactly why bare-word backslash escaping
+    // (`/a\ b/c`, leading `/` keeps the path class) works and a raw
+    // unescaped path with spaces would not.
     const shEscapeWord = (s) => String(s).replace(/[^A-Za-z0-9_@%+=:,./-]/g, '\\$&');
     const shim = (name, target) => {
       const p = join(binDir, name);
