@@ -511,6 +511,20 @@ test('no per-launch ssh-config is minted without ssh.realSsh', () => {
   assert.equal(sb.env.CCSANDBOX_SSH_CONFIG, undefined);
 });
 
+test('no per-launch ssh-config is minted without a git broker (minimal launches)', () => {
+  // buildMinimalSandboxSpawn passes ssh: seatbeltSsh() (realSsh set on real
+  // macOS hosts) with gitBroker: null -- nothing consumes the ssh machinery
+  // there, so nothing may be minted (bwrap parity: broker-gated).
+  const sb = buildSeatbeltLaunch(baseOpts({
+    ssh: { realSsh: '/usr/bin/ssh', configFile: '/nonexistent-ssh-config', knownHostsDefault: '/nonexistent-known-hosts', userKnownHosts: null },
+  }));
+  trackDir(sb.dir);
+  assert.ok(!existsSync(join(sb.dir, 'ssh-config')));
+  assert.ok(!existsSync(join(sb.dir, 'known-hosts')));
+  assert.equal(sb.env.CCSANDBOX_SSH_CONFIG, undefined);
+  assert.equal(sb.env.GIT_SSH_COMMAND, undefined);
+});
+
 test('deny lines are emitted after the allow lines (last-match-wins)', () => {
   const text = buildSeatbeltProfileText({
     readRegexes: ['^/srv/proj(/.*)?$'],
