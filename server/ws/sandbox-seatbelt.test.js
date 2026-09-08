@@ -476,6 +476,34 @@ test('missing server known_hosts falls back to /dev/null (fail-closed)', () => {
   assert.ok(sshConfigText.includes('UserKnownHostsFile /dev/null'), 'empty known_hosts, strict checking kept');
 });
 
+test('spaced launch dirs: helper is bare-word-escaped, ssh command is quoted', () => {
+  // $TMPDIR may contain spaces: credential.helper must stay a bare word
+  // (backslash-escaped, leading `/` so git executes it directly -- a `"`
+  // would be parsed as a helper NAME), while GIT_SSH_COMMAND is a shell
+  // command string and stays double-quoted.
+  const spacedBase = join(tmpRoot, 'with space');
+  mkdirSync(spacedBase, { recursive: true });
+  const brokerDir = mkdtempSync(join(tmpdir(), 'ccserver-seatbelt-broker-'));
+  DIRS.push(brokerDir);
+  const prev = process.env.CCSERVER_SANDBOX_SEATBELT_TMP;
+  process.env.CCSERVER_SANDBOX_SEATBELT_TMP = spacedBase;
+  try {
+    const sb = buildSeatbeltLaunch(baseOpts({
+      gitBroker: { sockPath: join(brokerDir, 'broker.sock'), allowlistPath: join(brokerDir, 'allow.json'), dir: brokerDir },
+      ssh: { realSsh: '/usr/bin/ssh', configFile: '/nonexistent-ssh-config', knownHostsDefault: '/nonexistent-known-hosts', userKnownHosts: null },
+    }));
+    trackDir(sb.dir);
+    assert.ok(sb.binDir.includes(' '), 'launch dir really contains a space');
+    const helperShim = join(sb.binDir, 'ccserver-git-credential-helper');
+    assert.equal(sb.env.GIT_CONFIG_VALUE_1, helperShim.replace(/ /g, '\\ '));
+    assert.ok(sb.env.GIT_CONFIG_VALUE_1.startsWith('/'), 'helper keeps its leading slash');
+    assert.equal(sb.env.GIT_SSH_COMMAND, `"${join(sb.binDir, 'ccserver-git-ssh')}"`);
+  } finally {
+    if (prev === undefined) delete process.env.CCSERVER_SANDBOX_SEATBELT_TMP;
+    else process.env.CCSERVER_SANDBOX_SEATBELT_TMP = prev;
+  }
+});
+
 test('no per-launch ssh-config is minted without ssh.realSsh', () => {
   const sb = buildSeatbeltLaunch(baseOpts());
   trackDir(sb.dir);

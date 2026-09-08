@@ -304,8 +304,8 @@ describe('gh-exec PR-body guard (plan8)', () => {
 
 // hostRuntimeDir (macOS Seatbelt support): XDG_RUNTIME_DIR wins when set;
 // otherwise Linux keeps /run/user/<uid> while darwin falls back to the
-// per-user tmpdir (macOS has no /run). The darwin branch itself can't run
-// here, so this locks the Linux behavior and the env-override precedence.
+// per-user tmpdir (macOS has no /run). Both fallbacks are asserted so the
+// suite stays green (and covered) wherever it runs.
 test('hostRuntimeDir honors XDG_RUNTIME_DIR and defaults per platform', async () => {
   const { hostRuntimeDir } = await import('./git-broker.js');
   const prev = process.env.XDG_RUNTIME_DIR;
@@ -314,7 +314,15 @@ test('hostRuntimeDir honors XDG_RUNTIME_DIR and defaults per platform', async ()
     assert.equal(hostRuntimeDir(), '/tmp/ccserver-test-runtime');
     delete process.env.XDG_RUNTIME_DIR;
     const uid = typeof process.getuid === 'function' ? process.getuid() : 0;
-    assert.equal(hostRuntimeDir(), `/run/user/${uid}`);
+    // No XDG_RUNTIME_DIR: Linux keeps /run/user/<uid>; macOS has no /run and
+    // falls back to the per-user tmpdir (same shape as the implementation's
+    // darwin branch -- assert both so the fallback stays covered wherever
+    // the suite runs).
+    if (process.platform === 'darwin') {
+      assert.equal(hostRuntimeDir(), join(tmpdir(), `ccserver-runtime-${uid}`));
+    } else {
+      assert.equal(hostRuntimeDir(), `/run/user/${uid}`);
+    }
   } finally {
     if (prev === undefined) delete process.env.XDG_RUNTIME_DIR;
     else process.env.XDG_RUNTIME_DIR = prev;
