@@ -168,10 +168,12 @@ test('buildSeatbeltLaunch honors an explicit persistent homeDir', () => {
 test('buildSeatbeltLaunch wires gitBroker shims and merges GIT_CONFIG_COUNT', () => {
   const brokerDir = mkdtempSync(join(tmpdir(), 'ccserver-seatbelt-broker-'));
   DIRS.push(brokerDir);
+  const knownHostsDefault = join(brokerDir, 'known-hosts-default');
+  writeFileSync(knownHostsDefault, 'example.com ssh-ed25519 AAAA\n');
   const sb = buildSeatbeltLaunch(baseOpts({
     gitBroker: { sockPath: join(brokerDir, 'broker.sock'), allowlistPath: join(brokerDir, 'allow.json'), dir: brokerDir },
     commitGuard: { configPath: join(brokerDir, 'guard.json') },
-    ssh: { realSsh: '/usr/bin/ssh', configFile: '/nonexistent-ssh-config', knownHostsDefault: '/nonexistent-known-hosts', userKnownHosts: null },
+    ssh: { realSsh: '/usr/bin/ssh', configFile: '/nonexistent-ssh-config', knownHostsDefault, userKnownHosts: null },
     sockets: { notify: join(brokerDir, 'notify.sock') },
   }));
   trackDir(sb.dir);
@@ -183,11 +185,16 @@ test('buildSeatbeltLaunch wires gitBroker shims and merges GIT_CONFIG_COUNT', ()
   }
   // The per-launch ssh config points UserKnownHostsFile at host paths (the
   // shared sandbox-ssh-config pins bwrap's fixed in-sandbox paths, which no
-  // mount provides here), and CCSANDBOX_SSH_CONFIG follows it.
+  // mount provides here), and CCSANDBOX_SSH_CONFIG follows it. The
+  // server-tree known_hosts is copied into the launch dir because
+  // UserKnownHostsFile has no quoting (a spaced install dir would split it).
   const sshConfig = join(sb.dir, 'ssh-config');
   assert.ok(existsSync(sshConfig), 'per-launch ssh config exists');
+  const knownHostsCopy = join(sb.dir, 'known-hosts');
+  assert.ok(existsSync(knownHostsCopy), 'known_hosts copied into the launch dir');
+  assert.equal(readFileSync(knownHostsCopy, 'utf-8'), 'example.com ssh-ed25519 AAAA\n');
   const sshConfigText = readFileSync(sshConfig, 'utf-8');
-  assert.ok(sshConfigText.includes('UserKnownHostsFile /nonexistent-known-hosts'), 'known_hosts uses host paths');
+  assert.ok(sshConfigText.includes(`UserKnownHostsFile ${knownHostsCopy}`), 'known_hosts uses the launch-dir copy');
   assert.ok(sshConfigText.includes('StrictHostKeyChecking yes'));
   assert.ok(!sshConfigText.includes('/ccserver-sandbox-known-hosts'), 'no bwrap fixed paths');
   assert.equal(sb.env.CCSANDBOX_SSH_CONFIG, sshConfig);
@@ -197,9 +204,11 @@ test('buildSeatbeltLaunch wires gitBroker shims and merges GIT_CONFIG_COUNT', ()
   assert.equal(sb.env.GIT_CONFIG_KEY_0, 'credential.useHttpPath');
   assert.equal(sb.env.GIT_CONFIG_VALUE_0, 'true');
   assert.equal(sb.env.GIT_CONFIG_KEY_1, 'credential.helper');
-  // Shim paths are sh-quoted: git runs both through a shell, so spaces in
-  // $TMPDIR cannot split them.
-  assert.equal(sb.env.GIT_CONFIG_VALUE_1, `"${join(sb.binDir, 'ccserver-git-credential-helper')}"`);
+  // credential.helper is backslash-escaped as a bare word (a leading `"` is
+  // parsed by git as a helper NAME, never executed). No metacharacters in
+  // binDir here, so the value is the plain path. GIT_SSH_COMMAND above stays
+  // sh-quoted: that one IS a shell command string.
+  assert.equal(sb.env.GIT_CONFIG_VALUE_1, join(sb.binDir, 'ccserver-git-credential-helper'));
   assert.equal(sb.env.GIT_CONFIG_KEY_2, 'core.hooksPath');
   assert.equal(sb.env.GIT_CONFIG_VALUE_2, sb.hooksDir);
   assert.equal(sb.env.GIT_SSH_COMMAND, `"${join(sb.binDir, 'ccserver-git-ssh')}"`);
@@ -442,13 +451,29 @@ test('own launch dir stays writable: pin denies do not override the re-allow', (
 test('per-launch ssh-config is write-pinned when ssh.realSsh is set', () => {
   const brokerDir = mkdtempSync(join(tmpdir(), 'ccserver-seatbelt-broker-'));
   DIRS.push(brokerDir);
+  const knownHostsDefault = join(brokerDir, 'known-hosts-default');
+  writeFileSync(knownHostsDefault, 'example.com ssh-ed25519 AAAA\n');
+  const sb = buildSeatbeltLaunch(baseOpts({
+    gitBroker: { sockPath: join(brokerDir, 'broker.sock'), allowlistPath: join(brokerDir, 'allow.json'), dir: brokerDir },
+    ssh: { realSsh: '/usr/bin/ssh', configFile: '/nonexistent-ssh-config', knownHostsDefault, userKnownHosts: null },
+  }));
+  trackDir(sb.dir);
+  const text = readFileSync(sb.profilePath, 'utf-8');
+  assert.equal(finalWriteVerdict(text, join(sb.dir, 'ssh-config')), 'deny');
+  assert.equal(finalWriteVerdict(text, join(sb.dir, 'known-hosts')), 'deny');
+});
+
+test('missing server known_hosts falls back to /dev/null (fail-closed)', () => {
+  const brokerDir = mkdtempSync(join(tmpdir(), 'ccserver-seatbelt-broker-'));
+  DIRS.push(brokerDir);
   const sb = buildSeatbeltLaunch(baseOpts({
     gitBroker: { sockPath: join(brokerDir, 'broker.sock'), allowlistPath: join(brokerDir, 'allow.json'), dir: brokerDir },
     ssh: { realSsh: '/usr/bin/ssh', configFile: '/nonexistent-ssh-config', knownHostsDefault: '/nonexistent-known-hosts', userKnownHosts: null },
   }));
   trackDir(sb.dir);
-  const text = readFileSync(sb.profilePath, 'utf-8');
-  assert.equal(finalWriteVerdict(text, join(sb.dir, 'ssh-config')), 'deny');
+  assert.ok(!existsSync(join(sb.dir, 'known-hosts')), 'no copy without a source file');
+  const sshConfigText = readFileSync(join(sb.dir, 'ssh-config'), 'utf-8');
+  assert.ok(sshConfigText.includes('UserKnownHostsFile /dev/null'), 'empty known_hosts, strict checking kept');
 });
 
 test('no per-launch ssh-config is minted without ssh.realSsh', () => {
