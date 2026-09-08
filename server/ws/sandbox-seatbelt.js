@@ -19,7 +19,7 @@
 // leading `"` would be treated as a helper NAME, never executed),
 // plus a `hooks/` directory for core.hooksPath.
 
-import { copyFileSync, existsSync, mkdirSync, realpathSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, realpathSync, renameSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -83,6 +83,10 @@ export function escapeSeatbeltLiteral(s) {
 //                    re-allows above
 //   denyExecLiterals            - exact paths denied for process-exec
 //                    (emitted after the broad process-exec allow)
+//   denyNetOutboundLiterals     - unix-socket paths denied for connect()
+//                    (emitted after the broad network allow; connect() is
+//                    mediated as network-outbound, so file-write* pins
+//                    cannot stop it)
 export function buildSeatbeltProfileText({
   readRegexes = [],
   writeRegexes = [],
@@ -94,6 +98,7 @@ export function buildSeatbeltProfileText({
   reAllowReadRegexes = [],
   denyWriteRegexes = [],
   denyExecLiterals = [],
+  denyNetOutboundLiterals = [],
 } = {}) {
   const line = (op, sel) => `  (${op} ${sel})`;
   const regexes = (list) => list.map((r) => `(regex #"${r}")`).join(' ');
@@ -128,6 +133,20 @@ export function buildSeatbeltProfileText({
     '(allow sysctl-read)',
     '(allow mach-lookup)',
     '(allow network*)',
+    // Host control-plane unix sockets (pty-host RPC, meta broker) live under
+    // hostRuntimeDir() -- inside the broad tmp write rules on darwin.
+    // connect() is mediated as network-outbound (a file-write* pin cannot
+    // stop it), and neither socket may be reachable from a sandboxed
+    // process: the pty-host RPC accepts `spawn` with sandbox:false
+    // (unsandboxed host exec) and the meta socket is the privileged meta
+    // toolset's channel. NOTE: the path filter MUST be path-literal (not
+    // regex/literal/subpath) -- per Apple's Sandbox Guide, unix-socket
+    // network filters accept only path-literal. Emitted AFTER (allow
+    // network*) per last-match-wins (verify on macOS hardware if touched:
+    // a compile error here is fail-closed for every seatbelt launch).
+    ...(denyNetOutboundLiterals.length > 0
+      ? [`(deny network-outbound ${denyNetOutboundLiterals.map((p) => `(remote unix-socket (path-literal "${escapeSeatbeltLiteral(p)}"))`).join(' ')})`]
+      : []),
     '',
     ';; devices: the pty and /dev/null etc. must stay usable.',
     '(allow file-read* file-write* (regex #"^/dev(/.*)?$"))',
@@ -200,6 +219,11 @@ function expandAgainstHome(p, hostHome) {
 //                    buildBwrapArgs ro-binds the wrapper over): denied for
 //                    process-exec while the git broker is on, so gh is
 //                    reachable only via the PATH shim
+//   controlSockDenies - host control-plane unix-socket paths (pty-host RPC,
+//                    meta broker, from sandbox.js): denied for
+//                    network-outbound connect() -- file-write* pins cannot
+//                    stop connect(), and both sockets live inside the broad
+//                    tmp write rules on darwin
 //
 // Returns { dir, profilePath, binDir, hooksDir, homeDir, ruleCopies, nodeBin,
 // env }. `dir` is the single teardown unit (also covers the throwaway HOME
@@ -227,6 +251,7 @@ export function buildSeatbeltLaunch({
   groupFilesDir = null,
   tools = null,
   ghPaths = [],
+  controlSockDenies = [],
 }) {
   const launchId = randomUUID();
   const dir = join(seatbeltBaseDir(), `ccserver-seatbelt-${launchId}`);
@@ -587,12 +612,23 @@ export function buildSeatbeltLaunch({
     if (orchestratorClaudeMdSrc) {
       for (const name of ['CLAUDE.md', 'AGENTS.md']) {
         const dest = join(projectDir, name);
+        // A concurrent launch from the same deterministic orchestratorDir may
+        // have already materialized these paths for a LIVE session -- the
+        // same scenario the stillReferenced teardown guards protect. Copy
+        // through a temp file + rename so a failed build never truncates a
+        // live overlay, and track ownership so teardown only unlinks files
+        // THIS launch created (a failed build must not delete a live
+        // session's overlay out from under it).
+        const preExisting = existsSync(dest);
+        const tmpDest = `${dest}.ccserver-overlay-tmp-${launchId}`;
         try {
-          copyFileSync(orchestratorClaudeMdSrc, dest);
+          copyFileSync(orchestratorClaudeMdSrc, tmpDest);
+          renameSync(tmpDest, dest);
         } catch (err) {
+          try { unlinkSync(tmpDest); } catch { /* best effort */ }
           throw new Error(`seatbelt orchestrator overlay: cannot copy rules to ${dest}: ${err.message}`);
         }
-        ruleCopies.push(dest);
+        if (!preExisting) ruleCopies.push(dest);
         for (const base of pathVariants(projectDir)) {
           denyWriteRegexes.push(`^${escapeSeatbeltRegex(join(base, name))}$`);
         }
@@ -613,6 +649,13 @@ export function buildSeatbeltLaunch({
       if (b.mode === 'rw') writeRegexes.push(...subtrees(src));
     }
 
+    // Control-plane sockets may not exist yet (pty-host/meta boot lazily),
+    // so derive both spellings from the existing parent dir -- same reason
+    // exactPins() avoids pathVariants() on not-yet-existing files.
+    const netDenyLiterals = [...new Set(
+      (controlSockDenies || []).filter(Boolean).flatMap((s) =>
+        pathVariants(dirname(s)).map((d) => join(d, basename(s)))),
+    )];
     const profileText = buildSeatbeltProfileText({
       readRegexes, writeRegexes, readLiterals, writeLiterals,
       siblingDenyWriteRegexes: siblingDeny, siblingDenyReadRegexes: siblingDeny,
@@ -625,6 +668,7 @@ export function buildSeatbeltLaunch({
       denyExecLiterals: gitBroker
         ? [...new Set(ghPaths)].filter((p) => p && p !== join(binDir, 'gh'))
         : [],
+      denyNetOutboundLiterals: netDenyLiterals,
     });
     writeFileSync(profilePath, profileText, { mode: 0o600 });
     return { dir, profilePath, binDir, hooksDir, homeDir: effectiveHome, ruleCopies: ruleCopies.length > 0 ? ruleCopies : null, nodeBin, env };
