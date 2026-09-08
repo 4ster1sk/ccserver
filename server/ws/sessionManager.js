@@ -1532,6 +1532,23 @@ async function fireSchedule(scheduleId) {
     return;
   }
 
+  // An exited-but-not-yet-reaped predecessor of the same group+role is still
+  // registered and still owns its seatbelt orchestrator overlay
+  // (sandboxSeatbeltFiles). Retire it before the successor launches --
+  // otherwise the successor sees the overlay files as pre-existing, claims
+  // no ownership, and this predecessor's later teardown unlinks the live
+  // successor's CLAUDE.md/AGENTS.md mid-session (the successor's seatbelt
+  // profile deny-pins those paths, so the agent cannot recreate them). Same
+  // retire-first ordering as routes/groups.js's orchestrator restart.
+  if (entry.groupId && entry.groupRole) {
+    for (const s of [...sessions.values()]) {
+      if (s.exited && s.groupId === entry.groupId && s.groupRole === entry.groupRole
+          && Array.isArray(s.sandboxSeatbeltFiles)) {
+        destroySession(s.id, { keepSchedule: false, reason: 'schedule-auto-resume' });
+      }
+    }
+  }
+
   // 3) No live session — auto-resume the conversation, then inject once ready.
   // opencode, copilot, codex and commandcode expose no session id in their
   // TUI output, so resume the last session of the project instead of a
