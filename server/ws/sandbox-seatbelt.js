@@ -14,7 +14,9 @@
 // shebang that only resolves inside bwrap. On macOS the host node binary is
 // directly visible, so this module mints per-launch `#!/bin/sh` shims that
 // exec the real host node with the real wrapper script (the shim bodies and
-// the GIT_SSH_COMMAND / credential.helper values are all quoted for /bin/sh),
+// GIT_SSH_COMMAND are quoted for /bin/sh; credential.helper is
+// backslash-escaped as a bare word because git never shell-parses it -- a
+// leading `"` would be treated as a helper NAME, never executed),
 // plus a `hooks/` directory for core.hooksPath.
 
 import { copyFileSync, existsSync, mkdirSync, realpathSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
@@ -271,6 +273,13 @@ export function buildSeatbeltLaunch({
     // constants and runtime dirs, but never interpolate them raw -- a `"`/`$`
     // in $TMPDIR today would otherwise break out of the exec line.
     const shQuote = (s) => `"${String(s).replace(/(["$`\\])/g, '\\$1')}"`;
+    // credential.helper is NOT a shell command string (unlike
+    // GIT_SSH_COMMAND): git passes the value verbatim, and a value not
+    // starting with `!` or `/` is treated as a helper NAME (`git
+    // credential-"<value>"`), which never executes. Escape shell
+    // metacharacters as a bare word instead (`/a\ b/c`), keeping the
+    // leading `/` so git runs it directly.
+    const shEscapeWord = (s) => String(s).replace(/[^A-Za-z0-9_@%+=:,./-]/g, '\\$&');
     const shim = (name, target) => {
       const p = join(binDir, name);
       writeFileSync(p, `#!/bin/sh\nexec ${shQuote(nodeBin)} ${shQuote(target)} "$@"\n`, { mode: 0o755 });
@@ -297,14 +306,26 @@ export function buildSeatbeltLaunch({
     // fail StrictHostKeyChecking. Emit a seatbelt variant pointing at the
     // host known_hosts paths (registered as read literals below).
     let sshConfigPath = ssh.configFile;
+    let knownHostsCopy = null;
     if (ssh.realSsh) {
+      // UserKnownHostsFile is a whitespace-separated list with no quoting:
+      // the server-tree default known_hosts (the install dir may contain
+      // spaces) must live at a space-free path. Copy it into the launch dir
+      // (under tmpdir, never spaced on macOS). ~/.ssh/known_hosts needs no
+      // copy: macOS HOME paths never contain spaces.
+      if (ssh.knownHostsDefault) {
+        try {
+          copyFileSync(ssh.knownHostsDefault, join(dir, 'known-hosts'));
+          knownHostsCopy = join(dir, 'known-hosts');
+        } catch { /* no known_hosts -> /dev/null (fail-closed) */ }
+      }
       sshConfigPath = join(dir, 'ssh-config');
       writeFileSync(sshConfigPath, [
         '# Seatbelt variant of sandbox-ssh-config: same skip-system-config',
         '# posture, but UserKnownHostsFile uses host paths (there are no',
         "# mounts to provide bwrap's fixed in-sandbox paths).",
         'Host *',
-        `\tUserKnownHostsFile ${[ssh.userKnownHosts, ssh.knownHostsDefault].filter(Boolean).join(' ') || '/dev/null'}`,
+        `\tUserKnownHostsFile ${[ssh.userKnownHosts, knownHostsCopy].filter(Boolean).join(' ') || '/dev/null'}`,
         '\tStrictHostKeyChecking yes',
         '',
       ].join('\n'), { mode: 0o600 });
@@ -365,8 +386,9 @@ export function buildSeatbeltLaunch({
       // Without it git drops the path from the credential description and
       // the broker's host+path allowlist match always denies.
       gitConfigKeys.push(['credential.useHttpPath', 'true']);
-      // Same shell-parsing hazard as GIT_SSH_COMMAND above: quote it too.
-      gitConfigKeys.push(['credential.helper', shQuote(credHelperShim)]);
+      // NOT shell-quoted: git treats a leading `"` as a helper name and never
+      // executes the helper. Backslash-escape as a bare word instead.
+      gitConfigKeys.push(['credential.helper', shEscapeWord(credHelperShim)]);
     }
     if (commitGuard) {
       env.CCSANDBOX_COMMIT_GUARD_CONFIG = commitGuard.configPath;
@@ -489,8 +511,10 @@ export function buildSeatbeltLaunch({
     if (commitGuard) readLiterals.push(commitGuard.configPath);
     // Both spellings (see pathVariants): a server tree or HOME under a
     // symlink would otherwise read-deny these via the other spelling.
+    // (The server-tree knownHostsDefault needs no literal: it is copied into
+    // the launch dir when ssh.realSsh is set, and that dir is readable via
+    // subtrees(dir) above.)
     if (ssh.userKnownHosts) readLiterals.push(...pathVariants(ssh.userKnownHosts));
-    if (ssh.knownHostsDefault) readLiterals.push(...pathVariants(ssh.knownHostsDefault));
     // The per-launch seatbelt ssh config above (or the shared file when no
     // real ssh exists, kept for completeness though nothing reads it then).
     if (sshConfigPath) readLiterals.push(...pathVariants(sshConfigPath));
@@ -541,6 +565,9 @@ export function buildSeatbeltLaunch({
       // sandbox-ssh-config: an agent-writable copy could weaken
       // StrictHostKeyChecking / UserKnownHostsFile for brokered git ssh.
       ...(ssh.realSsh ? exactPins(basename(sshConfigPath), dir) : []),
+      // The known_hosts copy is as security-sensitive as the ssh-config
+      // itself: an agent-writable known_hosts weakens host key verification.
+      ...(knownHostsCopy ? exactPins(basename(knownHostsCopy), dir) : []),
       // NOTE: sibling launch dirs are intentionally NOT repeated here.
       // They are already denied by siblingDenyWriteRegexes BEFORE the
       // own-dir re-allow (and future siblings never match that re-allow),
