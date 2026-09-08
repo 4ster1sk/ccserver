@@ -27,7 +27,7 @@ import { promisify } from 'node:util';
 import { randomUUID } from 'node:crypto';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { startGitBroker, hostRuntimeDir, PTY_HOST_SOCK_NAME, META_SOCK_NAME } from './git-broker.js';
+import { startGitBroker, hostRuntimeDir, ensureHostRuntimeDir, PTY_HOST_SOCK_NAME, META_SOCK_NAME } from './git-broker.js';
 import { buildGuardConfig } from './commitGuard.js';
 import { buildSeatbeltLaunch, seatbeltEnvArgs } from './sandbox-seatbelt.js';
 import { recordSandboxHome as recordSandboxHomeDb, listSandboxRowsBySlug, forgetSandboxHome } from './projects.js';
@@ -1178,6 +1178,11 @@ export function forceSandboxUnavailableReason() {
 function startCommitGuard(blockedPatterns) {
   const dir = join(XDG_RUNTIME_DIR, `ccserver-commit-guard-${randomUUID()}`);
   try {
+    // darwin: the base may be a hostile other-UID dir under sticky /tmp --
+    // same fail-closed verification as startGitBroker (git-broker.js). A
+    // throw here lands in the catch below (guard disabled), never writes
+    // the config into a directory a hostile local user owns.
+    ensureHostRuntimeDir();
     mkdirSync(dir, { recursive: true, mode: 0o700 });
     const configPath = join(dir, 'commit-guard.json');
     writeFileSync(configPath, JSON.stringify(buildGuardConfig(blockedPatterns)));

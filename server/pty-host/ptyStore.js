@@ -207,7 +207,10 @@ export class PtyStore {
       pid: entry.pid,
       cols: entry.cols,
       rows: entry.rows,
-      sandbox: { active: sandbox, docker, stateDir },
+      // seatbeltFiles: read-only reference so server本体's fireSchedule
+      // retire-first guard can see an exited predecessor still owns the
+      // orchestrator overlay. Teardown stays pty-host's (plan5 2.1).
+      sandbox: { active: sandbox, docker, stateDir, seatbeltFiles: seatbeltFiles || null },
     };
   }
 

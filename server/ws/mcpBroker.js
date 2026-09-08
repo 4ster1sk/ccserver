@@ -71,8 +71,9 @@ async function listenMcp({ groupId, tag, buildServer, sockPath }) {
   // darwin's hostRuntimeDir() base is not pre-created by anything else
   // (unlike Linux's logind-made /run/user/<uid>); ensureHostRuntimeDir()
   // additionally fails closed if a hostile other-UID dir squatted on it.
+  // Propagate its throw (fail closed) -- only the mkdir stays best-effort.
+  ensureHostRuntimeDir();
   try {
-    ensureHostRuntimeDir();
     mkdirSync(dirname(target), { recursive: true, mode: 0o700 });
   } catch { /* listen() below reports real problems */ }
   // A socket file left over from a crash (teardown never ran) would make

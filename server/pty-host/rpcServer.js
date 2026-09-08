@@ -78,8 +78,10 @@ export async function createRpcServer(ptyStore, { sockPath }) {
   // 0o700 like git-broker's broker dir: keep the RPC socket private.
   // ensureHostRuntimeDir() fails closed if a hostile other-UID dir squatted
   // on the base (mkdir's mode never fixes a pre-existing dir).
+  // Propagate its throw: swallowing it would let listen() bind the control
+  // plane inside the hostile dir, which is exactly what the guard forbids.
+  ensureHostRuntimeDir();
   try {
-    ensureHostRuntimeDir();
     mkdirSync(dirname(sockPath), { recursive: true, mode: 0o700 });
   } catch { /* listen() below reports real problems */ }
   try {

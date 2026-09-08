@@ -447,7 +447,11 @@ export async function groupsRoute(fastify, opts) {
       // copies in its own teardown (destroySession's sandboxSeatbeltFiles
       // block). It is already exited, so retiring it first breaks no
       // atomicity guarantee (that only protects a live predecessor).
-      if (s) destroySession(existing, { keepSchedule: false, reason: 'orchestrator-restart' });
+      // keepSchedule defaults to true: a pending scheduled prompt outlives
+      // the retire and fires into the restarted orchestrator
+      // (matchesScheduleTarget matches the same group+role), matching the
+      // pre-retire behavior and destroySession's documented policy.
+      if (s) destroySession(existing, { reason: 'orchestrator-restart' });
     }
 
     // Prefer the persisted launch app; fall back to the restored member's
