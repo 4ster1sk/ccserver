@@ -64,6 +64,34 @@ export function subtrees(p) {
   return pathVariants(p).map(subtreeRegex);
 }
 
+// Exact-match reads on every ancestor directory up to (excluding) "/".
+// Userspace realpath/lstat walks each ancestor component, and Seatbelt
+// mediates every one of them: subtree rules (^/a/b/...) do NOT cover the
+// ancestors themselves, so without these, node/vite/npm/git die with EPERM
+// the moment they resolve anything under an allowed tree (verified on macOS
+// hardware: EPERM lstat '/Volumes', '/Users', '/private' from project- and
+// HOME-relative realpath). Exact match only, never subtree: siblings'
+// contents stay closed. Both raw and realpath spellings (Seatbelt mediates
+// the resolved path). "/" itself is allowed as a literal elsewhere, so it
+// is excluded here.
+export function ancestorExactRegexes(paths) {
+  const out = [];
+  const seen = new Set();
+  for (const p of paths.filter(Boolean)) {
+    for (const v of pathVariants(p)) {
+      let d = dirname(v);
+      while (d && d !== '/' && d !== '.') {
+        if (!seen.has(d)) {
+          seen.add(d);
+          out.push(`^${escapeSeatbeltRegex(d)}$`);
+        }
+        d = dirname(d);
+      }
+    }
+  }
+  return out;
+}
+
 // Escape a host path for embedding in an SBPL `(literal "...")` string.
 // Unlike escapeSeatbeltRegex (for `regex #"..."`), only the string-syntax
 // metacharacters need escaping here.
@@ -520,6 +548,12 @@ export function buildSeatbeltLaunch({
       const r = subtreeRegex(t);
       if (!readRegexes.includes(r)) readRegexes.push(r);
     }
+    // Ancestor metadata (lstat) for userspace realpath: node/vite/npm/git
+    // resolve paths component-by-component, and subtree rules don't cover
+    // the ancestors themselves. Exact-match only -- siblings stay closed.
+    // Bases mirror the trees tools resolve within (project, sandbox HOME,
+    // launch dir, tmp, node binary).
+    readRegexes.push(...ancestorExactRegexes([projectDir, effectiveHome, dir, ...tmpDirs, nodeBin]));
     // Agent config dirs keep working when a CLI resolves the real home via
     // macOS APIs instead of $HOME (mirrors buildBwrapArgs' appBinds). Regexes
     // for absent paths are harmless, so no existsSync gating is needed.

@@ -15,6 +15,7 @@ import { tmpdir, homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import {
+  ancestorExactRegexes,
   buildSeatbeltLaunch,
   buildSeatbeltProfileText,
   escapeSeatbeltLiteral,
@@ -214,8 +215,24 @@ test('opencode XDG redirect is per-dir gated (absent host dirs stay sandbox-loca
   assert.equal(sb.env.XDG_STATE_HOME, undefined);
 });
 
-test('host git XDG dir stays denied (XDG redirect cannot leak host gitconfig)', () => {
-  // XDG_CONFIG_HOME now points at the host tree for opencode sessions, so
+test('ancestor dirs get exact-match (not subtree) read allows', () => {
+  // Userspace realpath/lstat walks every ancestor component: subtree rules
+  // don't cover the ancestors themselves, so node/vite/npm die with EPERM
+  // without these (verified on macOS: EPERM lstat '/Volumes', '/Users',
+  // '/private'). Exact match only -- siblings' contents stay closed.
+  assert.deepEqual(
+    ancestorExactRegexes(['/no/such/base/dir']),
+    ['^/no/such/base$', '^/no/such$', '^/no$'],
+  );
+  const sb = buildSeatbeltLaunch(baseOpts({ cwd: '/no/such/proj' }));
+  trackDir(sb.dir);
+  const text = readFileSync(sb.profilePath, 'utf-8');
+  assert.ok(text.includes('(regex #"^/no/such$")'), 'ancestor exact-match present');
+  assert.ok(text.includes('(regex #"^/no$")'));
+  assert.ok(!text.includes('^/no(/.*)?$'), 'ancestors must not be subtrees (siblings stay closed)');
+});
+
+test('host git XDG dir stays denied (XDG redirect cannot leak host gitconfig)', () => {  // XDG_CONFIG_HOME now points at the host tree for opencode sessions, so
   // lock in that sandboxed git can never read the host XDG gitconfig: the
   // profile must not allow-list host ~/.config/git, keeping the sandbox
   // gitconfig + broker pins authoritative.
