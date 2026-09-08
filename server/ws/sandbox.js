@@ -1667,10 +1667,39 @@ function seatbeltGhPaths() {
   // real binaries for process-exec while the git broker is on, so gh is only
   // reachable through the PATH shim (the wrapper relays to the git broker on
   // the host and never execs gh in-sandbox, so the pins cannot break
-  // brokered gh).
+  // brokered gh). Seatbelt mediates the symlink-RESOLVED path, so register
+  // both raw and realpath spellings (e.g. Homebrew's /opt/homebrew/bin/gh is
+  // a symlink into the Cellar) -- same rule as every other deny pin in the
+  // profile. NOTE: this pin is best-effort, unlike bwrap's mount (which hides
+  // the real binary entirely): process-exec is globally allowed and /tmp is
+  // writable, so a copied binary still runs. The hard boundary stays "gh
+  // credentials are unreadable in-sandbox" plus the git broker allowlist.
   return [...new Set(
-    [which('gh'), '/usr/bin/gh', '/usr/local/bin/gh', '/opt/homebrew/bin/gh', join(HOME, '.local', 'bin', 'gh')].filter(Boolean),
-  )].filter((p) => existsSync(p));
+    [which('gh'), '/usr/bin/gh', '/usr/local/bin/gh', '/opt/homebrew/bin/gh', join(HOME, '.local', 'bin', 'gh')]
+      .filter(Boolean)
+      .filter((p) => existsSync(p))
+      .flatMap((p) => { try { const r = realpathSync(p); return r === p ? [p] : [p, r]; } catch { return [p]; } }),
+  )];
+}
+
+function seatbeltControlSockPaths(metaSocketPath) {
+  // Host control-plane unix sockets under hostRuntimeDir() (per-user tmpdir
+  // on darwin, inside the sandbox's tmp write rules): the pty-host RPC can
+  // spawn with sandbox:false (unsandboxed host exec -- a sandbox escape) and
+  // the meta socket is the privileged meta toolset's channel, so both are
+  // network-outbound deny-pinned for every seatbelt session. The meta pin is
+  // skipped only for the meta-agent session itself (its socket is its
+  // control channel). Filenames are canonical in server/pty-host/index.js
+  // (SOCK_NAME) and server/ws/metaAgent.js (META_SOCKET_NAME) -- replicated
+  // here as join(hostRuntimeDir(), name) because importing those modules
+  // would cycle back into this one (both depend on sandbox.js). Also honor
+  // CCSERVER_PTY_HOST_SOCK when the operator overrode the pty-host socket.
+  const base = hostRuntimeDir();
+  const paths = [join(base, 'ccserver-pty-host.sock')];
+  if (process.env.CCSERVER_PTY_HOST_SOCK) paths.push(process.env.CCSERVER_PTY_HOST_SOCK);
+  const meta = join(base, 'ccserver-meta.sock');
+  if (metaSocketPath !== meta) paths.push(meta);
+  return paths;
 }
 
 // Minimal sandbox: just enough to launch an agent CLI in an isolated
@@ -1695,6 +1724,9 @@ export function buildMinimalSandboxSpawn({ cwd, targetCommand, app = 'claude' })
       nodeBin: realpathSync(process.execPath),
       scripts: seatbeltScripts(), ssh: seatbeltSsh(),
       gitBroker: null, commitGuard: null,
+      // Usage-capture CLIs have no business reaching the host control plane
+      // either (same escape via pty-host RPC / meta broker).
+      controlSockDenies: seatbeltControlSockPaths(null),
       sockets: {}, extraBinds: [], extraEnv: {}, authSock: null,
       claudeDir: installDir, tools: null,
     });
@@ -1899,6 +1931,14 @@ export function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, mcpSoc
         nodeBin: realpathSync(process.execPath),
         scripts: seatbeltScripts(), ssh: seatbeltSsh(),
         ghPaths: seatbeltGhPaths(),
+        // pty-host's RPC socket and the meta broker live under
+        // hostRuntimeDir() (per-user tmpdir on darwin) -- inside the
+        // sandbox's tmp write rules. The pty-host RPC can spawn with
+        // sandbox:false (unsandboxed host exec) and the meta socket is the
+        // privileged meta toolset's channel, so both are network-outbound
+        // deny-pinned. The meta pin is skipped only for the meta-agent
+        // session itself (metaSocketPath is set only there).
+        controlSockDenies: seatbeltControlSockPaths(metaSocketPath),
         gitBroker,
         commitGuard: commitGuard ? { configPath: commitGuard.configPath } : null,
         sockets: {

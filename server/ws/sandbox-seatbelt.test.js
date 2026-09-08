@@ -274,6 +274,39 @@ test('buildSeatbeltLaunch materializes the orchestrator overlay and tracks it fo
   assert.deepEqual(sb.ruleCopies, [join(cwd, 'CLAUDE.md'), join(cwd, 'AGENTS.md')]);
 });
 
+test('buildSeatbeltLaunch does not claim ownership of a live overlay', () => {
+  // Same deterministic orchestratorDir, predecessor still live: its overlay
+  // files pre-exist. The new launch refreshes them but must not list them
+  // for teardown -- otherwise its own teardown (or a failed build) would
+  // delete the live session's overlay out from under it.
+  const srcDir = mkdtempSync(join(tmpdir(), 'ccserver-seatbelt-orchsrc-'));
+  DIRS.push(srcDir);
+  const src = join(srcDir, 'rules.md');
+  writeFileSync(src, '# refreshed rules\n');
+  const cwd = mkdtempSync(join(tmpdir(), 'ccserver-seatbelt-orchcwd-'));
+  DIRS.push(cwd);
+  writeFileSync(join(cwd, 'CLAUDE.md'), '# live rules\n');
+  writeFileSync(join(cwd, 'AGENTS.md'), '# live rules\n');
+  const sb = buildSeatbeltLaunch(baseOpts({ cwd, orchestratorClaudeMdSrc: src }));
+  trackDir(sb.dir);
+  for (const name of ['CLAUDE.md', 'AGENTS.md']) {
+    assert.equal(readFileSync(join(cwd, name), 'utf-8'), '# refreshed rules\n', `${name} refreshed`);
+  }
+  assert.equal(sb.ruleCopies, null, 'pre-existing files are not owned');
+});
+
+test('buildSeatbeltLaunch failure preserves a pre-existing overlay', () => {
+  const cwd = mkdtempSync(join(tmpdir(), 'ccserver-seatbelt-orchcwd-'));
+  DIRS.push(cwd);
+  writeFileSync(join(cwd, 'CLAUDE.md'), '# live rules\n');
+  assert.throws(
+    () => buildSeatbeltLaunch(baseOpts({ cwd, orchestratorClaudeMdSrc: join(tmpRoot, 'absent.md') })),
+    /cannot copy rules/,
+  );
+  assert.equal(readFileSync(join(cwd, 'CLAUDE.md'), 'utf-8'), '# live rules\n', 'live overlay untouched');
+  assert.ok(!existsSync(join(cwd, 'AGENTS.md')), 'no partial overlay left behind');
+});
+
 test('buildSeatbeltLaunch skips blocked extra binds like bwrap does', () => {
   const sb = buildSeatbeltLaunch(baseOpts({
     extraBinds: [{ src: '~/.ssh', mode: 'ro' }, { src: '/srv/shared', mode: 'rw' }],
@@ -601,6 +634,35 @@ test('gitconfig deny pins apply only while the git broker is on', () => {
 test('buildSeatbeltProfileText denies real gh binaries for process-exec', () => {
   const text = buildSeatbeltProfileText({ denyExecLiterals: ['/opt/homebrew/bin/gh', '/tmp/we"ird/gh'] });
   assert.ok(text.includes('(deny process-exec (literal "/opt/homebrew/bin/gh") (literal "/tmp/we\\"ird/gh"))'));
+});
+
+test('buildSeatbeltProfileText denies control-plane sockets via path-literal', () => {
+  // connect() is mediated as network-outbound: the pin must use
+  // (remote unix-socket (path-literal ...)) -- Apple's Sandbox Guide allows
+  // only path-literal there, not regex/literal/subpath -- and land AFTER
+  // (allow network*) per last-match-wins.
+  const text = buildSeatbeltProfileText({ denyNetOutboundLiterals: ['/tmp/ccserver-runtime-501/ccserver-pty-host.sock'] });
+  assert.ok(text.includes('(deny network-outbound (remote unix-socket (path-literal "/tmp/ccserver-runtime-501/ccserver-pty-host.sock")))'));
+  assert.ok(text.indexOf('(allow network*)') < text.indexOf('(deny network-outbound'));
+  // Every emitted rule line must be paren-balanced (an unbalanced SBPL rule
+  // fails the whole profile compile -- fail-closed for all seatbelt launches).
+  for (const l of text.split('\n')) {
+    if (!l.trimStart().startsWith('(')) continue;
+    const opens = (l.match(/\(/g) || []).length;
+    const closes = (l.match(/\)/g) || []).length;
+    assert.equal(opens, closes, `balanced parens: ${l}`);
+  }
+});
+
+test('buildSeatbeltLaunch pins controlSockDenies for network-outbound', () => {
+  const sockDir = mkdtempSync(join(tmpdir(), 'ccserver-seatbelt-socks-'));
+  DIRS.push(sockDir);
+  const ptySock = join(sockDir, 'ccserver-pty-host.sock');
+  writeFileSync(ptySock, '');
+  const sb = buildSeatbeltLaunch(baseOpts({ controlSockDenies: [ptySock] }));
+  trackDir(sb.dir);
+  const text = readFileSync(sb.profilePath, 'utf-8');
+  assert.ok(text.includes(`(remote unix-socket (path-literal "${ptySock}"))`), 'pty-host socket pinned');
 });
 
 test('buildSeatbeltLaunch pins ghPaths only while the git broker is on', () => {
