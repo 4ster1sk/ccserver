@@ -224,7 +224,10 @@ function expandAgainstHome(p, hostHome) {
 //                    inside is the sandbox home, so gpg needs the override)
 //   claudeDir      - extra agent install dir | null
 //   orchestratorClaudeMdSrc / gitCommonDir / groupFilesDir - like bwrap
-//   tools          - resolved opt-in tool specs | null
+//   tools          - resolved opt-in tool specs | null. Call-shape parity
+//                    only: rtk/CRG provisioning is bwrap-only (mount-bound
+//                    provisioner) and every caller strips the flags before
+//                    passing this -- nothing reads it here.
 //   ghPaths        - real gh binary candidates (from sandbox.js, same set
 //                    buildBwrapArgs ro-binds the wrapper over): denied for
 //                    process-exec while the git broker is on, so gh is
@@ -440,14 +443,12 @@ export function buildSeatbeltLaunch({
       });
     }
 
-    if (tools && (tools.rtk || tools.codeReviewGraph)) {
-      env.CCSANDBOX_PROVISION_RTK = tools.rtk ? '1' : '0';
-      env.CCSANDBOX_PROVISION_CRG = tools.codeReviewGraph ? '1' : '0';
-      env.CCSANDBOX_RTK_VERSION = tools.rtkSpec?.version || '';
-      env.CCSANDBOX_RTK_URL = tools.rtkSpec?.url || '';
-      env.CCSANDBOX_RTK_SHA256 = tools.rtkSpec?.sha256 || '';
-      env.CCSANDBOX_CRG_VERSION = tools.crgSpec?.version || '';
-    }
+    // NOTE: `tools` (rtk / code-review-graph provisioning) is accepted for
+    // call-shape parity with buildBwrapArgs but is bwrap-only there: rtk is
+    // stripped by buildSandboxSpawn's darwin branch and CRG by its
+    // "no mounts -> no /ccserver-sandbox-provision.sh" warning, while
+    // buildMinimalSandboxSpawn passes null. Nothing provision-related is
+    // read or emitted here.
 
     // Operator env last, so it overrides the defaults above (like bwrap).
     for (const [k, v] of Object.entries(extraEnv || {})) {
@@ -604,8 +605,10 @@ export function buildSeatbeltLaunch({
       // hook re-reads it on every commit -- bwrap ro-binds it, so deny-write
       // it here too or the agent can empty blockedPatterns mid-session. Same
       // for the broker allowlist (read once at broker boot, but pinning it
-      // matches bwrap's ro-bind parity and closes the cross-session rewrite
-      // of a sibling session's allowlist file).
+      // matches bwrap's ro-bind parity). NOTE: these pins cover THIS launch's
+      // files only -- sibling sessions' runtime-dir files (broker sockets,
+      // allowlists, commit-guard configs) stay reachable, exactly as
+      // documented in docs-site (sandbox/overview.md).
       ...(commitGuard
         ? exactPins(basename(commitGuard.configPath), dirname(commitGuard.configPath))
         : []),
