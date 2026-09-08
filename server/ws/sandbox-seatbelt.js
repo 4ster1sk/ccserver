@@ -297,10 +297,13 @@ export function buildSeatbeltLaunch({
     // The shared sandbox-ssh-config pins UserKnownHostsFile at bwrap's fixed
     // in-sandbox paths, which no mount provides here -- every host would
     // fail StrictHostKeyChecking. Emit a seatbelt variant pointing at the
-    // host known_hosts paths (registered as read literals below).
+    // host known_hosts paths (registered as read literals below). Only a
+    // brokered launch consumes it (CCSANDBOX_SSH_CONFIG / GIT_SSH_COMMAND /
+    // the ssh shims are wired under gitBroker), so minimal launches
+    // (usage capture, gitBroker: null) must not mint it.
     let sshConfigPath = ssh.configFile;
     let knownHostsCopy = null;
-    if (ssh.realSsh) {
+    if (gitBroker && ssh.realSsh) {
       // UserKnownHostsFile is a whitespace-separated list with no quoting:
       // the server-tree default known_hosts (the install dir may contain
       // spaces) must live at a space-free path. Copy it into the launch dir
@@ -509,12 +512,13 @@ export function buildSeatbeltLaunch({
     // Both spellings (see pathVariants): a server tree or HOME under a
     // symlink would otherwise read-deny these via the other spelling.
     // (The server-tree knownHostsDefault needs no literal: it is copied into
-    // the launch dir when ssh.realSsh is set, and that dir is readable via
-    // subtrees(dir) above.)
+    // the launch dir when the brokered ssh config is minted, and that dir
+    // is readable via subtrees(dir) above.)
     if (ssh.userKnownHosts) readLiterals.push(...pathVariants(ssh.userKnownHosts));
     // The per-launch seatbelt ssh config above (or the shared file when no
     // real ssh exists, kept for completeness though nothing reads it then).
-    if (sshConfigPath) readLiterals.push(...pathVariants(sshConfigPath));
+    // Only brokered launches mint (and read) the per-launch copy.
+    if (gitBroker && sshConfigPath) readLiterals.push(...pathVariants(sshConfigPath));
     if (orchestratorClaudeMdSrc) readLiterals.push(...pathVariants(orchestratorClaudeMdSrc));
 
     // Every deny pin must cover both spellings Seatbelt may see: under the
@@ -557,11 +561,11 @@ export function buildSeatbeltLaunch({
       ...subtrees(binDir),
       ...subtrees(hooksDir),
       ...exactPins(basename(profilePath), dir),
-      // The per-launch ssh-config (CCSANDBOX_SSH_CONFIG, minted when
-      // ssh.realSsh) must stay immutable like bwrap's --ro-bind'ed
-      // sandbox-ssh-config: an agent-writable copy could weaken
+      // The per-launch ssh-config (CCSANDBOX_SSH_CONFIG, minted for brokered
+      // launches when ssh.realSsh) must stay immutable like bwrap's
+      // --ro-bind'ed sandbox-ssh-config: an agent-writable copy could weaken
       // StrictHostKeyChecking / UserKnownHostsFile for brokered git ssh.
-      ...(ssh.realSsh ? exactPins(basename(sshConfigPath), dir) : []),
+      ...(gitBroker && ssh.realSsh ? exactPins(basename(sshConfigPath), dir) : []),
       // The known_hosts copy is as security-sensitive as the ssh-config
       // itself: an agent-writable known_hosts weakens host key verification.
       ...(knownHostsCopy ? exactPins(basename(knownHostsCopy), dir) : []),
