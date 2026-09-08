@@ -285,11 +285,13 @@ export function buildSeatbeltLaunch({
       shim('gh', scripts.ghWrapper);
       credHelperShim = shim('ccserver-git-credential-helper', scripts.credHelper);
       if (ssh.realSsh) sshShim = shim('ccserver-git-ssh', scripts.sshWrapper);
-      // bwrap binds the ssh wrapper OVER the real ssh binary, so every ssh
-      // invocation (not just git's) passes the allowlist gate. Seatbelt has
-      // no mounts: the PATH-prepended binDir is the closest equivalent, so
-      // cover plain `ssh` resolution too. An absolute-path launch of the
-      // real ssh still bypasses the gate (documented in docs-site).
+      // bwrap binds the ssh wrapper OVER the real ssh binary's path, so a
+      // plain `ssh` resolution passes the allowlist gate (the real binary
+      // stays reachable there too via $CCSANDBOX_REAL_SSH -- same bypass
+      // class). Seatbelt has no mounts: the PATH-prepended binDir is the
+      // closest equivalent, so cover plain `ssh` resolution too. An
+      // absolute-path launch of the real ssh still bypasses the gate
+      // (documented in docs-site).
       if (ssh.realSsh) shim('ssh', scripts.sshWrapper);
     }
     // The shared sandbox-ssh-config pins UserKnownHostsFile at bwrap's fixed
