@@ -1174,6 +1174,7 @@ export function forceSandboxUnavailableReason() {
     reason: 'bwrap is not available on this host',
     hint: 'Install bwrap (bubblewrap) or disable forceSandbox.',
   };
+}
 
 // Writes this launch's commit-message guard config (built-in patterns +
 // sandbox.config.json's commitMessageGuard.blockedPatterns, see
