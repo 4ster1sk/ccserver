@@ -6,9 +6,12 @@
 // -- or when sandbox-exec is missing -- all exec cases skip (the single
 // cwd=/ fail-closed case at the bottom runs everywhere, it never spawns).
 //
-// Isolated via CCSERVER_SANDBOX_SEATBELT_TMP: every launch dir lands under a
-// temp root removed in after(). Each case builds its own project cwd (+ fake
-// HOME where needed) so parallel CI runs never share state.
+// Isolated via CCSERVER_SANDBOX_SEATBELT_TMP pointing at a fresh dir under
+// os.tmpdir() (production-like: inside the broad tmp allow trees, so the
+// sibling deny pins are genuinely exercised). Failing profiles are copied to
+// a separate tmp root (RUNNER_TEMP on CI) preserved in after(). Each case
+// builds its own project cwd (+ fake HOME where needed) so parallel CI runs
+// never share state.
 //
 // Debugging failures on CI: the failure messages include the profile path,
 // exit status/signal, stdout and stderr. Failing profiles are copied to
@@ -38,7 +41,19 @@ const SKIP_OPTS = SHOULD_SKIP
   : {};
 
 let tmpRoot;
+// Production-like seatbelt base (always under os.tmpdir(), i.e. inside the
+// broad tmp allow trees -- exactly what the sibling deny pins must beat).
+// Distinct from tmpRoot, which only holds failure profiles for upload.
+let seatbeltBase;
 let prevSeatbeltTmp;
+// NOTE: DIRS/trackDir must be declared BEFORE before(): node:test runs root
+// hooks during module evaluation, so anything the hook touches must already
+// be initialized (TDZ otherwise).
+const DIRS = [];
+function trackDir(d) {
+  DIRS.push(d);
+  return d;
+}
 // Set in before() when even `(allow default)` cannot be applied (nested
 // sandbox): every exec case then skips via checkRunnable(t).
 let nestedReason = null;
@@ -58,23 +73,18 @@ function baselineApplies() {
 }
 
 before(() => {
-  // Prefer RUNNER_TEMP on GitHub Actions so the failure artifact upload can
-  // scope to ${{ runner.temp }}/ccserver-sbexec-test-* (a /var/folders/**
-  // glob walks other users' dirs and EACCES-fails the upload step).
-  const base = process.env.RUNNER_TEMP || tmpdir();
-  tmpRoot = mkdtempSync(join(base, 'ccserver-sbexec-test-'));
+  // tmpRoot holds failure profiles for the CI artifact upload: prefer
+  // RUNNER_TEMP on GitHub Actions so the upload can scope to
+  // ${{ runner.temp }}/ccserver-sbexec-test-* (a /var/folders/** glob walks
+  // other users' dirs and EACCES-fails the upload step).
+  tmpRoot = mkdtempSync(join(process.env.RUNNER_TEMP || tmpdir(), 'ccserver-sbexec-test-'));
+  seatbeltBase = trackDir(mkdtempSync(join(tmpdir(), 'ccserver-sbexec-seatbeltbase-')));
   prevSeatbeltTmp = process.env.CCSERVER_SANDBOX_SEATBELT_TMP;
-  process.env.CCSERVER_SANDBOX_SEATBELT_TMP = join(tmpRoot, 'seatbelt');
+  process.env.CCSERVER_SANDBOX_SEATBELT_TMP = seatbeltBase;
   if (!SHOULD_SKIP && !baselineApplies()) {
     nestedReason = 'sandbox-exec cannot apply profiles in this shell (nested sandbox? sandbox_apply EPERM) -- skipping exec cases';
   }
 });
-
-const DIRS = [];
-function trackDir(d) {
-  DIRS.push(d);
-  return d;
-}
 
 after(() => {
   for (const d of DIRS) {
@@ -293,9 +303,12 @@ test('throwaway HOME and /tmp are writable', SKIP_OPTS, (t) => {
 
 test('raw keys stay denied: ~/.ssh and ~/.config/gh unreadable', SKIP_OPTS, (t) => {
   if (!checkRunnable(t)) return;
-  // Fake HOME so the test never touches the runner's real keys: the deny pins
-  // are built from hostHome, so secrets placed there must still be refused.
-  const fakeHome = trackDir(mkdtempSync(join(tmpdir(), 'ccserver-sbexec-fakehome-')));
+  // Fake HOME so the test never touches the runner's real keys -- placed
+  // directly under the real $HOME like production, NEVER under os.tmpdir():
+  // tmpdir sits inside the profile's broad tmp read allows, which would make
+  // these secrets readable and the test vacuous. A real $HOME is outside
+  // every allow tree, so reads are default-denied and writes pin-denied.
+  const fakeHome = trackDir(mkdtempSync(join(HOME, 'ccserver-sbexec-fakehome-')));
   mkdirSync(join(fakeHome, '.ssh'), { recursive: true });
   writeFileSync(join(fakeHome, '.ssh', 'secret.txt'), 'top-secret\n');
   mkdirSync(join(fakeHome, '.config', 'gh'), { recursive: true });
@@ -307,7 +320,10 @@ test('raw keys stay denied: ~/.ssh and ~/.config/gh unreadable', SKIP_OPTS, (t) 
   for (const f of [join(fakeHome, '.ssh', 'secret.txt'), join(fakeHome, '.config', 'gh', 'hosts.yml')]) {
     const res = runInSeatbelt(sb, ['/bin/cat', f], { cwd: opts.cwd });
     assertDenied(res, sb, `cat ${f}`);
+    const wres = runInSeatbelt(sb, ['/bin/sh', '-c', 'echo pwned > "$1"', 'sh', f], { cwd: opts.cwd });
+    assertDenied(wres, sb, `write ${f}`);
   }
+  assert.equal(readFileSync(join(fakeHome, '.ssh', 'secret.txt'), 'utf-8'), 'top-secret\n', 'secret must be unchanged');
 });
 
 test('sibling launch dirs denied, own runtime dir allowed', SKIP_OPTS, (t) => {
