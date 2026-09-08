@@ -18,6 +18,8 @@ import {
   getPtyHostClient,
   getAllPtyHostClients,
   resetPtyHostClientForTests,
+  isPtyHostEnabled,
+  checkPtyHostReachable,
 } from './ptyHostClient.js';
 
 function sleep(ms) {
@@ -362,4 +364,106 @@ test('getAllPtyHostClients returns exactly shardCount() clients, indexed 0..N-1'
     if (prev === undefined) delete process.env.CCSERVER_PTY_HOST_SHARDS;
     else process.env.CCSERVER_PTY_HOST_SHARDS = prev;
   }
+});
+
+// Issue #119 Step7-2: isPtyHostEnabled() now defaults to ON (unset/empty),
+// flipped from the historical default-OFF -- only an explicit '0' opts out.
+// Exercised via the injected `env` param (a plain object, not process.env)
+// so this stays a pure-function test with no global mutation/restore.
+test('isPtyHostEnabled defaults to true when unset or empty, false only for an explicit "0"', () => {
+  assert.equal(isPtyHostEnabled({}), true, 'unset means enabled by default');
+  assert.equal(isPtyHostEnabled({ CCSERVER_PTY_HOST: '' }), true, 'empty string means enabled by default');
+  assert.equal(isPtyHostEnabled({ CCSERVER_PTY_HOST: '0' }), false, 'explicit "0" is the only way to opt out');
+  assert.equal(isPtyHostEnabled({ CCSERVER_PTY_HOST: '1' }), true, 'the historical explicit "1" still means enabled');
+  assert.equal(isPtyHostEnabled({ CCSERVER_PTY_HOST: 'yes' }), true, 'any other non-"0" value stays enabled, not just "1"');
+});
+
+test('isPtyHostEnabled reads process.env by default when no env argument is given', () => {
+  const prev = process.env.CCSERVER_PTY_HOST;
+  try {
+    process.env.CCSERVER_PTY_HOST = '0';
+    assert.equal(isPtyHostEnabled(), false);
+    delete process.env.CCSERVER_PTY_HOST;
+    assert.equal(isPtyHostEnabled(), true);
+  } finally {
+    if (prev === undefined) delete process.env.CCSERVER_PTY_HOST;
+    else process.env.CCSERVER_PTY_HOST = prev;
+  }
+});
+
+// Issue #119 Step7-3: checkPtyHostReachable() backs server/index.js's
+// boot-time auto-fallback -- an existing deployment that never started
+// ccserver-pty-host.service must not have isPtyHostEnabled()'s new
+// default-ON break every session creation outright.
+test('checkPtyHostReachable resolves true against a real, running pty-host', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ccserver-ptyhostclient-reachable-'));
+  const sockPath = join(dir, 'pty-host.sock');
+  const host = await startPtyHost({ sockPath });
+  const client = new PtyHostClient(sockPath);
+  try {
+    assert.equal(await checkPtyHostReachable(client), true);
+  } finally {
+    client.close();
+    await host.stop();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('checkPtyHostReachable resolves false only once its timeout elapses when nothing is ever listening', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ccserver-ptyhostclient-unreachable-'));
+  // A path in a real, existing directory that nothing ever listens on. Each
+  // individual connection attempt is refused/ENOENT near-instantly, but
+  // checkPtyHostReachable() must keep retrying across its whole timeoutMs
+  // budget rather than give up on that first instant failure -- see its own
+  // comment: a single attempt failing fast is indistinguishable from "the
+  // pty-host that will bind this exact path in another second is still
+  // starting up" (the boot-race case this function exists to survive), so
+  // this genuinely-never-there case is expected to cost close to the full
+  // timeout, not return early.
+  const sockPath = join(dir, 'nothing-here.sock');
+  const client = new PtyHostClient(sockPath);
+  const startedAt = Date.now();
+  try {
+    const reachable = await checkPtyHostReachable(client, 500);
+    assert.equal(reachable, false);
+    assert.ok(Date.now() - startedAt >= 450, 'an absent socket must retry across the full timeout, not fail on the first attempt');
+  } finally {
+    client.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('checkPtyHostReachable detects a pty-host that finishes starting up partway through the probe window', async () => {
+  // Reproduces Issue #119 Step7-3's boot race: server本体 and pty-host start
+  // together (systemd's After= only orders unit starts, it does not wait for
+  // pty-host to actually finish initializing -- see docs/ccserver.service),
+  // so the very first connection attempt can hit a socket path that doesn't
+  // exist YET, not one that will never exist. checkPtyHostReachable() must
+  // keep polling and pick up pty-host once it does bind, well before its
+  // overall timeout elapses.
+  const dir = mkdtempSync(join(tmpdir(), 'ccserver-ptyhostclient-boot-race-'));
+  const sockPath = join(dir, 'pty-host.sock');
+  const client = new PtyHostClient(sockPath);
+  let host;
+  try {
+    const probe = checkPtyHostReachable(client, 3000);
+    await sleep(300);
+    host = await startPtyHost({ sockPath });
+    assert.equal(await probe, true);
+  } finally {
+    client.close();
+    if (host) await host.stop();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('checkPtyHostReachable resolves false once its own timeout elapses, for a client that never settles', async () => {
+  // A stub, not a real PtyHostClient: only list() matters to
+  // checkPtyHostReachable, and a promise that never settles is the cleanest
+  // way to exercise the timeout race deterministically -- a real "pty-host
+  // accepts the connection but never answers" repro would need an actual
+  // wedged process.
+  const neverSettles = { list: () => new Promise(() => {}) };
+  const reachable = await checkPtyHostReachable(neverSettles, 200);
+  assert.equal(reachable, false);
 });
