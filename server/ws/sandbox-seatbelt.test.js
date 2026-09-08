@@ -123,6 +123,16 @@ test('buildSeatbeltProfileText is deny-by-default with open egress', () => {
   assert.ok(text.includes('(deny file-write* (regex #"^/home/u/.ssh(/.*)?$")'));
 });
 
+test('profile allows reading the root directory itself (macOS startup requirement)', () => {
+  // macOS path resolution reads "/" as a directory during process startup:
+  // with only subtree regexes (^/usr/... etc.) allowed, every child dies at
+  // startup and sandbox-exec surfaces it as an abort (exit 134) -- while the
+  // UI reports code 0. See docs/seatbelt-root-read-abort-diagnosis.md. The
+  // literal grants only the root directory entry, not any tree below it.
+  const text = buildSeatbeltProfileText({ readRegexes: ['^/usr(/.*)?$'] });
+  assert.ok(text.includes('(allow file-read* (literal "/"))'), 'the literal root read must survive profile assembly');
+});
+
 test('buildSeatbeltLaunch creates profile+bin+hooks and a throwaway HOME', () => {
   const sb = buildSeatbeltLaunch(baseOpts());
   trackDir(sb.dir);

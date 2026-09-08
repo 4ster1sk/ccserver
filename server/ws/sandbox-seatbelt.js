@@ -168,6 +168,13 @@ export function buildSeatbeltProfileText({
     '(allow pseudo-tty)',
     '(allow file-ioctl (regex #"^/dev(/.*)?$"))',
     '',
+    ';; macOS requires reading the root directory itself during process',
+    ';; startup (path resolution touches "/" as a directory); without this,',
+    ';; every child dies at startup and sandbox-exec surfaces it as an abort',
+    ';; (see docs/seatbelt-root-read-abort-diagnosis.md). This grants only the',
+    ';; root directory entry, not any tree underneath it.',
+    '(allow file-read* (literal "/"))',
+    '',
   ];
   if (readRegexes.length > 0 || readLiterals.length > 0) {
     const sels = [regexes(readRegexes), literals(readLiterals)].filter(Boolean).join(' ');

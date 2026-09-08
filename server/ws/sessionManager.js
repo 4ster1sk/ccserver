@@ -260,13 +260,21 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
   // with a clear error instead of the opaque crash. Reachable via the
   // directory browser's own "/" fallback (used until the home-dir fetch
   // resolves, or if the user navigates all the way up and launches there),
-  // not just automated/edge-case callers. Shells are unaffected: plain
-  // /bin/bash starts fine at /.
-  if (!shell && cwd === '/') {
+  // not just automated/edge-case callers. Plain unsandboxed shells are
+  // unaffected: plain /bin/bash starts fine at /.
+  //
+  // A SANDBOXED shell at / is refused too: the project subtree rule would
+  // become "^/(/.*)?$" (seatbelt, see subtrees()) or a "/" bind (bwrap),
+  // silently granting the whole filesystem -- a fail-open sandbox. Shell
+  // sessions only run sandboxed under forceSandbox or an explicit per-launch
+  // sandbox request, so the refusal is gated on those.
+  if (cwd === '/' && (!shell || sandbox || cfg.forceSandbox)) {
     return {
       sessionId: id,
       session: null,
-      error: 'Cannot launch in the filesystem root (/) -- claude aborts immediately there. Choose a working directory first.',
+      error: !shell
+        ? 'Cannot launch in the filesystem root (/) -- claude aborts immediately there. Choose a working directory first.'
+        : 'Cannot launch a sandboxed shell in the filesystem root (/) -- the sandbox would grant the whole filesystem. Choose a working directory first.',
     };
   }
 

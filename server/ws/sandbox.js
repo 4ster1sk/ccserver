@@ -1826,6 +1826,15 @@ export function buildMinimalSandboxSpawn({ cwd, targetCommand, app = 'claude' })
 //                 bookkeeping row ('user' | 'meta-agent:<sessionId>' | ...).
 //                 Display only; never an authorization input.
 export function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, mcpSocketPath = null, notifySocketPath = null, usageSocketPath = null, metaSocketPath = null, reviewerSocketPath = null, reuseSandboxHome = true, orchestratorClaudeMdSrc = null, gitCommonDir = null, groupFilesDir = null, sandboxHomeCreatedBy = null }) {
+  // Defense in depth behind sessionManager's cwd='/' refusal: a sandbox
+  // with the filesystem root as projectDir is fail-open -- seatbelt's
+  // subtrees('/') becomes "^/(/.*)?$" and bwrap would bind "/" itself, both
+  // silently granting the whole filesystem. (The message deliberately avoids
+  // the 'Failed to build sandbox' prefix: this is a request rejection, not
+  // an infra fault.) See docs/seatbelt-root-read-abort-diagnosis.md.
+  if (resolve(cwd) === '/') {
+    throw new Error('Cannot build a sandbox for the filesystem root (/) -- the project rule would grant the whole filesystem. Choose a working directory first.');
+  }
   const { docker: cfgDocker, persistentHome, gpg: cfgGpg, sshAgent: cfgSshAgent, gitBroker: gitBrokerEnabled, commitMessageGuard, binds, env, tools: cfgTools, claudeBin } = loadSandboxConfig();
   const docker = cfgDocker && dockerSandboxAvailable();
   const gpg = sandboxOpts?.gpg ?? cfgGpg;
