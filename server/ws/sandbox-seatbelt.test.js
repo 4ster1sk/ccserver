@@ -36,7 +36,7 @@ let tmpRoot;
 let prevSeatbeltTmp;
 
 before(() => {
-  tmpRoot = mkdtempSync(join(tmpdir(), 'ccserver-seatbelt-test-'));
+  tmpRoot = mkdtempSync(join(tmpdir(), 'ccserver-sbtest-test-'));
   prevSeatbeltTmp = process.env.CCSERVER_SANDBOX_SEATBELT_TMP;
   process.env.CCSERVER_SANDBOX_SEATBELT_TMP = join(tmpRoot, 'seatbelt');
 });
@@ -59,7 +59,7 @@ after(() => {
 });
 
 function baseOpts(over = {}) {
-  const cwd = mkdtempSync(join(tmpdir(), 'ccserver-seatbelt-cwd-'));
+  const cwd = mkdtempSync(join(tmpdir(), 'ccserver-sbtest-cwd-'));
   DIRS.push(cwd);
   return {
     cwd,
@@ -172,7 +172,7 @@ test('agent config dirs and Caches are readable as well as writable (file-write*
 });
 
 test('buildSeatbeltLaunch honors an explicit persistent homeDir', () => {
-  const homeDir = mkdtempSync(join(tmpdir(), 'ccserver-seatbelt-home-'));
+  const homeDir = mkdtempSync(join(tmpdir(), 'ccserver-sbtest-home-'));
   DIRS.push(homeDir);
   const sb = buildSeatbeltLaunch(baseOpts({ homeDir }));
   trackDir(sb.dir);
@@ -184,7 +184,7 @@ test('opencode sessions resolve host auth/state via XDG; other apps keep the san
   // opencode honors XDG base dirs, so point them at the host trees (whose
   // profile allows already exist unconditionally): login, model memory and
   // --continue then carry over from the host, like bwrap's appBinds.
-  const fakeHome = mkdtempSync(join(tmpdir(), 'ccserver-seatbelt-hosthome-'));
+  const fakeHome = mkdtempSync(join(tmpdir(), 'ccserver-sbtest-hosthome-'));
   DIRS.push(fakeHome);
   for (const d of ['.config/opencode', '.local/share/opencode', '.local/state/opencode']) {
     mkdirSync(join(fakeHome, d), { recursive: true });
@@ -205,7 +205,7 @@ test('opencode sessions resolve host auth/state via XDG; other apps keep the san
 test('opencode XDG redirect is per-dir gated (absent host dirs stay sandbox-local)', () => {
   // A host that never ran opencode must not get host dirs materialized from
   // inside the sandbox: only existing opencode dirs are redirected.
-  const fakeHome = mkdtempSync(join(tmpdir(), 'ccserver-seatbelt-hosthome-'));
+  const fakeHome = mkdtempSync(join(tmpdir(), 'ccserver-sbtest-hosthome-'));
   DIRS.push(fakeHome);
   mkdirSync(join(fakeHome, '.local', 'share', 'opencode'), { recursive: true });
   const sb = buildSeatbeltLaunch({ ...baseOpts(), hostHome: fakeHome, app: 'opencode' });
@@ -243,7 +243,7 @@ test('host git XDG dir stays denied (XDG redirect cannot leak host gitconfig)', 
 });
 
 test('buildSeatbeltLaunch wires gitBroker shims and merges GIT_CONFIG_COUNT', () => {
-  const brokerDir = mkdtempSync(join(tmpdir(), 'ccserver-seatbelt-broker-'));
+  const brokerDir = mkdtempSync(join(tmpdir(), 'ccserver-sbtest-broker-'));
   DIRS.push(brokerDir);
   const knownHostsDefault = join(brokerDir, 'known-hosts-default');
   writeFileSync(knownHostsDefault, 'example.com ssh-ed25519 AAAA\n');
@@ -337,11 +337,11 @@ test('buildSeatbeltLaunch allows gitCommonDir rw and groupFilesDir ro', () => {
 });
 
 test('buildSeatbeltLaunch materializes the orchestrator overlay and tracks it for teardown', () => {
-  const srcDir = mkdtempSync(join(tmpdir(), 'ccserver-seatbelt-orchsrc-'));
+  const srcDir = mkdtempSync(join(tmpdir(), 'ccserver-sbtest-orchsrc-'));
   DIRS.push(srcDir);
   const src = join(srcDir, 'rules.md');
   writeFileSync(src, '# rules\n');
-  const cwd = mkdtempSync(join(tmpdir(), 'ccserver-seatbelt-orchcwd-'));
+  const cwd = mkdtempSync(join(tmpdir(), 'ccserver-sbtest-orchcwd-'));
   DIRS.push(cwd);
   const sb = buildSeatbeltLaunch(baseOpts({ cwd, orchestratorClaudeMdSrc: src }));
   trackDir(sb.dir);
@@ -356,11 +356,11 @@ test('buildSeatbeltLaunch does not claim ownership of a live overlay', () => {
   // files pre-exist. The new launch refreshes them but must not list them
   // for teardown -- otherwise its own teardown (or a failed build) would
   // delete the live session's overlay out from under it.
-  const srcDir = mkdtempSync(join(tmpdir(), 'ccserver-seatbelt-orchsrc-'));
+  const srcDir = mkdtempSync(join(tmpdir(), 'ccserver-sbtest-orchsrc-'));
   DIRS.push(srcDir);
   const src = join(srcDir, 'rules.md');
   writeFileSync(src, '# refreshed rules\n');
-  const cwd = mkdtempSync(join(tmpdir(), 'ccserver-seatbelt-orchcwd-'));
+  const cwd = mkdtempSync(join(tmpdir(), 'ccserver-sbtest-orchcwd-'));
   DIRS.push(cwd);
   writeFileSync(join(cwd, 'CLAUDE.md'), '# live rules\n');
   writeFileSync(join(cwd, 'AGENTS.md'), '# live rules\n');
@@ -373,7 +373,7 @@ test('buildSeatbeltLaunch does not claim ownership of a live overlay', () => {
 });
 
 test('buildSeatbeltLaunch failure preserves a pre-existing overlay', () => {
-  const cwd = mkdtempSync(join(tmpdir(), 'ccserver-seatbelt-orchcwd-'));
+  const cwd = mkdtempSync(join(tmpdir(), 'ccserver-sbtest-orchcwd-'));
   DIRS.push(cwd);
   writeFileSync(join(cwd, 'CLAUDE.md'), '# live rules\n');
   assert.throws(
@@ -432,7 +432,7 @@ test('forwarded ssh-agent socket gets an explicit allow rule', () => {
 });
 
 test('gitBroker env carries credential.useHttpPath (bwrap parity)', () => {
-  const brokerDir = mkdtempSync(join(tmpdir(), 'ccserver-seatbelt-httppath-'));
+  const brokerDir = mkdtempSync(join(tmpdir(), 'ccserver-sbtest-httppath-'));
   DIRS.push(brokerDir);
   const sb = buildSeatbeltLaunch(baseOpts({
     gitBroker: { sockPath: join(brokerDir, 'b.sock'), allowlistPath: join(brokerDir, 'a.json'), dir: brokerDir },
@@ -452,7 +452,7 @@ test('gitBroker env carries credential.useHttpPath (bwrap parity)', () => {
 test('sandbox HOME gitconfig is deny-pinned (no agent helper injection)', () => {
   // Pins apply while the broker is on (broker-issued tokens must not land in
   // an agent-written helper); without a broker both files stay writable.
-  const brokerDir = mkdtempSync(join(tmpdir(), 'ccserver-seatbelt-broker-'));
+  const brokerDir = mkdtempSync(join(tmpdir(), 'ccserver-sbtest-broker-'));
   DIRS.push(brokerDir);
   const sb = buildSeatbeltLaunch(baseOpts({
     gitBroker: { sockPath: join(brokerDir, 'broker.sock'), allowlistPath: join(brokerDir, 'allow.json'), dir: brokerDir },
@@ -471,7 +471,7 @@ test('bin/hooks/profile are deny-pinned despite the TMPDIR write rules', () => {
 });
 
 test('agent CLIs resolve the real config via env (HOME is remapped)', () => {
-  const fakeHome = mkdtempSync(join(tmpdir(), 'ccserver-seatbelt-realhome-'));
+  const fakeHome = mkdtempSync(join(tmpdir(), 'ccserver-sbtest-realhome-'));
   DIRS.push(fakeHome);
   mkdirSync(join(fakeHome, '.claude'));
   mkdirSync(join(fakeHome, '.codex'));
@@ -559,7 +559,7 @@ test('own launch dir stays writable: pin denies do not override the re-allow', (
 });
 
 test('per-launch ssh-config is write-pinned when ssh.realSsh is set', () => {
-  const brokerDir = mkdtempSync(join(tmpdir(), 'ccserver-seatbelt-broker-'));
+  const brokerDir = mkdtempSync(join(tmpdir(), 'ccserver-sbtest-broker-'));
   DIRS.push(brokerDir);
   const knownHostsDefault = join(brokerDir, 'known-hosts-default');
   writeFileSync(knownHostsDefault, 'example.com ssh-ed25519 AAAA\n');
@@ -574,7 +574,7 @@ test('per-launch ssh-config is write-pinned when ssh.realSsh is set', () => {
 });
 
 test('missing server known_hosts falls back to /dev/null (fail-closed)', () => {
-  const brokerDir = mkdtempSync(join(tmpdir(), 'ccserver-seatbelt-broker-'));
+  const brokerDir = mkdtempSync(join(tmpdir(), 'ccserver-sbtest-broker-'));
   DIRS.push(brokerDir);
   const sb = buildSeatbeltLaunch(baseOpts({
     gitBroker: { sockPath: join(brokerDir, 'broker.sock'), allowlistPath: join(brokerDir, 'allow.json'), dir: brokerDir },
@@ -593,7 +593,7 @@ test('spaced launch dirs: helper is bare-word-escaped, ssh command is quoted', (
   // command string and stays double-quoted.
   const spacedBase = join(tmpRoot, 'with space');
   mkdirSync(spacedBase, { recursive: true });
-  const brokerDir = mkdtempSync(join(tmpdir(), 'ccserver-seatbelt-broker-'));
+  const brokerDir = mkdtempSync(join(tmpdir(), 'ccserver-sbtest-broker-'));
   DIRS.push(brokerDir);
   const prev = process.env.CCSERVER_SANDBOX_SEATBELT_TMP;
   process.env.CCSERVER_SANDBOX_SEATBELT_TMP = spacedBase;
@@ -649,10 +649,13 @@ test('deny lines are emitted after the allow lines (last-match-wins)', () => {
 test('sibling deny pins cover both raw and realpath spellings of the base', () => {
   // seatbeltBaseDir() under a symlink: deny pins must carry both spellings,
   // or the other spelling walks around the pin via the broad tmp allows.
-  const realBase = mkdtempSync(join(tmpdir(), 'ccserver-seatbelt-realbase-'));
+  const realBase = mkdtempSync(join(tmpdir(), 'ccserver-sbtest-realbase-'));
   DIRS.push(realBase);
   const linkBase = join(tmpRoot, 'base-link');
   symlinkSync(realBase, linkBase);
+  // macOS resolves /var/... to /private/var/...: the registered realpath
+  // spelling is the fully-resolved one (cf. the /tmp control-socket test).
+  const realBaseResolved = realpathSync(realBase);
   const prev = process.env.CCSERVER_SANDBOX_SEATBELT_TMP;
   process.env.CCSERVER_SANDBOX_SEATBELT_TMP = linkBase;
   try {
@@ -664,7 +667,7 @@ test('sibling deny pins cover both raw and realpath spellings of the base', () =
       'raw base spelling pinned',
     );
     assert.ok(
-      text.includes(`^${escapeSeatbeltRegex(realBase)}/ccserver-seatbelt-`),
+      text.includes(`^${escapeSeatbeltRegex(realBaseResolved)}/ccserver-seatbelt-`),
       'realpath base spelling pinned',
     );
   } finally {
@@ -674,13 +677,16 @@ test('sibling deny pins cover both raw and realpath spellings of the base', () =
 });
 
 test('gitconfig deny pins cover both spellings of a symlinked HOME', () => {
-  const realHome = mkdtempSync(join(tmpdir(), 'ccserver-seatbelt-realhome-'));
+  const realHome = mkdtempSync(join(tmpdir(), 'ccserver-sbtest-realhome-'));
   DIRS.push(realHome);
   const linkHome = join(tmpRoot, 'home-link');
   symlinkSync(realHome, linkHome);
   const homeDir = join(linkHome, 'home');
   mkdirSync(homeDir, { recursive: true });
-  const brokerDir = mkdtempSync(join(tmpdir(), 'ccserver-seatbelt-broker-'));
+  // Same /var -> /private/var note as above: compare against the
+  // fully-resolved spelling.
+  const realHomeResolved = realpathSync(realHome);
+  const brokerDir = mkdtempSync(join(tmpdir(), 'ccserver-sbtest-broker-'));
   DIRS.push(brokerDir);
   const sb = buildSeatbeltLaunch(baseOpts({
     homeDir,
@@ -690,7 +696,7 @@ test('gitconfig deny pins cover both spellings of a symlinked HOME', () => {
   const text = readFileSync(sb.profilePath, 'utf-8');
   assert.ok(text.includes(`^${escapeSeatbeltRegex(join(homeDir, '.gitconfig'))}$`), 'raw spelling pinned');
   assert.ok(
-    text.includes(`^${escapeSeatbeltRegex(join(realHome, 'home', '.gitconfig'))}$`),
+    text.includes(`^${escapeSeatbeltRegex(join(realHomeResolved, 'home', '.gitconfig'))}$`),
     'realpath spelling pinned',
   );
 });
@@ -699,7 +705,7 @@ test('gitconfig deny pins apply only while the git broker is on', () => {
   // Without a broker there are no broker-issued tokens to steal, and bwrap
   // leaves both files agent-writable -- `git config --global` must keep
   // working in a persistent HOME.
-  const homeDir = mkdtempSync(join(tmpdir(), 'ccserver-seatbelt-home-'));
+  const homeDir = mkdtempSync(join(tmpdir(), 'ccserver-sbtest-home-'));
   DIRS.push(homeDir);
   const sb = buildSeatbeltLaunch(baseOpts({ homeDir, gitBroker: null }));
   trackDir(sb.dir);
@@ -732,7 +738,7 @@ test('buildSeatbeltProfileText denies control-plane sockets via path-literal', (
 });
 
 test('buildSeatbeltLaunch pins controlSockDenies for network-outbound', () => {
-  const sockDir = mkdtempSync(join(tmpdir(), 'ccserver-seatbelt-socks-'));
+  const sockDir = mkdtempSync(join(tmpdir(), 'ccserver-sbtest-socks-'));
   DIRS.push(sockDir);
   const ptySock = join(sockDir, 'ccserver-pty-host.sock');
   writeFileSync(ptySock, '');
@@ -796,7 +802,7 @@ test('control-plane pin paths track the producers (rename-safe)', () => {
 test('commit-guard config and broker allowlist are write-pinned', () => {
   // The in-sandbox commit-msg hook re-reads its config on every commit;
   // bwrap ro-binds it, so seatbelt must deny-write it (and the allowlist).
-  const brokerDir = mkdtempSync(join(tmpdir(), 'ccserver-seatbelt-broker-'));
+  const brokerDir = mkdtempSync(join(tmpdir(), 'ccserver-sbtest-broker-'));
   DIRS.push(brokerDir);
   const allowlistPath = join(brokerDir, 'allow.json');
   writeFileSync(allowlistPath, '{}');
@@ -813,7 +819,7 @@ test('commit-guard config and broker allowlist are write-pinned', () => {
 });
 
 test('buildSeatbeltLaunch pins ghPaths only while the git broker is on', () => {
-  const brokerDir = mkdtempSync(join(tmpdir(), 'ccserver-seatbelt-broker-'));
+  const brokerDir = mkdtempSync(join(tmpdir(), 'ccserver-sbtest-broker-'));
   DIRS.push(brokerDir);
   const gitBroker = { sockPath: join(brokerDir, 'broker.sock'), allowlistPath: join(brokerDir, 'allow.json'), dir: brokerDir };
   const sb = buildSeatbeltLaunch(baseOpts({ gitBroker, ghPaths: ['/opt/homebrew/bin/gh', '/usr/bin/gh'] }));
