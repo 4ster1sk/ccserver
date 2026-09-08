@@ -27,7 +27,7 @@ import { promisify } from 'node:util';
 import { randomUUID } from 'node:crypto';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { startGitBroker, hostRuntimeDir } from './git-broker.js';
+import { startGitBroker, hostRuntimeDir, PTY_HOST_SOCK_NAME, META_SOCK_NAME } from './git-broker.js';
 import { buildGuardConfig } from './commitGuard.js';
 import { buildSeatbeltLaunch, seatbeltEnvArgs } from './sandbox-seatbelt.js';
 import { recordSandboxHome as recordSandboxHomeDb, listSandboxRowsBySlug, forgetSandboxHome } from './projects.js';
@@ -128,7 +128,9 @@ const CRG_DEFAULT = { version: '2.3.7' };
 const HOME = homedir();
 // Host runtime dir (commit-guard state, rootlesskit state dirs). darwin-aware
 // via git-broker.js: macOS has no /run/user, so without XDG_RUNTIME_DIR this
-// falls back to the per-user tmpdir there instead of an uncreatable path.
+// falls back to a short /tmp base there (NOT the per-user tmpdir: broker
+// socket names appended to /var/folders/... would exceed darwin's 104-byte
+// sockaddr_un.sun_path limit and every bind would fail).
 const XDG_RUNTIME_DIR = hostRuntimeDir();
 
 // RootlessKit's state dir (holds the API socket dockerd connects to) lives
@@ -1682,22 +1684,22 @@ function seatbeltGhPaths() {
   )];
 }
 
-function seatbeltControlSockPaths(metaSocketPath) {
-  // Host control-plane unix sockets under hostRuntimeDir() (per-user tmpdir
+export function seatbeltControlSockPaths(metaSocketPath) {
+  // Host control-plane unix sockets under hostRuntimeDir() (short /tmp base
   // on darwin, inside the sandbox's tmp write rules): the pty-host RPC can
   // spawn with sandbox:false (unsandboxed host exec -- a sandbox escape) and
   // the meta socket is the privileged meta toolset's channel, so both are
   // network-outbound deny-pinned for every seatbelt session. The meta pin is
   // skipped only for the meta-agent session itself (its socket is its
-  // control channel). Filenames are canonical in server/pty-host/index.js
-  // (SOCK_NAME) and server/ws/metaAgent.js (META_SOCKET_NAME) -- replicated
-  // here as join(hostRuntimeDir(), name) because importing those modules
-  // would cycle back into this one (both depend on sandbox.js). Also honor
-  // CCSERVER_PTY_HOST_SOCK when the operator overrode the pty-host socket.
+  // control channel). Filenames come from git-broker.js (leaf module, no
+  // cycle) -- the same constants pty-host/index.js and metaAgent.js build
+  // their socket paths from, so a rename updates the pin automatically.
+  // Also honor CCSERVER_PTY_HOST_SOCK when the operator overrode the
+  // pty-host socket.
   const base = hostRuntimeDir();
-  const paths = [join(base, 'ccserver-pty-host.sock')];
+  const paths = [join(base, PTY_HOST_SOCK_NAME)];
   if (process.env.CCSERVER_PTY_HOST_SOCK) paths.push(process.env.CCSERVER_PTY_HOST_SOCK);
-  const meta = join(base, 'ccserver-meta.sock');
+  const meta = join(base, META_SOCK_NAME);
   if (metaSocketPath !== meta) paths.push(meta);
   return paths;
 }
@@ -1932,7 +1934,7 @@ export function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, mcpSoc
         scripts: seatbeltScripts(), ssh: seatbeltSsh(),
         ghPaths: seatbeltGhPaths(),
         // pty-host's RPC socket and the meta broker live under
-        // hostRuntimeDir() (per-user tmpdir on darwin) -- inside the
+        // hostRuntimeDir() (short /tmp base on darwin) -- inside the
         // sandbox's tmp write rules. The pty-host RPC can spawn with
         // sandbox:false (unsandboxed host exec) and the meta socket is the
         // privileged meta toolset's channel, so both are network-outbound

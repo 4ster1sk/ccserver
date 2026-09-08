@@ -28,9 +28,9 @@ import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { mkdirSync, chmodSync } from 'node:fs';
 import { loadSandboxConfig } from './sandbox.js';
-import { hostRuntimeDir } from './git-broker.js';
+import { hostRuntimeDir, META_SOCK_NAME } from './git-broker.js';
 
-const META_SOCKET_NAME = 'ccserver-meta.sock';
+const META_SOCKET_NAME = META_SOCK_NAME;
 
 let metaBroker = null; // { server, sockPath, dir, connections } | null
 let stopBrokerFn = null;

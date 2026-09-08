@@ -64,14 +64,24 @@ const GH_EXEC_MAX_BYTES = 10 * 1024 * 1024;
 const __filename = fileURLToPath(import.meta.url);
 
 const UID = typeof process.getuid === 'function' ? process.getuid() : 0;
+// Canonical control-plane socket filenames (single source of truth): the
+// seatbelt profile's network-outbound deny pins must keep matching
+// pty-host/index.js's SOCK_NAME and metaAgent.js's META_SOCKET_NAME -- a
+// rename in either place would silently void the pin (both modules import
+// these from here, so a rename updates the pin automatically).
+export const PTY_HOST_SOCK_NAME = 'ccserver-pty-host.sock';
+export const META_SOCK_NAME = 'ccserver-meta.sock';
 // Host runtime dir for broker sockets and other per-launch state.
 // XDG_RUNTIME_DIR wins when set; otherwise Linux uses /run/user/<uid> while
-// macOS -- which has no /run -- falls back to the per-user tmpdir (same
-// precedent as seatbeltBaseDir in sandbox-seatbelt.js). Without the darwin
-// branch every git-backed sandbox launch on macOS would fail at mkdir.
+// macOS -- which has no /run -- falls back to a short /tmp base. NOT the
+// per-user tmpdir (/var/folders/... is ~50 chars on its own): broker socket
+// names (ccserver-git-broker-<uuid>/broker.sock,
+// ccserver-mcp-<id>-<tag>) appended to it would exceed darwin's 104-byte
+// sockaddr_un.sun_path limit and every bind would fail. /tmp is sticky
+// (1777); every caller mkdirs the per-UID dir 0o700.
 export function hostRuntimeDir() {
   if (process.env.XDG_RUNTIME_DIR) return process.env.XDG_RUNTIME_DIR;
-  if (process.platform === 'darwin') return join(tmpdir(), `ccserver-runtime-${UID}`);
+  if (process.platform === 'darwin') return `/tmp/ccserver-runtime-${UID}`;
   return `/run/user/${UID}`;
 }
 function runtimeBase() {
