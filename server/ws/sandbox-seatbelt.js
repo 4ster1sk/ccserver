@@ -81,7 +81,6 @@ export function escapeSeatbeltLiteral(s) {
 //                    the sibling deny (last-match-wins)
 //   denyWriteRegexes            - pin denies, emitted last so they beat the
 //                    re-allows above
-//   denyReadRegexes             - read pin denies, emitted last
 //   denyExecLiterals            - exact paths denied for process-exec
 //                    (emitted after the broad process-exec allow)
 export function buildSeatbeltProfileText({
@@ -94,7 +93,6 @@ export function buildSeatbeltProfileText({
   reAllowWriteRegexes = [],
   reAllowReadRegexes = [],
   denyWriteRegexes = [],
-  denyReadRegexes = [],
   denyExecLiterals = [],
 } = {}) {
   const line = (op, sel) => `  (${op} ${sel})`;
@@ -158,13 +156,6 @@ export function buildSeatbeltProfileText({
       ';; pin denies (emitted last so they beat the re-allows above):',
       ';; raw keys / gh tokens stay behind the git broker.',
       line('deny file-write*', regexes(denyWriteRegexes)),
-      '',
-    );
-  }
-  if (denyReadRegexes.length > 0) {
-    out.push(
-      ';; read pin denies, emitted last.',
-      line('deny file-read*', regexes(denyReadRegexes)),
       '',
     );
   }
@@ -361,8 +352,12 @@ export function buildSeatbeltLaunch({
     // HOME is remapped to the sandbox home, so $HOME-relative config resolution
     // would miss the real auth/state (bwrap instead overlays the real dirs at
     // the real $HOME path). Point the CLIs that support it at the real dirs
-    // (gated on existence, like the appBinds binds). opencode/copilot have no
-    // equivalent override and keep working only via absolute-path resolution.
+    // (gated on existence, like the appBinds binds). opencode resolves its
+    // config/data/state via $HOME-relative XDG dirs and copilot/commandcode
+    // resolve via $HOME (no env override exists) -- under seatbelt they see
+    // the sandbox home, so their login / model / --continue state does NOT
+    // carry over from the host (unlike bwrap, where $HOME IS the host home
+    // path with the persistent home mounted there). See docs-site.
     if (existsSync(join(hostHome, '.claude'))) env.CLAUDE_CONFIG_DIR = join(hostHome, '.claude');
     if (existsSync(join(hostHome, '.codex'))) env.CODEX_HOME = join(hostHome, '.codex');
 
@@ -518,7 +513,7 @@ export function buildSeatbeltLaunch({
     // The per-launch seatbelt ssh config above (or the shared file when no
     // real ssh exists, kept for completeness though nothing reads it then).
     if (sshConfigPath) readLiterals.push(...pathVariants(sshConfigPath));
-    if (orchestratorClaudeMdSrc) readLiterals.push(orchestratorClaudeMdSrc);
+    if (orchestratorClaudeMdSrc) readLiterals.push(...pathVariants(orchestratorClaudeMdSrc));
 
     // Every deny pin must cover both spellings Seatbelt may see: under the
     // per-user TMPDIR, macOS resolves /var/... to /private/var/..., and a
@@ -612,19 +607,19 @@ export function buildSeatbeltLaunch({
       if (b.mode === 'rw') writeRegexes.push(...subtrees(src));
     }
 
-  const profileText = buildSeatbeltProfileText({
-    readRegexes, writeRegexes, readLiterals, writeLiterals,
-    siblingDenyWriteRegexes: siblingDeny, siblingDenyReadRegexes: siblingDeny,
-    reAllowWriteRegexes: ownReAllow, reAllowReadRegexes: ownReAllow,
-    denyWriteRegexes, denyReadRegexes: [],
-    // Mirror bwrap (gh wrapper bound over the real binaries only while the
-    // broker is on): with gitBroker off the agent may use its own gh, so the
-    // pins must not apply. The binDir shim itself is never in ghPaths, but
-    // filter it defensively so the PATH shim cannot be denied by mistake.
-    denyExecLiterals: gitBroker
-      ? [...new Set(ghPaths)].filter((p) => p && p !== join(binDir, 'gh'))
-      : [],
-  });
+    const profileText = buildSeatbeltProfileText({
+      readRegexes, writeRegexes, readLiterals, writeLiterals,
+      siblingDenyWriteRegexes: siblingDeny, siblingDenyReadRegexes: siblingDeny,
+      reAllowWriteRegexes: ownReAllow, reAllowReadRegexes: ownReAllow,
+      denyWriteRegexes,
+      // Mirror bwrap (gh wrapper bound over the real binaries only while the
+      // broker is on): with gitBroker off the agent may use its own gh, so the
+      // pins must not apply. The binDir shim itself is never in ghPaths, but
+      // filter it defensively so the PATH shim cannot be denied by mistake.
+      denyExecLiterals: gitBroker
+        ? [...new Set(ghPaths)].filter((p) => p && p !== join(binDir, 'gh'))
+        : [],
+    });
     writeFileSync(profilePath, profileText, { mode: 0o600 });
     return { dir, profilePath, binDir, hooksDir, homeDir: effectiveHome, ruleCopies: ruleCopies.length > 0 ? ruleCopies : null, nodeBin, env };
   } catch (err) {
