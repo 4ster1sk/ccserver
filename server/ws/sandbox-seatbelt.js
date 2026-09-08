@@ -122,7 +122,10 @@ export function buildSeatbeltProfileText({
     '(deny process-exec (literal "/usr/bin/pbcopy"))',
     '(deny process-exec (literal "/usr/bin/pbpaste"))',
     '(deny process-exec (literal "/usr/bin/open"))',
-    '(deny process-exec (literal "/usr/bin/screencapture"))',
+    // These pins target Apple's fixed binary paths (no symlinks there) --
+    // unlike ghPaths/controlSockDenies, no pathVariants needed. Note
+    // screencapture(1) lives in /usr/sbin, not /usr/bin.
+    '(deny process-exec (literal "/usr/sbin/screencapture"))',
     // Real gh binaries are denied so gh is reachable only via the PATH shim
     // (the wrapper relays to the git broker; nothing execs gh in-sandbox).
     // Seatbelt is last-match-wins (see the contract above), so these pins
