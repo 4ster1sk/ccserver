@@ -232,6 +232,10 @@ function expandAgainstHome(p, hostHome) {
 //   gnupg          - true to expose the host ~/.gnupg keyring (opt-in, like
 //                    bwrap's gpg flag) with GNUPGHOME pointed at it ($HOME
 //                    inside is the sandbox home, so gpg needs the override)
+//   app            - agent id ('claude' | 'opencode' | 'copilot' | 'codex' |
+//                    'commandcode') | null: opencode sessions get the host
+//                    XDG dirs (see env below); other apps resolve their
+//                    config from the sandbox HOME as before
 //   claudeDir      - extra agent install dir | null
 //   orchestratorClaudeMdSrc / gitCommonDir / groupFilesDir - like bwrap
 //   tools          - resolved opt-in tool specs | null. Call-shape parity
@@ -268,6 +272,7 @@ export function buildSeatbeltLaunch({
   extraEnv = {},
   authSock = null,
   gnupg = false,
+  app = null,
   claudeDir = null,
   orchestratorClaudeMdSrc = null,
   gitCommonDir = null,
@@ -416,6 +421,32 @@ export function buildSeatbeltLaunch({
     // path with the persistent home mounted there). See docs-site.
     if (existsSync(join(hostHome, '.claude'))) env.CLAUDE_CONFIG_DIR = join(hostHome, '.claude');
     if (existsSync(join(hostHome, '.codex'))) env.CODEX_HOME = join(hostHome, '.codex');
+    // opencode resolves config/data/state via $HOME-relative XDG dirs (no
+    // dedicated override like CLAUDE_CONFIG_DIR exists), so point the XDG
+    // base dirs at the host ones: login (auth.json under share), model/state
+    // memory and --continue history then carry over from the host, like the
+    // bwrap appBinds. Gated on existence so a host that never ran opencode
+    // keeps a sandbox-local (throwaway/persistent-HOME) setup instead of
+    // materializing host dirs from inside the sandbox. The profile already
+    // allows these three host trees read+write (see appConfigDirs); other
+    // tools resolving XDG dirs stay fail-closed because only the opencode
+    // subtrees are allow-listed -- notably host ~/.config/git stays denied,
+    // so sandboxed git keeps the sandbox gitconfig + broker pins.
+    if (app === 'opencode') {
+      const xdg = [
+        ['XDG_CONFIG_HOME', join(hostHome, '.config')],
+        ['XDG_DATA_HOME', join(hostHome, '.local', 'share')],
+        ['XDG_STATE_HOME', join(hostHome, '.local', 'state')],
+      ];
+      const opencodeDir = {
+        XDG_CONFIG_HOME: join(hostHome, '.config', 'opencode'),
+        XDG_DATA_HOME: join(hostHome, '.local', 'share', 'opencode'),
+        XDG_STATE_HOME: join(hostHome, '.local', 'state', 'opencode'),
+      };
+      for (const [key, base] of xdg) {
+        if (existsSync(opencodeDir[key])) env[key] = base;
+      }
+    }
 
     // GIT_CONFIG_COUNT merges credential.helper (gitBroker) and core.hooksPath
     // (commitGuard) into one env mechanism -- same rule as buildBwrapArgs'

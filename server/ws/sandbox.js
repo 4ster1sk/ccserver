@@ -1947,6 +1947,9 @@ export function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, mcpSoc
         nodeBin: realpathSync(process.execPath),
         scripts: seatbeltScripts(), ssh: seatbeltSsh(),
         ghPaths: seatbeltGhPaths(),
+        // opencode sessions resolve host auth/state via XDG (see
+        // buildSeatbeltLaunch); other apps keep the sandbox HOME.
+        app,
         // pty-host's RPC socket and the meta broker live under
         // hostRuntimeDir() (short /tmp base on darwin) -- inside the
         // sandbox's tmp write rules. The pty-host RPC can spawn with

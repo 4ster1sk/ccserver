@@ -54,6 +54,9 @@ function buildFor(cwd, tag) {
     sandboxPathBase: SANDBOX_PATH,
     nodeBin: realpathSync(process.execPath),
     scripts,
+    // opencode session shape (XDG redirect); the profile delta is app-
+    // independent, but the env block then matches the real launch.
+    app: 'opencode',
     ssh: {}, gitBroker: null, commitGuard: null,
     sockets: {}, extraBinds: [], extraEnv: {},
     authSock: null, gnupg: false, claudeDir: null,
