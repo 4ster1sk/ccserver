@@ -132,7 +132,14 @@ export function buildSeatbeltProfileText({
     ...(denyExecLiterals.length > 0
       ? [`(deny process-exec ${denyExecLiterals.map((p) => `(literal "${escapeSeatbeltLiteral(p)}")`).join(' ')})`]
       : []),
+    // Signals: self covers the agent process itself. Every descendant
+    // inherits this same profile, so same-sandbox covers the timeout /
+    // job-control kills (SIGTERM/SIGKILL to git, npm, shells...) that CLIs
+    // issue in-sandbox, without opening signals to host processes outside
+    // the tree. (Verify on macOS hardware: a missing allow here turns
+    // child-process management into EPERM.)
     '(allow signal (target self))',
+    '(allow signal (target same-sandbox))',
     '(allow sysctl-read)',
     '(allow mach-lookup)',
     '(allow network*)',
@@ -669,12 +676,28 @@ export function buildSeatbeltLaunch({
     }
 
     // Control-plane sockets may not exist yet (pty-host/meta boot lazily),
-    // so derive both spellings from the existing parent dir -- same reason
-    // exactPins() avoids pathVariants() on not-yet-existing files.
+    // and their parent runtime dir may not either. When it does exist,
+    // pathVariants(parent) yields both spellings; when it does not, keep
+    // the raw spelling and resolve via the grandparent (/tmp) so the
+    // symlink-resolved /private/tmp spelling is pinned too -- Seatbelt
+    // mediates the resolved path, and a raw-only pin would silently miss
+    // every connect().
     const netDenyLiterals = [...new Set(
-      (controlSockDenies || []).filter(Boolean).flatMap((s) =>
-        pathVariants(dirname(s)).map((d) => join(d, basename(s)))),
+      (controlSockDenies || []).filter(Boolean).flatMap((s) => {
+        const parent = dirname(s);
+        const parentVariants = existsSync(parent)
+          ? pathVariants(parent)
+          : [parent, ...pathVariants(dirname(parent)).map((d) => join(d, basename(parent)))];
+        return parentVariants.map((d) => join(d, basename(s)));
+      }),
     )];
+    // The pinned sockets' files themselves must also stay unwritable:
+    // file-write* covers unlink/rename, so without these pins the agent can
+    // delete or replace a pinned socket at its fixed path (DoS the server's
+    // control plane, or impersonate pty-host/meta for future host-side
+    // connects). Same list as the network-outbound pins -- the meta
+    // session's own socket is excluded there, so it stays fully usable here.
+    denyWriteRegexes.push(...netDenyLiterals.map((s) => `^${escapeSeatbeltRegex(s)}$`));
     const profileText = buildSeatbeltProfileText({
       readRegexes, writeRegexes, readLiterals, writeLiterals,
       siblingDenyWriteRegexes: siblingDeny, siblingDenyReadRegexes: siblingDeny,

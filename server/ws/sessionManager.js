@@ -505,8 +505,9 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
       // bridge would point at a socket that is never bound for them).
       groupMcp: !!mcpSocketPath,
       // Seatbelt sandboxes can't use the fixed in-sandbox bridge path (it is
-      // never bound there), so they take the host invocation like
-      // non-sandboxed sessions do (see seatbeltSandbox above).
+      // never bound there), so they take the host invocation. Non-sandboxed
+      // group sessions intentionally keep the fixed-path form (see
+      // groupInvocation in mcpConfig.js).
       hostBridge: seatbeltSandbox,
       notify: useNotify ? {
         mode: mcpBridgeMode,
