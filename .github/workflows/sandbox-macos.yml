@@ -39,13 +39,13 @@ jobs:
           node --check server/ws/sandbox-seatbelt.test.js
 
       - name: Run seatbelt unit tests (no exec)
-        run: node --test --test-timeout=60000 server/ws/sandbox-seatbelt.test.js
+        run: node --test --test-timeout=60000 ws/sandbox-seatbelt.test.js
         working-directory: server
         env:
           CCSERVER_PTY_HOST: 0
 
       - name: Run seatbelt exec tests (real sandbox-exec)
-        run: node --test --test-timeout=60000 server/ws/sandbox-seatbelt.exec.test.js
+        run: node --test --test-timeout=60000 ws/sandbox-seatbelt.exec.test.js
         working-directory: server
         env:
           CCSERVER_PTY_HOST: 0
@@ -55,6 +55,6 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: seatbelt-tmp
-          path: /var/folders/**/ccserver-sbexec-test-*
+          path: ${{ runner.temp }}/ccserver-sbexec-test-*
           retention-days: 7
           if-no-files-found: ignore

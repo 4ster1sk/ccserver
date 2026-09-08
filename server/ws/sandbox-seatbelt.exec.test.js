@@ -58,7 +58,11 @@ function baselineApplies() {
 }
 
 before(() => {
-  tmpRoot = mkdtempSync(join(tmpdir(), 'ccserver-sbexec-test-'));
+  // Prefer RUNNER_TEMP on GitHub Actions so the failure artifact upload can
+  // scope to ${{ runner.temp }}/ccserver-sbexec-test-* (a /var/folders/**
+  // glob walks other users' dirs and EACCES-fails the upload step).
+  const base = process.env.RUNNER_TEMP || tmpdir();
+  tmpRoot = mkdtempSync(join(base, 'ccserver-sbexec-test-'));
   prevSeatbeltTmp = process.env.CCSERVER_SANDBOX_SEATBELT_TMP;
   process.env.CCSERVER_SANDBOX_SEATBELT_TMP = join(tmpRoot, 'seatbelt');
   if (!SHOULD_SKIP && !baselineApplies()) {
