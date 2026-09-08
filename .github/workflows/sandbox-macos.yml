@@ -1,0 +1,60 @@
+name: Sandbox (macOS seatbelt)
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+  workflow_dispatch: {}
+
+concurrency:
+  group: sandbox-macos-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  seatbelt-exec:
+    name: Seatbelt exec (sandbox-exec)
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Check sandbox-exec availability
+        run: |
+          ls -l /usr/bin/sandbox-exec
+          /usr/bin/sandbox-exec -h 2>&1 | head -5 || true
+
+      - name: Syntax-check seatbelt sources
+        run: |
+          node --check server/ws/sandbox-seatbelt.js
+          node --check server/ws/sandbox-seatbelt.exec.test.js
+          node --check server/ws/sandbox-seatbelt.test.js
+
+      - name: Run seatbelt unit tests (no exec)
+        run: node --test --test-timeout=60000 server/ws/sandbox-seatbelt.test.js
+        working-directory: server
+        env:
+          CCSERVER_PTY_HOST: 0
+
+      - name: Run seatbelt exec tests (real sandbox-exec)
+        run: node --test --test-timeout=60000 server/ws/sandbox-seatbelt.exec.test.js
+        working-directory: server
+        env:
+          CCSERVER_PTY_HOST: 0
+
+      - name: Upload seatbelt temp dirs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: seatbelt-tmp
+          path: /var/folders/**/ccserver-sbexec-test-*
+          retention-days: 7
+          if-no-files-found: ignore
