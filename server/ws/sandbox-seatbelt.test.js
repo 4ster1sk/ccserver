@@ -179,6 +179,52 @@ test('buildSeatbeltLaunch honors an explicit persistent homeDir', () => {
   assert.equal(sb.env.HOME, homeDir);
 });
 
+test('opencode sessions resolve host auth/state via XDG; other apps keep the sandbox HOME', () => {
+  // opencode honors XDG base dirs, so point them at the host trees (whose
+  // profile allows already exist unconditionally): login, model memory and
+  // --continue then carry over from the host, like bwrap's appBinds.
+  const fakeHome = mkdtempSync(join(tmpdir(), 'ccserver-seatbelt-hosthome-'));
+  DIRS.push(fakeHome);
+  for (const d of ['.config/opencode', '.local/share/opencode', '.local/state/opencode']) {
+    mkdirSync(join(fakeHome, d), { recursive: true });
+  }
+  const sb = buildSeatbeltLaunch({ ...baseOpts(), hostHome: fakeHome, app: 'opencode' });
+  trackDir(sb.dir);
+  assert.equal(sb.env.XDG_CONFIG_HOME, join(fakeHome, '.config'));
+  assert.equal(sb.env.XDG_DATA_HOME, join(fakeHome, '.local', 'share'));
+  assert.equal(sb.env.XDG_STATE_HOME, join(fakeHome, '.local', 'state'));
+
+  const claude = buildSeatbeltLaunch({ ...baseOpts(), hostHome: fakeHome, app: 'claude' });
+  trackDir(claude.dir);
+  assert.equal(claude.env.XDG_CONFIG_HOME, undefined, 'non-opencode sessions must not redirect XDG');
+  assert.equal(claude.env.XDG_DATA_HOME, undefined);
+  assert.equal(claude.env.XDG_STATE_HOME, undefined);
+});
+
+test('opencode XDG redirect is per-dir gated (absent host dirs stay sandbox-local)', () => {
+  // A host that never ran opencode must not get host dirs materialized from
+  // inside the sandbox: only existing opencode dirs are redirected.
+  const fakeHome = mkdtempSync(join(tmpdir(), 'ccserver-seatbelt-hosthome-'));
+  DIRS.push(fakeHome);
+  mkdirSync(join(fakeHome, '.local', 'share', 'opencode'), { recursive: true });
+  const sb = buildSeatbeltLaunch({ ...baseOpts(), hostHome: fakeHome, app: 'opencode' });
+  trackDir(sb.dir);
+  assert.equal(sb.env.XDG_DATA_HOME, join(fakeHome, '.local', 'share'));
+  assert.equal(sb.env.XDG_CONFIG_HOME, undefined);
+  assert.equal(sb.env.XDG_STATE_HOME, undefined);
+});
+
+test('host git XDG dir stays denied (XDG redirect cannot leak host gitconfig)', () => {
+  // XDG_CONFIG_HOME now points at the host tree for opencode sessions, so
+  // lock in that sandboxed git can never read the host XDG gitconfig: the
+  // profile must not allow-list host ~/.config/git, keeping the sandbox
+  // gitconfig + broker pins authoritative.
+  const sb = buildSeatbeltLaunch(baseOpts());
+  trackDir(sb.dir);
+  const text = readFileSync(sb.profilePath, 'utf-8');
+  assert.ok(!text.includes(subtreeRegex(join(HOME, '.config', 'git'))), 'host ~/.config/git must stay denied');
+});
+
 test('buildSeatbeltLaunch wires gitBroker shims and merges GIT_CONFIG_COUNT', () => {
   const brokerDir = mkdtempSync(join(tmpdir(), 'ccserver-seatbelt-broker-'));
   DIRS.push(brokerDir);
