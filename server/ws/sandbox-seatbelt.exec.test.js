@@ -415,6 +415,49 @@ test('KERN_PROCARGS2 (other processes argv/env) is denied inside the sandbox', S
   }
 });
 
+test('toolchain sysctls stay readable inside the sandbox (allow-list not too tight)', SKIP_OPTS, (t) => {
+  if (!checkRunnable(t)) return;
+  // The sysctl-read allow-list replaced the broad `(allow sysctl-read)`; make
+  // sure the nodes node/libuv/V8/git actually read still resolve in-sandbox.
+  const src = join(tmpRoot, 'sysctl-needs-probe.c');
+  const bin = join(tmpRoot, 'sysctl-needs-probe');
+  writeFileSync(src, [
+    '#include <sys/sysctl.h>',
+    '#include <stdio.h>',
+    'int main(void){',
+    '  const char *names[] = { "hw.ncpu", "hw.logicalcpu", "hw.memsize", "hw.pagesize",',
+    '    "hw.machine", "hw.cachelinesize", "machdep.cpu.brand_string", "kern.osrelease",',
+    '    "kern.osversion", "kern.version", "kern.hostname", "kern.boottime",',
+    '    "kern.maxfilesperproc", "kern.argmax", "vm.loadavg" };',
+    '  int bad = 0;',
+    '  for (unsigned i = 0; i < sizeof(names)/sizeof(*names); i++) {',
+    '    size_t sz = 0;',
+    '    if (sysctlbyname(names[i], NULL, &sz, NULL, 0) != 0) { printf("FAIL %s\\n", names[i]); bad = 1; }',
+    '  }',
+    '  if (!bad) printf("ALL_OK\\n");',
+    '  return bad;',
+    '}',
+  ].join('\n'));
+  try {
+    execFileSync('cc', ['-O0', '-o', bin, src], { stdio: 'ignore', timeout: 30000 });
+  } catch {
+    t.skip('no working cc to build the sysctl-needs probe');
+    return;
+  }
+  const opts = baseOpts();
+  const sb = buildSeatbeltLaunch(opts);
+  trackDir(sb.dir);
+  sb.cwd = opts.cwd;
+  const res = runInSeatbelt(sb, [bin], { cwd: opts.cwd });
+  try {
+    assertAllowed(res, sb, 'toolchain sysctls');
+    assert.ok(String(res.stdout).includes('ALL_OK'), `some toolchain sysctl was denied: ${fmtResult(res)}`);
+  } catch (err) {
+    preserveProfile(sb, 'toolchain_sysctls');
+    throw err;
+  }
+});
+
 test('CFFIXED_USER_HOME redirects the macOS-API cache dir into the sandbox HOME', SKIP_OPTS, (t) => {
   if (!checkRunnable(t)) return;
   // CoreFoundation resolves ~/Library from getpwuid (not $HOME), so Xcode /

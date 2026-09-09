@@ -446,15 +446,26 @@ test('profile allows pty ioctls and nested pty allocation', () => {
   assert.ok(text.includes('(allow file-ioctl (regex #"^/dev(/.*)?$"))'));
 });
 
-test('profile denies the process argv/env sysctls after the broad sysctl allow', () => {
+test('sysctl-read is allow-listed (not broad); kern.proc* / procargs stay denied', () => {
   const text = buildSeatbeltProfileText({});
-  const allowIdx = text.indexOf('(allow sysctl-read)');
+  // No broad `(allow sysctl-read)` -- that spelling was the bug (it also
+  // matched the numeric-MIB KERN_PROCARGS2 read).
+  assert.ok(!/\(allow sysctl-read\)/.test(text), 'no unfiltered (allow sysctl-read)');
+  assert.ok(text.includes('(allow sysctl-read'), 'a filtered sysctl-read allow is present');
+  // The toolchain essentials are allowed...
+  for (const need of ['(sysctl-name-prefix "hw.")', '(sysctl-name-prefix "machdep.")',
+    '(sysctl-name-prefix "kern.os")', '"sysctl.name2oid"', '"kern.version"']) {
+    assert.ok(text.includes(need), `sysctl allow-list keeps ${need}`);
+  }
+  // ...but nothing opens kern.proc* (enumeration + procargs blobs).
+  const allowLine = text.split('\n').find((l) => l.startsWith('(allow sysctl-read '));
+  assert.ok(allowLine, 'the sysctl-read allow is a single line');
+  assert.ok(!allowLine.includes('kern.proc'), 'kern.proc* / procargs are not in the sysctl allow list');
+  assert.ok(!allowLine.includes('(sysctl-name-prefix "kern.")'), 'no bare kern. prefix (would re-open procargs)');
+  // Explicit belt-and-suspenders deny for the sysctlbyname spelling, after the allow.
+  const allowIdx = text.indexOf('(allow sysctl-read');
   const denyIdx = text.indexOf('(deny sysctl-read (sysctl-name "kern.procargs")');
-  assert.ok(allowIdx !== -1, '(allow sysctl-read) present');
-  assert.ok(denyIdx !== -1, 'kern.procargs/procargs2 deny present');
-  assert.ok(denyIdx > allowIdx, 'the deny is emitted AFTER the allow (last-match-wins)');
-  assert.ok(text.includes('kern.procargs2'), 'KERN_PROCARGS2 named');
-  // ...and before the file-read* allows, so a later rule cannot re-open it.
+  assert.ok(denyIdx > allowIdx, 'the procargs deny is emitted AFTER the allow (last-match-wins)');
   const readAllowIdx = text.indexOf('(allow file-read*');
   if (readAllowIdx !== -1) assert.ok(denyIdx < readAllowIdx, 'deny precedes the file allows');
 });

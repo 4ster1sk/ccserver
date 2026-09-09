@@ -255,17 +255,44 @@ export function buildSeatbeltProfileText({
     // child-process management into EPERM.)
     '(allow signal (target self))',
     '(allow signal (target same-sandbox))',
-    '(allow sysctl-read)',
-    // ...but NOT the process argv/environment blobs. KERN_PROCARGS2 (and the
-    // older KERN_PROCARGS) hand a same-UID reader the full command line AND
-    // environment of ANY process on the machine -- the ccserver server itself
-    // (CCSERVER_TOKEN / ANTHROPIC_API_KEY / cloud creds), other agent sessions
-    // (messaging + meta identity tokens), the git broker. bwrap gets this for
-    // free via --unshare-pid; Seatbelt needs the explicit deny (emitted AFTER
-    // the broad allow, last-match-wins). Cost: `pgrep -f` / `pkill -f`
-    // full-command-line matching stops working (name matching still does;
-    // ps(1)/top(1) are already blocked as setuid-root). Verify on macOS
-    // hardware if this line is touched -- a compile error here fails closed.
+    // sysctl-read is NOT broadly allowed. KERN_PROCARGS2 -- read via the numeric
+    // MIB {CTL_KERN, KERN_PROCARGS2, pid} -- hands a same-UID caller another
+    // process's full argv AND environment: the ccserver server (CCSERVER_TOKEN /
+    // ANTHROPIC_API_KEY / cloud creds), other agent sessions (messaging + meta
+    // identity tokens), the git broker. A filtered
+    // `(deny sysctl-read (sysctl-name "kern.procargs2"))` after a broad
+    // `(allow sysctl-read)` does NOT stop the numeric-MIB path -- Seatbelt
+    // cannot evaluate (sysctl-name ...) against it (confirmed on CI: the probe
+    // still read another process's env). So rely on `(deny default)` and
+    // allow-list only the non-sensitive nodes the toolchain reads (list
+    // adapted from macOS's own container.sb). kern.proc* is deliberately NOT
+    // allowed -> process enumeration and BOTH procargs blobs are closed,
+    // matching what bwrap gets from --unshare-pid. Cost: `pgrep` / `pkill` /
+    // `ps` and anything walking kern.proc.* cannot see other processes
+    // in-sandbox. sysctl.name2oid / sysctl.oidfmt are load-bearing --
+    // sysctlbyname(3) issues them first, so denying them breaks every named
+    // lookup. Listing a name absent on a given arch/OS is harmless (the rule
+    // just never matches). Verify on macOS hardware if this block is touched --
+    // a compile error here fails closed for every launch.
+    `(allow sysctl-read ${[
+      '(sysctl-name "sysctl.name2oid" "sysctl.proc_native")',
+      '(sysctl-name-prefix "sysctl.oidfmt")',
+      '(sysctl-name-prefix "hw.")',
+      '(sysctl-name-prefix "machdep.")',
+      '(sysctl-name-prefix "vm.")',
+      '(sysctl-name-prefix "kern.os")',
+      '(sysctl-name-prefix "kern.monotonicclock")',
+      `(sysctl-name ${[
+        'kern.argmax', 'kern.boottime', 'kern.clockrate', 'kern.hostid', 'kern.hostname',
+        'kern.hv_support', 'kern.hv_vmm_present', 'kern.maxfiles', 'kern.maxfilesperproc',
+        'kern.maxproc', 'kern.maxprocperuid', 'kern.maxvnodes', 'kern.memorystatus_level',
+        'kern.ngroups', 'kern.ncpu', 'kern.safeboot', 'kern.saved_ids', 'kern.secure_kernel',
+        'kern.smp_active', 'kern.tcsm_available', 'kern.tcsm_enable', 'kern.usrstack',
+        'kern.usrstack64', 'kern.version', 'kern.waketime',
+      ].map((n) => `"${n}"`).join(' ')})`,
+    ].join(' ')})`,
+    // Redundant under default-deny, but explicit: also refuse the procargs
+    // names for the sysctlbyname(3) spelling.
     '(deny sysctl-read (sysctl-name "kern.procargs") (sysctl-name "kern.procargs2"))',
     '(allow mach-lookup)',
     '(allow network*)',
