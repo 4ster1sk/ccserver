@@ -29,7 +29,26 @@ const TRUST_SETTLE_MS = 1500;         // let the UI replace the trust dialog bef
 
 // A cwd claude hasn't seen before shows a "trust this folder" gate that would
 // otherwise swallow the /usage command. Detected in the rendered text.
-const TRUST_RE = /trust this folder|Enter y\/n/i;
+// The sandboxed capture uses a throwaway USAGE_CWD (below), so it hits this
+// gate while an unsandboxed capture in an already-trusted $HOME does not --
+// a missed variant here surfaces as a sandbox-only "Timed out reading /usage"
+// with the process still alive. Keep the alternation conservative (dashboard
+// text must never match it and cause a stray 'y' + Enter into a live prompt).
+const TRUST_RE = /trust this (?:folder|directory|project)|do you trust|enter y\/n/i;
+
+// Exported for unit tests (pure): does the rendered screen show the trust gate?
+export function isTrustPrompt(text) {
+  return TRUST_RE.test(stripRender(text));
+}
+
+// Screen tail attached to the timeout result so the next "Timed out" report
+// carries what claude was actually showing (trust gate? login? blank?).
+// Pure: tested directly, no spawn involved.
+export const TIMEOUT_SCREEN_TAIL_LEN = 800;
+export function buildTimeoutError(buf, { sandboxed = false, sentUsage = false, trustHandled = false, resends = 0 } = {}) {
+  const screenTail = stripRender(buf).slice(-TIMEOUT_SCREEN_TAIL_LEN);
+  return { error: 'Timed out reading /usage', screenTail, sandboxed, sentUsage, trustHandled, resends };
+}
 
 // A throwaway working directory for the sandboxed capture (kept empty; only
 // exists so bwrap has a cwd to bind/chdir into without exposing a real project).
@@ -278,6 +297,7 @@ function capture() {
       clearTimeout(bootTimer);
       clearTimeout(settleTimer);
       clearTimeout(hardTimer);
+      clearTimeout(resendTimer);
       try { ptyProc.kill(); } catch { /* already gone */ }
       if (seatbeltDir) {
         try { rmSync(seatbeltDir, { recursive: true, force: true }); } catch { /* best effort */ }
@@ -285,21 +305,56 @@ function capture() {
       resolve({ ...res, sandboxed });
     };
 
-    // Type `/usage` (once). The Enter is sent slightly later so it lands as a
-    // submit after the command text is in the input box.
-    const sendUsage = () => {
-      if (sentUsage || done) return;
-      sentUsage = true;
+    // Type `/usage`, retrying while the dashboard hasn't appeared. A single
+    // send is enough on a warm start, but a cold sandboxed start (seatbelt
+    // profile compile, throwaway-HOME cache miss) can still be booting when
+    // BOOT_DELAY_MS fires, so the first command text lands nowhere. Resends
+    // are spaced 10s apart and capped: typing into an idle prompt is harmless
+    // (it just re-opens the dashboard), and the leading Ctrl-U clears a stale
+    // "/usage" left by a lost Enter so we never submit "/usage/usage".
+    // Never resends while the trust gate is showing -- that dialog expects
+    // y/n and must keep going through answerTrustThenUsage instead.
+    const RESEND_DELAY_MS = 10 * 1000;
+    const MAX_RESENDS = 2;
+    let resends = 0;
+    let resendTimer = null;
+    const sendUsage = ({ resend = false, force = false } = {}) => {
+      if (done) return;
+      if (!force) {
+        if (!resend && sentUsage) return;
+        if (resend) {
+          if (resends >= MAX_RESENDS) return;
+          if (isTrustPrompt(buf)) return; // trust gate up: leave it to its own flow
+          if (parseUsage(buf).limits.length) return; // dashboard already here
+          resends += 1;
+        } else {
+          sentUsage = true;
+        }
+      }
       try {
+        if (resend && !force) ptyProc.write('\x15'); // Ctrl-U: clear a possibly stale input line
         ptyProc.write('/usage');
         setTimeout(() => { try { ptyProc.write('\r'); } catch { /* dead */ } }, 500);
       } catch {
-        finish({ error: 'claude exited before /usage could be sent' });
+        if (!resend && !force) finish({ error: 'claude exited before /usage could be sent' });
+      }
+      if (!resend && !force) {
+        const schedule = () => {
+          if (done) return;
+          clearTimeout(resendTimer);
+          resendTimer = setTimeout(() => {
+            sendUsage({ resend: true });
+            schedule();
+          }, RESEND_DELAY_MS);
+        };
+        schedule();
       }
     };
 
     // Clear the trust gate, then ask for usage once the dialog is gone. The
     // sandbox exposes only an empty throwaway cwd, so trusting it is harmless.
+    // Runs even if a /usage was already sent (a late-appearing gate would have
+    // eaten it): the post-trust send is forced, bypassing the once-only guard.
     const answerTrustThenUsage = () => {
       if (trustHandled || done) return;
       trustHandled = true;
@@ -307,20 +362,22 @@ function capture() {
         ptyProc.write('y');
         setTimeout(() => { try { ptyProc.write('\r'); } catch { /* dead */ } }, 200);
       } catch { /* dead */ }
-      setTimeout(sendUsage, TRUST_SETTLE_MS);
+      setTimeout(() => sendUsage({ force: true }), TRUST_SETTLE_MS);
     };
 
     bootTimer = setTimeout(() => {
-      if (TRUST_RE.test(stripRender(buf))) answerTrustThenUsage();
+      if (isTrustPrompt(buf)) answerTrustThenUsage();
       else sendUsage();
     }, BOOT_DELAY_MS);
 
     ptyProc.onData((d) => {
       buf += d;
       if (buf.length > 512 * 1024) buf = buf.slice(-256 * 1024);
-      // The trust gate can appear before the boot delay; clear it as soon as
-      // it shows so it never eats the /usage command.
-      if (!sentUsage && !trustHandled && TRUST_RE.test(stripRender(buf))) {
+      // The trust gate can appear before the boot delay -- or after an
+      // already-sent /usage (slow render); clear it whenever it shows so it
+      // never eats the command for good. The forced post-trust send recovers
+      // the eaten command in the late case.
+      if (!trustHandled && isTrustPrompt(buf)) {
         answerTrustThenUsage();
         return;
       }
@@ -335,7 +392,15 @@ function capture() {
 
     hardTimer = setTimeout(() => {
       const parsed = parseUsage(buf);
-      finish(parsed.limits.length ? { usage: parsed } : { error: 'Timed out reading /usage' });
+      if (parsed.limits.length) {
+        finish({ usage: parsed });
+        return;
+      }
+      const diag = buildTimeoutError(buf, { sandboxed, sentUsage, trustHandled, resends });
+      console.warn(
+        `[usage] capture timed out (sandboxed=${sandboxed} sentUsage=${sentUsage} trustHandled=${trustHandled} resends=${resends} bufLen=${buf.length}) screenTail=${JSON.stringify(diag.screenTail.slice(-400))}`,
+      );
+      finish(diag);
     }, CAPTURE_TIMEOUT_MS);
   });
 }
@@ -386,7 +451,15 @@ export async function getUsage({ force = false } = {}) {
   if (cache) {
     return { usage: cache.usage, updatedAt: cache.updatedAt, cached: true, error: res.error };
   }
-  return { usage: null, error: res.error || 'Could not read usage', sandboxed: res.sandboxed };
+  const out = { usage: null, error: res.error || 'Could not read usage', sandboxed: res.sandboxed };
+  // Timeout diagnostics (screenTail/sentUsage/trustHandled from
+  // buildTimeoutError): the client ignores unknown fields, but they let the
+  // next report pin trust-gate vs login vs blank without a live repro.
+  if (res.screenTail !== undefined) out.screenTail = res.screenTail;
+  if (res.sentUsage !== undefined) out.sentUsage = res.sentUsage;
+  if (res.trustHandled !== undefined) out.trustHandled = res.trustHandled;
+  if (res.resends !== undefined) out.resends = res.resends;
+  return out;
 }
 
 // Best-effort cache warm at server startup so the first click is instant.

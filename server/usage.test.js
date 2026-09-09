@@ -11,7 +11,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { getUsage, parseUsage } from './usage.js';
+import { getUsage, parseUsage, isTrustPrompt, buildTimeoutError } from './usage.js';
 
 // Self-review (issue #105): sandbox.config.json's hiddenApps must not be a
 // purely cosmetic picker-hiding feature. GET /api/usage (and the warmUsage()
@@ -214,4 +214,23 @@ test('parseUsage: a block whose header has not rendered yet (only "Refreshing…
 
   const parsed = parseUsage(raw);
   assert.equal(parsed.limits.length, 0, 'no block should render with "Refreshing…" (or similar) as its label');
+});
+
+test('isTrustPrompt: catches trust-gate variants (sandbox-only path)', () => {
+  assert.equal(isTrustPrompt('Do you trust this folder?'), true);
+  assert.equal(isTrustPrompt('Do you trust this directory?'), true);
+  assert.equal(isTrustPrompt('Trust this project? Enter y/n'), true);
+  assert.equal(isTrustPrompt('trust this folder'), true);
+  assert.equal(isTrustPrompt('Current session\n87% 87% used'), false, 'dashboard text must never match');
+  assert.equal(isTrustPrompt('Total cost: $0.0123'), false);
+});
+
+test('buildTimeoutError: keeps the stable prefix and carries the screen tail', () => {
+  const res = buildTimeoutError('login screen…\x1b[31mred', { sandboxed: true, sentUsage: true, trustHandled: false });
+  assert.equal(res.error, 'Timed out reading /usage');
+  assert.equal(res.sandboxed, true);
+  assert.equal(res.sentUsage, true);
+  assert.equal(res.trustHandled, false);
+  assert.ok(res.screenTail.includes('login screen'), 'stripped tail must survive ANSI cleanup');
+  assert.ok(!res.screenTail.includes('\x1b'), 'ANSI escapes must be stripped');
 });

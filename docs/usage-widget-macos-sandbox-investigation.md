@@ -87,3 +87,16 @@ client/.../useUsage.js
 - `server/ws/sandbox-minimal-seatbelt.test.js`（新規、Linux 可）: `app` 伝搬、`claude` のみ seed／他 app は seed なし、seed throw 時の non-fatal、実 `buildSeatbeltLaunch` との結合（argv 形状）を asserts。4 件 pass
 - 非回帰: `sandbox-seatbelt.test.js` 56 pass、`usage.test.js` 12 pass、`sandbox-resolve.test.js` 6 pass を確認。`sandbox-provision/commit-guard/persistent-home` の失敗は本環境（seatbelt 内 sandbox での `EPERM mkdir .../ccserver-seatbelt-*`）による既存失敗で、stash 前後で件数一致（provision 10 fail、commit-guard 4 fail、persistent-home 9 fail）のため本変更の回帰ではない
 - 実機持ち越し: `sandbox-seatbelt.exec.test.js` は本環境では skip が正常。macOS CI の `failures/*.sb` artifact と `GET /api/usage?force=1`（`sandboxed:true`）の確認は未実施
+
+## 続報（2026-09-10 2時台、H1修正後も `Timed out` 継続）
+
+- H1（Keychain シード漏れ）は原因ではなかった：ホスト `~/.claude/.credentials.json` は存在し、有効期限内（2026-09-10 08:50 JST まで）のトークンを含む。ファイル存在時は seed が no-op のため、前回修正はこの環境では無害だが無効だった
+- バイナリ・フラグも正常：ホスト claude は `~/.local/bin/claude → .../2.1.266`（SANDBOX_PATH 上のため `installDir: null` は正しい）、`--ax-screen-reader` は 2.1.266 に存在
+- 残る有力仮説に切り替え：
+  - T1（trust ゲート取りこぼし）：sandbox capture は throwaway `USAGE_CWD` を使うため unsandboxed（＝既 trusted `$HOME`）と違い毎回 trust 対話があり得る。`TRUST_RE` が新文言に未対応だと `/usage` が飲まれ、プロセス生存のまま 30s タイムアウトする（症状と一致）
+  - T2（コールドスタート遅延）：seatbelt プロファイル生成＋throwaway HOME キャッシュミスで 3s の `BOOT_DELAY` に間に合わず、単発送信が消失。従来は再送なしのため残り 27s 何もせずタイムアウトする
+- 対策（`server/usage.js`）：
+  - `isTrustPrompt()` に切って文言バリエーション（directory/project、do you trust）を追加。trust 検出時は送信済みでも `y` 応答＋強制再送する（遅延出現ゲートとのデッドロック解消）
+  - `/usage` 再送（10s 間隔・最大2回、先頭 Ctrl-U クリア、trust 表示中は再送抑制）
+  - タイムアウト結果に `screenTail`（ANSI 除去後末尾 800 字）＋ `sentUsage/trustHandled/resends` を付与。`getUsage()` 経由で API 応答にも載る（クライアントは未知フィールド無視）。サーバーログにも `screenTail` 末尾 400 字を warn 出力。`error` 先頭の `Timed out reading /usage` は維持
+- 次の切り分けは実データ待ち：`curl '/api/usage?force=1'` の応答の `screenTail`（またはサーバーログの warn 行）で trust／login／白紙のいずれかを見る
