@@ -415,6 +415,49 @@ test('KERN_PROCARGS2 (other processes argv/env) is denied inside the sandbox', S
   }
 });
 
+test('CFFIXED_USER_HOME redirects the macOS-API cache dir into the sandbox HOME', SKIP_OPTS, (t) => {
+  if (!checkRunnable(t)) return;
+  // CoreFoundation resolves ~/Library from getpwuid (not $HOME), so Xcode /
+  // SwiftPM / `defaults` etc. would hit the REAL ~/Library/Caches. Compile a
+  // tiny Foundation probe, run it inside the profile, and assert the cache dir
+  // now resolves under the sandbox HOME -- and that the host cache is denied.
+  const probeSrc = join(tmpRoot, 'cffixed-probe.m');
+  const probeBin = join(tmpRoot, 'cffixed-probe');
+  writeFileSync(probeSrc, [
+    '#import <Foundation/Foundation.h>',
+    'int main(void){ @autoreleasepool {',
+    '  NSArray *c = NSSearchPathForDirectoriesInDomains(NSCachesDirectory, NSUserDomainMask, YES);',
+    '  printf("HOME=%s\\n", NSHomeDirectory().UTF8String);',
+    '  printf("CACHES=%s\\n", [c.firstObject UTF8String]);',
+    '  return 0;',
+    '} }',
+  ].join('\n'));
+  try {
+    execFileSync('cc', ['-x', 'objective-c', '-O0', '-framework', 'Foundation', '-o', probeBin, probeSrc],
+      { stdio: 'ignore', timeout: 30000 });
+  } catch {
+    t.skip('no working cc / Foundation to build the CFFIXED_USER_HOME probe');
+    return;
+  }
+  const opts = baseOpts();
+  const sb = buildSeatbeltLaunch(opts);
+  trackDir(sb.dir);
+  sb.cwd = opts.cwd;
+
+  const res = runInSeatbelt(sb, [probeBin], { cwd: opts.cwd });
+  assertAllowed(res, sb, 'CFFIXED probe');
+  const out = String(res.stdout);
+  assert.ok(out.includes(`HOME=${sb.homeDir}`), `NSHomeDirectory should be the sandbox HOME, got ${fmtResult(res)}`);
+  assert.ok(out.includes(`CACHES=${join(sb.homeDir, 'Library', 'Caches')}`),
+    `caches dir should resolve under the sandbox HOME, got ${fmtResult(res)}`);
+  assert.ok(!out.includes(`HOME=${HOME}\n`), 'must not resolve the real host HOME');
+
+  // The host cache stays unreachable (no allow-list entry).
+  const hostCacheProbe = join(HOME, 'Library', 'Caches', 'ccserver-sbexec-should-not-exist');
+  const wres = runInSeatbelt(sb, ['/bin/sh', '-c', 'echo x > "$1"', 'sh', hostCacheProbe], { cwd: opts.cwd });
+  assertDenied(wres, sb, `write ${hostCacheProbe}`);
+});
+
 test('sibling launch dirs denied, own runtime dir allowed', SKIP_OPTS, (t) => {
   if (!checkRunnable(t)) return;
   const opts = baseOpts();

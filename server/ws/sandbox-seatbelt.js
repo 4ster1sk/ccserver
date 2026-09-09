@@ -514,6 +514,16 @@ export function buildSeatbeltLaunch({
     const hostLocalBin = join(hostHome, '.local', 'bin');
     const env = {
       HOME: effectiveHome,
+      // CoreFoundation resolves the home dir (NSHomeDirectory, and hence
+      // NSCachesDirectory / Application Support / Preferences / ~/Library) from
+      // getpwuid, NOT $HOME -- so Objective-C/Swift tools (Xcode toolchain,
+      // xcrun, CocoaPods, SwiftPM, `defaults`) would otherwise read+write the
+      // REAL ~/Library/Caches, forcing it onto the allow-list and sharing it
+      // with the host. CFFIXED_USER_HOME overrides that resolution (the same
+      // hook the iOS simulator / sandboxed-app containers use), so those tools
+      // land under the sandbox HOME like everything $HOME-based already does.
+      // Completes the HOME remap; no host ~/Library/* stays reachable for it.
+      CFFIXED_USER_HOME: effectiveHome,
       // bwrap sets XDG_RUNTIME_DIR via --setenv (hostRuntimeDir()). Without an
       // override the shared entrypoint defaults it to /run/user/<uid>, which
       // does not exist on macOS and is not writable under this profile. A
@@ -680,7 +690,6 @@ export function buildSeatbeltLaunch({
       join(hostHome, '.codex'),
       join(hostHome, '.commandcode'),
     ];
-    const cachesDir = join(hostHome, 'Library', 'Caches');
     // Ancestor metadata (lstat) for userspace realpath: node/vite/npm/git and
     // the agent CLIs resolve paths component-by-component, and subtree rules
     // don't cover the ancestors themselves. Exact-match only -- siblings stay
@@ -693,7 +702,11 @@ export function buildSeatbeltLaunch({
     readRegexes.push(...ancestorExactRegexes([
       projectDir, effectiveHome, dir, ...tmpDirs, nodeBin, hostHome, ...appConfigDirs,
     ]));
-    readRegexes.push(...subtrees(cachesDir), ...appConfigDirs.flatMap(subtrees));
+    // NOTE: host ~/Library/Caches is deliberately NOT allow-listed -- CFFIXED_USER_HOME
+    // (see env) redirects the macOS-API cache/Library resolution into the sandbox
+    // HOME, so nothing needs the host copy. (Xcode/SwiftPM-heavy workflows that
+    // want the host DerivedData/package cache can add a targeted operator bind.)
+    readRegexes.push(...appConfigDirs.flatMap(subtrees));
     // gpg opt-in (bwrap binds ~/.gnupg): with no mounts, allow the real
     // keyring and point gpg at it ($HOME here is the sandbox home).
     const gnupgHome = gnupg ? join(hostHome, '.gnupg') : null;
@@ -708,8 +721,9 @@ export function buildSeatbeltLaunch({
       // git/gh/commit invocation.
       ...subtrees(join(dir, 'runtime')),
       '^/tmp(/.*)?$', '^/private/tmp(/.*)?$',
-      // macOS-API writers (NSSearchPath ignores $HOME): caches stay usable.
-      ...subtrees(cachesDir),
+      // host ~/Library/Caches intentionally absent: CFFIXED_USER_HOME points the
+      // macOS-API cache dir at <sandbox HOME>/Library/Caches, already writable
+      // via subtrees(effectiveHome).
       ...appConfigDirs.flatMap(subtrees),
     ];
     for (const t of tmpDirs) {

@@ -155,7 +155,7 @@ test('buildSeatbeltLaunch creates profile+bin+hooks and a throwaway HOME', () =>
   assert.ok(text.includes(subtreeRegex(join(HOME, '.codex'))));
 });
 
-test('agent config dirs and Caches are readable as well as writable (file-write* does not imply file-read*)', () => {
+test('agent config dirs are readable as well as writable (file-write* does not imply file-read*)', () => {
   // Seatbelt file-write* does not imply file-read*: a write-only entry would
   // leave CLIs unable to read back the auth/state they just wrote.
   const sb = buildSeatbeltLaunch(baseOpts());
@@ -166,10 +166,22 @@ test('agent config dirs and Caches are readable as well as writable (file-write*
   for (const p of [
     join(HOME, '.claude'), join(HOME, '.config', 'opencode'),
     join(HOME, '.local', 'state', 'opencode'), join(HOME, '.codex'),
-    join(HOME, '.commandcode'), join(HOME, 'Library', 'Caches'),
+    join(HOME, '.commandcode'),
   ]) {
     assert.ok(readLine.includes(subtreeRegex(p)), `${p} is readable`);
   }
+});
+
+test('host ~/Library/Caches is NOT shared; CFFIXED_USER_HOME redirects the macOS-API cache dir', () => {
+  // CoreFoundation resolves ~/Library from getpwuid, not $HOME, so without
+  // CFFIXED_USER_HOME the host cache would have to be allow-listed and shared.
+  const sb = buildSeatbeltLaunch(baseOpts());
+  trackDir(sb.dir);
+  assert.equal(sb.env.CFFIXED_USER_HOME, sb.homeDir, 'CFFIXED_USER_HOME points at the sandbox HOME');
+  const text = readFileSync(sb.profilePath, 'utf-8');
+  assert.ok(!text.includes(subtreeRegex(join(HOME, 'Library', 'Caches'))), 'host ~/Library/Caches must not be allow-listed');
+  // the macOS-API cache dir now resolves under the (writable) sandbox HOME
+  assert.ok(text.includes(subtreeRegex(sb.homeDir)), 'sandbox HOME is writable, so <HOME>/Library/Caches is too');
 });
 
 test('buildSeatbeltLaunch honors an explicit persistent homeDir', () => {
