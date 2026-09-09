@@ -1884,6 +1884,10 @@ export function buildMinimalSandboxSpawn({ cwd, targetCommand, app = 'claude' })
 //                 bookkeeping row ('user' | 'meta-agent:<sessionId>' | ...).
 //                 Display only; never an authorization input.
 export function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, mcpSocketPath = null, notifySocketPath = null, usageSocketPath = null, metaSocketPath = null, reviewerSocketPath = null, reuseSandboxHome = true, orchestratorClaudeMdSrc = null, gitCommonDir = null, groupFilesDir = null, sandboxHomeCreatedBy = null }) {
+  // Normalize the app id up front: a nullish `app` resolves to 'claude' in
+  // resolveApp(), so every later `app === 'claude'` / `app === 'opencode'`
+  // check (and the Keychain seed gate) must see the same value.
+  app = app || 'claude';
   // Defense in depth behind sessionManager's cwd='/' refusal: a sandbox
   // with the filesystem root as projectDir is fail-open -- seatbelt's
   // subtrees('/') becomes "^/(/.*)?$" and bwrap would bind "/" itself, both

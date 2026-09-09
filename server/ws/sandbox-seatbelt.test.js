@@ -532,26 +532,40 @@ test('seedClaudeCredentialsFromHostKeychain is a no-op when auth env overrides a
   }
 });
 
-test('seedClaudeCredentialsFromHostKeychain does not throw when the Keychain has no item', { skip: process.platform !== 'darwin' && 'darwin only' }, () => {
-  // A host that has never logged into Claude Code: `security` exits non-zero /
-  // finds nothing. The helper must swallow that and return false so the caller
-  // falls through to an in-sandbox login.
+test('seedClaudeCredentialsFromHostKeychain swallows a failing Keychain probe', () => {
+  // A host that never logged into Claude Code: `security` throws / finds
+  // nothing. The helper must return false (-> in-sandbox login) and create no
+  // file. runSecurity is injected so no real `security` runs (never touches
+  // the runner's real Keychain, and works on Linux CI).
   const fakeHome = mkdtempSync(join(tmpdir(), 'ccserver-sbtest-seednohit-'));
   DIRS.push(fakeHome);
-  const prevDir = process.env.CLAUDE_SECURESTORAGE_CONFIG_DIR;
-  // Point Claude's own resolver away too, just in case something reads it.
-  delete process.env.CLAUDE_SECURESTORAGE_CONFIG_DIR;
-  try {
-    // We cannot guarantee the runner has NO "Claude Code-credentials" item, so
-    // only assert it does not throw and does not create a malformed file.
-    const wrote = seedClaudeCredentialsFromHostKeychain(fakeHome);
-    assert.equal(typeof wrote, 'boolean');
-    if (wrote) {
-      const parsed = JSON.parse(readFileSync(join(fakeHome, '.claude', '.credentials.json'), 'utf-8'));
-      assert.ok(parsed.claudeAiOauth?.accessToken, 'seeded file is well-formed');
-    }
-  } finally {
-    if (prevDir !== undefined) process.env.CLAUDE_SECURESTORAGE_CONFIG_DIR = prevDir;
+  const wrote = seedClaudeCredentialsFromHostKeychain(fakeHome, {
+    runSecurity: () => { throw new Error('errSecItemNotFound'); },
+  });
+  assert.equal(wrote, false);
+  assert.ok(!existsSync(join(fakeHome, '.claude', '.credentials.json')));
+});
+
+test('seedClaudeCredentialsFromHostKeychain writes a 0600 file when the probe returns a credential', () => {
+  const fakeHome = mkdtempSync(join(tmpdir(), 'ccserver-sbtest-seedhit-'));
+  DIRS.push(fakeHome);
+  const payload = { claudeAiOauth: { accessToken: 'sk-ant-oat01-x', refreshToken: 'r', expiresAt: 1 } };
+  const wrote = seedClaudeCredentialsFromHostKeychain(fakeHome, {
+    runSecurity: () => `${JSON.stringify(payload)}\n`,
+  });
+  assert.equal(wrote, true);
+  const credsPath = join(fakeHome, '.claude', '.credentials.json');
+  assert.deepEqual(JSON.parse(readFileSync(credsPath, 'utf-8')), payload);
+  assert.equal(statSync(credsPath).mode & 0o777, 0o600, 'credentials file is chmod 600');
+});
+
+test('seedClaudeCredentialsFromHostKeychain rejects a non-JSON / shapeless probe result', () => {
+  for (const bad of ['not json', '{}', '{"claudeAiOauth":{}}', '']) {
+    const fakeHome = mkdtempSync(join(tmpdir(), 'ccserver-sbtest-seedbad-'));
+    DIRS.push(fakeHome);
+    const wrote = seedClaudeCredentialsFromHostKeychain(fakeHome, { runSecurity: () => bad });
+    assert.equal(wrote, false, `rejected: ${JSON.stringify(bad)}`);
+    assert.ok(!existsSync(join(fakeHome, '.claude', '.credentials.json')));
   }
 });
 

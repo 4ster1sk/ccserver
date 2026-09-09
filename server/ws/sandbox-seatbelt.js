@@ -53,8 +53,36 @@ export function seatbeltBaseDir() {
 //
 // Idempotent: never overwrites an existing .credentials.json (Claude manages
 // token refresh in that file itself once it exists).
-export function seedClaudeCredentialsFromHostKeychain(hostHome) {
-  if (process.platform !== 'darwin') return false;
+//
+// The `security` shell-out is SYNCHRONOUS (execFileSync) on the launch path --
+// the pty-host shard for full sessions, the main server process for /usage
+// captures -- so a `security` that blocks on a GUI prompt would freeze that
+// event loop. Two guards: a 2s timeout (matches Claude Code's own keychain
+// timeout) and a once-per-process probe (`defaultKeychainProbed`) so a launch
+// storm can't re-stall. Tests inject `deps.runSecurity` to bypass both.
+
+// Claude Code's own keychain account (its HT()): $USER, sanitized to
+// "claude-code-user" if it has characters outside [A-Za-z0-9._-].
+function keychainAccount() {
+  let n;
+  try { n = process.env.USER || userInfo().username; } catch { n = process.env.USER || ''; }
+  if (!n) return '';
+  return /^[a-zA-Z0-9._-]+$/.test(n) ? n : 'claude-code-user';
+}
+
+function probeHostKeychain() {
+  const account = keychainAccount();
+  const args = ['find-generic-password', '-w', '-s', 'Claude Code-credentials'];
+  if (account) args.push('-a', account);
+  return execFileSync('security', args, {
+    encoding: 'utf-8', timeout: 2000, stdio: ['ignore', 'pipe', 'ignore'],
+  }).trim();
+}
+
+let defaultKeychainProbed = false;
+
+export function seedClaudeCredentialsFromHostKeychain(hostHome, { runSecurity = null } = {}) {
+  if (process.platform !== 'darwin' && !runSecurity) return false;
   // These env overrides make Claude ignore the stored credential entirely.
   if (process.env.ANTHROPIC_API_KEY || process.env.CLAUDE_CODE_OAUTH_TOKEN) return false;
   const claudeDir = join(hostHome, '.claude');
@@ -62,22 +90,17 @@ export function seedClaudeCredentialsFromHostKeychain(hostHome) {
   if (existsSync(credsPath)) return false;
   let raw;
   try {
-    // Match Claude Code's own keychain account (its HT()): $USER, sanitized to
-    // "claude-code-user" if it has characters outside [A-Za-z0-9._-].
-    const account = (() => {
-      let n;
-      try { n = process.env.USER || userInfo().username; } catch { n = process.env.USER || ''; }
-      if (!n) return '';
-      return /^[a-zA-Z0-9._-]+$/.test(n) ? n : 'claude-code-user';
-    })();
-    const args = ['find-generic-password', '-w', '-s', 'Claude Code-credentials'];
-    if (account) args.push('-a', account);
-    raw = execFileSync('security', args, {
-      encoding: 'utf-8', timeout: 5000, stdio: ['ignore', 'pipe', 'ignore'],
-    }).trim();
+    if (runSecurity) {
+      raw = String(runSecurity() ?? '').trim();
+    } else {
+      // One real `security` probe per process: a miss here (no item, ACL
+      // denied, non-interactive, `security` missing, or the 2s timeout) just
+      // means an in-sandbox login, and re-probing every launch would re-stall.
+      if (defaultKeychainProbed) return false;
+      defaultKeychainProbed = true;
+      raw = probeHostKeychain();
+    }
   } catch {
-    // no item, ACL denied, non-interactive, or `security` missing -- fall back
-    // to an in-sandbox login.
     return false;
   }
   if (!raw) return false;
