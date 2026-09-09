@@ -29,7 +29,7 @@ import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { startGitBroker, hostRuntimeDir, ensureHostRuntimeDir, PTY_HOST_SOCK_NAME, META_SOCKET_DIR_NAME } from './git-broker.js';
 import { buildGuardConfig } from './commitGuard.js';
-import { buildSeatbeltLaunch, seatbeltEnvArgs } from './sandbox-seatbelt.js';
+import { buildSeatbeltLaunch, seatbeltEnvArgs, seedClaudeCredentialsFromHostKeychain } from './sandbox-seatbelt.js';
 import { recordSandboxHome as recordSandboxHomeDb, listSandboxRowsBySlug, forgetSandboxHome } from './projects.js';
 import { APPS } from './appLaunch.js';
 
@@ -1664,6 +1664,18 @@ function buildBwrapArgs({ cwd, docker, gpg, extraBinds, extraEnv, authSock, stat
   return args;
 }
 
+// Seatbelt remaps $HOME to the sandbox home, so buildSeatbeltLaunch points
+// claude/codex at CLAUDE_CONFIG_DIR / CODEX_HOME = <host ~>/.claude|.codex
+// unconditionally. Create those on the host first (like buildBwrapArgs mkdir's
+// the copilot/codex/commandcode dirs) so the first launch on a host that never
+// ran the CLI outside ccserver still gets a persistent config/credentials dir
+// instead of writing into the throwaway sandbox HOME.
+function ensureHostAgentConfigDirs() {
+  for (const d of [join(HOME, '.claude'), join(HOME, '.codex')]) {
+    try { mkdirSync(d, { recursive: true }); } catch { /* best effort */ }
+  }
+}
+
 // Shared seatbelt wiring (macOS): the host files this backend executes or
 // reads inside the sandbox. bwrap ro-binds these individually; with no
 // mounts they are allow-listed as exact literals instead of the whole
@@ -1746,6 +1758,7 @@ export function buildMinimalSandboxSpawn({ cwd, targetCommand, app = 'claude' })
     // Volta/mise shims, custom npm prefixes) are exec-denied, and the usage
     // callers silently fall back to an unsandboxed direct launch.
     const { command, installDir } = resolveApp(app);
+    ensureHostAgentConfigDirs();
     const sb = buildSeatbeltLaunch({
       cwd, hostHome: HOME, homeDir: null, sandboxPathBase: SANDBOX_PATH,
       nodeBin: realpathSync(process.execPath),
@@ -1959,6 +1972,15 @@ export function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, mcpSoc
     if (sbTools.codeReviewGraph) {
       console.warn('[sandbox] code-review-graph provisioning is disabled on macOS (sandbox-exec has no mounts, so /ccserver-sandbox-provision.sh is never present); launching without it.');
       sbTools = { ...sbTools, codeReviewGraph: false, crgSpec: null };
+    }
+    ensureHostAgentConfigDirs();
+    // macOS Claude Code keeps its OAuth login in the Keychain, which is
+    // unreachable under the Seatbelt profile; buildSeatbeltLaunch points it at
+    // the plaintext ~/.claude/.credentials.json fallback instead. Seed that
+    // file from the host Keychain once so an existing host login carries over
+    // without a fresh in-sandbox login (no-op if the file already exists).
+    if (app === 'claude') {
+      try { seedClaudeCredentialsFromHostKeychain(HOME); } catch { /* non-fatal: in-sandbox login still works */ }
     }
     let sb;
     try {

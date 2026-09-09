@@ -22,6 +22,7 @@ import {
   escapeSeatbeltRegex,
   pathVariants,
   seatbeltEnvArgs,
+  seedClaudeCredentialsFromHostKeychain,
   subtreeRegex,
   subtrees,
 } from './sandbox-seatbelt.js';
@@ -478,7 +479,80 @@ test('agent CLIs resolve the real config via env (HOME is remapped)', () => {
   const sb = buildSeatbeltLaunch(baseOpts({ hostHome: fakeHome }));
   trackDir(sb.dir);
   assert.equal(sb.env.CLAUDE_CONFIG_DIR, join(fakeHome, '.claude'));
+  assert.equal(sb.env.CLAUDE_SECURESTORAGE_CONFIG_DIR, join(fakeHome, '.claude'));
   assert.equal(sb.env.CODEX_HOME, join(fakeHome, '.codex'));
+});
+
+test('CLAUDE_CONFIG_DIR / CODEX_HOME are set even when the host dirs are absent', () => {
+  // The macOS Keychain is unreachable in the sandbox, so Claude relies on the
+  // plaintext ~/.claude/.credentials.json fallback; gating these on existsSync
+  // meant a host that never ran the CLI outside ccserver got no override, the
+  // credentials landed in the throwaway sandbox HOME, and every launch demanded
+  // a fresh login. buildSandboxSpawn mkdir's the host dirs; buildSeatbeltLaunch
+  // must point the env at them regardless.
+  const fakeHome = mkdtempSync(join(tmpdir(), 'ccserver-sbtest-emptyhome-'));
+  DIRS.push(fakeHome);
+  const sb = buildSeatbeltLaunch(baseOpts({ hostHome: fakeHome }));
+  trackDir(sb.dir);
+  assert.equal(sb.env.CLAUDE_CONFIG_DIR, join(fakeHome, '.claude'));
+  assert.equal(sb.env.CLAUDE_SECURESTORAGE_CONFIG_DIR, join(fakeHome, '.claude'));
+  assert.equal(sb.env.CODEX_HOME, join(fakeHome, '.codex'));
+  // ...and buildSeatbeltLaunch must not have created them on the host itself
+  // (it only ever writes under its own runtime dir).
+  assert.ok(!existsSync(join(fakeHome, '.claude')), 'buildSeatbeltLaunch does not touch the host home');
+  assert.ok(!existsSync(join(fakeHome, '.codex')), 'buildSeatbeltLaunch does not touch the host home');
+  // The fallback trees stay allow-listed read+write even when absent.
+  const text = readFileSync(sb.profilePath, 'utf-8');
+  assert.ok(text.includes(subtreeRegex(join(fakeHome, '.claude'))));
+  assert.ok(text.includes(subtreeRegex(join(fakeHome, '.codex'))));
+});
+
+test('seedClaudeCredentialsFromHostKeychain never overwrites an existing credentials file', () => {
+  const fakeHome = mkdtempSync(join(tmpdir(), 'ccserver-sbtest-seedhome-'));
+  DIRS.push(fakeHome);
+  mkdirSync(join(fakeHome, '.claude'));
+  const credsPath = join(fakeHome, '.claude', '.credentials.json');
+  writeFileSync(credsPath, '{"claudeAiOauth":{"accessToken":"keep-me"}}\n');
+  const wrote = seedClaudeCredentialsFromHostKeychain(fakeHome);
+  assert.equal(wrote, false, 'no-op when the file already exists');
+  assert.equal(readFileSync(credsPath, 'utf-8'), '{"claudeAiOauth":{"accessToken":"keep-me"}}\n');
+});
+
+test('seedClaudeCredentialsFromHostKeychain is a no-op when auth env overrides are set', () => {
+  const fakeHome = mkdtempSync(join(tmpdir(), 'ccserver-sbtest-seedenv-'));
+  DIRS.push(fakeHome);
+  const prev = process.env.ANTHROPIC_API_KEY;
+  process.env.ANTHROPIC_API_KEY = 'sk-ant-test';
+  try {
+    assert.equal(seedClaudeCredentialsFromHostKeychain(fakeHome), false);
+    assert.ok(!existsSync(join(fakeHome, '.claude', '.credentials.json')));
+  } finally {
+    if (prev === undefined) delete process.env.ANTHROPIC_API_KEY;
+    else process.env.ANTHROPIC_API_KEY = prev;
+  }
+});
+
+test('seedClaudeCredentialsFromHostKeychain does not throw when the Keychain has no item', { skip: process.platform !== 'darwin' && 'darwin only' }, () => {
+  // A host that has never logged into Claude Code: `security` exits non-zero /
+  // finds nothing. The helper must swallow that and return false so the caller
+  // falls through to an in-sandbox login.
+  const fakeHome = mkdtempSync(join(tmpdir(), 'ccserver-sbtest-seednohit-'));
+  DIRS.push(fakeHome);
+  const prevDir = process.env.CLAUDE_SECURESTORAGE_CONFIG_DIR;
+  // Point Claude's own resolver away too, just in case something reads it.
+  delete process.env.CLAUDE_SECURESTORAGE_CONFIG_DIR;
+  try {
+    // We cannot guarantee the runner has NO "Claude Code-credentials" item, so
+    // only assert it does not throw and does not create a malformed file.
+    const wrote = seedClaudeCredentialsFromHostKeychain(fakeHome);
+    assert.equal(typeof wrote, 'boolean');
+    if (wrote) {
+      const parsed = JSON.parse(readFileSync(join(fakeHome, '.claude', '.credentials.json'), 'utf-8'));
+      assert.ok(parsed.claudeAiOauth?.accessToken, 'seeded file is well-formed');
+    }
+  } finally {
+    if (prevDir !== undefined) process.env.CLAUDE_SECURESTORAGE_CONFIG_DIR = prevDir;
+  }
 });
 
 test('host node binary dir stays readable (nvm-style installs)', () => {

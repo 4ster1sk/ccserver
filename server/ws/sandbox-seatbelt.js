@@ -23,15 +23,76 @@
 // plus a `hooks/` directory for core.hooksPath.
 
 import { copyFileSync, existsSync, mkdirSync, realpathSync, renameSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { tmpdir, userInfo } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { execFileSync } from 'node:child_process';
 
 // Base dir for per-launch seatbelt runtime dirs. os.tmpdir() honors $TMPDIR,
 // which on macOS is the per-user /var/folders/... path. Overridable via
 // CCSERVER_SANDBOX_SEATBELT_TMP for tests.
 export function seatbeltBaseDir() {
   return process.env.CCSERVER_SANDBOX_SEATBELT_TMP || tmpdir();
+}
+
+// Carry the host's Claude Code login into the sandbox on darwin.
+//
+// macOS Claude Code stores its OAuth credentials in the login Keychain, which
+// is unreachable under the Seatbelt profile (~/Library/Keychains is not
+// allow-listed; `security` reports errSecNoDefaultKeychain / "authorization
+// denied"). Claude then falls back to a plaintext <configDir>/.credentials.json
+// -- which we point at the host ~/.claude (readable+writable in the profile) --
+// but on a host that logged in via the Keychain that file does not exist yet,
+// so the first sandbox launch would demand a fresh login.
+//
+// This runs on the HOST (unsandboxed, before the launch) and, only when the
+// fallback file is absent, copies the Keychain item into it. `security` may
+// pop a one-time GUI "ccserver wants to use the Keychain" prompt (ccserver did
+// not create the item); a non-interactive failure is non-fatal -- the user
+// just logs in once inside the sandbox and the file then persists.
+//
+// Idempotent: never overwrites an existing .credentials.json (Claude manages
+// token refresh in that file itself once it exists).
+export function seedClaudeCredentialsFromHostKeychain(hostHome) {
+  if (process.platform !== 'darwin') return false;
+  // These env overrides make Claude ignore the stored credential entirely.
+  if (process.env.ANTHROPIC_API_KEY || process.env.CLAUDE_CODE_OAUTH_TOKEN) return false;
+  const claudeDir = join(hostHome, '.claude');
+  const credsPath = join(claudeDir, '.credentials.json');
+  if (existsSync(credsPath)) return false;
+  let raw;
+  try {
+    // Match Claude Code's own keychain account (its HT()): $USER, sanitized to
+    // "claude-code-user" if it has characters outside [A-Za-z0-9._-].
+    const account = (() => {
+      let n;
+      try { n = process.env.USER || userInfo().username; } catch { n = process.env.USER || ''; }
+      if (!n) return '';
+      return /^[a-zA-Z0-9._-]+$/.test(n) ? n : 'claude-code-user';
+    })();
+    const args = ['find-generic-password', '-w', '-s', 'Claude Code-credentials'];
+    if (account) args.push('-a', account);
+    raw = execFileSync('security', args, {
+      encoding: 'utf-8', timeout: 5000, stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim();
+  } catch {
+    // no item, ACL denied, non-interactive, or `security` missing -- fall back
+    // to an in-sandbox login.
+    return false;
+  }
+  if (!raw) return false;
+  let parsed;
+  try { parsed = JSON.parse(raw); } catch { return false; }
+  if (!parsed || typeof parsed !== 'object' || !parsed.claudeAiOauth?.accessToken) return false;
+  try {
+    mkdirSync(claudeDir, { recursive: true });
+    writeFileSync(credsPath, `${JSON.stringify(parsed)}\n`, { mode: 0o600 });
+  } catch (err) {
+    console.warn(`[sandbox] could not seed ${credsPath} from the host Keychain: ${err?.message || err}`);
+    return false;
+  }
+  console.warn(`[sandbox] seeded ${credsPath} from the host Keychain (Claude Code login carried into the sandbox)`);
+  return true;
 }
 
 // Quote a host path for embedding in a Seatbelt `regex #"..."` literal.
@@ -440,15 +501,32 @@ export function buildSeatbeltLaunch({
     if (gnupg) env.GNUPGHOME = join(hostHome, '.gnupg');
     // HOME is remapped to the sandbox home, so $HOME-relative config resolution
     // would miss the real auth/state (bwrap instead overlays the real dirs at
-    // the real $HOME path). Point the CLIs that support it at the real dirs
-    // (gated on existence, like the appBinds binds). opencode resolves its
-    // config/data/state via $HOME-relative XDG dirs and copilot/commandcode
-    // resolve via $HOME (no env override exists) -- under seatbelt they see
-    // the sandbox home, so their login / model / --continue state does NOT
-    // carry over from the host (unlike bwrap, where $HOME IS the host home
-    // path with the persistent home mounted there). See docs-site.
-    if (existsSync(join(hostHome, '.claude'))) env.CLAUDE_CONFIG_DIR = join(hostHome, '.claude');
-    if (existsSync(join(hostHome, '.codex'))) env.CODEX_HOME = join(hostHome, '.codex');
+    // the real $HOME path). Point the CLIs that support it at the real dirs.
+    // opencode resolves config/data/state via $HOME-relative XDG dirs and
+    // copilot/commandcode resolve via $HOME (no env override exists) -- under
+    // seatbelt they see the sandbox home, so their login / model / --continue
+    // state does NOT carry over from the host (unlike bwrap, where $HOME IS the
+    // host home path with the persistent home mounted there). See docs-site.
+    //
+    // NOT gated on existsSync: gating meant a host that had never run `claude` /
+    // `codex` outside ccserver got no CLAUDE_CONFIG_DIR / CODEX_HOME, so their
+    // config + credentials resolved against the throwaway sandbox HOME and every
+    // launch demanded a fresh login -- and the host dir was never created, so it
+    // never self-healed. The dirs are mkdir'd on the host by buildSandboxSpawn /
+    // buildMinimalSandboxSpawn before the launch (this function never writes
+    // outside its own runtime dir); pointing the env at a not-yet-created dir is
+    // harmless (it is allow-listed read+write in the profile via appConfigDirs).
+    const hostClaudeDir = join(hostHome, '.claude');
+    env.CLAUDE_CONFIG_DIR = hostClaudeDir;
+    // The macOS login Keychain (Claude's primary credential store on darwin) is
+    // unreachable under this profile -- ~/Library/Keychains is not allow-listed
+    // and `security` reports errSecNoDefaultKeychain / "authorization denied".
+    // Claude falls back to a plaintext <configDir>/.credentials.json, and its
+    // store resolves that path from CLAUDE_SECURESTORAGE_CONFIG_DIR *first*
+    // (before CLAUDE_CONFIG_DIR); set it explicitly so the credential file
+    // unambiguously lands in the host ~/.claude and persists across launches.
+    env.CLAUDE_SECURESTORAGE_CONFIG_DIR = hostClaudeDir;
+    env.CODEX_HOME = join(hostHome, '.codex');
     // opencode resolves config/data/state via $HOME-relative XDG dirs (no
     // dedicated override like CLAUDE_CONFIG_DIR exists), so point the XDG
     // base dirs at the host ones: login (auth.json under share), model/state

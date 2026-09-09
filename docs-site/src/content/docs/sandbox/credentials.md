@@ -53,6 +53,52 @@ git の `credential.helper` がホスト側の git-broker プロセス (サン�
 
 設定・config読み込みに何らかの問題があった場合 (フックへの設定ファイルが読めない、壊れている等) は **fail-open** (コミットを通す) します。これは事故防止のための補助機構であり、可用性を犠牲にしてまで守る機能ではないためです。
 
+## エージェント CLI のログイン (macOS Seatbelt)
+
+Linux (bwrap) では `$HOME` がホストのパスのまま保たれ `~/.claude` などが rw
+バインドされるので、エージェント CLI のログインはそのまま引き継がれます。
+
+macOS (Seatbelt) では `$HOME` がサンドボックス側ホームに差し替わるうえ、
+**macOS のログインキーチェーンにはこのプロファイルから一切アクセスできません**
+(`~/Library/Keychains` は allow リストに無く、`security` は
+`errSecNoDefaultKeychain` や認可拒否を返します)。Claude Code は macOS では
+通常このキーチェーンに OAuth トークンを保存するため、対策が無いとサンドボックス
+起動のたびに再ログインが必要になります。
+
+ccserver はこれを次の方法で回避します:
+
+- `~/.claude` / `~/.codex` を起動時に自動作成し、`CLAUDE_CONFIG_DIR` /
+  `CLAUDE_SECURESTORAGE_CONFIG_DIR` / `CODEX_HOME` を常にそこへ向ける
+  (プロファイルはこれらのツリーを read+write で allow-list 済み)。
+- Claude Code は macOS でもキーチェーンが使えないと平文ファイル
+  `~/.claude/.credentials.json` (`0600`) にフォールバックするので、サンドボックス
+  内でのログインとトークンのリフレッシュはこのファイルに永続します。
+- **初回起動時 (`.credentials.json` がまだ無いとき) だけ**、ccserver
+  (サンドボックス外) がホストのログインキーチェーンから一度読み取り
+  (`security find-generic-password -s "Claude Code-credentials"`)、その内容を
+  `~/.claude/.credentials.json` に書き出します。ホストで既に Claude Code に
+  ログイン済みなら再ログイン不要で引き継がれます。
+  - ccserver はこのアイテムを作成したアプリではないため、初回は macOS が
+    「ccserver がキーチェーンにアクセスしようとしています」の GUI 許可
+    ダイアログを出す場合があります (「常に許可」で以後抑制)。
+  - 非対話環境などで読み取りに失敗しても致命的ではありません。サンドボックス内で
+    一度ログインすれば、以降は `.credentials.json` が永続します。
+  - 既存の `.credentials.json` は**上書きしません** (Claude 自身がその
+    ファイル上でトークンをリフレッシュ管理します)。
+
+注意点:
+
+- OAuth トークンが平文でディスクに載ります (Linux/bwrap や、キーチェーンが
+  使えない環境での Claude Code 自身のフォールバックと同じ挙動)。
+- サンドボックス内でトークンがリフレッシュされると、ホストのキーチェーン側の
+  トークンは古くなり得ます。ホストで直接 `claude` を使うと再ログインが必要に
+  なる場合があります。
+- codex はキーチェーンを使わず `~/.codex/auth.json` (平文) に保存するため、
+  `CODEX_HOME` とディレクトリ自動作成だけで引き継がれます (キーチェーン種取りは
+  Claude Code のみ)。
+- copilot / commandcode は `$HOME` 依存で env 上書きが無いため、Seatbelt では
+  引き続き引き継がれません (上記 overview 参照)。
+
 ## 既知の限界
 
 これは「侵害/暴走したプロセスが無関係なリポジトリの認証情報を安易に使ってしまう」事故を防ぐ多層防御であり、意図的にバイパスを試みるコードへの完全な防壁ではありません。以下は主に ssh-agent 転送が有効なときに関係します (既定オフなら SSH 経由の抜け道はそもそも存在しません)。

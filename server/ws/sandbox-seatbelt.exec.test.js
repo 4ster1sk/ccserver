@@ -326,6 +326,41 @@ test('raw keys stay denied: ~/.ssh and ~/.config/gh unreadable', SKIP_OPTS, (t) 
   assert.equal(readFileSync(join(fakeHome, '.ssh', 'secret.txt'), 'utf-8'), 'top-secret\n', 'secret must be unchanged');
 });
 
+test('claude credentials: keychain stays unreachable, plaintext fallback stays readable', SKIP_OPTS, (t) => {
+  if (!checkRunnable(t)) return;
+  // The macOS login Keychain is not allow-listed, so Claude Code cannot use it
+  // inside the sandbox -- it must fall back to <CLAUDE_CONFIG_DIR>/.credentials.json,
+  // which buildSeatbeltLaunch points at the host ~/.claude (allow-listed rw).
+  // Fake HOME directly under the real $HOME (see the raw-keys test for why not
+  // tmpdir): ~/.claude is only reachable because appConfigDirs allow-lists it,
+  // not because it sits in a broad tmp allow.
+  const fakeHome = trackDir(mkdtempSync(join(HOME, 'ccserver-sbexec-credhome-')));
+  mkdirSync(join(fakeHome, '.claude'), { recursive: true });
+  const credsPath = join(fakeHome, '.claude', '.credentials.json');
+  writeFileSync(credsPath, '{"claudeAiOauth":{"accessToken":"sk-ant-oat01-fake"}}\n', { mode: 0o600 });
+  const opts = baseOpts({ hostHome: fakeHome });
+  const sb = buildSeatbeltLaunch(opts);
+  trackDir(sb.dir);
+  sb.cwd = opts.cwd;
+
+  assert.equal(sb.env.CLAUDE_CONFIG_DIR, join(fakeHome, '.claude'));
+
+  // Fallback file is readable inside the sandbox.
+  const readRes = runInSeatbelt(sb, ['/bin/cat', credsPath], { cwd: opts.cwd });
+  assertAllowed(readRes, sb, `cat ${credsPath}`);
+  assert.ok(String(readRes.stdout).includes('sk-ant-oat01-fake'), 'credentials file contents readable');
+
+  // The login Keychain is dead: `security` finds no default keychain / no item.
+  // (Non-zero exit, not a crash -- Claude's store treats this as "fall back to
+  // the file".) This pins the behavior the fallback design depends on.
+  const kcRes = runInSeatbelt(
+    sb,
+    ['/usr/bin/security', 'find-generic-password', '-s', 'Claude Code-credentials'],
+    { cwd: opts.cwd },
+  );
+  assert.notEqual(kcRes.status, 0, `security must not succeed in the sandbox ${fmtResult(kcRes)}`);
+});
+
 test('sibling launch dirs denied, own runtime dir allowed', SKIP_OPTS, (t) => {
   if (!checkRunnable(t)) return;
   const opts = baseOpts();
