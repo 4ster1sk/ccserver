@@ -1675,9 +1675,10 @@ function buildBwrapArgs({ cwd, docker, gpg, extraBinds, extraEnv, authSock, stat
 // unconditionally. Create those on the host first (like buildBwrapArgs mkdir's
 // the copilot/codex/commandcode dirs) so the first launch on a host that never
 // ran the CLI outside ccserver still gets a persistent config/credentials dir
-// instead of writing into the throwaway sandbox HOME.
-function ensureHostAgentConfigDirs() {
-  for (const d of [join(HOME, '.claude'), join(HOME, '.codex')]) {
+// instead of writing into the throwaway sandbox HOME. `base` is overridable
+// for tests (defaults to the real $HOME).
+export function ensureHostAgentConfigDirs(base = HOME) {
+  for (const d of [join(base, '.claude'), join(base, '.codex')]) {
     try { mkdirSync(d, { recursive: true }); } catch { /* best effort */ }
   }
 }
@@ -1769,6 +1770,10 @@ export function buildMinimalSeatbeltSpawn({ cwd, targetCommand, app = 'claude' }
     seedFn = seedClaudeCredentialsFromHostKeychain,
     launchFn = buildSeatbeltLaunch,
   } = deps;
+  // Normalize like buildSandboxSpawn: a nullish/'' app resolves to 'claude'
+  // everywhere (resolveApp), so the `app === 'claude'` seed gate must see the
+  // same value -- a raw null would skip the Keychain seed for a default launch.
+  app = app || 'claude';
   // installDir is load-bearing here too (not just the full launch): without
   // it, CLIs installed outside the default allow trees (~/.opencode/bin,
   // Volta/mise shims, custom npm prefixes) are exec-denied, and the usage

@@ -102,3 +102,33 @@ test('real piped stdin content is still forwarded correctly (not broken by the t
   assert.equal(r.out, 'GH_ARGS:pr create --body-file -\n');
   assert.ok(r.ms < 2000, `took ${r.ms}ms`);
 });
+
+function runWrapperWithToken(token) {
+  return new Promise((resolve) => {
+    const env = { ...process.env, CCSANDBOX_GIT_BROKER_SOCK: broker.sockPath };
+    if (token === undefined) delete env.CCSANDBOX_GIT_BROKER_TOKEN;
+    else env.CCSANDBOX_GIT_BROKER_TOKEN = token;
+    const child = spawn(process.execPath, [WRAPPER, 'pr', 'view', '1'], {
+      cwd: repoDir, env, stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    let out = '';
+    let err = '';
+    child.stdout.on('data', (d) => { out += d; });
+    child.stderr.on('data', (d) => { err += d; });
+    child.on('close', (code) => resolve({ code, out, err }));
+    child.stdin.end();
+  });
+}
+
+test('gh-wrapper surfaces the unauthorized message and exits non-zero on a missing/wrong token', async () => {
+  for (const token of [undefined, '', 'not-the-session-token']) {
+    const r = await runWrapperWithToken(token);
+    assert.notEqual(r.code, 0, `token=${JSON.stringify(token)} must fail closed`);
+    assert.match(r.err, /gh-broker rejected this session's token/, `token=${JSON.stringify(token)} shows the unauthorized message`);
+    assert.equal(r.out, '', 'no gh output leaks past the token check');
+  }
+  // sanity: the real token still works through this same path
+  const ok = await runWrapperWithToken(broker.token);
+  assert.equal(ok.code, 0, `valid token succeeds: ${ok.err}`);
+  assert.equal(ok.out, 'GH_ARGS:pr view 1\n');
+});

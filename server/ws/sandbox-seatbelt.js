@@ -62,8 +62,9 @@ export function seatbeltBaseDir() {
 // storm can't re-stall. Tests inject `deps.runSecurity` to bypass both.
 
 // Claude Code's own keychain account (its HT()): $USER, sanitized to
-// "claude-code-user" if it has characters outside [A-Za-z0-9._-].
-function keychainAccount() {
+// "claude-code-user" if it has characters outside [A-Za-z0-9._-]. Exported for
+// tests only.
+export function keychainAccount() {
   let n;
   try { n = process.env.USER || userInfo().username; } catch { n = process.env.USER || ''; }
   if (!n) return '';
@@ -80,8 +81,10 @@ function probeHostKeychain() {
 }
 
 let defaultKeychainProbed = false;
+// Tests only: clear the once-per-process probe latch.
+export function _resetKeychainProbeForTest() { defaultKeychainProbed = false; }
 
-export function seedClaudeCredentialsFromHostKeychain(hostHome, { runSecurity = null } = {}) {
+export function seedClaudeCredentialsFromHostKeychain(hostHome, { runSecurity = null, probe = probeHostKeychain } = {}) {
   if (process.platform !== 'darwin' && !runSecurity) return false;
   // These env overrides make Claude ignore the stored credential entirely.
   if (process.env.ANTHROPIC_API_KEY || process.env.CLAUDE_CODE_OAUTH_TOKEN) return false;
@@ -91,6 +94,8 @@ export function seedClaudeCredentialsFromHostKeychain(hostHome, { runSecurity = 
   let raw;
   try {
     if (runSecurity) {
+      // Full bypass of the once-per-process latch (each injected test drives
+      // its own case).
       raw = String(runSecurity() ?? '').trim();
     } else {
       // One real `security` probe per process: a miss here (no item, ACL
@@ -98,7 +103,7 @@ export function seedClaudeCredentialsFromHostKeychain(hostHome, { runSecurity = 
       // means an in-sandbox login, and re-probing every launch would re-stall.
       if (defaultKeychainProbed) return false;
       defaultKeychainProbed = true;
-      raw = probeHostKeychain();
+      raw = String(probe() ?? '').trim();
     }
   } catch {
     return false;

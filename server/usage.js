@@ -41,6 +41,23 @@ export function isTrustPrompt(text) {
   return TRUST_RE.test(stripRender(text));
 }
 
+// Pure decision for the /usage send/resend loop (tested directly; the pty
+// closure below applies the counter mutation the caller owns). `force` (the
+// post-trust send) always sends and never hits this. Returns { send, reason }.
+export function usageSendGate({
+  resend = false, sentUsage = false, resends = 0, maxResends = 2,
+  trustShowing = false, dashboardPresent = false,
+} = {}) {
+  if (!resend) {
+    // Initial send: exactly once.
+    return sentUsage ? { send: false, reason: 'already-sent' } : { send: true, reason: 'initial' };
+  }
+  if (resends >= maxResends) return { send: false, reason: 'capped' };
+  if (trustShowing) return { send: false, reason: 'trust-gate' }; // its own y/n flow drives the send
+  if (dashboardPresent) return { send: false, reason: 'dashboard-ready' };
+  return { send: true, reason: 'resend' };
+}
+
 // Screen tail attached to the timeout result so the next "Timed out" report
 // carries what claude was actually showing (trust gate? login? blank?).
 // Pure: tested directly, no spawn involved.
@@ -321,15 +338,14 @@ function capture() {
     const sendUsage = ({ resend = false, force = false } = {}) => {
       if (done) return;
       if (!force) {
-        if (!resend && sentUsage) return;
-        if (resend) {
-          if (resends >= MAX_RESENDS) return;
-          if (isTrustPrompt(buf)) return; // trust gate up: leave it to its own flow
-          if (parseUsage(buf).limits.length) return; // dashboard already here
-          resends += 1;
-        } else {
-          sentUsage = true;
-        }
+        const gate = usageSendGate({
+          resend, sentUsage, resends, maxResends: MAX_RESENDS,
+          trustShowing: isTrustPrompt(buf),
+          dashboardPresent: parseUsage(buf).limits.length > 0,
+        });
+        if (!gate.send) return;
+        if (resend) resends += 1;
+        else sentUsage = true;
       }
       try {
         if (resend && !force) ptyProc.write('\x15'); // Ctrl-U: clear a possibly stale input line

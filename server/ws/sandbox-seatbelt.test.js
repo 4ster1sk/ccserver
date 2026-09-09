@@ -23,6 +23,8 @@ import {
   pathVariants,
   seatbeltEnvArgs,
   seedClaudeCredentialsFromHostKeychain,
+  keychainAccount,
+  _resetKeychainProbeForTest,
   subtreeRegex,
   subtrees,
 } from './sandbox-seatbelt.js';
@@ -191,6 +193,10 @@ test('buildSeatbeltLaunch honors an explicit persistent homeDir', () => {
   trackDir(sb.dir);
   assert.equal(sb.homeDir, homeDir);
   assert.equal(sb.env.HOME, homeDir);
+  // CFFIXED_USER_HOME must track the persistent HOME too, not just the
+  // throwaway one -- otherwise Foundation-API tools write into the real
+  // ~/Library on a persistent-HOME session.
+  assert.equal(sb.env.CFFIXED_USER_HOME, homeDir);
 });
 
 test('opencode sessions resolve host auth/state via XDG; other apps keep the sandbox HOME', () => {
@@ -637,6 +643,48 @@ test('seedClaudeCredentialsFromHostKeychain rejects a non-JSON / shapeless probe
   }
 });
 
+test('seedClaudeCredentialsFromHostKeychain runs the real Keychain probe at most once per process', () => {
+  _resetKeychainProbeForTest();
+  let calls = 0;
+  const probe = () => { calls += 1; return ''; }; // empty -> returns false, latch still set
+  const h1 = mkdtempSync(join(tmpdir(), 'ccserver-sbtest-once1-'));
+  const h2 = mkdtempSync(join(tmpdir(), 'ccserver-sbtest-once2-'));
+  DIRS.push(h1, h2);
+  assert.equal(seedClaudeCredentialsFromHostKeychain(h1, { probe }), false);
+  assert.equal(seedClaudeCredentialsFromHostKeychain(h2, { probe }), false);
+  assert.equal(calls, 1, 'a launch storm must not re-stall on `security` after the first miss');
+  _resetKeychainProbeForTest(); // don't leak the latch to later tests
+});
+
+test('seedClaudeCredentialsFromHostKeychain swallows a throwing real probe (timeout / missing security)', () => {
+  _resetKeychainProbeForTest();
+  const h = mkdtempSync(join(tmpdir(), 'ccserver-sbtest-throwprobe-'));
+  DIRS.push(h);
+  const wrote = seedClaudeCredentialsFromHostKeychain(h, {
+    probe: () => { throw new Error('spawn security ENOENT'); },
+  });
+  assert.equal(wrote, false);
+  assert.ok(!existsSync(join(h, '.claude', '.credentials.json')));
+  _resetKeychainProbeForTest();
+});
+
+test('keychainAccount matches Claude Code HT(): $USER, sanitized to claude-code-user', () => {
+  const prev = process.env.USER;
+  try {
+    process.env.USER = 'ast';
+    assert.equal(keychainAccount(), 'ast');
+    process.env.USER = 'first.last-2_x';
+    assert.equal(keychainAccount(), 'first.last-2_x', 'dots/dashes/underscores are allowed');
+    process.env.USER = 'weird name!';
+    assert.equal(keychainAccount(), 'claude-code-user', 'anything outside [A-Za-z0-9._-] -> fallback');
+    process.env.USER = 'アスト';
+    assert.equal(keychainAccount(), 'claude-code-user', 'non-ASCII -> fallback');
+  } finally {
+    if (prev === undefined) delete process.env.USER;
+    else process.env.USER = prev;
+  }
+});
+
 test('host node binary dir stays readable (nvm-style installs)', () => {
   const sb = buildSeatbeltLaunch(baseOpts());
   trackDir(sb.dir);
@@ -891,6 +939,75 @@ test('buildSeatbeltProfileText denies control-plane sockets via path-literal', (
     const closes = (l.match(/\)/g) || []).length;
     assert.equal(opens, closes, `balanced parens: ${l}`);
   }
+});
+
+function assertParenBalanced(text) {
+  let depth = 0;
+  for (let i = 0; i < text.length; i++) {
+    if (text[i] === '"') { // skip string literals (may contain parens)
+      i += 1;
+      while (i < text.length && text[i] !== '"') { if (text[i] === '\\') i += 1; i += 1; }
+      continue;
+    }
+    if (text[i] === '(') depth += 1;
+    else if (text[i] === ')') { depth -= 1; assert.ok(depth >= 0, 'unbalanced ) in profile'); }
+  }
+  assert.equal(depth, 0, 'profile is not paren-balanced overall');
+  // ...and no rule line individually spills its parens (single-line style).
+  for (const l of text.split('\n')) {
+    if (!l.trimStart().startsWith('(')) continue;
+    const noStr = l.replace(/"(?:[^"\\]|\\.)*"/g, '""');
+    assert.equal((noStr.match(/\(/g) || []).length, (noStr.match(/\)/g) || []).length, `balanced rule line: ${l}`);
+  }
+}
+
+test('buildSeatbeltProfileText compiles balanced with every optional clause populated', () => {
+  // A syntax error in a clause only emitted under a rare combination (broker +
+  // guard + gnupg + orchestrator overlay + control-sock denies + exec/net
+  // deny literals) would otherwise surface only at a real launch. Feed all of
+  // them at once and check the whole profile stays paren-balanced.
+  const text = buildSeatbeltProfileText({
+    readRegexes: [subtreeRegex('/opt/x'), subtreeRegex('/weird "quote" dir')],
+    writeRegexes: [subtreeRegex('/opt/y')],
+    readLiterals: ['/tmp/a.sock', '/tmp/we"ird.sock'],
+    writeLiterals: ['/tmp/b.sock'],
+    siblingDenyWriteRegexes: ['^/tmp/base/ccserver-seatbelt-'],
+    siblingDenyReadRegexes: ['^/tmp/base/ccserver-seatbelt-'],
+    reAllowWriteRegexes: ['^/tmp/base/ccserver-seatbelt-abc(/.*)?$'],
+    reAllowReadRegexes: ['^/tmp/base/ccserver-seatbelt-abc(/.*)?$'],
+    denyWriteRegexes: ['^/home/u/\\.ssh(/.*)?$', '^/home/u/\\.gitconfig$'],
+    denyExecLiterals: ['/opt/homebrew/bin/gh', '/tmp/we"ird/gh'],
+    denyNetOutboundLiterals: ['/tmp/rt/ccserver-pty-host.sock', '/tmp/rt/meta/meta.sock'],
+  });
+  assertParenBalanced(text);
+  // Spot-check the clauses actually co-exist (not silently dropped).
+  assert.ok(text.includes('(deny process-exec (literal "/opt/homebrew/bin/gh") (literal "/tmp/we\\"ird/gh"))'));
+  assert.ok(text.includes('(remote unix-socket (path-literal "/tmp/rt/meta/meta.sock"))'));
+  assert.ok(text.includes('(allow sysctl-read (sysctl-name'));
+});
+
+test('buildSeatbeltLaunch: a fully-loaded launch produces a paren-balanced profile', () => {
+  const brokerDir = mkdtempSync(join(tmpdir(), 'ccserver-sbtest-full-broker-'));
+  const sockDir = mkdtempSync(join(tmpdir(), 'ccserver-sbtest-full-socks-'));
+  const homeDir = mkdtempSync(join(tmpdir(), 'ccserver-sbtest-full-home-'));
+  const orch = join(sockDir, 'CLAUDE.md');
+  writeFileSync(orch, '# orchestrator\n');
+  DIRS.push(brokerDir, sockDir, homeDir);
+  const sb = buildSeatbeltLaunch(baseOpts({
+    homeDir,
+    gitBroker: { sockPath: join(brokerDir, 'b.sock'), allowlistPath: join(brokerDir, 'a.json'), dir: brokerDir, token: 'tok' },
+    commitGuard: { configPath: join(brokerDir, 'guard.json') },
+    gnupg: true,
+    authSock: join(sockDir, '1password-agent.sock'),
+    orchestratorClaudeMdSrc: orch,
+    ghPaths: ['/opt/homebrew/bin/gh', '/usr/local/bin/gh'],
+    controlSockDenies: [join(sockDir, 'ccserver-pty-host.sock'), join(sockDir, 'meta', 'meta.sock')],
+    sockets: { mcp: join(sockDir, 'mcp.sock'), notify: join(sockDir, 'notify.sock'), meta: join(sockDir, 'meta', 'meta.sock') },
+    extraBinds: [{ src: '/srv/shared', mode: 'rw' }, { src: '~/.ssh', mode: 'ro' }],
+  }));
+  trackDir(sb.dir);
+  for (const c of sb.ruleCopies || []) DIRS.push(c);
+  assertParenBalanced(readFileSync(sb.profilePath, 'utf-8'));
 });
 
 test('buildSeatbeltLaunch pins controlSockDenies for network-outbound', () => {

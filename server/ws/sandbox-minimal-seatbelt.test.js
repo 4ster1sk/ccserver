@@ -16,7 +16,8 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { buildMinimalSeatbeltSpawn } from './sandbox.js';
+import { buildMinimalSeatbeltSpawn, ensureHostAgentConfigDirs } from './sandbox.js';
+import { existsSync } from 'node:fs';
 
 let tmpRoot;
 let prevSeatbeltTmp;
@@ -85,6 +86,32 @@ test('minimal seatbelt seeds Keychain credentials for claude only', () => {
     );
     assert.equal(seeds.length, 0, `${app} must not attempt the Claude Keychain seed`);
   }
+});
+
+test('minimal seatbelt normalizes a nullish app to claude (seed gate + resolveApp agree)', () => {
+  // A raw null/'' app resolves to claude in resolveApp() but the seed gate is
+  // `app === 'claude'` -- without normalization a default (null-app) capture
+  // would silently skip the Keychain seed. Mirrors buildSandboxSpawn's fix.
+  for (const app of [null, undefined, '']) {
+    const seeds = [];
+    const seen = {};
+    buildMinimalSeatbeltSpawn(
+      { cwd: makeCwd(), targetCommand: ['claude'], app },
+      stubDeps({ seen, seedCalls: seeds }),
+    );
+    assert.equal(seeds.length, 1, `app:${JSON.stringify(app)} must still seed`);
+    assert.equal(seen.launchOpts.app, 'claude', `app:${JSON.stringify(app)} must reach the launch as 'claude'`);
+  }
+});
+
+test('ensureHostAgentConfigDirs creates ~/.claude and ~/.codex under the given base', () => {
+  const base = mkdtempSync(join(tmpdir(), 'ccserver-ensuredirs-'));
+  DIRS.push(base);
+  ensureHostAgentConfigDirs(base);
+  assert.ok(existsSync(join(base, '.claude')), '~/.claude created');
+  assert.ok(existsSync(join(base, '.codex')), '~/.codex created');
+  // Idempotent: a second call over existing dirs must not throw.
+  assert.doesNotThrow(() => ensureHostAgentConfigDirs(base));
 });
 
 test('minimal seatbelt survives a throwing seed (non-fatal)', () => {

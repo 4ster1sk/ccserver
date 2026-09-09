@@ -26,7 +26,7 @@
 
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync, spawnSync } from 'node:child_process';
+import { execFileSync, spawn as spawnFn, spawnSync } from 'node:child_process';
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir, homedir } from 'node:os';
 import { join } from 'node:path';
@@ -228,6 +228,38 @@ test('smoke via entrypoint: bash + entrypoint + echo', SKIP_OPTS, (t) => {
   assert.ok(res.stdout.includes('via-entrypoint'), `unexpected output: ${fmtResult(res)}`);
 });
 
+test('smoke: a fully-loaded profile (broker + guard + gnupg + overlay + sock denies) compiles and runs', SKIP_OPTS, (t) => {
+  if (!checkRunnable(t)) return;
+  // The baseOpts() smoke tests only compile the minimal profile -- a syntax
+  // error in a clause emitted only under a rare combination would slip through
+  // to a real launch ("compile error fails closed for every launch"). Turn on
+  // everything at once and run a real sandbox-exec.
+  const brokerDir = trackDir(mkdtempSync(join(tmpdir(), 'ccserver-sbexec-full-broker-')));
+  const sockDir = trackDir(mkdtempSync(join(tmpdir(), 'ccserver-sbexec-full-socks-')));
+  const homeDir = trackDir(mkdtempSync(join(tmpdir(), 'ccserver-sbexec-full-home-')));
+  const orch = join(sockDir, 'CLAUDE.md');
+  writeFileSync(orch, '# orchestrator overlay\n');
+  const opts = baseOpts({
+    homeDir,
+    gitBroker: { sockPath: join(brokerDir, 'b.sock'), allowlistPath: join(brokerDir, 'a.json'), dir: brokerDir, token: 'tok-abc' },
+    commitGuard: { configPath: join(brokerDir, 'guard.json') },
+    gnupg: true,
+    authSock: join(sockDir, 'agent.sock'),
+    orchestratorClaudeMdSrc: orch,
+    ghPaths: ['/opt/homebrew/bin/gh', '/usr/local/bin/gh'],
+    controlSockDenies: [join(sockDir, 'ccserver-pty-host.sock'), join(sockDir, 'meta', 'meta.sock')],
+    sockets: { mcp: join(sockDir, 'mcp.sock'), notify: join(sockDir, 'notify.sock') },
+    extraBinds: [{ src: '/srv/shared', mode: 'rw' }, { src: '~/.ssh', mode: 'ro' }],
+  });
+  const sb = buildSeatbeltLaunch(opts);
+  trackDir(sb.dir);
+  for (const c of sb.ruleCopies || []) trackDir(c);
+  sb.cwd = opts.cwd;
+  const res = runInSeatbelt(sb, ['/bin/echo', 'full-profile-ok'], { cwd: opts.cwd });
+  assertAllowed(res, sb, 'full-profile echo');
+  assert.match(res.stdout.trim(), /^full-profile-ok$/);
+});
+
 test('root literal: /bin/ls / starts (no startup abort)', SKIP_OPTS, (t) => {
   if (!checkRunnable(t)) return;
   // Regression for docs/seatbelt-root-read-abort-diagnosis.md: without
@@ -369,18 +401,22 @@ test('KERN_PROCARGS2 (other processes argv/env) is denied inside the sandbox', S
   // assert the same read is refused inside.
   const probeSrc = join(tmpRoot, 'procargs2-probe.c');
   const probeBin = join(tmpRoot, 'procargs2-probe');
+  // The probe dumps the buffer so we can assert a same-UID secret does not
+  // leak, not just that a size was returned.
   writeFileSync(probeSrc, [
     '#include <sys/sysctl.h>',
     '#include <stdio.h>',
     '#include <stdlib.h>',
+    '#include <unistd.h>',
     'int main(int argc, char **argv){',
     '  int pid = argc > 1 ? atoi(argv[1]) : 1;',
     '  int mib[3] = { CTL_KERN, KERN_PROCARGS2, pid };',
     '  size_t sz = 0;',
     '  if (sysctl(mib, 3, NULL, &sz, NULL, 0) != 0) { printf("DENIED\\n"); return 3; }',
-    '  char *buf = malloc(sz);',
+    '  char *buf = calloc(1, sz + 1);',
     '  if (sysctl(mib, 3, buf, &sz, NULL, 0) != 0) { printf("DENIED\\n"); return 3; }',
     '  printf("READABLE %zu\\n", sz);',
+    '  fwrite(buf, 1, sz, stdout);',
     '  return 0;',
     '}',
   ].join('\n'));
@@ -390,28 +426,42 @@ test('KERN_PROCARGS2 (other processes argv/env) is denied inside the sandbox', S
     t.skip('no working cc to build the KERN_PROCARGS2 probe');
     return;
   }
-  const target = String(process.pid); // the test runner: not the sandbox's child
 
-  const outside = spawnSync(probeBin, [target], { encoding: 'utf-8', timeout: 10000 });
-  if (!String(outside.stdout).startsWith('READABLE')) {
-    t.skip(`KERN_PROCARGS2 not readable even outside a sandbox here (${fmtResult(outside)}) -- test would be vacuous`);
-    return;
-  }
-
-  const opts = baseOpts();
-  const sb = buildSeatbeltLaunch(opts);
-  trackDir(sb.dir);
-  sb.cwd = opts.cwd;
-  const inside = runInSeatbelt(sb, [probeBin, target], { cwd: opts.cwd });
+  // A dedicated same-UID sibling that OUTLIVES the sandboxed read and carries a
+  // marker in its env -- exactly the cross-session leak shape (a peer session /
+  // the ccserver server holding CCSERVER_TOKEN). More reliable than targeting
+  // the test runner's own pid.
+  const MARKER = `CCSERVER_SECRET_${Math.random().toString(36).slice(2)}`;
+  const sleeper = spawnFn('/bin/sh', ['-c', 'sleep 30'], {
+    env: { ...process.env, [MARKER]: 'do-not-leak' }, stdio: 'ignore', detached: true,
+  });
   try {
-    assert.ok(
-      String(inside.stdout).includes('DENIED') || (inside.status ?? 0) !== 0,
-      `KERN_PROCARGS2 must be refused inside the sandbox, got ${fmtResult(inside)}`,
-    );
-    assert.ok(!String(inside.stdout).startsWith('READABLE'), 'sandbox must not read another process argv/env');
-  } catch (err) {
-    preserveProfile(sb, 'kern_procargs2_denied');
-    throw err;
+    const target = String(sleeper.pid);
+    const outside = spawnSync(probeBin, [target], { encoding: 'utf-8', timeout: 10000 });
+    if (!String(outside.stdout).startsWith('READABLE')) {
+      t.skip(`KERN_PROCARGS2 not readable even outside a sandbox here (${fmtResult(outside)}) -- test would be vacuous`);
+      return;
+    }
+    assert.ok(String(outside.stdout).includes(MARKER), 'sanity: the marker IS readable outside the sandbox');
+
+    const opts = baseOpts();
+    const sb = buildSeatbeltLaunch(opts);
+    trackDir(sb.dir);
+    sb.cwd = opts.cwd;
+    const inside = runInSeatbelt(sb, [probeBin, target], { cwd: opts.cwd });
+    try {
+      assert.ok(
+        String(inside.stdout).includes('DENIED') || (inside.status ?? 0) !== 0,
+        `KERN_PROCARGS2 must be refused inside the sandbox, got ${fmtResult(inside)}`,
+      );
+      assert.ok(!String(inside.stdout).startsWith('READABLE'), 'sandbox must not read another process argv/env');
+      assert.ok(!String(inside.stdout).includes(MARKER), 'the peer process env marker must not leak into the sandbox');
+    } catch (err) {
+      preserveProfile(sb, 'kern_procargs2_denied');
+      throw err;
+    }
+  } finally {
+    try { process.kill(sleeper.pid, 'SIGKILL'); } catch { /* already gone */ }
   }
 });
 

@@ -11,7 +11,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { getUsage, parseUsage, isTrustPrompt, buildTimeoutError } from './usage.js';
+import { getUsage, parseUsage, isTrustPrompt, buildTimeoutError, usageSendGate } from './usage.js';
 
 // Self-review (issue #105): sandbox.config.json's hiddenApps must not be a
 // purely cosmetic picker-hiding feature. GET /api/usage (and the warmUsage()
@@ -233,4 +233,20 @@ test('buildTimeoutError: keeps the stable prefix and carries the screen tail', (
   assert.equal(res.trustHandled, false);
   assert.ok(res.screenTail.includes('login screen'), 'stripped tail must survive ANSI cleanup');
   assert.ok(!res.screenTail.includes('\x1b'), 'ANSI escapes must be stripped');
+});
+
+test('usageSendGate: initial /usage send happens exactly once', () => {
+  assert.deepEqual(usageSendGate({ resend: false, sentUsage: false }), { send: true, reason: 'initial' });
+  assert.deepEqual(usageSendGate({ resend: false, sentUsage: true }), { send: false, reason: 'already-sent' });
+});
+
+test('usageSendGate: resends are capped, gated by the trust dialog, and stop once the dashboard renders', () => {
+  // A cold sandboxed start can still be booting when the first /usage lands
+  // nowhere -- resends recover it, but only up to MAX_RESENDS and never while
+  // the trust gate owns the y/n input, and not once limits have rendered.
+  assert.equal(usageSendGate({ resend: true, resends: 0 }).send, true);
+  assert.equal(usageSendGate({ resend: true, resends: 1, maxResends: 2 }).send, true);
+  assert.deepEqual(usageSendGate({ resend: true, resends: 2, maxResends: 2 }), { send: false, reason: 'capped' });
+  assert.deepEqual(usageSendGate({ resend: true, resends: 0, trustShowing: true }), { send: false, reason: 'trust-gate' });
+  assert.deepEqual(usageSendGate({ resend: true, resends: 0, dashboardPresent: true }), { send: false, reason: 'dashboard-ready' });
 });
