@@ -26,7 +26,7 @@
 
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir, homedir } from 'node:os';
 import { join } from 'node:path';
@@ -359,6 +359,60 @@ test('claude credentials: keychain stays unreachable, plaintext fallback stays r
     { cwd: opts.cwd },
   );
   assert.notEqual(kcRes.status, 0, `security must not succeed in the sandbox ${fmtResult(kcRes)}`);
+});
+
+test('KERN_PROCARGS2 (other processes argv/env) is denied inside the sandbox', SKIP_OPTS, (t) => {
+  if (!checkRunnable(t)) return;
+  // Same-UID KERN_PROCARGS2 leaks a process's full command line AND environment
+  // (CCSERVER_TOKEN, API keys, other sessions' tokens). Compile a tiny probe,
+  // confirm it CAN read outside the sandbox (else the test is vacuous), then
+  // assert the same read is refused inside.
+  const probeSrc = join(tmpRoot, 'procargs2-probe.c');
+  const probeBin = join(tmpRoot, 'procargs2-probe');
+  writeFileSync(probeSrc, [
+    '#include <sys/sysctl.h>',
+    '#include <stdio.h>',
+    '#include <stdlib.h>',
+    'int main(int argc, char **argv){',
+    '  int pid = argc > 1 ? atoi(argv[1]) : 1;',
+    '  int mib[3] = { CTL_KERN, KERN_PROCARGS2, pid };',
+    '  size_t sz = 0;',
+    '  if (sysctl(mib, 3, NULL, &sz, NULL, 0) != 0) { printf("DENIED\\n"); return 3; }',
+    '  char *buf = malloc(sz);',
+    '  if (sysctl(mib, 3, buf, &sz, NULL, 0) != 0) { printf("DENIED\\n"); return 3; }',
+    '  printf("READABLE %zu\\n", sz);',
+    '  return 0;',
+    '}',
+  ].join('\n'));
+  try {
+    execFileSync('cc', ['-O0', '-o', probeBin, probeSrc], { stdio: 'ignore', timeout: 30000 });
+  } catch {
+    t.skip('no working cc to build the KERN_PROCARGS2 probe');
+    return;
+  }
+  const target = String(process.pid); // the test runner: not the sandbox's child
+
+  const outside = spawnSync(probeBin, [target], { encoding: 'utf-8', timeout: 10000 });
+  if (!String(outside.stdout).startsWith('READABLE')) {
+    t.skip(`KERN_PROCARGS2 not readable even outside a sandbox here (${fmtResult(outside)}) -- test would be vacuous`);
+    return;
+  }
+
+  const opts = baseOpts();
+  const sb = buildSeatbeltLaunch(opts);
+  trackDir(sb.dir);
+  sb.cwd = opts.cwd;
+  const inside = runInSeatbelt(sb, [probeBin, target], { cwd: opts.cwd });
+  try {
+    assert.ok(
+      String(inside.stdout).includes('DENIED') || (inside.status ?? 0) !== 0,
+      `KERN_PROCARGS2 must be refused inside the sandbox, got ${fmtResult(inside)}`,
+    );
+    assert.ok(!String(inside.stdout).startsWith('READABLE'), 'sandbox must not read another process argv/env');
+  } catch (err) {
+    preserveProfile(sb, 'kern_procargs2_denied');
+    throw err;
+  }
 });
 
 test('sibling launch dirs denied, own runtime dir allowed', SKIP_OPTS, (t) => {

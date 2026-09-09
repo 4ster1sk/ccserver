@@ -434,6 +434,19 @@ test('profile allows pty ioctls and nested pty allocation', () => {
   assert.ok(text.includes('(allow file-ioctl (regex #"^/dev(/.*)?$"))'));
 });
 
+test('profile denies the process argv/env sysctls after the broad sysctl allow', () => {
+  const text = buildSeatbeltProfileText({});
+  const allowIdx = text.indexOf('(allow sysctl-read)');
+  const denyIdx = text.indexOf('(deny sysctl-read (sysctl-name "kern.procargs")');
+  assert.ok(allowIdx !== -1, '(allow sysctl-read) present');
+  assert.ok(denyIdx !== -1, 'kern.procargs/procargs2 deny present');
+  assert.ok(denyIdx > allowIdx, 'the deny is emitted AFTER the allow (last-match-wins)');
+  assert.ok(text.includes('kern.procargs2'), 'KERN_PROCARGS2 named');
+  // ...and before the file-read* allows, so a later rule cannot re-open it.
+  const readAllowIdx = text.indexOf('(allow file-read*');
+  if (readAllowIdx !== -1) assert.ok(denyIdx < readAllowIdx, 'deny precedes the file allows');
+});
+
 test('pathVariants registers both raw and realpath spellings', () => {
   assert.deepEqual(pathVariants('/definitely-absent-path-xyz'), ['/definitely-absent-path-xyz']);
   assert.ok(subtrees(tmpRoot).length >= 1);

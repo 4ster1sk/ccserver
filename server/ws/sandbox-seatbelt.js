@@ -256,6 +256,17 @@ export function buildSeatbeltProfileText({
     '(allow signal (target self))',
     '(allow signal (target same-sandbox))',
     '(allow sysctl-read)',
+    // ...but NOT the process argv/environment blobs. KERN_PROCARGS2 (and the
+    // older KERN_PROCARGS) hand a same-UID reader the full command line AND
+    // environment of ANY process on the machine -- the ccserver server itself
+    // (CCSERVER_TOKEN / ANTHROPIC_API_KEY / cloud creds), other agent sessions
+    // (messaging + meta identity tokens), the git broker. bwrap gets this for
+    // free via --unshare-pid; Seatbelt needs the explicit deny (emitted AFTER
+    // the broad allow, last-match-wins). Cost: `pgrep -f` / `pkill -f`
+    // full-command-line matching stops working (name matching still does;
+    // ps(1)/top(1) are already blocked as setuid-root). Verify on macOS
+    // hardware if this line is touched -- a compile error here fails closed.
+    '(deny sysctl-read (sysctl-name "kern.procargs") (sysctl-name "kern.procargs2"))',
     '(allow mach-lookup)',
     '(allow network*)',
     // Host control-plane unix sockets (pty-host RPC, meta broker) live under
