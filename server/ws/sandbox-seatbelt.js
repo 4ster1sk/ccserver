@@ -649,12 +649,6 @@ export function buildSeatbeltLaunch({
       const r = subtreeRegex(t);
       if (!readRegexes.includes(r)) readRegexes.push(r);
     }
-    // Ancestor metadata (lstat) for userspace realpath: node/vite/npm/git
-    // resolve paths component-by-component, and subtree rules don't cover
-    // the ancestors themselves. Exact-match only -- siblings stay closed.
-    // Bases mirror the trees tools resolve within (project, sandbox HOME,
-    // launch dir, tmp, node binary).
-    readRegexes.push(...ancestorExactRegexes([projectDir, effectiveHome, dir, ...tmpDirs, nodeBin]));
     // Agent config dirs keep working when a CLI resolves the real home via
     // macOS APIs instead of $HOME (mirrors buildBwrapArgs' appBinds). Regexes
     // for absent paths are harmless, so no existsSync gating is needed.
@@ -673,6 +667,18 @@ export function buildSeatbeltLaunch({
       join(hostHome, '.commandcode'),
     ];
     const cachesDir = join(hostHome, 'Library', 'Caches');
+    // Ancestor metadata (lstat) for userspace realpath: node/vite/npm/git and
+    // the agent CLIs resolve paths component-by-component, and subtree rules
+    // don't cover the ancestors themselves. Exact-match only -- siblings stay
+    // closed. Bases mirror every tree a tool resolves within: project, sandbox
+    // HOME, launch dir, tmp, node binary, AND the host home + agent config
+    // dirs (CLAUDE_CONFIG_DIR / CODEX_HOME / the opencode XDG dirs all live
+    // under hostHome -- without hostHome's ancestors a throwaway-HOME launch on
+    // a host whose node lives outside $HOME EPERMs on lstat '/Users/<user>'
+    // the moment Claude reads ~/.claude/.credentials.json).
+    readRegexes.push(...ancestorExactRegexes([
+      projectDir, effectiveHome, dir, ...tmpDirs, nodeBin, hostHome, ...appConfigDirs,
+    ]));
     readRegexes.push(...subtrees(cachesDir), ...appConfigDirs.flatMap(subtrees));
     // gpg opt-in (bwrap binds ~/.gnupg): with no mounts, allow the real
     // keyring and point gpg at it ($HOME here is the sandbox home).
@@ -842,10 +848,13 @@ export function buildSeatbeltLaunch({
 
     // Operator extra binds become allow rules (no remount, so src is used
     // as-is; dest is ignored). Blocked paths are skipped with a warning.
+    // resolve() collapses `..` first: without it `~/.config/../.ssh/id_rsa`
+    // slips past the ~/.ssh prefix check (Seatbelt then mediates the resolved
+    // path and grants it anyway).
     const BLOCKED = [join(hostHome, '.ssh'), join(hostHome, '.config', 'gh')];
     for (const b of extraBinds || []) {
       if (!b || !b.src) continue;
-      const src = expandAgainstHome(String(b.src), hostHome);
+      const src = resolve(expandAgainstHome(String(b.src), hostHome));
       if (BLOCKED.some((p) => src === p || src.startsWith(`${p}/`))) {
         console.warn(`[sandbox] ignoring configured bind of ${src}: raw ssh keys / gh config are no longer exposed to the sandbox (see the git broker)`);
         continue;

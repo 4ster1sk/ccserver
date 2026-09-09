@@ -233,6 +233,24 @@ test('ancestor dirs get exact-match (not subtree) read allows', () => {
   assert.ok(!text.includes('^/no(/.*)?$'), 'ancestors must not be subtrees (siblings stay closed)');
 });
 
+test('hostHome ancestors get lstat allows even for a throwaway HOME with node outside $HOME', () => {
+  // CLAUDE_CONFIG_DIR / CODEX_HOME / the opencode XDG dirs live under hostHome.
+  // A throwaway-HOME launch (homeDir:null) whose node lives outside $HOME must
+  // still be able to lstat the hostHome ancestors, or Claude EPERMs the moment
+  // it reads ~/.claude/.credentials.json. hostHome deliberately points outside
+  // every other allow tree (project/tmp/node) so only the new push covers it.
+  const fakeHome = '/Users/ccserver-anchome-fixture'; // synthetic, need not exist
+  const nodeBin = '/opt/homebrew/bin/node'; // deliberately not under fakeHome
+  const sb = buildSeatbeltLaunch(baseOpts({ hostHome: fakeHome, homeDir: null, nodeBin }));
+  trackDir(sb.dir);
+  const text = readFileSync(sb.profilePath, 'utf-8');
+  for (const anc of ancestorExactRegexes([fakeHome, join(fakeHome, '.claude'), join(fakeHome, '.config', 'opencode')])) {
+    assert.ok(text.includes(`(regex #"${anc}")`), `missing ancestor lstat allow: ${anc}`);
+  }
+  // ...still exact-match only (never a subtree that would open siblings).
+  assert.ok(!text.includes(subtreeRegex('/Users')), '/Users must not become a subtree');
+});
+
 test('host git XDG dir stays denied (XDG redirect cannot leak host gitconfig)', () => {  // XDG_CONFIG_HOME now points at the host tree for opencode sessions, so
   // lock in that sandboxed git can never read the host XDG gitconfig: the
   // profile must not allow-list host ~/.config/git, keeping the sandbox
@@ -386,12 +404,26 @@ test('buildSeatbeltLaunch failure preserves a pre-existing overlay', () => {
 });
 
 test('buildSeatbeltLaunch skips blocked extra binds like bwrap does', () => {
+  const fakeHome = mkdtempSync(join(tmpdir(), 'ccserver-sbtest-bindhome-'));
+  DIRS.push(fakeHome);
   const sb = buildSeatbeltLaunch(baseOpts({
-    extraBinds: [{ src: '~/.ssh', mode: 'ro' }, { src: '/srv/shared', mode: 'rw' }],
+    hostHome: fakeHome,
+    extraBinds: [
+      { src: '~/.ssh', mode: 'ro' },
+      // `..` traversal must not slip a raw-key path past the ~/.ssh check.
+      { src: '~/.config/../.ssh/id_rsa', mode: 'ro' },
+      { src: `${fakeHome}/.ssh/../.ssh`, mode: 'rw' },
+      { src: '/srv/shared', mode: 'rw' },
+    ],
   }));
   trackDir(sb.dir);
   const text = readFileSync(sb.profilePath, 'utf-8');
   assert.ok(text.includes(subtreeRegex('/srv/shared')), 'legit extra bind is allowed');
+  // ~/.ssh appears in the deny section by design; assert it is in NO allow line
+  // and that the `..` path never produced a raw-key allow at all.
+  const allowLines = text.split('\n').filter((l) => /^\s*\(allow file-(read|write)\*/.test(l)).join('\n');
+  assert.ok(!allowLines.includes(subtreeRegex(join(fakeHome, '.ssh'))), '~/.ssh never allow-listed');
+  assert.ok(!text.includes(escapeSeatbeltRegex(join(fakeHome, '.ssh', 'id_rsa'))), 'no raw key path via ..');
 });
 
 test('profile allows pty ioctls and nested pty allocation', () => {

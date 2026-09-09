@@ -1600,7 +1600,9 @@ function buildBwrapArgs({ cwd, docker, gpg, extraBinds, extraEnv, authSock, stat
   const BLOCKED_BIND_PATHS = [join(HOME, '.ssh'), join(HOME, '.config', 'gh')];
   for (const b of extraBinds) {
     if (!b || !b.src) continue;
-    const src = expandHome(String(b.src));
+    // resolve() collapses `..` first: without it `~/.config/../.ssh` slips
+    // past the prefix check and bwrap then binds the resolved ~/.ssh anyway.
+    const src = resolve(expandHome(String(b.src)));
     if (BLOCKED_BIND_PATHS.some((p) => src === p || src.startsWith(`${p}/`))) {
       console.warn(`[sandbox] ignoring configured bind of ${src}: raw ssh keys / gh config are no longer exposed to the sandbox (see the git broker)`);
       continue;
