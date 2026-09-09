@@ -1751,37 +1751,62 @@ export function seatbeltControlSockPaths(metaSocketPath) {
 // resolved; defaults to 'claude' for the original caller.
 // On macOS the same shape runs under sandbox-exec with a throwaway HOME
 // (never the persistent per-project one -- this stays a throwaway read).
+// macOS minimal launch assembly, extracted for testability: the IS_MACOS
+// branch of buildMinimalSandboxSpawn() below delegates here, but this helper
+// itself never checks process.platform (like buildSeatbeltLaunch), so Linux CI
+// can exercise the seatbelt opts assembly directly. deps.* are injectable for
+// unit tests (seed call counting / launch opts capture).
+export function buildMinimalSeatbeltSpawn({ cwd, targetCommand, app = 'claude' }, deps = {}) {
+  const {
+    resolveFn = resolveApp,
+    ensureDirsFn = ensureHostAgentConfigDirs,
+    seedFn = seedClaudeCredentialsFromHostKeychain,
+    launchFn = buildSeatbeltLaunch,
+  } = deps;
+  // installDir is load-bearing here too (not just the full launch): without
+  // it, CLIs installed outside the default allow trees (~/.opencode/bin,
+  // Volta/mise shims, custom npm prefixes) are exec-denied, and the usage
+  // callers silently fall back to an unsandboxed direct launch.
+  const { command, installDir } = resolveFn(app);
+  ensureDirsFn();
+  // macOS Claude Code keeps its OAuth login in the Keychain, which is
+  // unreachable under the Seatbelt profile (see buildSandboxSpawn's darwin
+  // branch). Seed the plaintext fallback the same way so a sandboxed
+  // /usage capture sees the same credentials as a full session.
+  // Non-fatal; no-op when the file already exists or outside darwin.
+  if (app === 'claude') {
+    try { seedFn(HOME); } catch { /* non-fatal: capture still attempts login fallback */ }
+  }
+  const sb = launchFn({
+    cwd, hostHome: HOME, homeDir: null, sandboxPathBase: SANDBOX_PATH,
+    nodeBin: realpathSync(process.execPath),
+    scripts: seatbeltScripts(), ssh: seatbeltSsh(),
+    gitBroker: null, commitGuard: null,
+    // Usage-capture CLIs have no business reaching the host control plane
+    // either (same escape via pty-host RPC / meta broker).
+    controlSockDenies: seatbeltControlSockPaths(null),
+    sockets: {}, extraBinds: [], extraEnv: {}, authSock: null,
+    // Pass app through so app-specific env (e.g. opencode's host XDG dirs)
+    // resolves the same way as a full session launch.
+    app,
+    claudeDir: installDir, tools: null,
+  });
+  return {
+    command: SANDBOX_EXEC,
+    args: ['-f', sb.profilePath, '/usr/bin/env', ...seatbeltEnvArgs(sb.env),
+      MACOS_BASH, ENTRYPOINT, ...withClaude(targetCommand, command)],
+    docker: false,
+    stateDir: null,
+    seatbeltDir: sb.dir,
+    seatbeltFiles: null, // minimal launches never request an orchestrator overlay
+    gitBrokerProc: null,
+    gitBrokerDir: null,
+    commitGuardDir: null,
+  };
+}
 export function buildMinimalSandboxSpawn({ cwd, targetCommand, app = 'claude' }) {
   if (IS_MACOS) {
-    // installDir is load-bearing here too (not just the full launch): without
-    // it, CLIs installed outside the default allow trees (~/.opencode/bin,
-    // Volta/mise shims, custom npm prefixes) are exec-denied, and the usage
-    // callers silently fall back to an unsandboxed direct launch.
-    const { command, installDir } = resolveApp(app);
-    ensureHostAgentConfigDirs();
-    const sb = buildSeatbeltLaunch({
-      cwd, hostHome: HOME, homeDir: null, sandboxPathBase: SANDBOX_PATH,
-      nodeBin: realpathSync(process.execPath),
-      scripts: seatbeltScripts(), ssh: seatbeltSsh(),
-      gitBroker: null, commitGuard: null,
-      // Usage-capture CLIs have no business reaching the host control plane
-      // either (same escape via pty-host RPC / meta broker).
-      controlSockDenies: seatbeltControlSockPaths(null),
-      sockets: {}, extraBinds: [], extraEnv: {}, authSock: null,
-      claudeDir: installDir, tools: null,
-    });
-    return {
-      command: SANDBOX_EXEC,
-      args: ['-f', sb.profilePath, '/usr/bin/env', ...seatbeltEnvArgs(sb.env),
-        MACOS_BASH, ENTRYPOINT, ...withClaude(targetCommand, command)],
-      docker: false,
-      stateDir: null,
-      seatbeltDir: sb.dir,
-      seatbeltFiles: null, // minimal launches never request an orchestrator overlay
-      gitBrokerProc: null,
-      gitBrokerDir: null,
-      commitGuardDir: null,
-    };
+    return buildMinimalSeatbeltSpawn({ cwd, targetCommand, app });
   }
   const { command, installDir } = resolveApp(app);
   const bwrapArgs = buildBwrapArgs({
