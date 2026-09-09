@@ -595,6 +595,9 @@ export function buildSeatbeltLaunch({
     if (gitBroker) {
       env.CCSANDBOX_GIT_BROKER_SOCK = gitBroker.sockPath;
       env.CCSANDBOX_GIT_ALLOWLIST = gitBroker.allowlistPath;
+      // Per-session token for the broker connection (git-broker.js): the socket
+      // shares a /tmp dir with every concurrent session's broker here.
+      if (gitBroker.token) env.CCSANDBOX_GIT_BROKER_TOKEN = gitBroker.token;
       env.GIT_CONFIG_NOSYSTEM = '1';
       if (ssh.realSsh) {
         env.CCSANDBOX_REAL_SSH = ssh.realSsh;

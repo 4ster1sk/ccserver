@@ -88,6 +88,7 @@ const DENY_MESSAGES = {
   'not-allowlisted': () => 'sandbox: gh access to this repo is not allow-listed for this session',
   'blocked-message': (argv, field) => `sandbox: this gh command's --${field || 'body'} matches a blocked pattern (see sandbox.config.json's commitMessageGuard.blockedPatterns) -- likely a Claude-Session: trailer or claude.ai/code/session_ URL, which must not leak into a PR`,
   'bad-request': () => 'sandbox: malformed gh-broker request',
+  unauthorized: () => 'sandbox: gh-broker rejected this session\'s token (CCSANDBOX_GIT_BROKER_TOKEN missing or wrong)',
   'exec-failed': () => 'sandbox: gh-broker failed to run gh on the host',
   timeout: () => 'sandbox: gh-broker timed out running this gh command',
 };
@@ -107,7 +108,14 @@ async function main() {
     process.exit(1);
   }
 
-  const req = { op: 'gh-exec', argv, stdin: stdinBuf.length ? stdinBuf.toString('base64') : undefined };
+  const req = {
+    op: 'gh-exec',
+    // Per-session connection token (git-broker.js): shared-/tmp socket on
+    // macOS Seatbelt, so the broker authenticates the caller first.
+    token: process.env.CCSANDBOX_GIT_BROKER_TOKEN || '',
+    argv,
+    stdin: stdinBuf.length ? stdinBuf.toString('base64') : undefined,
+  };
   const result = await requestExec(req, sockPath);
 
   if (!result) {

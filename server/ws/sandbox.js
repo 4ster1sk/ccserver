@@ -1557,6 +1557,10 @@ function buildBwrapArgs({ cwd, docker, gpg, extraBinds, extraEnv, authSock, stat
       '--setenv', 'CCSANDBOX_GIT_BROKER_SOCK', SANDBOX_BROKER_SOCK_PATH,
       '--setenv', 'CCSANDBOX_GIT_ALLOWLIST', SANDBOX_ALLOWLIST_PATH,
     );
+    // Per-session broker connection token (git-broker.js). bwrap binds the
+    // socket per-session so this is defense-in-depth here, but the broker
+    // requires it unconditionally now -- so both backends must supply it.
+    if (gitBroker.token) args.push('--setenv', 'CCSANDBOX_GIT_BROKER_TOKEN', gitBroker.token);
   }
 
   // Commit-message guard: an independently-toggled commit-msg hook (see

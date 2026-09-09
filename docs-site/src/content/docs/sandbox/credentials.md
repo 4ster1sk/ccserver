@@ -11,6 +11,8 @@ description: サンドボックス内から git/ssh/gpg/gh を安全に使うた
 
 git の `credential.helper` がホスト側の git-broker プロセス (サンドボックスの外で動作、`gh auth token` を都度取得) に host+path を問い合わせ、許可されたリポジトリだけにトークンを渡します。トークン自体はサンドボックス内のファイルには一切現れません。
 
+broker への接続はセッション毎の乱数トークン (`CCSANDBOX_GIT_BROKER_TOKEN`、env 経由) で認証されます。macOS Seatbelt では broker ソケットが `/tmp` 配下の共有ランタイム dir に置かれ、並行する他セッションからも `connect()` 可能なため、トークン無し / 不一致の要求は op 判定より前に `unauthorized` で弾かれます (他セッションはこのトークンを読めません — profile が `KERN_PROCARGS2` を deny しているため env が覗けない)。bwrap では従来どおりソケット自体がセッション毎マウントなので、トークンは二重の防御です。
+
 ## git — SSH / ssh-agent 転送
 
 `/usr/bin/ssh` と `$GIT_SSH_COMMAND` を、起動時に読み取り専用で渡された許可リスト (`gitBroker` が算出したのと同じ owner/repo) と照合するラッパーに差し替えます。許可されなければネットワークに出る前に拒否されます。

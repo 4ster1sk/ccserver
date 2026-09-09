@@ -67,7 +67,7 @@ function runWrapper(argv, feedStdin) {
   return new Promise((resolve) => {
     const child = spawn(process.execPath, [WRAPPER, ...argv], {
       cwd: repoDir,
-      env: { ...process.env, CCSANDBOX_GIT_BROKER_SOCK: broker.sockPath },
+      env: { ...process.env, CCSANDBOX_GIT_BROKER_SOCK: broker.sockPath, CCSANDBOX_GIT_BROKER_TOKEN: broker.token },
       stdio: ['pipe', 'pipe', 'pipe'],
     });
     let out = '';

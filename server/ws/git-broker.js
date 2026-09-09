@@ -51,7 +51,7 @@ import { existsSync, mkdirSync, readFileSync, statSync, unlinkSync, writeFileSyn
 import { tmpdir } from 'node:os';
 import { createServer } from 'node:net';
 import { execFileSync, spawn } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
+import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { isAbsolute, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { computeGitAllowlist, normalizeGitUrl, resolveOriginUrl } from './gitAllowlist.js';
@@ -282,12 +282,33 @@ async function handleGhExec(req, conn, ctx) {
   conn.end(`${JSON.stringify(result)}\n`);
 }
 
+// Constant-time compare that never throws and rejects length mismatches
+// (timingSafeEqual requires equal-length buffers).
+function tokenEq(a, b) {
+  if (typeof a !== 'string' || typeof b !== 'string' || a.length === 0) return false;
+  const ab = Buffer.from(a);
+  const bb = Buffer.from(b);
+  if (ab.length !== bb.length) return false;
+  try { return timingSafeEqual(ab, bb); } catch { return false; }
+}
+
 function handleRequest(line, conn, ctx) {
   let req;
   try {
     req = JSON.parse(line);
   } catch {
     conn.end(`${JSON.stringify({ ok: false, reason: 'bad-request' })}\n`);
+    return;
+  }
+  // Connection auth: on macOS Seatbelt this socket sits in a shared /tmp dir
+  // reachable by every concurrent sandboxed session (bwrap binds it per-session
+  // so this is belt-and-suspenders there). Without a matching per-session token
+  // -- delivered to the sandbox via CCSANDBOX_GIT_BROKER_TOKEN, and unreadable
+  // from a peer session's env now that KERN_PROCARGS2 is denied -- a session
+  // could borrow another session's repo-scoped credentials. Fail closed: no
+  // configured token rejects everything.
+  if (!tokenEq(req && req.token, ctx.token)) {
+    conn.end(`${JSON.stringify({ ok: false, reason: 'unauthorized' })}\n`);
     return;
   }
   if (req && req.op === 'credential') {
@@ -322,7 +343,10 @@ function runServer({ sock, allowlist, cwd, commitGuard }) {
       guardPatterns = [];
     }
   }
-  const ctx = { allowSet, cwd, guardPatterns };
+  // Per-session connection token (see handleRequest). Delivered via env, not
+  // argv: the broker process is unsandboxed, but keeping it out of the command
+  // line avoids incidental exposure via crash reports / process listings.
+  const ctx = { allowSet, cwd, guardPatterns, token: process.env.CCSANDBOX_BROKER_TOKEN || '' };
 
   try { unlinkSync(sock); } catch { /* fresh dir, usually not present */ }
 
@@ -366,26 +390,30 @@ function runServer({ sock, allowlist, cwd, commitGuard }) {
 
 // Synchronous readiness probe: spawn a short-lived helper that connects and expects a JSON line.
 // Uses execFileSync with timeout so the current thread can block without starving the event loop.
-function probeBrokerSync(sockPath, timeoutMs = 700) {
+function probeBrokerSync(sockPath, timeoutMs = 700, token = '') {
   const probeScript = `
     const net=require('net');
     const sock=process.argv[1];
+    const tok=process.argv[2]||'';
     const c=net.createConnection(sock);
     let buf='';
     const t=setTimeout(()=>process.exit(2), ${timeoutMs});
-    c.on('connect',()=>{ try{c.write('{\"op\":\"probe\"}\\n');}catch{} });
+    c.on('connect',()=>{ try{c.write(JSON.stringify({op:'probe',token:tok})+'\\n');}catch{} });
     c.on('data',d=>{ buf+=d; if(buf.includes('\\n')){ clearTimeout(t); process.stdout.write(buf); c.end(); }});
     c.on('error',()=>{ clearTimeout(t); process.exit(1); });
     c.on('close',()=>{ if(buf) process.exit(0); });
     c.on('end',()=>{ clearTimeout(t); process.exit(buf.includes('\\n')?0:1); });
   `;
   try {
-    const out = execFileSync(process.execPath, ['-e', probeScript, sockPath], {
+    const out = execFileSync(process.execPath, ['-e', probeScript, sockPath, token], {
       encoding: 'utf-8',
       timeout: timeoutMs + 500,
       stdio: ['ignore', 'pipe', 'pipe'],
     });
-    return typeof out === 'string' && out.includes('\n');
+    // A `\n`-terminated line means the broker is up and accepted our token
+    // (an unauthorized reply is still a valid line -- but the probe always
+    // sends the real token, so a well-formed response = ready + authed).
+    return typeof out === 'string' && out.includes('\n') && !out.includes('"unauthorized"');
   } catch {
     return false;
   }
@@ -443,9 +471,17 @@ export function startGitBroker({ cwd, blockedPatterns = null }) {
     }
   }
 
+  // Per-session connection token: the sandbox gets it via
+  // CCSANDBOX_GIT_BROKER_TOKEN, the --serve child via CCSANDBOX_BROKER_TOKEN.
+  // A concurrent session (which cannot read this env now that the Seatbelt
+  // profile denies KERN_PROCARGS2) is rejected with reason:"unauthorized".
+  const token = randomBytes(24).toString('base64url');
   const serveArgs = [__filename, '--serve', '--sock', sockPath, '--allowlist', allowlistPath, '--cwd', cwd];
   if (commitGuardPath) serveArgs.push('--commit-guard', commitGuardPath);
-  const proc = spawn(process.execPath, serveArgs, { stdio: ['ignore', 'pipe', 'pipe'] });
+  const proc = spawn(process.execPath, serveArgs, {
+    stdio: ['ignore', 'pipe', 'pipe'],
+    env: { ...process.env, CCSANDBOX_BROKER_TOKEN: token },
+  });
 
   proc.stdout.on('data', (d) => process.stdout.write(`[git-broker] ${d}`));
   proc.stderr.on('data', (d) => process.stderr.write(`[git-broker] ${d}`));
@@ -485,14 +521,14 @@ export function startGitBroker({ cwd, blockedPatterns = null }) {
   }
 
   // Readiness probe: ensure the broker actually speaks the protocol
-  const probed = probeBrokerSync(sockPath, 500);
+  const probed = probeBrokerSync(sockPath, 500, token);
   if (!probed) {
     try { proc.kill('SIGKILL'); } catch {}
     try { rmSync(dir, { recursive: true, force: true }); } catch {}
     throw new Error(`git broker readiness probe failed for ${cwd}: no response on ${sockPath}`);
   }
 
-  return { proc, dir, sockPath, allowlistPath, allowlist, commitGuardPath };
+  return { proc, dir, sockPath, allowlistPath, allowlist, commitGuardPath, token };
 }
 
 // Entry point when this file is spawned directly by startGitBroker().
