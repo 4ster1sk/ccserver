@@ -47,7 +47,7 @@
 // commitMessageGuard.enabled); omitted entirely, this is a no-op, same as
 // before plan8.
 
-import { existsSync, mkdirSync, readFileSync, statSync, unlinkSync, writeFileSync, rmSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, unlinkSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { createServer } from 'node:net';
 import { execFileSync, spawn } from 'node:child_process';
@@ -102,9 +102,26 @@ export function ensureHostRuntimeDir() {
   const base = hostRuntimeDir();
   if (process.platform !== 'darwin' || process.env.XDG_RUNTIME_DIR) return base;
   mkdirSync(base, { recursive: true, mode: 0o700 });
-  const st = statSync(base);
+  let st = statSync(base);
+  // mkdirSync's mode option never fixes a PRE-existing dir. When THIS uid
+  // already owns it, a too-loose mode (a past run's 0755, an earlier tool,
+  // a lax host umask) is ours to correct -- self-heal to 0700 rather than
+  // throwing on every sandbox / MCP-broker / pty-host launch on the host
+  // until the dir is deleted by hand (mcpBroker.js and rpcServer.js
+  // deliberately propagate this throw, so a non-heal here bricks those
+  // features). A dir owned by ANOTHER uid is still refused: binding sockets
+  // into a dir its owner can unlink/replace is the exact threat this guard
+  // exists for, and chmod cannot take ownership.
+  if (st.uid === UID && (st.mode & 0o777) !== 0o700) {
+    try { chmodSync(base, 0o700); } catch { /* fall through to the throw */ }
+    st = statSync(base);
+  }
   if (st.uid !== UID || (st.mode & 0o777) !== 0o700) {
-    throw new Error(`host runtime dir is not a private 0700 dir owned by uid ${UID}: ${base}`);
+    throw new Error(
+      `host runtime dir is not a private 0700 dir owned by uid ${UID}: ${base} `
+      + `(owner uid ${st.uid}, mode ${(st.mode & 0o777).toString(8)}); `
+      + 'remove it or fix its ownership/permissions, then relaunch',
+    );
   }
   return base;
 }

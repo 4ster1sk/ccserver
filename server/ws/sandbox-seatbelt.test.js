@@ -21,6 +21,7 @@ import {
   escapeSeatbeltLiteral,
   escapeSeatbeltRegex,
   pathVariants,
+  pathVariantsDeep,
   seatbeltEnvArgs,
   seedClaudeCredentialsFromHostKeychain,
   keychainAccount,
@@ -314,17 +315,24 @@ test('buildSeatbeltLaunch wires gitBroker shims and merges GIT_CONFIG_COUNT', ()
   assert.equal(sb.env.CCSANDBOX_SSH_CONFIG, sshConfig);
   const hook = join(sb.hooksDir, 'commit-msg');
   assert.ok(existsSync(hook), 'commit-msg hook shim exists');
-  assert.equal(sb.env.GIT_CONFIG_COUNT, '3');
-  assert.equal(sb.env.GIT_CONFIG_KEY_0, 'credential.useHttpPath');
-  assert.equal(sb.env.GIT_CONFIG_VALUE_0, 'true');
-  assert.equal(sb.env.GIT_CONFIG_KEY_1, 'credential.helper');
+  assert.equal(sb.env.GIT_CONFIG_COUNT, '4');
+  // KEY_0 is an empty-string credential.helper: it clears any helper the
+  // agent left in .gitconfig / .config/git/config / repo .git/config before
+  // KEY_2 re-establishes the broker shim (git multi-valued keys APPEND via
+  // GIT_CONFIG_KEY_*, so without this reset a persistent-HOME `store` helper
+  // would still fire and exfiltrate the broker token).
+  assert.equal(sb.env.GIT_CONFIG_KEY_0, 'credential.helper');
+  assert.equal(sb.env.GIT_CONFIG_VALUE_0, '');
+  assert.equal(sb.env.GIT_CONFIG_KEY_1, 'credential.useHttpPath');
+  assert.equal(sb.env.GIT_CONFIG_VALUE_1, 'true');
+  assert.equal(sb.env.GIT_CONFIG_KEY_2, 'credential.helper');
   // credential.helper is backslash-escaped as a bare word (a leading `"` is
   // parsed by git as a helper NAME, never executed). No metacharacters in
   // binDir here, so the value is the plain path. GIT_SSH_COMMAND above stays
   // sh-quoted: that one IS a shell command string.
-  assert.equal(sb.env.GIT_CONFIG_VALUE_1, join(sb.binDir, 'ccserver-git-credential-helper'));
-  assert.equal(sb.env.GIT_CONFIG_KEY_2, 'core.hooksPath');
-  assert.equal(sb.env.GIT_CONFIG_VALUE_2, sb.hooksDir);
+  assert.equal(sb.env.GIT_CONFIG_VALUE_2, join(sb.binDir, 'ccserver-git-credential-helper'));
+  assert.equal(sb.env.GIT_CONFIG_KEY_3, 'core.hooksPath');
+  assert.equal(sb.env.GIT_CONFIG_VALUE_3, sb.hooksDir);
   assert.equal(sb.env.GIT_SSH_COMMAND, `"${join(sb.binDir, 'ccserver-git-ssh')}"`);
   assert.equal(sb.env.CCSANDBOX_MCP_SOCK, undefined);
   assert.ok(sb.env.PATH.includes(sb.binDir));
@@ -726,21 +734,22 @@ test('sibling launch dirs are deny-pinned for read and write', () => {
   // re-allowed after the deny (last-match-wins). Siblings stay unreachable
   // despite the broad tmpdir allow rules (0o700 is per-UID, not per-session).
   assert.ok(!text.includes('(?!'), 'no lookahead: not valid Seatbelt ERE');
-  assert.ok(text.includes('ccserver-seatbelt-'), 'sibling launch dirs pinned');
+  assert.ok(text.includes('ccserver-sb-'), 'sibling launch dirs pinned');
   const denyWrites = text.split('\n').filter((l) => l.includes('(deny file-write*')).join('\n');
   const denyReads = text.split('\n').filter((l) => l.includes('(deny file-read*')).join('\n');
-  assert.ok(denyWrites.includes('ccserver-seatbelt-'), 'write pin covers siblings');
-  assert.ok(denyReads.includes('ccserver-seatbelt-'), 'read pin covers siblings');
+  assert.ok(denyWrites.includes('ccserver-sb-'), 'write pin covers siblings');
+  assert.ok(denyReads.includes('ccserver-sb-'), 'read pin covers siblings');
 });
 
 // Minimal last-match-wins emulator for file-write* rules: returns the op of
-// the last rule whose regex selector matches the path ('deny' when nothing
-// matches, mirroring `(deny default)`).
+// the last rule whose regex OR literal selector matches the path ('deny' when
+// nothing matches, mirroring `(deny default)`).
 function finalWriteVerdict(text, path) {
   let verdict = 'deny';
   for (const m of text.matchAll(/^\s*\((allow|deny) file-write\*\s*(.*)\)$/gm)) {
     const bodies = [...m[2].matchAll(/\(regex #"(.*?)"\)/g)].map((x) => x[1]);
-    if (bodies.some((r) => new RegExp(r).test(path))) verdict = m[1];
+    const lits = [...m[2].matchAll(/\(literal "((?:[^"\\]|\\.)*)"\)/g)].map((x) => x[1].replace(/\\(.)/g, '$1'));
+    if (bodies.some((r) => new RegExp(r).test(path)) || lits.includes(path)) verdict = m[1];
   }
   return verdict;
 }
@@ -757,7 +766,7 @@ test('own launch dir stays writable: pin denies do not override the re-allow', (
   assert.equal(finalWriteVerdict(text, join(sb.binDir, 'gh')), 'deny');
   assert.equal(finalWriteVerdict(text, join(sb.profilePath)), 'deny');
   assert.equal(
-    finalWriteVerdict(text, join(dirname(sb.dir), 'ccserver-seatbelt-sibling', 'sandbox.sb')),
+    finalWriteVerdict(text, join(dirname(sb.dir), 'ccserver-sb-sibling', 'sandbox.sb')),
     'deny',
   );
 });
@@ -809,8 +818,10 @@ test('spaced launch dirs: helper is bare-word-escaped, ssh command is quoted', (
     trackDir(sb.dir);
     assert.ok(sb.binDir.includes(' '), 'launch dir really contains a space');
     const helperShim = join(sb.binDir, 'ccserver-git-credential-helper');
-    assert.equal(sb.env.GIT_CONFIG_VALUE_1, helperShim.replace(/ /g, '\\ '));
-    assert.ok(sb.env.GIT_CONFIG_VALUE_1.startsWith('/'), 'helper keeps its leading slash');
+    // KEY_2 is the real helper (KEY_0 is the empty-string reset, KEY_1 useHttpPath).
+    assert.equal(sb.env.GIT_CONFIG_KEY_2, 'credential.helper');
+    assert.equal(sb.env.GIT_CONFIG_VALUE_2, helperShim.replace(/ /g, '\\ '));
+    assert.ok(sb.env.GIT_CONFIG_VALUE_2.startsWith('/'), 'helper keeps its leading slash');
     assert.equal(sb.env.GIT_SSH_COMMAND, `"${join(sb.binDir, 'ccserver-git-ssh')}"`);
   } finally {
     if (prev === undefined) delete process.env.CCSERVER_SANDBOX_SEATBELT_TMP;
@@ -867,11 +878,11 @@ test('sibling deny pins cover both raw and realpath spellings of the base', () =
     trackDir(sb.dir);
     const text = readFileSync(sb.profilePath, 'utf-8');
     assert.ok(
-      text.includes(`^${escapeSeatbeltRegex(linkBase)}/ccserver-seatbelt-`),
+      text.includes(`^${escapeSeatbeltRegex(linkBase)}/ccserver-sb-`),
       'raw base spelling pinned',
     );
     assert.ok(
-      text.includes(`^${escapeSeatbeltRegex(realBaseResolved)}/ccserver-seatbelt-`),
+      text.includes(`^${escapeSeatbeltRegex(realBaseResolved)}/ccserver-sb-`),
       'realpath base spelling pinned',
     );
   } finally {
@@ -995,6 +1006,7 @@ test('buildSeatbeltLaunch: a fully-loaded launch produces a paren-balanced profi
   DIRS.push(brokerDir, sockDir, homeDir);
   const sb = buildSeatbeltLaunch(baseOpts({
     homeDir,
+    hostRuntimeDir: sockDir, // exercise the runtime-dir deny/re-allow clause too
     gitBroker: { sockPath: join(brokerDir, 'b.sock'), allowlistPath: join(brokerDir, 'a.json'), dir: brokerDir, token: 'tok' },
     commitGuard: { configPath: join(brokerDir, 'guard.json') },
     gnupg: true,
@@ -1105,6 +1117,183 @@ test('buildSeatbeltLaunch pins ghPaths only while the git broker is on', () => {
   trackDir(sbOff.dir);
   const textOff = readFileSync(sbOff.profilePath, 'utf-8');
   assert.ok(!textOff.includes('(literal "/opt/homebrew/bin/gh")'), 'no gh pin without a broker');
+});
+
+// --- security review 2026-09-10 fixes A-F -------------------------------------
+
+test('A: seatbeltControlSockPaths pins every pty-host shard, not just shard 0', () => {
+  const prevShards = process.env.CCSERVER_PTY_HOST_SHARDS;
+  const prevSock = process.env.CCSERVER_PTY_HOST_SOCK;
+  const prevXdg = process.env.XDG_RUNTIME_DIR;
+  delete process.env.CCSERVER_PTY_HOST_SOCK;
+  delete process.env.XDG_RUNTIME_DIR;
+  process.env.CCSERVER_PTY_HOST_SHARDS = '3';
+  try {
+    const base = hostRuntimeDir();
+    const pins = seatbeltControlSockPaths(null);
+    // shard 0 keeps its historical name; shards 1..N-1 get sibling paths --
+    // the exact set getPtyHostSockPath() derives (pty-host/index.js).
+    assert.ok(pins.includes(join(base, PTY_HOST_SOCK_NAME)), 'shard 0 pinned');
+    assert.ok(pins.includes(getPtyHostSockPath(1)), 'shard 1 pinned');
+    assert.ok(pins.includes(getPtyHostSockPath(2)), 'shard 2 pinned');
+    assert.ok(!pins.includes(join(base, 'ccserver-pty-host-3.sock')), 'no phantom shard 3');
+  } finally {
+    if (prevShards === undefined) delete process.env.CCSERVER_PTY_HOST_SHARDS;
+    else process.env.CCSERVER_PTY_HOST_SHARDS = prevShards;
+    if (prevSock === undefined) delete process.env.CCSERVER_PTY_HOST_SOCK;
+    else process.env.CCSERVER_PTY_HOST_SOCK = prevSock;
+    if (prevXdg === undefined) delete process.env.XDG_RUNTIME_DIR;
+    else process.env.XDG_RUNTIME_DIR = prevXdg;
+  }
+});
+
+test('A: shard pins honor a CCSERVER_PTY_HOST_SOCK override', () => {
+  const prevShards = process.env.CCSERVER_PTY_HOST_SHARDS;
+  const prevSock = process.env.CCSERVER_PTY_HOST_SOCK;
+  process.env.CCSERVER_PTY_HOST_SHARDS = '2';
+  process.env.CCSERVER_PTY_HOST_SOCK = '/tmp/custom-pty.sock';
+  try {
+    const pins = seatbeltControlSockPaths(null);
+    assert.ok(pins.includes('/tmp/custom-pty.sock'), 'override shard 0 pinned');
+    assert.ok(pins.includes('/tmp/custom-pty.sock-1'), 'override shard 1 pinned');
+  } finally {
+    if (prevShards === undefined) delete process.env.CCSERVER_PTY_HOST_SHARDS;
+    else process.env.CCSERVER_PTY_HOST_SHARDS = prevShards;
+    if (prevSock === undefined) delete process.env.CCSERVER_PTY_HOST_SOCK;
+    else process.env.CCSERVER_PTY_HOST_SOCK = prevSock;
+  }
+});
+
+test('B: pathVariantsDeep resolves the symlink spelling through missing components', () => {
+  // Existing dir: both spellings, like pathVariants.
+  const real = realpathSync(tmpRoot);
+  assert.deepEqual(new Set(pathVariantsDeep(tmpRoot)), new Set([tmpRoot, real].map((p) => p)));
+  // Deep missing path under /tmp: the /private/tmp spelling must still appear,
+  // no matter how many trailing components do not exist yet.
+  const deep = '/tmp/ccserver-runtime-999/ccserver-meta.d/sock';
+  const got = pathVariantsDeep(deep);
+  assert.ok(got.includes(deep), 'raw spelling kept');
+  assert.ok(got.includes('/private/tmp/ccserver-runtime-999/ccserver-meta.d/sock'), 'resolved spelling synthesized');
+});
+
+test('B: the 2-level meta socket is net-pinned in BOTH /tmp spellings when the runtime dir is absent', () => {
+  // The bug: pathVariants() on a non-existent 2-level path returned only the
+  // raw spelling, so the meta broker stayed reachable via /private/tmp.
+  const absentBase = join(tmpdir(), `ccserver-rt-absent-${randomUUID()}`);
+  const metaSock = join(absentBase, 'ccserver-meta.d', 'sock');
+  const prev = process.env.CCSERVER_SANDBOX_SEATBELT_TMP;
+  process.env.CCSERVER_SANDBOX_SEATBELT_TMP = tmpRoot; // keep the launch dir out of absentBase
+  try {
+    const sb = buildSeatbeltLaunch(baseOpts({ controlSockDenies: [metaSock] }));
+    trackDir(sb.dir);
+    const text = readFileSync(sb.profilePath, 'utf-8');
+    assert.ok(text.includes(`(path-literal "${metaSock}")`), 'raw spelling net-pinned');
+    const priv = metaSock.replace('/tmp/', '/private/tmp/');
+    assert.ok(text.includes(`(path-literal "${priv}")`), 'resolved spelling net-pinned');
+    // ...and the socket file itself stays write-denied in both spellings.
+    assert.equal(finalWriteVerdict(text, metaSock), 'deny');
+    assert.equal(finalWriteVerdict(text, priv), 'deny');
+  } finally {
+    if (prev === undefined) delete process.env.CCSERVER_SANDBOX_SEATBELT_TMP;
+    else process.env.CCSERVER_SANDBOX_SEATBELT_TMP = prev;
+  }
+});
+
+test('C: the host runtime dir tree is deny-written, with only this session\'s sockets re-allowed', () => {
+  const runtimeDir = join(tmpdir(), `ccserver-rt-${randomUUID()}`);
+  mkdirSync(runtimeDir, { recursive: true });
+  DIRS.push(runtimeDir);
+  const brokerDir = join(runtimeDir, 'ccserver-git-broker-x');
+  mkdirSync(brokerDir, { recursive: true });
+  const brokerSock = join(brokerDir, 'broker.sock');
+  const notifySock = join(runtimeDir, 'ccserver-notify.d', 'sock');
+  const ptySock = join(runtimeDir, PTY_HOST_SOCK_NAME);
+  const sb = buildSeatbeltLaunch(baseOpts({
+    hostRuntimeDir: runtimeDir,
+    gitBroker: { sockPath: brokerSock, allowlistPath: join(brokerDir, 'allow.json'), dir: brokerDir },
+    sockets: { notify: notifySock },
+    controlSockDenies: [ptySock],
+  }));
+  trackDir(sb.dir);
+  const text = readFileSync(sb.profilePath, 'utf-8');
+  // The runtime dir itself and an arbitrary path in it (the rename/rmdir DoS
+  // vector) are write-denied...
+  assert.equal(finalWriteVerdict(text, runtimeDir), 'deny', 'runtime dir itself unwritable');
+  assert.equal(finalWriteVerdict(text, join(runtimeDir, 'attacker-rename-target')), 'deny');
+  // ...but the sockets this session legitimately connect()s to stay writable.
+  assert.equal(finalWriteVerdict(text, brokerSock), 'allow', 'broker socket connectable');
+  assert.equal(finalWriteVerdict(text, notifySock), 'allow', 'notify socket connectable');
+  // ...while the pty-host control socket stays denied (never re-allowed).
+  assert.equal(finalWriteVerdict(text, ptySock), 'deny', 'pty-host socket stays unwritable');
+});
+
+test('C: no runtime-dir deny is emitted without a hostRuntimeDir (bwrap-path / unset)', () => {
+  const sb = buildSeatbeltLaunch(baseOpts());
+  trackDir(sb.dir);
+  const text = readFileSync(sb.profilePath, 'utf-8');
+  assert.ok(!text.includes('host runtime dir: deny-write'), 'no runtime-dir clause when not requested');
+});
+
+test('D: credential.helper is reset to empty BEFORE the broker shim is re-added', () => {
+  const brokerDir = mkdtempSync(join(tmpdir(), 'ccserver-sbtest-dreset-'));
+  DIRS.push(brokerDir);
+  const sb = buildSeatbeltLaunch(baseOpts({
+    gitBroker: { sockPath: join(brokerDir, 'b.sock'), allowlistPath: join(brokerDir, 'a.json'), dir: brokerDir },
+  }));
+  trackDir(sb.dir);
+  const n = Number(sb.env.GIT_CONFIG_COUNT);
+  const entries = [];
+  for (let i = 0; i < n; i++) entries.push([sb.env[`GIT_CONFIG_KEY_${i}`], sb.env[`GIT_CONFIG_VALUE_${i}`]]);
+  const helperIdxs = entries.map(([k], i) => (k === 'credential.helper' ? i : -1)).filter((i) => i >= 0);
+  assert.equal(helperIdxs.length, 2, 'exactly a reset entry + the shim');
+  assert.equal(entries[helperIdxs[0]][1], '', 'first credential.helper is the empty-string reset');
+  assert.ok(entries[helperIdxs[1]][1].includes('ccserver-git-credential-helper'), 'second is the broker shim');
+  assert.ok(helperIdxs[0] < helperIdxs[1], 'reset comes first');
+});
+
+test('D: ~/.git-credentials is deny-write-pinned while the broker is on', () => {
+  const brokerDir = mkdtempSync(join(tmpdir(), 'ccserver-sbtest-dcreds-'));
+  DIRS.push(brokerDir);
+  const homeDir = mkdtempSync(join(tmpdir(), 'ccserver-sbtest-dcreds-home-'));
+  DIRS.push(homeDir);
+  const sb = buildSeatbeltLaunch(baseOpts({
+    homeDir,
+    gitBroker: { sockPath: join(brokerDir, 'b.sock'), allowlistPath: join(brokerDir, 'a.json'), dir: brokerDir },
+  }));
+  trackDir(sb.dir);
+  const text = readFileSync(sb.profilePath, 'utf-8');
+  assert.equal(finalWriteVerdict(text, join(homeDir, '.git-credentials')), 'deny');
+  assert.equal(finalWriteVerdict(text, join(homeDir, '.config', 'git', 'credentials')), 'deny');
+  // Off without a broker (bwrap parity: those files stay agent-writable).
+  const sbOff = buildSeatbeltLaunch(baseOpts({ homeDir, gitBroker: null }));
+  trackDir(sbOff.dir);
+  const textOff = readFileSync(sbOff.profilePath, 'utf-8');
+  assert.notEqual(finalWriteVerdict(textOff, join(homeDir, '.git-credentials')), 'deny');
+});
+
+test('F: the in-sandbox XDG_RUNTIME_DIR fits sockaddr_un with room for a socket name', () => {
+  // A full-UUID launch-dir leaf pushed <dir>/runtime past darwin's 104-byte
+  // sun_path limit, so gpg-agent / tmux / ssh ControlPath binds under
+  // $XDG_RUNTIME_DIR failed ENAMETOOLONG. The short leaf keeps headroom.
+  // Measure against the REAL per-user tmpdir, not the deliberately-long test
+  // override (CCSERVER_SANDBOX_SEATBELT_TMP), which no production launch uses.
+  const prev = process.env.CCSERVER_SANDBOX_SEATBELT_TMP;
+  delete process.env.CCSERVER_SANDBOX_SEATBELT_TMP;
+  try {
+    const sb = buildSeatbeltLaunch(baseOpts());
+    trackDir(sb.dir);
+    const rt = sb.env.XDG_RUNTIME_DIR;
+    assert.ok(rt.startsWith(`${sb.dir}/`), 'runtime dir still inside the single teardown unit');
+    assert.ok(rt.startsWith(tmpdir()), 'runtime dir under the real per-user tmpdir');
+    // tmux binds $XDG_RUNTIME_DIR/tmux-<uid>/default (~17 bytes); keep that clear.
+    assert.ok(
+      Buffer.byteLength(`${rt}/tmux-501/default`) < 104,
+      `${rt} (${Buffer.byteLength(rt)} bytes) leaves no room for a socket name`,
+    );
+  } finally {
+    if (prev === undefined) delete process.env.CCSERVER_SANDBOX_SEATBELT_TMP;
+    else process.env.CCSERVER_SANDBOX_SEATBELT_TMP = prev;
+  }
 });
 
 test('seatbeltEnvArgs serializes K=V pairs for /usr/bin/env', () => {

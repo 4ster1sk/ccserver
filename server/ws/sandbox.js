@@ -1742,7 +1742,26 @@ export function seatbeltControlSockPaths(metaSocketPath) {
   // pty-host socket.
   const base = hostRuntimeDir();
   const paths = [join(base, PTY_HOST_SOCK_NAME)];
-  if (process.env.CCSERVER_PTY_HOST_SOCK) paths.push(process.env.CCSERVER_PTY_HOST_SOCK);
+  // pty-host may be sharded (Issue #119 / plan5 Step5): shard 0 is
+  // PTY_HOST_SOCK_NAME, shard N>0 is ccserver-pty-host-<N>.sock (see
+  // getPtyHostSockPath() in pty-host/index.js). The shard count is fixed by
+  // CCSERVER_PTY_HOST_SHARDS at deploy time. Every shard's RPC socket accepts
+  // `spawn` with sandbox:false (unsandboxed host exec), so ALL of them -- not
+  // just shard 0 -- must be network-outbound deny-pinned, or a compromised
+  // agent connect()s to shard N and escapes the sandbox.
+  const rawShards = Number.parseInt(process.env.CCSERVER_PTY_HOST_SHARDS, 10);
+  const shardCount = Number.isInteger(rawShards) && rawShards > 0 ? rawShards : 1;
+  for (let i = 1; i < shardCount; i++) {
+    paths.push(join(base, `ccserver-pty-host-${i}.sock`));
+  }
+  if (process.env.CCSERVER_PTY_HOST_SOCK) {
+    // Operator override: shard 0 is the value verbatim, shard N is `<value>-N`
+    // (getPtyHostSockPath() again).
+    paths.push(process.env.CCSERVER_PTY_HOST_SOCK);
+    for (let i = 1; i < shardCount; i++) {
+      paths.push(`${process.env.CCSERVER_PTY_HOST_SOCK}-${i}`);
+    }
+  }
   const meta = join(base, META_SOCKET_DIR_NAME, 'sock');
   if (metaSocketPath !== meta) paths.push(meta);
   return paths;
@@ -1796,6 +1815,9 @@ export function buildMinimalSeatbeltSpawn({ cwd, targetCommand, app = 'claude' }
     // Usage-capture CLIs have no business reaching the host control plane
     // either (same escape via pty-host RPC / meta broker).
     controlSockDenies: seatbeltControlSockPaths(null),
+    // Deny-write the whole host runtime dir tree so a capture cannot
+    // rename/rmdir it out from under live sessions' control plane.
+    hostRuntimeDir: hostRuntimeDir(),
     sockets: {}, extraBinds: [], extraEnv: {}, authSock: null,
     // Pass app through so app-specific env (e.g. opencode's host XDG dirs)
     // resolves the same way as a full session launch.
@@ -2040,6 +2062,11 @@ export function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, mcpSoc
         // deny-pinned. The meta pin is skipped only for the meta-agent
         // session itself (metaSocketPath is set only there).
         controlSockDenies: seatbeltControlSockPaths(metaSocketPath),
+        // The runtime dir (short /tmp base on darwin) holds every session's
+        // control-plane sockets; deny-write the whole tree so this sandbox
+        // cannot rename/rmdir it and break other sessions (only its own
+        // sockets are re-allowed inside buildSeatbeltLaunch).
+        hostRuntimeDir: hostRuntimeDir(),
         gitBroker,
         commitGuard: commitGuard ? { configPath: commitGuard.configPath } : null,
         sockets: {

@@ -153,6 +153,28 @@ export function subtrees(p) {
   return pathVariants(p).map(subtreeRegex);
 }
 
+// Like pathVariants(), but resolves the symlink spelling even when `p` (or an
+// intermediate component) does not exist yet: walk up to the nearest existing
+// ancestor, realpath THAT, and re-append the missing trailing components.
+// Seatbelt mediates the symlink-RESOLVED path, so a pin built from a
+// not-yet-created path (a control socket before its broker has booted, the
+// per-UID runtime dir on a fresh host) would otherwise keep only the raw
+// spelling and silently miss every access via the resolved one (e.g. macOS
+// resolves /tmp -> /private/tmp). Always includes the raw spelling too.
+export function pathVariantsDeep(p) {
+  const abs = resolve(p);
+  const missing = [];
+  let cur = abs;
+  while (cur && cur !== dirname(cur) && !existsSync(cur)) {
+    missing.unshift(basename(cur));
+    cur = dirname(cur);
+  }
+  const out = new Set([abs]);
+  const bases = existsSync(cur) ? pathVariants(cur) : [cur];
+  for (const b of bases) out.add(missing.length ? join(b, ...missing) : b);
+  return [...out];
+}
+
 // Exact-match reads on every ancestor directory up to (excluding) "/".
 // Userspace realpath/lstat walks each ancestor component, and Seatbelt
 // mediates every one of them: subtree rules (^/a/b/...) do NOT cover the
@@ -219,6 +241,8 @@ export function buildSeatbeltProfileText({
   denyWriteRegexes = [],
   denyExecLiterals = [],
   denyNetOutboundLiterals = [],
+  runtimeDirDenyWriteRegexes = [],
+  runtimeSocketAllowLiterals = [],
 } = {}) {
   const line = (op, sel) => `  (${op} ${sel})`;
   const regexes = (list) => list.map((r) => `(regex #"${r}")`).join(' ');
@@ -353,6 +377,28 @@ export function buildSeatbeltProfileText({
       '',
     );
   }
+  // Host runtime dir (hostRuntimeDir(): the /tmp base on darwin that holds
+  // every session's control-plane sockets). The broad `^/tmp(/.*)?$` write
+  // allow above would otherwise leave the dir itself writable: a sandboxed
+  // process runs as the server's uid and owns it, and macOS sticky-bit does
+  // not stop an owner renaming/rmdir'ing its own entry -- so the agent could
+  // `rename()` the whole dir away and make EVERY other session's pty-host /
+  // meta / notify / usage / reviewer socket resolve to nothing (server-wide
+  // DoS from one sandbox). Deny-write the whole tree, then re-allow only the
+  // exact sockets this session legitimately connect()s to (connect() is
+  // mediated as file-write* on the socket path). pty-host / meta stay denied
+  // -- they are never in the re-allow list.
+  if (runtimeDirDenyWriteRegexes.length > 0) {
+    out.push(
+      ';; host runtime dir: deny-write the tree (rename/rmdir DoS), keep only',
+      ';; the sockets this session connect()s to reachable.',
+      line('deny file-write*', regexes(runtimeDirDenyWriteRegexes)),
+      '',
+    );
+    if (runtimeSocketAllowLiterals.length > 0) {
+      out.push(line('allow file-write*', literals(runtimeSocketAllowLiterals)), '');
+    }
+  }
   return out.join('\n');
 }
 
@@ -406,6 +452,11 @@ function expandAgainstHome(p, hostHome) {
 //                    network-outbound connect() -- file-write* pins cannot
 //                    stop connect(), and both sockets live inside the broad
 //                    tmp write rules on darwin
+//   hostRuntimeDir - git-broker.js's hostRuntimeDir() (the short /tmp base on
+//                    darwin holding every session's control-plane sockets):
+//                    the whole tree is deny-written so a sandboxed process
+//                    cannot rename/rmdir it and break other sessions' control
+//                    plane, with only this session's own sockets re-allowed
 //
 // Returns { dir, profilePath, binDir, hooksDir, homeDir, ruleCopies, nodeBin,
 // env }. `dir` is the single teardown unit (also covers the throwaway HOME
@@ -435,9 +486,20 @@ export function buildSeatbeltLaunch({
   tools = null,
   ghPaths = [],
   controlSockDenies = [],
+  hostRuntimeDir = null,
 }) {
   const launchId = randomUUID();
-  const dir = join(seatbeltBaseDir(), `ccserver-seatbelt-${launchId}`);
+  // The launch dir holds the in-sandbox XDG_RUNTIME_DIR (`<dir>/runtime`, see
+  // env below). Tools bind unix sockets directly under $XDG_RUNTIME_DIR
+  // (gpg-agent, tmux, `ssh -o ControlPath=%d/...`), and sockaddr_un.sun_path
+  // caps the whole path at ~104 bytes on darwin. The per-user $TMPDIR base
+  // (/var/folders/<...>/T, ~49 chars) plus a full-UUID leaf already pushes
+  // `<dir>/runtime` past that -- every such bind then fails ENAMETOOLONG
+  // (git-broker.js's hostRuntimeDir() picks a short /tmp base for exactly
+  // this reason). Keep the launch dir a single teardown unit but give it a
+  // short leaf so the runtime dir underneath stays inside the limit.
+  const shortId = launchId.replace(/-/g, '').slice(0, 12);
+  const dir = join(seatbeltBaseDir(), `ccserver-sb-${shortId}`);
   const binDir = join(dir, 'bin');
   const hooksDir = join(dir, 'hooks');
   const profilePath = join(dir, 'sandbox.sb');
@@ -648,6 +710,21 @@ export function buildSeatbeltLaunch({
         // $TMPDIR / CCSERVER_SANDBOX_SEATBELT_TMP cannot split it.
         env.GIT_SSH_COMMAND = shQuote(sshShim);
       }
+      // Reset the helper list FIRST. bwrap ro-binds GENERATED_GITCONFIG over
+      // ~/.gitconfig and so fully replaces a user-defined helper; there is no
+      // mount here, so credential.helper only rides GIT_CONFIG_KEY_* -- and
+      // git's multi-valued semantics make that an APPEND, not a replace. A
+      // persistent HOME that once ran `git config --global credential.helper
+      // store` during a gitBroker:false session (no .gitconfig write-pin
+      // then) would otherwise end up with an effective list of
+      // [store, broker-shim]: after a successful fetch git calls `approve` on
+      // every helper, `store` writes the broker's (repo-unscoped) token to
+      // ~/.git-credentials, and the agent -- which can read it -- then has an
+      // any-repo github.com credential. An empty-string credential.helper
+      // clears every helper read from .gitconfig / .config/git/config / repo
+      // .git/config that came before; the two entries below then re-establish
+      // only the broker shim.
+      gitConfigKeys.push(['credential.helper', '']);
       // useHttpPath is supplied by the ro-bound GENERATED_GITCONFIG on the
       // bwrap path; there is no mount here, so it rides GIT_CONFIG too.
       // Without it git drops the path from the credential description and
@@ -814,7 +891,7 @@ export function buildSeatbeltLaunch({
     // included), then re-allow our own subtree afterwards
     // (last-match-wins). Future sibling dirs stay covered by the deny.
     const siblingDeny = pathVariants(seatbeltBaseDir()).map((base) =>
-      `^${escapeSeatbeltRegex(base)}/ccserver-seatbelt-`);
+      `^${escapeSeatbeltRegex(base)}/ccserver-sb-`);
     const ownReAllow = subtrees(dir);
     // Raw keys / gh tokens are never reachable (mirrors bwrap's
     // BLOCKED_BIND_PATHS, unconditionally even with gitBroker off).
@@ -835,6 +912,11 @@ export function buildSeatbeltLaunch({
       ...(gitBroker ? [
         ...exactPins('.gitconfig', effectiveHome),
         ...exactPins(join('.config', 'git', 'config'), effectiveHome),
+        // Defense-in-depth for the credential.helper reset above: even if a
+        // `store` helper somehow still ran, it must not be able to persist a
+        // broker-issued token where the agent can read it back.
+        ...exactPins('.git-credentials', effectiveHome),
+        ...exactPins(join('.config', 'git', 'credentials'), effectiveHome),
       ] : []),
       // Pin the read-only invariant explicitly: the runtime dir lives under
       // TMPDIR, which the broad tmp write rules above also match -- these
@@ -924,20 +1006,16 @@ export function buildSeatbeltLaunch({
     }
 
     // Control-plane sockets may not exist yet (pty-host/meta boot lazily),
-    // and their parent runtime dir may not either. When it does exist,
-    // pathVariants(parent) yields both spellings; when it does not, keep
-    // the raw spelling and resolve via the grandparent (/tmp) so the
-    // symlink-resolved /private/tmp spelling is pinned too -- Seatbelt
-    // mediates the resolved path, and a raw-only pin would silently miss
-    // every connect().
+    // and NEITHER may any of their parent dirs: the pty-host socket sits one
+    // level below the runtime dir, the meta socket two levels below it, and
+    // on a fresh host the runtime dir itself is absent until the first broker
+    // starts. pathVariantsDeep() walks up to the first existing ancestor
+    // (ultimately /tmp) and synthesizes both the raw and the symlink-resolved
+    // (/private/tmp) spelling regardless of how many components are missing --
+    // a raw-only pin would let connect() walk around the deny via the
+    // resolved path Seatbelt actually mediates.
     const netDenyLiterals = [...new Set(
-      (controlSockDenies || []).filter(Boolean).flatMap((s) => {
-        const parent = dirname(s);
-        const parentVariants = existsSync(parent)
-          ? pathVariants(parent)
-          : [parent, ...pathVariants(dirname(parent)).map((d) => join(d, basename(parent)))];
-        return parentVariants.map((d) => join(d, basename(s)));
-      }),
+      (controlSockDenies || []).filter(Boolean).flatMap((s) => pathVariantsDeep(s)),
     )];
     // The pinned sockets' files themselves must also stay unwritable:
     // file-write* covers unlink/rename, so without these pins the agent can
@@ -946,11 +1024,34 @@ export function buildSeatbeltLaunch({
     // connects). Same list as the network-outbound pins -- the meta
     // session's own socket is excluded there, so it stays fully usable here.
     denyWriteRegexes.push(...netDenyLiterals.map((s) => `^${escapeSeatbeltRegex(s)}$`));
+    // Deny-write the whole host runtime dir tree (see the C fix): the broad
+    // `^/tmp(/.*)?$` write allow otherwise leaves the dir the server's
+    // control-plane sockets live in renamable/removable by a same-uid
+    // sandboxed process -> server-wide control-plane DoS. Both spellings, and
+    // resolvable even before the dir exists (pathVariantsDeep). Re-allow only
+    // the sockets THIS session connect()s to (writeLiterals that fall under
+    // the tree) -- pty-host / meta are never in that list, so they stay
+    // denied both here and via the netDenyLiterals pins above.
+    let runtimeDirDenyWriteRegexes = [];
+    let runtimeSocketAllowLiterals = [];
+    if (hostRuntimeDir) {
+      const rtVariants = pathVariantsDeep(hostRuntimeDir);
+      runtimeDirDenyWriteRegexes = rtVariants.map(subtreeRegex);
+      const underRuntime = (p) => rtVariants.some((base) => p === base || p.startsWith(`${base}/`));
+      // Both spellings of every re-allowed socket: Seatbelt evaluates the
+      // symlink-RESOLVED path, so the deny subtrees above catch a connect via
+      // /private/tmp/... and a raw-only re-allow would leave it net-denied.
+      runtimeSocketAllowLiterals = [...new Set(
+        writeLiterals.filter(underRuntime).flatMap((p) => pathVariantsDeep(p)),
+      )];
+    }
     const profileText = buildSeatbeltProfileText({
       readRegexes, writeRegexes, readLiterals, writeLiterals,
       siblingDenyWriteRegexes: siblingDeny, siblingDenyReadRegexes: siblingDeny,
       reAllowWriteRegexes: ownReAllow, reAllowReadRegexes: ownReAllow,
       denyWriteRegexes,
+      runtimeDirDenyWriteRegexes,
+      runtimeSocketAllowLiterals,
       // Mirror bwrap (gh wrapper bound over the real binaries only while the
       // broker is on): with gitBroker off the agent may use its own gh, so the
       // pins must not apply. The binDir shim itself is never in ghPaths, but

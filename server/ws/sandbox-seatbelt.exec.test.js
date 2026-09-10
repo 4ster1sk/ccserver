@@ -561,7 +561,7 @@ test('sibling launch dirs denied, own runtime dir allowed', SKIP_OPTS, (t) => {
   // the sibling deny pin keeps it closed (POSIX ERE has no lookahead: deny all
   // launch dirs, re-allow our own afterwards).
   const base = process.env.CCSERVER_SANDBOX_SEATBELT_TMP;
-  const sibling = trackDir(mkdtempSync(join(base, 'ccserver-seatbelt-sibling-')));
+  const sibling = trackDir(mkdtempSync(join(base, 'ccserver-sb-sibling-')));
   const siblingFile = join(sibling, 'secret.txt');
   writeFileSync(siblingFile, 'sibling-secret\n');
   const denied = runInSeatbelt(sb, ['/bin/cat', siblingFile], { cwd: opts.cwd });
