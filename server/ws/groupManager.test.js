@@ -37,7 +37,11 @@ let groupsToDestroy = [];
 let templateCopyPath;
 
 before(async () => {
-  runtimeDir = mkdtempSync(join(tmpdir(), 'ccserver-gm-test-'));
+  // Short base: the broker sockets (ccserver-mcp-<32hex>-<tag>.d/sock) under a
+  // /var/folders/... macOS tmpdir() overflow sockaddr_un's 104-byte limit and
+  // listen() then never binds. hostRuntimeDir() picks a short /tmp base on
+  // darwin for the same reason.
+  runtimeDir = mkdtempSync(join(process.platform === 'darwin' ? '/tmp' : tmpdir(), 'ccs-gm-'));
   process.env.XDG_RUNTIME_DIR = runtimeDir;
   process.env.CCSERVER_GROUPS_PATH = join(runtimeDir, 'saved-groups.json');
   process.env.CCSERVER_SAVED_SESSIONS_PATH = join(runtimeDir, 'saved-sessions.json');

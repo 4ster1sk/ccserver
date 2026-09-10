@@ -441,6 +441,30 @@ export class PtyHostClient {
     return res.sessions;
   }
 
+  // Acked destroy for retire-first reuse paths (#12): unlike
+  // RemotePty.destroy()'s fire-and-forget, this waits for pty-host's teardown
+  // (including the seatbelt overlay unlink) to complete before the caller
+  // spawns a successor into the same deterministic orchestratorDir. A
+  // fire-and-forget destroy followed by an immediate spawn races the
+  // successor's overlay materialization against the predecessor's unlink --
+  // and a UDS drop in between loses the destroy entirely. Best-effort:
+  // not-found / unreachable just resolve false so the successor still
+  // launches (its overlay copy overwrites, and the teardown guard covers the
+  // rest).
+  async destroySession(id) {
+    try {
+      await this._ensureConnected();
+    } catch {
+      return false;
+    }
+    try {
+      await this._request('destroy', { id });
+      return true;
+    } catch {
+      return false; // already reaped / gone -- nothing to wait for
+    }
+  }
+
   // Reattaches to a session pty-host already has (plan5 Step3): unlike
   // spawn(), issues no RPC of its own -- the session already exists on
   // pty-host's side (found via a prior list()), so this only needs to build

@@ -26,6 +26,13 @@
 // per-connection sessionId there is how finish_review verifies the caller IS
 // the review job it claims to be (see reviewer.js). Usage mode carries no
 // identity at all (get_usage answers the same regardless of caller).
+//
+// Plain mode (the group control / handoff socket) writes a frame too when
+// CCSANDBOX_MCP_TOKEN is set: `{"ccserver": {"token": "<T>"}}`. The broker
+// gates the connection on that token (mcpBroker.js requireToken) -- the shared
+// /tmp runtime dir on the seatbelt backend is reachable by every concurrent
+// sandboxed session, so an unauthenticated connect must not reach an
+// McpServer. No token env -> no frame -> the broker refuses (fail closed).
 'use strict';
 const net = require('net');
 const mode = process.argv[2];
@@ -35,6 +42,12 @@ const IDENTITY_ENV = {
   reviewer: 'CCSERVER_REVIEWER_IDENTITY',
 };
 const wantsIdentityFrame = !!IDENTITY_ENV[mode];
+// Plain mode: the group control / handoff socket. Its first frame carries the
+// connection token (CCSANDBOX_MCP_TOKEN), which the broker checks before
+// building an McpServer. notify/meta/reviewer already send a frame of their
+// own; usage sends none and is not token-gated.
+const plainToken = (!mode && process.env.CCSANDBOX_MCP_TOKEN) || null;
+const wantsFirstFrame = wantsIdentityFrame || !!plainToken;
 const MODE_SOCK_ENV = {
   notify: 'CCSANDBOX_NOTIFY_MCP_SOCK',
   usage: 'CCSANDBOX_USAGE_MCP_SOCK',
@@ -68,8 +81,11 @@ function connect(attempt = 0) {
   const sock = net.createConnection(sockPath);
   sock.on('connect', () => {
     established = true;
-    if (wantsIdentityFrame) {
-      sock.write(`${JSON.stringify({ ccserver: parseIdentity(process.env[IDENTITY_ENV[mode]]) })}\n`);
+    if (wantsFirstFrame) {
+      const frame = wantsIdentityFrame
+        ? parseIdentity(process.env[IDENTITY_ENV[mode]])
+        : { token: plainToken };
+      sock.write(`${JSON.stringify({ ccserver: frame })}\n`);
     }
     process.stdin.pipe(sock);
     sock.pipe(process.stdout);

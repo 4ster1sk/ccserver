@@ -29,7 +29,7 @@ import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { startGitBroker, hostRuntimeDir, ensureHostRuntimeDir, PTY_HOST_SOCK_NAME, META_SOCKET_DIR_NAME } from './git-broker.js';
 import { buildGuardConfig } from './commitGuard.js';
-import { buildSeatbeltLaunch, seatbeltEnvArgs, seedClaudeCredentialsFromHostKeychain, isBlockedCredentialBind } from './sandbox-seatbelt.js';
+import { buildSeatbeltLaunch, seatbeltEnvArgs, seedClaudeCredentialsFromHostKeychain, isBlockedCredentialBind, agentConfigDirs } from './sandbox-seatbelt.js';
 import { recordSandboxHome as recordSandboxHomeDb, listSandboxRowsBySlug, forgetSandboxHome } from './projects.js';
 import { APPS } from './appLaunch.js';
 
@@ -1092,6 +1092,27 @@ export function discoverSshAuthSock() {
     join(XDG_RUNTIME_DIR, 'gcr', 'ssh'),
   ]) candidates.push(p);
 
+  // macOS agents live outside the Linux runtime conventions above: 1Password
+  // and Secretive expose fixed-path sockets under ~/Library, and the system
+  // ssh-agent listens under a per-boot launchd dir. Missing paths are
+  // skipped by the stat gate below, so pushing them unconditionally here is
+  // harmless on hosts without these agents.
+  if (process.platform === 'darwin') {
+    try {
+      const home = homedir();
+      candidates.push(
+        join(home, 'Library', 'Group Containers', '2BUA8C4S2C.com.1password', 't', 'agent.sock'),
+        join(home, 'Library', 'Containers', 'com.maxgoedjen.secretive.Secretive', 'Data', 'socket.ssh'),
+      );
+    } catch { /* homedir unavailable -- skip */ }
+    try {
+      for (const d of readdirSync('/private/tmp')) {
+        if (!d.startsWith('com.apple.launchd.')) continue;
+        candidates.push(join('/private/tmp', d, 'Listeners'));
+      }
+    } catch { /* no launchd dir visible */ }
+  }
+
   // ccserver's own env, if any (often the empty agent — lowest priority).
   if (process.env.SSH_AUTH_SOCK) candidates.push(process.env.SSH_AUTH_SOCK);
 
@@ -1226,7 +1247,7 @@ function startCommitGuard(blockedPatterns) {
 //             via env (see the tail of this function).
 //   commitGuard - { dir, configPath } from startCommitGuard(), or null when
 //             the commit-message guard is disabled/unavailable for this launch.
-function buildBwrapArgs({ cwd, docker, gpg, extraBinds, extraEnv, authSock, stateDir, claudeDir, gitBroker, commitGuard, mcpSocketPath, notifySocketPath, usageSocketPath, metaSocketPath, reviewerSocketPath, homeDir = null, orchestratorClaudeMdSrc = null, gitCommonDir = null, groupFilesDir = null, app = null, tools = null }) {
+function buildBwrapArgs({ cwd, docker, gpg, extraBinds, extraEnv, authSock, stateDir, claudeDir, gitBroker, commitGuard, mcpSocketPath, mcpToken = null, notifySocketPath, usageSocketPath, metaSocketPath, reviewerSocketPath, homeDir = null, orchestratorClaudeMdSrc = null, gitCommonDir = null, groupFilesDir = null, app = null, tools = null }) {
   const args = [
     '--die-with-parent',
     // Own PID namespace so the whole sandbox tree is reaped as a unit. Without
@@ -1336,6 +1357,10 @@ function buildBwrapArgs({ cwd, docker, gpg, extraBinds, extraEnv, authSock, stat
   if (mcpSocketPath) {
     args.push('--bind-try', dirname(mcpSocketPath), dirname(SANDBOX_MCP_SOCK_PATH));
     args.push('--setenv', 'CCSANDBOX_MCP_SOCK', SANDBOX_MCP_SOCK_PATH);
+    // Connection token for the group control / handoff socket (see mcpBroker.js).
+    // bwrap already binds the socket per-session, so this is belt-and-suspenders
+    // here; it is load-bearing on the seatbelt backend.
+    if (mcpToken) args.push('--setenv', 'CCSANDBOX_MCP_TOKEN', mcpToken);
   }
 
   // ccserver-notify: the same wrapper script, reached with the 'notify' argv
@@ -1399,27 +1424,21 @@ function buildBwrapArgs({ cwd, docker, gpg, extraBinds, extraEnv, authSock, stat
   // state (session history lives under ~/.copilot, so `--continue` works).
   // commandcode stores its API key auth at ~/.commandcode/auth.json -- without
   // this bind every sandboxed launch prompts for the key again.
-  const opencodeState = join(HOME, '.local', 'state', 'opencode');
-  mkdirSync(opencodeState, { recursive: true });
-  const copilotConfig = join(HOME, '.config', 'github-copilot');
-  const copilotHome = join(HOME, '.copilot');
-  const codexHome = join(HOME, '.codex');
-  mkdirSync(copilotConfig, { recursive: true });
-  mkdirSync(copilotHome, { recursive: true });
-  const commandcodeHome = join(HOME, '.commandcode');
-  mkdirSync(commandcodeHome, { recursive: true });
-  const appBinds = [
-    [join(HOME, '.claude'), 'rw'],
-    [join(HOME, '.claude.json'), 'rw'],
-    [join(HOME, '.local', 'share', 'claude'), 'rw'],
-    [join(HOME, '.config', 'opencode'), 'rw'],
-    [join(HOME, '.local', 'share', 'opencode'), 'rw'],
-    [opencodeState, 'rw'],
-    [copilotConfig, 'rw'],
-    [copilotHome, 'rw'],
-    [codexHome, 'rw'],
-    [commandcodeHome, 'rw'],
-  ];
+  // Resolved from the shared agentConfigDirs() list (see sandbox-seatbelt.js)
+  // so bwrap and seatbelt expose the same set -- extend it there, not here.
+  const appBindSrcs = agentConfigDirs(HOME);
+  // Ensure the state/config homes a sandboxed CLI writes to exist so the rw
+  // bind below applies even on a fresh host. Same subset as before: login /
+  // cache dirs that may legitimately be absent (~/.claude etc., ~/.codex)
+  // stay uncreated when missing.
+  for (const src of appBindSrcs.filter((p) =>
+    p.endsWith(join('.local', 'state', 'opencode'))
+    || p.endsWith(join('.config', 'github-copilot'))
+    || p === join(HOME, '.copilot')
+    || p === join(HOME, '.commandcode'))) {
+    mkdirSync(src, { recursive: true });
+  }
+  const appBinds = appBindSrcs.map((src) => [src, 'rw']);
   for (const [src, mode] of appBinds) {
     if (existsSync(src)) {
       args.push(mode === 'ro' ? '--ro-bind' : '--bind', src, src);
@@ -1925,7 +1944,7 @@ export function buildMinimalSandboxSpawn({ cwd, targetCommand, app = 'claude' })
 //   sandboxHomeCreatedBy - optional attribution stored on the sandbox HOME's
 //                 bookkeeping row ('user' | 'meta-agent:<sessionId>' | ...).
 //                 Display only; never an authorization input.
-export function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, mcpSocketPath = null, notifySocketPath = null, usageSocketPath = null, metaSocketPath = null, reviewerSocketPath = null, reuseSandboxHome = true, orchestratorClaudeMdSrc = null, gitCommonDir = null, groupFilesDir = null, sandboxHomeCreatedBy = null }) {
+export function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, mcpSocketPath = null, mcpToken = null, notifySocketPath = null, usageSocketPath = null, metaSocketPath = null, reviewerSocketPath = null, reuseSandboxHome = true, orchestratorClaudeMdSrc = null, gitCommonDir = null, groupFilesDir = null, sandboxHomeCreatedBy = null }) {
   // Normalize the app id up front: a nullish `app` resolves to 'claude' in
   // resolveApp(), so every later `app === 'claude'` / `app === 'opencode'`
   // check (and the Keychain seed gate) must see the same value.
@@ -2082,6 +2101,7 @@ export function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, mcpSoc
           mcp: mcpSocketPath, notify: notifySocketPath, usage: usageSocketPath,
           meta: metaSocketPath, reviewer: reviewerSocketPath,
         },
+        mcpToken,
         extraBinds: binds, extraEnv: env, authSock, gnupg: gpg, claudeDir: installDir,
         orchestratorClaudeMdSrc, gitCommonDir, groupFilesDir, tools: sbTools,
       });
@@ -2107,15 +2127,18 @@ export function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, mcpSoc
       stateDir: null,
       seatbeltDir: sb.dir,
       // Orchestrator rule files materialized into the project dir (NOT under
-      // seatbeltDir) -- the caller removes them on teardown.
-      seatbeltFiles: sb.ruleCopies,
+      // seatbeltDir) -- the caller removes them on teardown. overlayFiles
+      // covers pre-existing siblings' files too so the stillReferenced guard
+      // sees the successor (ruleCopies is ownership-only, for build-failure
+      // cleanup inside buildSeatbeltLaunch).
+      seatbeltFiles: sb.overlayFiles || sb.ruleCopies,
       gitBrokerProc: gitBroker ? gitBroker.proc : null,
       gitBrokerDir: gitBroker ? gitBroker.dir : null,
       commitGuardDir: commitGuard ? commitGuard.dir : null,
     };
   }
 
-  const bwrapArgs = buildBwrapArgs({ cwd, docker, gpg, extraBinds: binds, extraEnv: env, authSock, stateDir, claudeDir: installDir, gitBroker, commitGuard, mcpSocketPath, notifySocketPath, usageSocketPath, metaSocketPath, reviewerSocketPath, homeDir, orchestratorClaudeMdSrc, gitCommonDir, groupFilesDir, app, tools });
+  const bwrapArgs = buildBwrapArgs({ cwd, docker, gpg, extraBinds: binds, extraEnv: env, authSock, stateDir, claudeDir: installDir, gitBroker, commitGuard, mcpSocketPath, mcpToken, notifySocketPath, usageSocketPath, metaSocketPath, reviewerSocketPath, homeDir, orchestratorClaudeMdSrc, gitCommonDir, groupFilesDir, app, tools });
   // command-code's launcher is a Node script. Run it explicitly via the
   // sandbox's node binary, bypassing the #!/usr/bin/env shebang which would
   // otherwise require /usr/bin/node to be present inside the sandbox's PATH.

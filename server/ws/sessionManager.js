@@ -5,6 +5,7 @@ import { writeFileSync, readFileSync, unlinkSync, rmSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { buildSandboxSpawn, resolveApp, sandboxAvailable, sandboxBackend, sandboxUnavailableReason, forceSandboxUnavailableReason, loadSandboxConfig, persistentHomeDir, dockerSandboxAvailable, dockerdStatus, dockerdLockHeld, resolveTools } from './sandbox.js';
+import { releaseSeatbeltOverlay } from './sandbox-seatbelt.js';
 import { getGroupFilesDir, ensureGroupFilesDir } from './groupFiles.js';
 import { buildMcpConfigArgsAndEnv } from './mcpConfig.js';
 import { shouldInjectNotify, notifyEnabled, getNotifySockPath, notifyBrokerRunning } from './notify.js';
@@ -98,8 +99,8 @@ export function setSessionCreateListener(fn) {
 
 // Resolvers of the MCP socket a group member session should be launched with.
 // groupManager registers one: it (re)creates the member's handoff channel (or
-// the orchestrator's control broker) and returns its sockPath. Used by the
-// scheduled-prompt auto-resume path, where a group member's session is
+// the orchestrator's control broker) and returns { sockPath, token }. Used by
+// the scheduled-prompt auto-resume path, where a group member's session is
 // recreated outside the explicit launch flows.
 const mcpSocketResolvers = new Set();
 
@@ -107,14 +108,17 @@ export function setMcpSocketResolver(fn) {
   mcpSocketResolvers.add(fn);
 }
 
-// Resolve the MCP socket path for a group member being recreated. Resolves to
-// null when no resolver can produce one (group gone, broker failed, or not a
-// group member) -- the caller then launches without MCP injection.
+// Resolve the MCP socket for a group member being recreated: returns
+// { sockPath, token } (token gates the socket -- see mcpBroker.js), or null
+// when no resolver can produce one (group gone, broker failed, or not a group
+// member) -- the caller then launches without MCP injection.
 export async function resolveMcpSocketForSession(groupId, groupRole) {
   for (const fn of mcpSocketResolvers) {
     try {
-      const sockPath = await fn(groupId, groupRole);
-      if (sockPath) return sockPath;
+      const resolved = await fn(groupId, groupRole);
+      // Back-compat: a resolver may still return a bare sockPath string.
+      if (typeof resolved === 'string' && resolved) return { sockPath: resolved, token: null };
+      if (resolved && resolved.sockPath) return { sockPath: resolved.sockPath, token: resolved.token || null };
     } catch {
       // try the next resolver
     }
@@ -587,7 +591,7 @@ function buildSessionRecord(id, ptyProcess, meta) {
   return session;
 }
 
-export async function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox, sandboxOpts, app, model, permissionMode, resumeLast, groupId = null, groupRole = null, mcpSocketPath = null, projectName = null, reuseSandboxHome = true, orchestratorClaudeMdSrc = null, gitCommonDir = null, groupFilesDir = null, isMetaAgent = false, isReviewJob = false, sandboxHomeCreatedBy = null, customLabel = null }) {
+export async function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox, sandboxOpts, app, model, permissionMode, resumeLast, groupId = null, groupRole = null, mcpSocketPath = null, mcpToken = null, projectName = null, reuseSandboxHome = true, orchestratorClaudeMdSrc = null, gitCommonDir = null, groupFilesDir = null, isMetaAgent = false, isReviewJob = false, sandboxHomeCreatedBy = null, customLabel = null }) {
   const id = randomUUID();
   // Read once and thread through: this hot path (every session launch) was
   // otherwise re-reading + re-parsing sandbox.config.json up to four times
@@ -1031,6 +1035,7 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
         // for shell sessions) keeps that combination working unchanged.
         app: sessionApp || 'claude',
         mcpSocketPath,
+        mcpToken,
         notifySocketPath,
         usageSocketPath,
         metaSocketPath,
@@ -1103,6 +1108,7 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
         env: ptyEnv,
         command,
         mcpSocketPath,
+        mcpToken,
         notifySocketPath,
         usageSocketPath,
         metaSocketPath,
@@ -1151,7 +1157,7 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
         } catch { resolvedGroupFilesDir = null; }
       }
       try {
-        const spawn = buildSandboxSpawn({ cwd, targetCommand: [command, ...args], app: sessionApp, sandboxOpts, mcpSocketPath, notifySocketPath, usageSocketPath, metaSocketPath, reviewerSocketPath, reuseSandboxHome, orchestratorClaudeMdSrc, gitCommonDir, groupFilesDir: resolvedGroupFilesDir, sandboxHomeCreatedBy });
+        const spawn = buildSandboxSpawn({ cwd, targetCommand: [command, ...args], app: sessionApp, sandboxOpts, mcpSocketPath, mcpToken, notifySocketPath, usageSocketPath, metaSocketPath, reviewerSocketPath, reuseSandboxHome, orchestratorClaudeMdSrc, gitCommonDir, groupFilesDir: resolvedGroupFilesDir, sandboxHomeCreatedBy });
         command = spawn.command;
         args = spawn.args;
         sandboxDocker = !!spawn.docker;
@@ -1225,15 +1231,10 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
         // Same guard as destroySession(): a concurrent launch from the same
         // orchestratorDir may already own these paths. (The failed session
         // itself is not registered yet, so no self-exclusion is needed.)
-        const stillReferenced = new Set();
-        for (const other of sessions.values()) {
-          if (!Array.isArray(other.sandboxSeatbeltFiles)) continue;
-          for (const f of other.sandboxSeatbeltFiles) stillReferenced.add(f);
-        }
-        for (const f of sandboxSeatbeltFiles) {
-          if (stillReferenced.has(f)) continue;
-          try { unlinkSync(f); } catch { /* best effort */ }
-        }
+        releaseSeatbeltOverlay(
+          sandboxSeatbeltFiles,
+          [...sessions.values()].map((other) => other.sandboxSeatbeltFiles),
+        );
       }
       return { sessionId: id, session: null, error: `Failed to spawn "${command}": ${err.message}` };
     }
@@ -1787,9 +1788,11 @@ async function fireSchedule(scheduleId) {
   // down, broker failed), the prompt is dropped rather than orphaned: a
   // member session without MCP can never hand off again, and in the
   // group-gone case nobody is waiting anyway.
-  const mcpSocketPath = entry.groupId && entry.groupRole
+  const mcpResolved = entry.groupId && entry.groupRole
     ? await resolveMcpSocketForSession(entry.groupId, entry.groupRole)
     : null;
+  const mcpSocketPath = mcpResolved ? mcpResolved.sockPath : null;
+  const mcpToken = mcpResolved ? mcpResolved.token : null;
   if (entry.groupId && !mcpSocketPath) {
     console.warn(`[scheduler] dropping prompt for group member ${entry.groupRole} of ${entry.groupId}: MCP socket unavailable`);
     return;
@@ -1840,7 +1843,9 @@ async function fireSchedule(scheduleId) {
     for (const s of [...sessions.values()]) {
       if (s.exited && s.groupId === entry.groupId && s.groupRole === entry.groupRole
           && Array.isArray(s.sandboxSeatbeltFiles)) {
-        destroySession(s.id, { keepSchedule: true, reason: 'schedule-auto-resume' });
+        // Awaited: in pty-host mode the overlay unlink happens over there,
+        // so the successor must not spawn until the ack is back (#12).
+        await retireSessionForReuse(s.id);
       }
     }
   }
@@ -1861,6 +1866,7 @@ async function fireSchedule(scheduleId) {
     groupId: entry.groupId,
     groupRole: entry.groupRole,
     mcpSocketPath,
+    mcpToken,
     orchestratorClaudeMdSrc,
     gitCommonDir,
   });
@@ -2306,15 +2312,10 @@ export function destroySession(id, { keepSchedule = true, reason = 'request' } =
     // files no other registered session still references, or the successor's
     // overlay is deleted out from under it mid-session.
     if (Array.isArray(session.sandboxSeatbeltFiles)) {
-      const stillReferenced = new Set();
-      for (const other of sessions.values()) {
-        if (other === session || !Array.isArray(other.sandboxSeatbeltFiles)) continue;
-        for (const f of other.sandboxSeatbeltFiles) stillReferenced.add(f);
-      }
-      for (const f of session.sandboxSeatbeltFiles) {
-        if (stillReferenced.has(f)) continue;
-        try { unlinkSync(f); } catch { /* best effort */ }
-      }
+      releaseSeatbeltOverlay(
+        session.sandboxSeatbeltFiles,
+        [...sessions.values()].filter((other) => other !== session).map((other) => other.sandboxSeatbeltFiles),
+      );
     }
   } else {
     // Step3 (plan5): this session's restore metadata (see
@@ -2327,6 +2328,27 @@ export function destroySession(id, { keepSchedule = true, reason = 'request' } =
   }
 
   sessions.delete(id);
+}
+
+// Retire-first for overlay reuse (#12): destroy the exited predecessor before
+// the caller spawns a successor into the same deterministic orchestratorDir,
+// and -- in pty-host mode -- wait for pty-host's destroy ack (overlay unlink
+// included) first. destroySession() alone is fire-and-forget there
+// (RemotePty kill/destroy send no-reply frames), so a successor spawned
+// immediately after would race the predecessor's unlink, and a UDS drop in
+// between would lose the destroy entirely while the successor (seeing
+// pre-existing overlay files) claims no ownership. Direct-spawn
+// destroySession() unlinks synchronously, so no wait is needed there.
+export async function retireSessionForReuse(id) {
+  const session = sessions.get(id);
+  if (!session) return;
+  if (isPtyHostEnabled()) {
+    try {
+      const shardIndex = session.shardIndex ?? shardIndexForKey(shardKeyForSession(session));
+      await getPtyHostClient(shardIndex).destroySession(id);
+    } catch { /* best effort -- fall through to local bookkeeping */ }
+  }
+  destroySession(id, { keepSchedule: true, reason: 'retire-first' });
 }
 
 let ptyHostDestroyedHandlerArmed = false;

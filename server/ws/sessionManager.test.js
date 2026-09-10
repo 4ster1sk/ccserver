@@ -765,24 +765,28 @@ test('resolveGroupMcpSocket: creates a worker handoff channel, reuses/recreates 
   await groupManager.createGroup({ groupId: gid, cwd: '/srv/proj', orchestratorDir: '/srv/orch' });
   const group = groupManager.getGroup(gid);
 
-  // Worker: no channel yet -> created and registered.
-  const workerSock = await groupManager.resolveGroupMcpSocket(gid, 'workerA');
-  assert.ok(workerSock, 'worker channel socket path returned');
-  assert.equal(group.handoffChannels.get('workerA').sockPath, workerSock);
-  // Second call reuses the existing channel.
-  const workerSock2 = await groupManager.resolveGroupMcpSocket(gid, 'workerA');
-  assert.equal(workerSock2, workerSock);
+  // Worker: no channel yet -> created and registered. Returns { sockPath, token }.
+  const worker = await groupManager.resolveGroupMcpSocket(gid, 'workerA');
+  assert.ok(worker && worker.sockPath, 'worker channel socket path returned');
+  assert.ok(worker.token && worker.token.length >= 20, 'worker channel has a connection token');
+  assert.equal(group.handoffChannels.get('workerA').sockPath, worker.sockPath);
+  // Second call reuses the existing channel (same path + token).
+  const worker2 = await groupManager.resolveGroupMcpSocket(gid, 'workerA');
+  assert.deepEqual(worker2, worker);
 
   // Orchestrator: existing control broker is returned as-is.
-  const orchSock = await groupManager.resolveGroupMcpSocket(gid, 'orchestrator');
-  assert.equal(orchSock, group.controlBroker.sockPath);
+  const orch = await groupManager.resolveGroupMcpSocket(gid, 'orchestrator');
+  assert.equal(orch.sockPath, group.controlBroker.sockPath);
+  assert.equal(orch.token, group.controlBroker.token);
+  assert.notEqual(orch.token, worker.token, 'control and handoff tokens differ');
   // Simulate the orchestrator's pty exiting (broker stopped) -> resolver
-  // brings the broker back.
+  // brings the broker back (with a fresh token).
   groupManager.onOrchestratorExit(gid);
   assert.equal(group.controlBroker, null);
-  const orchSock2 = await groupManager.resolveGroupMcpSocket(gid, 'orchestrator');
-  assert.ok(orchSock2, 'control broker recreated');
-  assert.equal(group.controlBroker.sockPath, orchSock2);
+  const orch2 = await groupManager.resolveGroupMcpSocket(gid, 'orchestrator');
+  assert.ok(orch2 && orch2.sockPath, 'control broker recreated');
+  assert.equal(group.controlBroker.sockPath, orch2.sockPath);
+  assert.equal(group.controlBroker.token, orch2.token);
 
   // Unknown group -> null (caller drops the prompt rather than orphan).
   assert.equal(await groupManager.resolveGroupMcpSocket('no-such-group', 'workerA'), null);

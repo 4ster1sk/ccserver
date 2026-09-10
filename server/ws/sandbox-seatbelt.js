@@ -144,17 +144,25 @@ export function subtreeRegex(dir) {
 // realpath spelling so symlinked dirs still match their rules -- and so
 // denies can't be walked around via the other spelling. Best-effort: absent
 // paths keep just the raw spelling.
-export function pathVariants(p) {
+// `cache` (a per-launch Map, see buildSeatbeltLaunch) memoizes the
+// realpathSync probe: the same anchor paths (projectDir, HOME, nodeBin, ...)
+// are pinned repeatedly while one profile is assembled, and each uncached
+// call is a blocking syscall.
+export function pathVariants(p, cache = null) {
+  if (cache?.has(p)) return cache.get(p);
+  let out;
   try {
     const r = realpathSync(p);
-    return r === p ? [p] : [p, r];
+    out = r === p ? [p] : [p, r];
   } catch {
-    return [p];
+    out = [p];
   }
+  cache?.set(p, out);
+  return out;
 }
 
-export function subtrees(p) {
-  return pathVariants(p).map(subtreeRegex);
+export function subtrees(p, cache = null) {
+  return pathVariants(p, cache).map(subtreeRegex);
 }
 
 // Like pathVariants(), but resolves the symlink spelling even when `p` (or an
@@ -165,16 +173,23 @@ export function subtrees(p) {
 // per-UID runtime dir on a fresh host) would otherwise keep only the raw
 // spelling and silently miss every access via the resolved one (e.g. macOS
 // resolves /tmp -> /private/tmp). Always includes the raw spelling too.
-export function pathVariantsDeep(p) {
+export function pathVariantsDeep(p, cache = null) {
   const abs = resolve(p);
   const missing = [];
   let cur = abs;
-  while (cur && cur !== dirname(cur) && !existsSync(cur)) {
+  const exists = (q) => {
+    const k = `exists:${q}`;
+    if (cache?.has(k)) return cache.get(k);
+    const v = existsSync(q);
+    cache?.set(k, v);
+    return v;
+  };
+  while (cur && cur !== dirname(cur) && !exists(cur)) {
     missing.unshift(basename(cur));
     cur = dirname(cur);
   }
   const out = new Set([abs]);
-  const bases = existsSync(cur) ? pathVariants(cur) : [cur];
+  const bases = exists(cur) ? pathVariants(cur, cache) : [cur];
   for (const b of bases) out.add(missing.length ? join(b, ...missing) : b);
   return [...out];
 }
@@ -189,11 +204,11 @@ export function pathVariantsDeep(p) {
 // contents stay closed. Both raw and realpath spellings (Seatbelt mediates
 // the resolved path). "/" itself is allowed as a literal elsewhere, so it
 // is excluded here.
-export function ancestorExactRegexes(paths) {
+export function ancestorExactRegexes(paths, cache = null) {
   const out = [];
   const seen = new Set();
   for (const p of paths.filter(Boolean)) {
-    for (const v of pathVariants(p)) {
+    for (const v of pathVariants(p, cache)) {
       let d = dirname(v);
       while (d && d !== '/' && d !== '.') {
         if (!seen.has(d)) {
@@ -226,6 +241,46 @@ export function escapeSeatbeltLiteral(s) {
 export function isBlockedCredentialBind(resolvedSrc, home) {
   return [join(home, '.ssh'), join(home, '.config', 'gh')]
     .some((p) => resolvedSrc === p || resolvedSrc.startsWith(`${p}/`));
+}
+
+// Agent CLI config/state dirs exposed writable on both backends so login and
+// session state survive sandbox launches (bwrap's appBinds, seatbelt's
+// appConfigDirs). Single source of truth (#7): both backends resolve the same
+// relative list against their host home -- add a new CLI here, not in two
+// places.
+export const AGENT_CONFIG_REL_PATHS = [
+  ['.claude'],
+  ['.claude.json'],
+  ['.local', 'share', 'claude'],
+  ['.config', 'opencode'],
+  ['.local', 'share', 'opencode'],
+  ['.local', 'state', 'opencode'],
+  ['.config', 'github-copilot'],
+  ['.copilot'],
+  ['.codex'],
+  ['.commandcode'],
+];
+export function agentConfigDirs(home) {
+  return AGENT_CONFIG_REL_PATHS.map((segs) => join(home, ...segs));
+}
+
+// Single teardown helper for the seatbelt orchestrator overlay (#9): the
+// "only unlink files no other live session still references" guard was
+// copy-pasted across sessionManager.js (spawn-failure + destroySession) and
+// ptyStore.js (spawn-failure + destroy). `ownedFiles` is this session's
+// overlay list, `peerFileLists` the other live sessions' lists -- files still
+// referenced by a peer are kept. Best-effort: unlink failures are ignored.
+export function releaseSeatbeltOverlay(ownedFiles, peerFileLists) {
+  if (!Array.isArray(ownedFiles)) return;
+  const stillReferenced = new Set();
+  for (const list of peerFileLists || []) {
+    if (!Array.isArray(list)) continue;
+    for (const f of list) stillReferenced.add(f);
+  }
+  for (const f of ownedFiles) {
+    if (stillReferenced.has(f)) continue;
+    try { unlinkSync(f); } catch { /* best effort */ }
+  }
 }
 
 // Assemble the profile text. Each list holds ready-made `regex #"..."` bodies
@@ -517,11 +572,13 @@ function expandAgainstHome(p, hostHome) {
 //                    cannot rename/rmdir it and break other sessions' control
 //                    plane, with only this session's own sockets re-allowed
 //
-// Returns { dir, profilePath, binDir, hooksDir, homeDir, ruleCopies, nodeBin,
-// env }. `dir` is the single teardown unit (also covers the throwaway HOME
-// when homeDir was null). ruleCopies lists orchestrator rule files
-// materialized into the project dir -- NOT under `dir`, so the caller must
-// remove them separately on teardown (null when no overlay was requested).
+// Returns { dir, profilePath, binDir, hooksDir, homeDir, ruleCopies,
+// overlayFiles, nodeBin, env }. `dir` is the single teardown unit (also
+// covers the throwaway HOME when homeDir was null). ruleCopies lists
+// orchestrator rule files THIS launch created, overlayFiles every overlay
+// path it uses (incl. pre-existing siblings' files -- the teardown guard's
+// input) -- both NOT under `dir`, so the caller must remove them separately
+// on teardown (null when no overlay was requested).
 export function buildSeatbeltLaunch({
   cwd,
   hostHome,
@@ -533,6 +590,7 @@ export function buildSeatbeltLaunch({
   gitBroker = null,
   commitGuard = null,
   sockets = {},
+  mcpToken = null,
   extraBinds = [],
   extraEnv = {},
   authSock = null,
@@ -576,6 +634,24 @@ export function buildSeatbeltLaunch({
   // under $TMPDIR. Remove it (and any rule copies made so far) before
   // rethrowing -- still fail-closed.
   const ruleCopies = [];
+  const overlayFiles = [];
+  // Every overlay path this launch uses (including pre-existing ones owned by
+  // a live sibling). Returned as `overlayFiles` for the stillReferenced
+  // teardown guard: a successor that sees the overlay as pre-existing must
+  // still register it, or the owner's later teardown unlinks the live
+  // successor's rules mid-session (#9). `ruleCopies` stays ownership-only
+  // (this launch created them) for the build-failure catch below, which must
+  // not delete a live sibling's overlay.
+  // Per-launch memo for the blocking fs probes below (#8): the same anchor
+  // paths are pinned a dozen times while one profile is assembled
+  // (read + write + ancestor lists). Scoped to this launch -- never shared
+  // across launches -- so a path that appears mid-run (broker sockets,
+  // runtime dirs) is always probed fresh on the next launch.
+  const pathCache = new Map();
+  const memoVariants = (p) => pathVariants(p, pathCache);
+  const memoSubtrees = (p) => subtrees(p, pathCache);
+  const memoDeep = (p) => pathVariantsDeep(p, pathCache);
+  const memoAncestors = (paths) => ancestorExactRegexes(paths, pathCache);
   try {
     // 0o700 like git-broker's dir: shims/hook/profile must be private to
     // this launch -- sandbox.sb reveals host paths, and a same-UID session
@@ -707,6 +783,11 @@ export function buildSeatbeltLaunch({
       CCSANDBOX_DOCKER: '0',
     };
     if (sockets.mcp) env.CCSANDBOX_MCP_SOCK = sockets.mcp;
+    // Connection token for the group control / handoff socket: the shared /tmp
+    // runtime dir is reachable by every concurrent sandboxed session here, so
+    // without this the bridge could not authenticate to its own broker (and a
+    // peer session could reach it). See mcpBroker.js's requireToken.
+    if (sockets.mcp && mcpToken) env.CCSANDBOX_MCP_TOKEN = mcpToken;
     // Seatbelt has no mounts: there is no /ccserver-group-files. Expose the
     // host blob dir the established way (env, like the socket paths) so tool
     // responses can one day report a path that actually resolves. NOTE: the
@@ -842,17 +923,17 @@ export function buildSeatbeltLaunch({
       '^/System(/.*)?$', '^/Library(/.*)?$', '^/opt(/.*)?$',
       '^/private/etc(/.*)?$', '^/private/var(/.*)?$', '^/var(/.*)?$',
       '^/tmp(/.*)?$', '^/private/tmp(/.*)?$',
-    ...subtrees(projectDir),
-    ...subtrees(effectiveHome),
-    ...subtrees(dir),
+    ...memoSubtrees(projectDir),
+    ...memoSubtrees(effectiveHome),
+    ...memoSubtrees(dir),
     // Only the individual host files this launch executes/reads -- parity
     // with bwrap's per-file ro-binds. A serverDir subtree would expose the
     // whole server implementation to the sandboxed agent (open egress +
     // prompt injection make that reconnaissance material).
     ...[scripts.entrypoint, scripts.mcpBridge, scripts.ghWrapper,
       scripts.credHelper, scripts.sshWrapper, scripts.commitHook]
-      .filter(Boolean).flatMap((f) => pathVariants(f).map((p) => `^${escapeSeatbeltRegex(p)}$`)),
-    ...subtrees(hostLocalBin),
+      .filter(Boolean).flatMap((f) => memoVariants(f).map((p) => `^${escapeSeatbeltRegex(p)}$`)),
+    ...memoSubtrees(hostLocalBin),
   ];
     const tmpDirs = new Set([tmpdir()]);
     try { tmpDirs.add(realpathSync(tmpdir())); } catch { /* best effort */ }
@@ -866,17 +947,7 @@ export function buildSeatbeltLaunch({
     // NOTE: these need read as well as write (bwrap binds them rw) -- Seatbelt
     // file-write* does not imply file-read*, so a write-only entry would leave
     // CLIs unable to read back the auth/state they just wrote.
-    const appConfigDirs = [
-      join(hostHome, '.claude'), join(hostHome, '.claude.json'),
-      join(hostHome, '.local', 'share', 'claude'),
-      join(hostHome, '.config', 'opencode'),
-      join(hostHome, '.local', 'share', 'opencode'),
-      join(hostHome, '.local', 'state', 'opencode'),
-      join(hostHome, '.config', 'github-copilot'),
-      join(hostHome, '.copilot'),
-      join(hostHome, '.codex'),
-      join(hostHome, '.commandcode'),
-    ];
+    const appConfigDirs = agentConfigDirs(hostHome);
     // Ancestor metadata (lstat) for userspace realpath: node/vite/npm/git and
     // the agent CLIs resolve paths component-by-component, and subtree rules
     // don't cover the ancestors themselves. Exact-match only -- siblings stay
@@ -899,7 +970,7 @@ export function buildSeatbeltLaunch({
     // needs lstat on each component, never readdir. Without the split a bare
     // ancestor like the real $HOME (above ~/.claude etc.) is listable, so a
     // throwaway-HOME /usage capture could `ls ~` and enumerate the host home.
-    const readMetadataRegexes = ancestorExactRegexes([
+    const readMetadataRegexes = memoAncestors([
       projectDir, effectiveHome, dir, ...tmpDirs, nodeBin, hostHome, ...appConfigDirs,
       ...[scripts.entrypoint, scripts.mcpBridge, scripts.ghWrapper,
         scripts.credHelper, scripts.sshWrapper, scripts.commitHook].filter(Boolean),
@@ -908,32 +979,32 @@ export function buildSeatbeltLaunch({
     // (see env) redirects the macOS-API cache/Library resolution into the sandbox
     // HOME, so nothing needs the host copy. (Xcode/SwiftPM-heavy workflows that
     // want the host DerivedData/package cache can add a targeted operator bind.)
-    readRegexes.push(...appConfigDirs.flatMap(subtrees));
+    readRegexes.push(...appConfigDirs.flatMap(memoSubtrees));
     // gpg opt-in (bwrap binds ~/.gnupg): with no mounts, allow the real
     // keyring and point gpg at it ($HOME here is the sandbox home).
     const gnupgHome = gnupg ? join(hostHome, '.gnupg') : null;
-    if (gnupgHome) readRegexes.push(...subtrees(gnupgHome));
+    if (gnupgHome) readRegexes.push(...memoSubtrees(gnupgHome));
     const writeRegexes = [
-      ...subtrees(projectDir),
-      ...subtrees(effectiveHome),
+      ...memoSubtrees(projectDir),
+      ...memoSubtrees(effectiveHome),
       // Only the mutable part of the runtime dir is writable. bin/ (gh/ssh/
       // credential-helper shims), hooks/ (the core.hooksPath target) and
       // sandbox.sb must stay read-only -- bwrap ro-binds their equivalents at
       // fixed paths, and a writable shim is attacker-chosen code on the next
       // git/gh/commit invocation.
-      ...subtrees(join(dir, 'runtime')),
+      ...memoSubtrees(join(dir, 'runtime')),
       '^/tmp(/.*)?$', '^/private/tmp(/.*)?$',
       // host ~/Library/Caches intentionally absent: CFFIXED_USER_HOME points the
       // macOS-API cache dir at <sandbox HOME>/Library/Caches, already writable
       // via subtrees(effectiveHome).
-      ...appConfigDirs.flatMap(subtrees),
+      ...appConfigDirs.flatMap(memoSubtrees),
     ];
     for (const t of tmpDirs) {
       const r = subtreeRegex(t);
       if (!writeRegexes.includes(r)) writeRegexes.push(r);
     }
-    if (gnupgHome) writeRegexes.push(...subtrees(gnupgHome));
-    if (claudeDir && existsSync(claudeDir)) readRegexes.push(...subtrees(claudeDir));
+    if (gnupgHome) writeRegexes.push(...memoSubtrees(gnupgHome));
+    if (claudeDir && existsSync(claudeDir)) readRegexes.push(...memoSubtrees(claudeDir));
     // The shims, the commit-msg hook and the MCP bridge all exec through the
     // host node binary: guarantee the binary FILE stays readable (dyld reads it
     // to exec) even when it lives outside the default trees (nvm/Volta/fnm under
@@ -941,12 +1012,12 @@ export function buildSeatbeltLaunch({
     // match that: `subtrees(dirname(nodeBin))` would expose every unrelated tool
     // in a shared bin dir (/usr/local/bin, ~/.local/bin). Ancestors are already
     // covered (metadata) by ancestorExactRegexes above; both spellings here.
-    if (nodeBin) readRegexes.push(...pathVariants(nodeBin).map((p) => `^${escapeSeatbeltRegex(p)}$`));
+    if (nodeBin) readRegexes.push(...memoVariants(nodeBin).map((p) => `^${escapeSeatbeltRegex(p)}$`));
     if (gitCommonDir) {
-      readRegexes.push(...subtrees(gitCommonDir));
-      writeRegexes.push(...subtrees(gitCommonDir));
+      readRegexes.push(...memoSubtrees(gitCommonDir));
+      writeRegexes.push(...memoSubtrees(gitCommonDir));
     }
-    if (groupFilesDir) readRegexes.push(...subtrees(groupFilesDir));
+    if (groupFilesDir) readRegexes.push(...memoSubtrees(groupFilesDir));
 
     const readLiterals = [];
     const writeLiterals = [];
@@ -956,7 +1027,7 @@ export function buildSeatbeltLaunch({
     // A forwarded ssh-agent socket needs an explicit rule: connect() is a
     // write, and custom locations (e.g. 1Password's ~/Library socket) fall
     // outside every allow tree above. Both spellings (see pathVariants).
-    if (authSock) sockPaths.push(...pathVariants(authSock));
+    if (authSock) sockPaths.push(...memoVariants(authSock));
     for (const s of new Set(sockPaths)) {
       readLiterals.push(s);
       writeLiterals.push(s); // connect() needs write
@@ -968,12 +1039,12 @@ export function buildSeatbeltLaunch({
     // (The server-tree knownHostsDefault needs no literal: it is copied into
     // the launch dir when the brokered ssh config is minted, and that dir
     // is readable via subtrees(dir) above.)
-    if (ssh.userKnownHosts) readLiterals.push(...pathVariants(ssh.userKnownHosts));
+    if (ssh.userKnownHosts) readLiterals.push(...memoVariants(ssh.userKnownHosts));
     // The per-launch seatbelt ssh config above (or the shared file when no
     // real ssh exists, kept for completeness though nothing reads it then).
     // Only brokered launches mint (and read) the per-launch copy.
-    if (gitBroker && sshConfigPath) readLiterals.push(...pathVariants(sshConfigPath));
-    if (orchestratorClaudeMdSrc) readLiterals.push(...pathVariants(orchestratorClaudeMdSrc));
+    if (gitBroker && sshConfigPath) readLiterals.push(...memoVariants(sshConfigPath));
+    if (orchestratorClaudeMdSrc) readLiterals.push(...memoVariants(orchestratorClaudeMdSrc));
 
     // Every deny pin must cover both spellings Seatbelt may see: under the
     // per-user TMPDIR, macOS resolves /var/... to /private/var/..., and a
@@ -981,19 +1052,19 @@ export function buildSeatbeltLaunch({
     // silently keep only the raw spelling via pathVariants(). Derive both
     // spellings from the existing parent dir instead.
     const exactPins = (name, existingParent) =>
-      pathVariants(existingParent).map((p) => `^${escapeSeatbeltRegex(join(p, name))}$`);
+      memoVariants(existingParent).map((p) => `^${escapeSeatbeltRegex(join(p, name))}$`);
     // Sibling launch-dir denies need both spellings of the base dir as
     // well. POSIX ERE has no lookahead: deny ALL launch dirs (own
     // included), then re-allow our own subtree afterwards
     // (last-match-wins). Future sibling dirs stay covered by the deny.
-    const siblingDeny = pathVariants(seatbeltBaseDir()).map((base) =>
+    const siblingDeny = memoVariants(seatbeltBaseDir()).map((base) =>
       `^${escapeSeatbeltRegex(base)}/ccserver-sb-`);
-    const ownReAllow = subtrees(dir);
+    const ownReAllow = memoSubtrees(dir);
     // Raw keys / gh tokens are never reachable (mirrors bwrap's
     // BLOCKED_BIND_PATHS, unconditionally even with gitBroker off).
     const denyWriteRegexes = [
-      ...subtrees(join(hostHome, '.ssh')),
-      ...subtrees(join(hostHome, '.config', 'gh')),
+      ...memoSubtrees(join(hostHome, '.ssh')),
+      ...memoSubtrees(join(hostHome, '.config', 'gh')),
       // With the git broker on, the sandbox HOME's gitconfig stays
       // unwritable (bwrap ro-binds GENERATED_GITCONFIG over it for the same
       // reason): an agent-written credential.helper there would otherwise
@@ -1017,8 +1088,8 @@ export function buildSeatbeltLaunch({
       // Pin the read-only invariant explicitly: the runtime dir lives under
       // TMPDIR, which the broad tmp write rules above also match -- these
       // last-match-wins pins keep shims/hooks/profile immutable even so.
-      ...subtrees(binDir),
-      ...subtrees(hooksDir),
+      ...memoSubtrees(binDir),
+      ...memoSubtrees(hooksDir),
       ...exactPins(basename(profilePath), dir),
       // The commit-msg guard config lives under hostRuntimeDir() (short /tmp
       // base on darwin, inside the broad tmp write rules) and the in-sandbox
@@ -1078,7 +1149,8 @@ export function buildSeatbeltLaunch({
           throw new Error(`seatbelt orchestrator overlay: cannot copy rules to ${dest}: ${err.message}`);
         }
         if (!preExisting) ruleCopies.push(dest);
-        for (const base of pathVariants(projectDir)) {
+        overlayFiles.push(dest);
+        for (const base of memoVariants(projectDir)) {
           denyWriteRegexes.push(`^${escapeSeatbeltRegex(join(base, name))}$`);
         }
       }
@@ -1095,8 +1167,8 @@ export function buildSeatbeltLaunch({
         console.warn(`[sandbox] ignoring configured bind of ${src}: raw ssh keys / gh config are no longer exposed to the sandbox (see the git broker)`);
         continue;
       }
-      readRegexes.push(...subtrees(src));
-      if (b.mode === 'rw') writeRegexes.push(...subtrees(src));
+      readRegexes.push(...memoSubtrees(src));
+      if (b.mode === 'rw') writeRegexes.push(...memoSubtrees(src));
     }
 
     // Control-plane sockets may not exist yet (pty-host/meta boot lazily),
@@ -1109,7 +1181,7 @@ export function buildSeatbeltLaunch({
     // a raw-only pin would let connect() walk around the deny via the
     // resolved path Seatbelt actually mediates.
     const netDenyLiterals = [...new Set(
-      (controlSockDenies || []).filter(Boolean).flatMap((s) => pathVariantsDeep(s)),
+      (controlSockDenies || []).filter(Boolean).flatMap((s) => memoDeep(s)),
     )];
     // The pinned sockets' files themselves must also stay unwritable:
     // file-write* covers unlink/rename, so without these pins the agent can
@@ -1129,14 +1201,14 @@ export function buildSeatbeltLaunch({
     let runtimeDirDenyWriteRegexes = [];
     let runtimeSocketAllowLiterals = [];
     if (hostRuntimeDir) {
-      const rtVariants = pathVariantsDeep(hostRuntimeDir);
+      const rtVariants = memoDeep(hostRuntimeDir);
       runtimeDirDenyWriteRegexes = rtVariants.map(subtreeRegex);
       const underRuntime = (p) => rtVariants.some((base) => p === base || p.startsWith(`${base}/`));
       // Both spellings of every re-allowed socket: Seatbelt evaluates the
       // symlink-RESOLVED path, so the deny subtrees above catch a connect via
       // /private/tmp/... and a raw-only re-allow would leave it net-denied.
       runtimeSocketAllowLiterals = [...new Set(
-        writeLiterals.filter(underRuntime).flatMap((p) => pathVariantsDeep(p)),
+        writeLiterals.filter(underRuntime).flatMap((p) => memoDeep(p)),
       )];
     }
     const profileText = buildSeatbeltProfileText({
@@ -1156,7 +1228,7 @@ export function buildSeatbeltLaunch({
       denyNetOutboundLiterals: netDenyLiterals,
     });
     writeFileSync(profilePath, profileText, { mode: 0o600 });
-    return { dir, profilePath, binDir, hooksDir, homeDir: effectiveHome, ruleCopies: ruleCopies.length > 0 ? ruleCopies : null, nodeBin, env };
+    return { dir, profilePath, binDir, hooksDir, homeDir: effectiveHome, ruleCopies: ruleCopies.length > 0 ? ruleCopies : null, overlayFiles: overlayFiles.length > 0 ? [...overlayFiles] : null, nodeBin, env };
   } catch (err) {
     try { rmSync(dir, { recursive: true, force: true }); } catch { /* best effort */ }
     for (const f of ruleCopies) { try { unlinkSync(f); } catch { /* best effort */ } }

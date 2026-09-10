@@ -26,7 +26,7 @@ import { mkdirSync, statSync, rmSync, existsSync } from 'node:fs';
 import { basename, join, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import * as groupManager from '../ws/groupManager.js';
-import { createSession, destroySession, getSession, isInfrastructureError } from '../ws/sessionManager.js';
+import { createSession, getSession, isInfrastructureError, retireSessionForReuse } from '../ws/sessionManager.js';
 import { sandboxAvailable, sandboxUnavailableReason } from '../ws/sandbox.js';
 import { isValidApp } from '../ws/appLaunch.js';
 import { projectHashForCwd } from '../ws/projectHash.js';
@@ -179,7 +179,7 @@ export function workerLaunchFailureCode(res) {
 // `resumeLast` maps 1:1 onto "the previous conversation"). projectName is the
 // real project's basename: the session's cwd is the hashed orchestratorDir,
 // which must not leak into the notify footer (see sessionManager).
-export function orchestratorRestartSessionOpts({ group, app, model = null, sandboxOpts = null, mcpSocketPath, orchestratorClaudeMdSrc = null }) {
+export function orchestratorRestartSessionOpts({ group, app, model = null, sandboxOpts = null, mcpSocketPath, mcpToken = null, orchestratorClaudeMdSrc = null }) {
   return {
     cwd: group.orchestratorDir,
     cols: 80,
@@ -193,6 +193,7 @@ export function orchestratorRestartSessionOpts({ group, app, model = null, sandb
     groupRole: 'orchestrator',
     projectName: group.cwd ? basename(group.cwd) : null,
     mcpSocketPath,
+    mcpToken,
     orchestratorClaudeMdSrc,
   };
 }
@@ -365,6 +366,7 @@ export async function launchGroupFromSpec(body) {
     // must attribute the orchestrator to the real project instead.
     projectName: basename(cwd),
     mcpSocketPath: controlBroker ? controlBroker.sockPath : null,
+    mcpToken: controlBroker ? (controlBroker.token || null) : null,
     orchestratorClaudeMdSrc,
   });
   if (orchRes.error || !orchRes.session) {
@@ -458,7 +460,9 @@ export async function groupsRoute(fastify, opts) {
       // scrollback + restore metadata for no benefit (issue: Linux
       // orchestrator-restart regression).
       if (s && Array.isArray(s.sandboxSeatbeltFiles)) {
-        destroySession(existing, { reason: 'orchestrator-restart' });
+        // Awaited: in pty-host mode the overlay unlink happens over there,
+        // so the successor must not spawn until the ack is back (#12).
+        await retireSessionForReuse(existing);
       }
     }
 
@@ -476,10 +480,11 @@ export async function groupsRoute(fastify, opts) {
       return reply.code(400).send({ error: 'orchestrator dir missing' });
     }
 
-    const mcpSocketPath = await groupManager.resolveGroupMcpSocket(request.params.id, 'orchestrator');
-    if (!mcpSocketPath) {
+    const mcp = await groupManager.resolveGroupMcpSocket(request.params.id, 'orchestrator');
+    if (!mcp) {
       return reply.code(500).send({ error: 'failed to re-create the control broker' });
     }
+    const { sockPath: mcpSocketPath, token: mcpToken } = mcp;
 
     // Regenerated on every restart (see groupManager.generateOrchestratorClaudeMdSrc):
     // picks up any template edit since the orchestrator's last launch, and
@@ -497,7 +502,7 @@ export async function groupsRoute(fastify, opts) {
       return reply.code(500).send({ error: 'failed to generate orchestrator instructions: no CLAUDE.md overlay was produced' });
     }
 
-    const res = await createSession(orchestratorRestartSessionOpts({ group, app, model, sandboxOpts, mcpSocketPath, orchestratorClaudeMdSrc }));
+    const res = await createSession(orchestratorRestartSessionOpts({ group, app, model, sandboxOpts, mcpSocketPath, mcpToken, orchestratorClaudeMdSrc }));
     if (res.error || !res.session) {
       // Infra faults (sandbox build / spawn) are 500; request-as-given
       // rejections stay 400 -- see orchestratorRestartFailureStatus().

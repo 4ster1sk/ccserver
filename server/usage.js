@@ -346,15 +346,24 @@ function capture() {
         if (!gate.send) return;
         if (resend) resends += 1;
         else sentUsage = true;
+      } else if (!resend) {
+        // Post-trust forced send (answerTrustThenUsage): the throwaway-cwd
+        // sandboxed capture always passes through the trust gate first, so no
+        // non-force send ever runs and sentUsage would stay false forever --
+        // leaving fast-complete (onData's looksReady) and the retry schedule
+        // below disarmed, i.e. every trust-first capture waits out the full
+        // hard timeout. Count the forced send as the initial send (gate and
+        // Ctrl-U still skipped), so retries + fast-complete work the same way.
+        sentUsage = true;
       }
       try {
         if (resend && !force) ptyProc.write('\x15'); // Ctrl-U: clear a possibly stale input line
         ptyProc.write('/usage');
         setTimeout(() => { try { ptyProc.write('\r'); } catch { /* dead */ } }, 500);
       } catch {
-        if (!resend && !force) finish({ error: 'claude exited before /usage could be sent' });
+        if (!resend) finish({ error: 'claude exited before /usage could be sent' });
       }
-      if (!resend && !force) {
+      if (!resend) {
         const schedule = () => {
           if (done) return;
           clearTimeout(resendTimer);

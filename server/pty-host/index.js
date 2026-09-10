@@ -126,6 +126,7 @@ function autoResumeSessions(ptyStore, shardIndex) {
         // sandbox:true without one.
         app: meta.app || 'claude',
         mcpSocketPath: meta.mcpSocketPath,
+        mcpToken: meta.mcpToken,
         notifySocketPath: meta.notifySocketPath,
         usageSocketPath: meta.usageSocketPath,
         metaSocketPath: meta.metaSocketPath,

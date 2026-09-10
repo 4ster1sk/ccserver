@@ -15,6 +15,8 @@ import { tmpdir, homedir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import {
+  AGENT_CONFIG_REL_PATHS,
+  agentConfigDirs,
   ancestorExactRegexes,
   buildSeatbeltLaunch,
   buildSeatbeltProfileText,
@@ -23,6 +25,7 @@ import {
   isBlockedCredentialBind,
   pathVariants,
   pathVariantsDeep,
+  releaseSeatbeltOverlay,
   seatbeltEnvArgs,
   seedClaudeCredentialsFromHostKeychain,
   keychainAccount,
@@ -395,6 +398,7 @@ test('buildSeatbeltLaunch materializes the orchestrator overlay and tracks it fo
     assert.equal(readFileSync(join(cwd, name), 'utf-8'), '# rules\n', `${name} materialized`);
   }
   assert.deepEqual(sb.ruleCopies, [join(cwd, 'CLAUDE.md'), join(cwd, 'AGENTS.md')]);
+  assert.deepEqual(sb.overlayFiles, sb.ruleCopies, 'owned files are registered too');
 });
 
 test('buildSeatbeltLaunch does not claim ownership of a live overlay', () => {
@@ -416,6 +420,11 @@ test('buildSeatbeltLaunch does not claim ownership of a live overlay', () => {
     assert.equal(readFileSync(join(cwd, name), 'utf-8'), '# refreshed rules\n', `${name} refreshed`);
   }
   assert.equal(sb.ruleCopies, null, 'pre-existing files are not owned');
+  assert.deepEqual(
+    sb.overlayFiles,
+    [join(cwd, 'CLAUDE.md'), join(cwd, 'AGENTS.md')],
+    'pre-existing files are still registered so the teardown guard sees the successor',
+  );
 });
 
 test('buildSeatbeltLaunch failure preserves a pre-existing overlay', () => {
@@ -453,8 +462,55 @@ test('buildSeatbeltLaunch skips blocked extra binds like bwrap does', () => {
   assert.ok(!text.includes(escapeSeatbeltRegex(join(fakeHome, '.ssh', 'id_rsa'))), 'no raw key path via ..');
 });
 
-test('isBlockedCredentialBind: the shared filter matches ~/.ssh and ~/.config/gh trees only', () => {
-  const home = '/home/u';
+test('releaseSeatbeltOverlay: unlinks only files no peer still references', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ccserver-sbtest-overlay-'));
+  DIRS.push(dir);
+  const a = join(dir, 'CLAUDE.md');
+  const b = join(dir, 'AGENTS.md');
+  const c = join(dir, 'OTHER.md');
+  for (const f of [a, b, c]) writeFileSync(f, 'x\n');
+  // A peer still references `a`: only `b` goes.
+  releaseSeatbeltOverlay([a, b], [[a], null, [join(dir, 'UNRELATED.md')]]);
+  assert.ok(existsSync(a), 'peer-referenced file is kept');
+  assert.ok(!existsSync(b), 'unreferenced file is unlinked');
+  // Nothing references `a` anymore: it goes too. Non-arrays are ignored.
+  releaseSeatbeltOverlay([a, c], [null, undefined, []]);
+  assert.ok(!existsSync(a), 'last owner cleans up');
+  assert.ok(!existsSync(c), 'unreferenced file is unlinked');
+  // Non-array owned input is a no-op, never throws.
+  releaseSeatbeltOverlay(null, [[a]]);
+  releaseSeatbeltOverlay(undefined, null);
+});
+
+test('agentConfigDirs: single source of truth for both backends (#7)', () => {
+  const dirs = agentConfigDirs('/home/u');
+  assert.equal(dirs.length, 10, 'ten CLI config/state dirs');
+  assert.ok(dirs.includes('/home/u/.claude'), 'claude config');
+  assert.ok(dirs.includes(join('/home/u', '.local', 'state', 'opencode')), 'opencode state');
+  assert.ok(dirs.includes(join('/home/u', '.config', 'github-copilot')), 'copilot config');
+  assert.ok(dirs.includes(join('/home/u', '.commandcode')), 'commandcode auth');
+  // Every entry resolves under the given home (join, never string concat).
+  for (const d of dirs) assert.ok(d.startsWith('/home/u/') || d === '/home/u/.claude.json' || d.startsWith('/home/u/.claude'), `${d} is under the home`);
+  assert.equal(new Set(dirs).size, dirs.length, 'no duplicates');
+  assert.equal(AGENT_CONFIG_REL_PATHS.length, 10, 'relative list matches');
+});
+
+test('pathVariants/subtrees accept a per-launch memo cache (#8)', () => {
+  const cache = new Map();
+  const first = pathVariants('/tmp', cache);
+  assert.ok(cache.size > 0, 'probe is cached');
+  const second = pathVariants('/tmp', cache);
+  assert.equal(second, first, 'same reference from cache');
+  // Uncached calls keep the old behavior.
+  assert.deepEqual(pathVariants('/definitely-absent-ccserver-test-path'), ['/definitely-absent-ccserver-test-path']);
+  const st1 = subtrees('/tmp', cache);
+  const st2 = subtrees('/tmp', cache);
+  assert.equal(st2[0], st1[0], 'subtrees reuses the cached variants');
+  const anc = ancestorExactRegexes(['/tmp/a', '/tmp/b'], cache);
+  assert.ok(anc.includes('^/tmp$'), 'ancestors still emitted with a cache');
+});
+
+test('isBlockedCredentialBind: the shared filter matches ~/.ssh and ~/.config/gh trees only', () => {  const home = '/home/u';
   assert.equal(isBlockedCredentialBind('/home/u/.ssh', home), true, 'the dir itself');
   assert.equal(isBlockedCredentialBind('/home/u/.ssh/id_ed25519', home), true, 'a file under it');
   assert.equal(isBlockedCredentialBind('/home/u/.config/gh/hosts.yml', home), true, 'gh config');

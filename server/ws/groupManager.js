@@ -754,30 +754,33 @@ export async function createMemberHandoffChannel(groupId, role) {
 // Provide the MCP socket a (re)created member session should be launched
 // with -- used by the scheduled-prompt auto-resume path. A dead worker gets a
 // fresh handoff channel; the orchestrator gets its control broker back (it
-// was stopped when the orchestrator exited). Returns null when the group is
-// gone or the broker can't be (re)started -- the caller (fireSchedule) then
-// drops the prompt instead of spawning a member that could never hand off.
+// was stopped when the orchestrator exited). Returns { sockPath, token } (the
+// token gates the socket -- see mcpBroker.js -- and must reach the session's
+// sandbox as CCSANDBOX_MCP_TOKEN), or null when the group is gone or the
+// broker can't be (re)started -- the caller (fireSchedule) then drops the
+// prompt instead of spawning a member that could never hand off.
 export async function resolveGroupMcpSocket(groupId, groupRole) {
   const group = groups.get(groupId);
   if (!group) return null;
+  const handle = (b) => (b ? { sockPath: b.sockPath, token: b.token || null } : null);
   if (groupRole === 'orchestrator') {
-    if (group.controlBroker) return group.controlBroker.sockPath;
+    if (group.controlBroker) return handle(group.controlBroker);
     try {
       group.controlBroker = await startControlBroker({
         groupId,
         groupManager: groupManagerApi,
         sessionManager: sessionApi,
       });
-      return group.controlBroker.sockPath;
+      return handle(group.controlBroker);
     } catch {
       return null;
     }
   }
   const existing = group.handoffChannels.get(groupRole);
-  if (existing) return existing.sockPath;
+  if (existing) return handle(existing);
   try {
     const channel = await createMemberHandoffChannel(groupId, groupRole);
-    return channel ? channel.sockPath : null;
+    return handle(channel);
   } catch {
     return null;
   }
@@ -940,6 +943,7 @@ export async function addMember(groupId, role, options = {}) {
     groupId,
     groupRole: role,
     mcpSocketPath: channel.sockPath,
+    mcpToken: channel.token || null,
     gitCommonDir,
   });
   if (res.error || !res.session) {

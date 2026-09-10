@@ -20,8 +20,9 @@
 
 import * as pty from 'node-pty';
 import { randomUUID } from 'node:crypto';
-import { rmSync, unlinkSync } from 'node:fs';
+import { rmSync } from 'node:fs';
 import { buildSandboxSpawn } from '../ws/sandbox.js';
+import { releaseSeatbeltOverlay } from '../ws/sandbox-seatbelt.js';
 import { resolveSessionTimeoutMs, resolveExitedTimeoutMs } from './timeouts.js';
 
 const OUTPUT_BUFFER_MAX_BYTES = 512 * 1024;
@@ -78,6 +79,7 @@ export class PtyStore {
     sandboxOpts = null,
     app = null,
     mcpSocketPath = null,
+    mcpToken = null,
     notifySocketPath = null,
     usageSocketPath = null,
     metaSocketPath = null,
@@ -117,7 +119,7 @@ export class PtyStore {
       try {
         built = buildSandboxSpawn({
           cwd, targetCommand: [command, ...args], app, sandboxOpts,
-          mcpSocketPath, notifySocketPath, usageSocketPath, metaSocketPath, reviewerSocketPath,
+          mcpSocketPath, mcpToken, notifySocketPath, usageSocketPath, metaSocketPath, reviewerSocketPath,
           reuseSandboxHome, orchestratorClaudeMdSrc, gitCommonDir, groupFilesDir, sandboxHomeCreatedBy,
         });
       } catch (err) {
@@ -162,15 +164,10 @@ export class PtyStore {
       if (Array.isArray(seatbeltFiles)) {
         // Same guard as destroy(): a concurrent launch from the same
         // orchestratorDir may already own these paths.
-        const stillReferenced = new Set();
-        for (const other of this._sessions.values()) {
-          if (!Array.isArray(other.sandbox.seatbeltFiles)) continue;
-          for (const f of other.sandbox.seatbeltFiles) stillReferenced.add(f);
-        }
-        for (const f of seatbeltFiles) {
-          if (stillReferenced.has(f)) continue;
-          try { unlinkSync(f); } catch { /* best effort */ }
-        }
+        releaseSeatbeltOverlay(
+          seatbeltFiles,
+          [...this._sessions.values()].map((other) => other.sandbox.seatbeltFiles),
+        );
       }
       throw new Error(`Failed to spawn "${finalCommand}": ${err.message}`);
     }
@@ -343,15 +340,10 @@ export class PtyStore {
       try { rmSync(entry.sandbox.seatbeltDir, { recursive: true, force: true }); } catch { /* best effort */ }
     }
     if (Array.isArray(entry.sandbox.seatbeltFiles)) {
-      const stillReferenced = new Set();
-      for (const other of this._sessions.values()) {
-        if (other === entry || !Array.isArray(other.sandbox.seatbeltFiles)) continue;
-        for (const f of other.sandbox.seatbeltFiles) stillReferenced.add(f);
-      }
-      for (const f of entry.sandbox.seatbeltFiles) {
-        if (stillReferenced.has(f)) continue;
-        try { unlinkSync(f); } catch { /* best effort */ }
-      }
+      releaseSeatbeltOverlay(
+        entry.sandbox.seatbeltFiles,
+        [...this._sessions.values()].filter((other) => other !== entry).map((other) => other.sandbox.seatbeltFiles),
+      );
     }
     this._gitBrokerRegistry?.forget(id);
 
