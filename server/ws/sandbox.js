@@ -808,6 +808,18 @@ export function resolveTools(sandboxOpts = null, cfgTools = null) {
   return { rtk: !!rtkSpec, codeReviewGraph: !!crgSpec, rtkSpec, crgSpec };
 }
 
+// Which opt-in tools can actually be provisioned on this host, keyed by the
+// same ids resolveTools() uses. Exposed via GET /dirs/home so the launch /
+// settings UIs can render the toggles disabled-with-an-explanation (mirrors
+// availableApps for agent CLIs) instead of offering a checkbox the server
+// silently ignores. macOS: the seatbelt backend has no provisioner wiring and
+// no darwin rtk asset map (see buildSandboxSpawn's IS_MACOS branch, which
+// force-disables both), so neither is available there.
+export function sandboxToolsAvailable() {
+  const ok = !IS_MACOS;
+  return { rtk: ok, codeReviewGraph: ok };
+}
+
 // Locate an executable named `cmd` on the given PATH (or return it as-is if
 // it already looks like a path). Mirrors `command -v` without spawning a
 // shell. Defaults to the sandbox's own runtime PATH (see SANDBOX_PATH) since

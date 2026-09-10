@@ -120,7 +120,7 @@ export default function App() {
   // enabled (sandbox.config.json's "showUsage") and which agent CLIs are
   // installed here (availableApps). Usage is only meaningful when claude
   // exists, so a missing claude hides the button regardless of showUsage.
-  const [usagePrefs, setUsagePrefs] = useState({ showUsage: true, availableApps: null, hiddenApps: [] });
+  const [usagePrefs, setUsagePrefs] = useState({ showUsage: true, availableApps: null, hiddenApps: [], toolsAvailable: null });
   const [metaAgentDir, setMetaAgentDir] = useState(null);
 
   useEffect(() => {
@@ -145,6 +145,9 @@ export default function App() {
           showUsage: data.showUsage !== false,
           availableApps: data.availableApps || null,
           hiddenApps: Array.isArray(data.hiddenApps) ? data.hiddenApps : [],
+          // Which opt-in sandbox tools this host can provision (false on macOS);
+          // null/absent = older server -> the settings toggles stay enabled.
+          toolsAvailable: (data.toolsAvailable && typeof data.toolsAvailable === 'object') ? data.toolsAvailable : null,
         });
         if (data.metaAgentDir) setMetaAgentDir(data.metaAgentDir);
       })
@@ -995,6 +998,7 @@ export default function App() {
               onSessionModeChange={sessionSidebarPrefs.setMode}
               sandboxDefaults={sandboxDefaults}
               onSandboxDefaultsChange={setSandboxDefaultsPersisted}
+              toolsAvailable={usagePrefs.toolsAvailable}
               navGuardMode={navGuardMode}
               onNavGuardModeChange={setNavGuardModePersisted}
               notifyEnabled={notifyEnabled}

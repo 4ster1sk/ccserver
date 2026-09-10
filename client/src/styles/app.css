@@ -1437,6 +1437,16 @@ body {
   cursor: pointer;
 }
 
+/* Sandbox-default toggle unavailable on this host (rtk / code-review-graph on
+   macOS -- see issue #22). */
+.general-setting-check-disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.general-setting-check-disabled input[type="checkbox"] {
+  cursor: not-allowed;
+}
+
 .general-setting-subhead {
   margin: 20px 0 4px;
   font-size: 14px;
@@ -2150,6 +2160,17 @@ body {
   width: 14px;
   height: 14px;
   margin: 0;
+}
+
+/* Opt-in tool toggle the server host can't provision (rtk / code-review-graph
+   on macOS -- see issue #22): greyed out with an inline note, like a
+   not-installed agent CLI in the picker. */
+.open-menu-suboption-disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.open-menu-suboption-disabled input[type="checkbox"] {
+  cursor: not-allowed;
 }
 
 .open-menu-label {
