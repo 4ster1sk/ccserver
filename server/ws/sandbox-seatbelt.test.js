@@ -474,7 +474,9 @@ test('sysctl-read is allow-listed (not broad); kern.proc* / procargs stay denied
     '(sysctl-name-prefix "kern.os")', '"sysctl.name2oid"', '"kern.version"']) {
     assert.ok(text.includes(need), `sysctl allow-list keeps ${need}`);
   }
-  // ...but nothing opens kern.proc* (enumeration + procargs blobs).
+  // ...but nothing opens kern.proc* (so `ps` is refused -- though `pgrep` /
+  // proc_listpids() still enumerate, and KERN_PROCARGS2 still leaks: see the
+  // KNOWN LIMITATION in sandbox-seatbelt.js).
   const allowLine = text.split('\n').find((l) => l.startsWith('(allow sysctl-read '));
   assert.ok(allowLine, 'the sysctl-read allow is a single line');
   assert.ok(!allowLine.includes('kern.proc'), 'kern.proc* / procargs are not in the sysctl allow list');

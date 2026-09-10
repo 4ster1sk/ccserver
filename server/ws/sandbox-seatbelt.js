@@ -317,9 +317,18 @@ export function buildSeatbeltProfileText({
     // docs-site sandbox/overview.md "Known limitations" and issue tracker).
     // The `kern.procargs*`-name deny below is kept only for the sysctlbyname(3)
     // spelling and as documentation -- it does nothing for the numeric MIB.
-    // kern.proc* is also NOT allowed -> process enumeration is closed (a speed
-    // bump, not a barrier: pids are guessable). Cost: `pgrep` / `pkill` / `ps`
-    // cannot see other processes in-sandbox.
+    // kern.proc* is also NOT allowed, so `ps` (which walks KERN_PROC via
+    // sysctl) is refused -- but that is NOT process-list isolation:
+    // `pgrep` / anything using proc_listpids() / libproc reaches every
+    // same-UID pid (verified on macOS 14.8.5: `pgrep -l .` lists the full
+    // process table in-sandbox). Combined with the KERN_PROCARGS2 read above,
+    // a sandboxed agent enumerates every session and reads its env directly
+    // -- no pid guessing needed. So the per-session broker token
+    // (env-delivered) provides no isolation on macOS; the repo-scoped
+    // allow-list is the only real boundary. Same posture applies to the
+    // meta/messaging tokens. (Whether a targeted (deny process-info*
+    // (target others)) would at least close the pgrep enumeration path
+    // without breaking the toolchain is untested -- see the issue tracker.)
     `(allow sysctl-read ${[
       '(sysctl-name "sysctl.name2oid" "sysctl.proc_native")',
       '(sysctl-name-prefix "sysctl.oidfmt")',
