@@ -288,25 +288,38 @@ export function buildSeatbeltProfileText({
     // child-process management into EPERM.)
     '(allow signal (target self))',
     '(allow signal (target same-sandbox))',
-    // sysctl-read is NOT broadly allowed. KERN_PROCARGS2 -- read via the numeric
-    // MIB {CTL_KERN, KERN_PROCARGS2, pid} -- hands a same-UID caller another
-    // process's full argv AND environment: the ccserver server (CCSERVER_TOKEN /
-    // ANTHROPIC_API_KEY / cloud creds), other agent sessions (messaging + meta
-    // identity tokens), the git broker. A filtered
-    // `(deny sysctl-read (sysctl-name "kern.procargs2"))` after a broad
-    // `(allow sysctl-read)` does NOT stop the numeric-MIB path -- Seatbelt
-    // cannot evaluate (sysctl-name ...) against it (confirmed on CI: the probe
-    // still read another process's env). So rely on `(deny default)` and
-    // allow-list only the non-sensitive nodes the toolchain reads (list
-    // adapted from macOS's own container.sb). kern.proc* is deliberately NOT
-    // allowed -> process enumeration and BOTH procargs blobs are closed,
-    // matching what bwrap gets from --unshare-pid. Cost: `pgrep` / `pkill` /
-    // `ps` and anything walking kern.proc.* cannot see other processes
-    // in-sandbox. sysctl.name2oid / sysctl.oidfmt are load-bearing --
-    // sysctlbyname(3) issues them first, so denying them breaks every named
-    // lookup. Listing a name absent on a given arch/OS is harmless (the rule
-    // just never matches). Verify on macOS hardware if this block is touched --
-    // a compile error here fails closed for every launch.
+    // sysctl-read is NOT broadly allowed: deny-by-default, then allow-list only
+    // the non-sensitive nodes the toolchain reads (list adapted from macOS's
+    // own container.sb). This narrowing DOES stop a number of same-UID info
+    // leaks Seatbelt actually mediates -- verified on macOS 14 hardware: a
+    // sandboxed read of kern.bootargs / kern.osvariant_status /
+    // hw.ephemeral_storage is refused. sysctl.name2oid / sysctl.oidfmt are
+    // load-bearing (sysctlbyname(3) issues them first, so denying them breaks
+    // every named lookup). Listing a name absent on a given arch/OS is
+    // harmless. Verify on macOS hardware if this block is touched -- a compile
+    // error here fails closed for every launch.
+    //
+    // KNOWN LIMITATION (KERN_PROCARGS2): a same-UID process's full argv AND
+    // environment is still readable from inside the sandbox via the numeric MIB
+    // {CTL_KERN, KERN_PROCARGS2, pid}. Verified on macOS 14.8.5 arm64: NEITHER
+    // (deny default) for sysctl-read NOR any (deny sysctl-read (sysctl-name
+    // ...)) / (deny sysctl*) / (deny system-info) / (deny process-info*) rule
+    // has any effect on that path -- the numeric-MIB procargs read is simply
+    // not a Seatbelt-mediated operation on current macOS. Cross-UID is still
+    // blocked (by the kernel, not the sandbox). This means a sandboxed agent
+    // CAN read the ccserver server's env (CCSERVER_TOKEN / ANTHROPIC_API_KEY /
+    // cloud creds), a peer session's env (its CCSANDBOX_GIT_BROKER_TOKEN,
+    // messaging + meta identity tokens), and the git broker's env. bwrap's
+    // --unshare-pid genuinely closes this; Seatbelt cannot. Mitigations that
+    // do NOT depend on this being blocked: the git broker's allow-list is
+    // repo-scoped regardless of token theft's blast radius, and secrets that
+    // must be session-private should move off env entirely (see
+    // docs-site sandbox/overview.md "Known limitations" and issue tracker).
+    // The `kern.procargs*`-name deny below is kept only for the sysctlbyname(3)
+    // spelling and as documentation -- it does nothing for the numeric MIB.
+    // kern.proc* is also NOT allowed -> process enumeration is closed (a speed
+    // bump, not a barrier: pids are guessable). Cost: `pgrep` / `pkill` / `ps`
+    // cannot see other processes in-sandbox.
     `(allow sysctl-read ${[
       '(sysctl-name "sysctl.name2oid" "sysctl.proc_native")',
       '(sysctl-name-prefix "sysctl.oidfmt")',
@@ -324,8 +337,8 @@ export function buildSeatbeltProfileText({
         'kern.usrstack64', 'kern.version', 'kern.waketime',
       ].map((n) => `"${n}"`).join(' ')})`,
     ].join(' ')})`,
-    // Redundant under default-deny, but explicit: also refuse the procargs
-    // names for the sysctlbyname(3) spelling.
+    // Refuses the procargs nodes for the sysctlbyname(3) spelling only; the
+    // numeric-MIB path (see the KNOWN LIMITATION above) is unaffected.
     '(deny sysctl-read (sysctl-name "kern.procargs") (sysctl-name "kern.procargs2"))',
     '(allow mach-lookup)',
     '(allow network*)',

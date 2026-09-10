@@ -462,8 +462,11 @@ test('profile allows pty ioctls and nested pty allocation', () => {
 
 test('sysctl-read is allow-listed (not broad); kern.proc* / procargs stay denied', () => {
   const text = buildSeatbeltProfileText({});
-  // No broad `(allow sysctl-read)` -- that spelling was the bug (it also
-  // matched the numeric-MIB KERN_PROCARGS2 read).
+  // No broad `(allow sysctl-read)`: the narrow allow-list still refuses
+  // sysctl-read leaks Seatbelt mediates (kern.bootargs etc.). It does NOT
+  // block the numeric-MIB KERN_PROCARGS2 read -- that path is unmediated on
+  // macOS 14+ (see the KNOWN LIMITATION in sandbox-seatbelt.js and the
+  // exec test).
   assert.ok(!/\(allow sysctl-read\)/.test(text), 'no unfiltered (allow sysctl-read)');
   assert.ok(text.includes('(allow sysctl-read'), 'a filtered sysctl-read allow is present');
   // The toolchain essentials are allowed...
