@@ -443,15 +443,23 @@ export async function groupsRoute(fastify, opts) {
       }
       // macOS seatbelt materializes the rule overlay as real files in the
       // shared, deterministic orchestratorDir. An exited-but-not-yet-reaped
-      // session still references those paths and would unlink the successor's
-      // copies in its own teardown (destroySession's sandboxSeatbeltFiles
-      // block). It is already exited, so retiring it first breaks no
-      // atomicity guarantee (that only protects a live predecessor).
-      // keepSchedule defaults to true: a pending scheduled prompt outlives
-      // the retire and fires into the restarted orchestrator
-      // (matchesScheduleTarget matches the same group+role), matching the
-      // pre-retire behavior and destroySession's documented policy.
-      if (s) destroySession(existing, { reason: 'orchestrator-restart' });
+      // session that OWNS those files (sandboxSeatbeltFiles is an array) would
+      // unlink the successor's copies in its own teardown, so retire it first
+      // -- it is already exited, so this breaks no atomicity guarantee (that
+      // only protects a live predecessor). keepSchedule defaults to true: a
+      // pending scheduled prompt outlives the retire and fires into the
+      // restarted orchestrator (matchesScheduleTarget matches the same
+      // group+role), matching the pre-retire behavior and destroySession's
+      // documented policy.
+      //
+      // Gated on sandboxSeatbeltFiles (like fireSchedule's own retire-first):
+      // bwrap and non-sandboxed sessions never own overlay files, so eagerly
+      // destroying an exited predecessor there only costs a viewer its
+      // scrollback + restore metadata for no benefit (issue: Linux
+      // orchestrator-restart regression).
+      if (s && Array.isArray(s.sandboxSeatbeltFiles)) {
+        destroySession(existing, { reason: 'orchestrator-restart' });
+      }
     }
 
     // Prefer the persisted launch app; fall back to the restored member's
