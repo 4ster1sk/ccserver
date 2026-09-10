@@ -12,7 +12,7 @@ import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir, homedir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import {
   ancestorExactRegexes,
@@ -1167,20 +1167,30 @@ test('A: shard pins honor a CCSERVER_PTY_HOST_SOCK override', () => {
 test('B: pathVariantsDeep resolves the symlink spelling through missing components', () => {
   // Existing dir: both spellings, like pathVariants.
   const real = realpathSync(tmpRoot);
-  assert.deepEqual(new Set(pathVariantsDeep(tmpRoot)), new Set([tmpRoot, real].map((p) => p)));
-  // Deep missing path under /tmp: the /private/tmp spelling must still appear,
-  // no matter how many trailing components do not exist yet.
-  const deep = '/tmp/ccserver-runtime-999/ccserver-meta.d/sock';
+  assert.deepEqual(new Set(pathVariantsDeep(tmpRoot)), new Set([tmpRoot, real]));
+  // Deep path whose trailing components don't exist yet: the spelling that
+  // resolves the nearest existing ancestor (tmpRoot -> its realpath, which on
+  // macOS is the /private/... form and on Linux is identical) must still
+  // appear, no matter how many components are missing.
+  const deep = join(tmpRoot, 'ccserver-runtime-999', 'ccserver-meta.d', 'sock');
   const got = pathVariantsDeep(deep);
   assert.ok(got.includes(deep), 'raw spelling kept');
-  assert.ok(got.includes('/private/tmp/ccserver-runtime-999/ccserver-meta.d/sock'), 'resolved spelling synthesized');
+  assert.ok(
+    got.includes(join(real, 'ccserver-runtime-999', 'ccserver-meta.d', 'sock')),
+    'ancestor-resolved spelling synthesized',
+  );
 });
 
-test('B: the 2-level meta socket is net-pinned in BOTH /tmp spellings when the runtime dir is absent', () => {
+test('B: the 2-level meta socket is net-pinned in BOTH spellings when the runtime dir is absent', () => {
   // The bug: pathVariants() on a non-existent 2-level path returned only the
-  // raw spelling, so the meta broker stayed reachable via /private/tmp.
-  const absentBase = join(tmpdir(), `ccserver-rt-absent-${randomUUID()}`);
+  // raw spelling, so the meta broker stayed reachable via the symlink-resolved
+  // spelling Seatbelt actually mediates (e.g. /tmp -> /private/tmp on macOS).
+  const base = tmpdir();
+  const absentBase = join(base, `ccserver-rt-absent-${randomUUID()}`);
   const metaSock = join(absentBase, 'ccserver-meta.d', 'sock');
+  // The spelling pathVariantsDeep synthesizes: nearest existing ancestor
+  // (tmpdir) resolved. Identical to metaSock on Linux, the /private form on macOS.
+  const priv = metaSock.replace(base, realpathSync(base));
   const prev = process.env.CCSERVER_SANDBOX_SEATBELT_TMP;
   process.env.CCSERVER_SANDBOX_SEATBELT_TMP = tmpRoot; // keep the launch dir out of absentBase
   try {
@@ -1188,8 +1198,7 @@ test('B: the 2-level meta socket is net-pinned in BOTH /tmp spellings when the r
     trackDir(sb.dir);
     const text = readFileSync(sb.profilePath, 'utf-8');
     assert.ok(text.includes(`(path-literal "${metaSock}")`), 'raw spelling net-pinned');
-    const priv = metaSock.replace('/tmp/', '/private/tmp/');
-    assert.ok(text.includes(`(path-literal "${priv}")`), 'resolved spelling net-pinned');
+    assert.ok(text.includes(`(path-literal "${priv}")`), 'ancestor-resolved spelling net-pinned');
     // ...and the socket file itself stays write-denied in both spellings.
     assert.equal(finalWriteVerdict(text, metaSock), 'deny');
     assert.equal(finalWriteVerdict(text, priv), 'deny');
@@ -1272,20 +1281,30 @@ test('D: ~/.git-credentials is deny-write-pinned while the broker is on', () => 
 });
 
 test('F: the in-sandbox XDG_RUNTIME_DIR fits sockaddr_un with room for a socket name', () => {
-  // A full-UUID launch-dir leaf pushed <dir>/runtime past darwin's 104-byte
-  // sun_path limit, so gpg-agent / tmux / ssh ControlPath binds under
-  // $XDG_RUNTIME_DIR failed ENAMETOOLONG. The short leaf keeps headroom.
-  // Measure against the REAL per-user tmpdir, not the deliberately-long test
-  // override (CCSERVER_SANDBOX_SEATBELT_TMP), which no production launch uses.
+  // A full-UUID launch-dir leaf (`ccserver-seatbelt-<uuid>`, 54 chars) pushed
+  // <dir>/runtime past darwin's 104-byte sun_path limit, so gpg-agent / tmux
+  // / ssh ControlPath binds under $XDG_RUNTIME_DIR failed ENAMETOOLONG. The
+  // fix shortens the leaf. Base the check on a realistic-length root: darwin's
+  // real per-user tmpdir is /var/folders/<...>/T (~48 chars); pad a short /tmp
+  // dir up to that so the test is independent of the actual (possibly
+  // pathological, possibly sandboxed) host tmpdir.
+  const realBaseLen = 48;
+  let padBase = trackDir(mkdtempSync('/tmp/ccs-f-')); // ~15 chars
+  if (padBase.length < realBaseLen) {
+    padBase = join(padBase, 'p'.repeat(realBaseLen - padBase.length - 1));
+    mkdirSync(padBase, { recursive: true });
+  }
   const prev = process.env.CCSERVER_SANDBOX_SEATBELT_TMP;
-  delete process.env.CCSERVER_SANDBOX_SEATBELT_TMP;
+  process.env.CCSERVER_SANDBOX_SEATBELT_TMP = padBase;
   try {
     const sb = buildSeatbeltLaunch(baseOpts());
     trackDir(sb.dir);
     const rt = sb.env.XDG_RUNTIME_DIR;
     assert.ok(rt.startsWith(`${sb.dir}/`), 'runtime dir still inside the single teardown unit');
-    assert.ok(rt.startsWith(tmpdir()), 'runtime dir under the real per-user tmpdir');
-    // tmux binds $XDG_RUNTIME_DIR/tmux-<uid>/default (~17 bytes); keep that clear.
+    // The launch-dir leaf is the part this fix controls: far shorter than the
+    // old `ccserver-seatbelt-<uuid>` (54 chars).
+    assert.ok(basename(sb.dir).length <= 26, `launch-dir leaf too long: ${basename(sb.dir)}`);
+    // tmux binds $XDG_RUNTIME_DIR/tmux-<uid>/default (~17 bytes); keep it clear.
     assert.ok(
       Buffer.byteLength(`${rt}/tmux-501/default`) < 104,
       `${rt} (${Buffer.byteLength(rt)} bytes) leaves no room for a socket name`,
