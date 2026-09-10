@@ -506,10 +506,18 @@ test('sysctl-read is allow-listed (not broad); kern.proc* / procargs stay denied
   assert.ok(allowLine, 'the sysctl-read allow is a single line');
   assert.ok(!allowLine.includes('kern.proc'), 'kern.proc* / procargs are not in the sysctl allow list');
   assert.ok(!allowLine.includes('(sysctl-name-prefix "kern.")'), 'no bare kern. prefix (would re-open procargs)');
-  // Explicit belt-and-suspenders deny for the sysctlbyname spelling, after the allow.
+  // The broad hw. / kern.os prefixes are plain string-prefix matches, so they
+  // pull in hw.ephemeral_storage and kern.osvariant_status (fingerprinting).
+  // Those are re-denied by name AFTER the allow-list, together with the
+  // procargs sysctlbyname spelling (last-match-wins).
+  const denyLine = text.split('\n').find((l) => l.startsWith('(deny sysctl-read '));
+  assert.ok(denyLine, 'a sysctl-read deny line exists after the allow-list');
+  for (const name of ['hw.ephemeral_storage', 'kern.osvariant_status', 'kern.procargs', 'kern.procargs2']) {
+    assert.ok(denyLine.includes(`(sysctl-name "${name}")`), `re-denies ${name} after the prefix allow`);
+  }
   const allowIdx = text.indexOf('(allow sysctl-read');
-  const denyIdx = text.indexOf('(deny sysctl-read (sysctl-name "kern.procargs")');
-  assert.ok(denyIdx > allowIdx, 'the procargs deny is emitted AFTER the allow (last-match-wins)');
+  const denyIdx = text.indexOf(denyLine);
+  assert.ok(denyIdx > allowIdx, 'the sysctl re-deny is emitted AFTER the allow (last-match-wins)');
   const readAllowIdx = text.indexOf('(allow file-read*');
   if (readAllowIdx !== -1) assert.ok(denyIdx < readAllowIdx, 'deny precedes the file allows');
 });
@@ -723,12 +731,20 @@ test('keychainAccount matches Claude Code HT(): $USER, sanitized to claude-code-
   }
 });
 
-test('host node binary dir stays readable (nvm-style installs)', () => {
+test('host node binary is readable as a FILE, not its whole dir (nvm-style installs)', () => {
   const sb = buildSeatbeltLaunch(baseOpts());
   trackDir(sb.dir);
   const text = readFileSync(sb.profilePath, 'utf-8');
   const readLine = text.split('\n').find((l) => l.startsWith('  (allow file-read*'));
-  assert.ok(readLine.includes(subtreeRegex(dirname(process.execPath))));
+  const nodeBin = realpathSync(process.execPath);
+  // The exact binary path is pinned (dyld reads it to exec)...
+  assert.ok(readLine.includes(`^${escapeSeatbeltRegex(nodeBin)}$`), 'node binary file pinned');
+  // ...but NOT its directory as a subtree -- a shared bin dir (/usr/local/bin,
+  // ~/.local/bin) would otherwise expose every unrelated tool in it.
+  assert.ok(!readLine.includes(subtreeRegex(dirname(nodeBin))), 'node bin dir is not a subtree allow');
+  // Its ancestors are still resolvable, but metadata-only (lstat, not readdir).
+  const metaLine = text.split('\n').find((l) => l.startsWith('  (allow file-read-metadata'));
+  assert.ok(metaLine.includes(`^${escapeSeatbeltRegex(dirname(nodeBin))}$`), 'node bin dir ancestor lstat allowed');
 });
 
 test('buildSeatbeltLaunch cleans up its runtime dir when the overlay copy fails', () => {
@@ -762,18 +778,38 @@ test('the shim scripts get ancestor lstat allows (node module-loader realpath)',
   // `.cjs` pins cover open() but not the ancestor lstat -- without these the
   // gh / credential-helper / ssh / commit-hook / MCP shims all die with
   // `EPERM lstat '<serverdir>'` unless the server sits under a broadly-read
-  // tree. Exact-match only, so the server tree's contents stay closed.
+  // tree. Ancestors are file-read-METADATA only (lstat, never readdir), so the
+  // server tree's contents stay closed -- and a bare ancestor like the real
+  // $HOME cannot be listed.
   const sb = buildSeatbeltLaunch(baseOpts());
   trackDir(sb.dir);
   const text = readFileSync(sb.profilePath, 'utf-8');
   const readLine = text.split('\n').find((l) => l.startsWith('  (allow file-read*'));
-  // server/ws (holds the .cj), its parents up a few levels.
+  const metaLine = text.split('\n').find((l) => l.startsWith('  (allow file-read-metadata'));
   const wsDir = import.meta.dirname;                 // <repo>/server/ws
   for (const anc of ancestorExactRegexes([join(wsDir, 'sandbox-gh-wrapper.cjs')])) {
-    assert.ok(readLine.includes(`(regex #"${anc}")`), `missing ancestor lstat allow: ${anc}`);
+    assert.ok(metaLine.includes(`(regex #"${anc}")`), `missing ancestor lstat allow: ${anc}`);
+    assert.ok(!readLine.includes(`(regex #"${anc}")`), `ancestor must be metadata-only, not file-read*: ${anc}`);
   }
   // still exact-match: server/ws must not be a subtree (contents closed).
   assert.ok(!readLine.includes(subtreeRegex(wsDir)), 'server/ws is not a subtree allow');
+  assert.ok(!metaLine.includes(subtreeRegex(wsDir)), 'server/ws is not a metadata subtree either');
+});
+
+test('the real host $HOME is not listable from a throwaway-HOME sandbox (#3)', () => {
+  const fakeHome = mkdtempSync(join(tmpdir(), 'ccserver-sbtest-realhome-'));
+  DIRS.push(fakeHome);
+  mkdirSync(join(fakeHome, '.claude'), { recursive: true });
+  const sb = buildSeatbeltLaunch(baseOpts({ hostHome: fakeHome, homeDir: null }));
+  trackDir(sb.dir);
+  const text = readFileSync(sb.profilePath, 'utf-8');
+  const readLine = text.split('\n').find((l) => l.startsWith('  (allow file-read*')) || '';
+  const metaLine = text.split('\n').find((l) => l.startsWith('  (allow file-read-metadata')) || '';
+  // ~/.claude is a genuine read tree; the home dir ITSELF is only an ancestor.
+  assert.ok(readLine.includes(subtreeRegex(join(fakeHome, '.claude'))), '~/.claude readable');
+  assert.ok(metaLine.includes(`^${escapeSeatbeltRegex(fakeHome)}$`), 'host home ancestor lstat allowed');
+  assert.ok(!readLine.includes(`^${escapeSeatbeltRegex(fakeHome)}$`), 'host home is NOT file-read* (no readdir)');
+  assert.ok(!readLine.includes(subtreeRegex(fakeHome)), 'host home is not a subtree allow');
 });
 
 test('sibling launch dirs are deny-pinned for read and write', () => {

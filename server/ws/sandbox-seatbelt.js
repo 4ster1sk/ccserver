@@ -249,6 +249,7 @@ export function isBlockedCredentialBind(resolvedSrc, home) {
 //                    cannot stop it)
 export function buildSeatbeltProfileText({
   readRegexes = [],
+  readMetadataRegexes = [],
   writeRegexes = [],
   readLiterals = [],
   writeLiterals = [],
@@ -304,14 +305,18 @@ export function buildSeatbeltProfileText({
     '(allow signal (target same-sandbox))',
     // sysctl-read is NOT broadly allowed: deny-by-default, then allow-list only
     // the non-sensitive nodes the toolchain reads (list adapted from macOS's
-    // own container.sb). This narrowing DOES stop a number of same-UID info
-    // leaks Seatbelt actually mediates -- verified on macOS 14 hardware: a
-    // sandboxed read of kern.bootargs / kern.osvariant_status /
-    // hw.ephemeral_storage is refused. sysctl.name2oid / sysctl.oidfmt are
-    // load-bearing (sysctlbyname(3) issues them first, so denying them breaks
-    // every named lookup). Listing a name absent on a given arch/OS is
-    // harmless. Verify on macOS hardware if this block is touched -- a compile
-    // error here fails closed for every launch.
+    // own container.sb). This narrowing DOES stop the same-UID info leaks
+    // Seatbelt actually mediates -- kern.bootargs is not under any allowed
+    // prefix, so `(deny default)` refuses it (verified on macOS 14.8.5 arm64).
+    // Two nodes DO fall under the broad prefixes -- `(sysctl-name-prefix "hw.")`
+    // matches hw.ephemeral_storage and `(sysctl-name-prefix "kern.os")` matches
+    // kern.osvariant_status (sysctl-name-prefix is a plain string prefix, not
+    // component-wise) -- so they are re-denied by name AFTER the allow-list
+    // (last-match-wins; verified they flip to EPERM on hardware). sysctl.name2oid
+    // / sysctl.oidfmt are load-bearing (sysctlbyname(3) issues them first, so
+    // denying them breaks every named lookup). Listing a name absent on a given
+    // arch/OS is harmless. Verify on macOS hardware if this block is touched --
+    // a compile error here fails closed for every launch.
     //
     // KNOWN LIMITATION (KERN_PROCARGS2): a same-UID process's full argv AND
     // environment is still readable from inside the sandbox via the numeric MIB
@@ -360,9 +365,13 @@ export function buildSeatbeltProfileText({
         'kern.usrstack64', 'kern.version', 'kern.waketime',
       ].map((n) => `"${n}"`).join(' ')})`,
     ].join(' ')})`,
-    // Refuses the procargs nodes for the sysctlbyname(3) spelling only; the
-    // numeric-MIB path (see the KNOWN LIMITATION above) is unaffected.
-    '(deny sysctl-read (sysctl-name "kern.procargs") (sysctl-name "kern.procargs2"))',
+    // Re-deny (after the allow-list, last-match-wins) the sensitive nodes that
+    // the broad hw. / kern.os prefixes above would otherwise let through:
+    //   - hw.ephemeral_storage / kern.osvariant_status: fingerprinting
+    //     (VM/ephemeral detection, internal-build bitfield).
+    //   - kern.procargs / kern.procargs2: the sysctlbyname(3) spelling only;
+    //     the numeric-MIB path (see the KNOWN LIMITATION above) is unaffected.
+    '(deny sysctl-read (sysctl-name "hw.ephemeral_storage") (sysctl-name "kern.osvariant_status") (sysctl-name "kern.procargs") (sysctl-name "kern.procargs2"))',
     '(allow mach-lookup)',
     '(allow network*)',
     // Host control-plane unix sockets (pty-host RPC, meta broker) live under
@@ -395,6 +404,16 @@ export function buildSeatbeltProfileText({
     '(allow file-read* (literal "/"))',
     '',
   ];
+  if (readMetadataRegexes.length > 0) {
+    // Ancestor directories of the allowed trees: userspace realpath/lstat walks
+    // every path component, and Seatbelt mediates each. These need only
+    // file-read-metadata (stat/lstat/access) -- NOT file-read-data, which on a
+    // directory is readdir(). Emitting them here (before the file-read* allow)
+    // means an ancestor that is ALSO a genuine read tree still gets the wider
+    // grant, while a bare ancestor (e.g. the real $HOME above the agent config
+    // dirs) stays un-listable.
+    out.push(';; ancestor directories: metadata only (path resolution, not readdir).', line('allow file-read-metadata', regexes(readMetadataRegexes)), '');
+  }
   if (readRegexes.length > 0 || readLiterals.length > 0) {
     const sels = [regexes(readRegexes), literals(readLiterals)].filter(Boolean).join(' ');
     out.push(';; readable trees and files (system, project, tooling, scripts).', line('allow file-read*', sels), '');
@@ -876,12 +895,15 @@ export function buildSeatbeltLaunch({
     // ancestors here every shim dies with `EPERM lstat '<serverdir>'` unless
     // the server happens to sit under a broadly-read tree (/opt, /usr/local).
     // Exact-match only, like every other ancestor -- the server tree's
-    // contents stay closed.
-    readRegexes.push(...ancestorExactRegexes([
+    // contents stay closed. file-read-METADATA, not file-read*: resolution
+    // needs lstat on each component, never readdir. Without the split a bare
+    // ancestor like the real $HOME (above ~/.claude etc.) is listable, so a
+    // throwaway-HOME /usage capture could `ls ~` and enumerate the host home.
+    const readMetadataRegexes = ancestorExactRegexes([
       projectDir, effectiveHome, dir, ...tmpDirs, nodeBin, hostHome, ...appConfigDirs,
       ...[scripts.entrypoint, scripts.mcpBridge, scripts.ghWrapper,
         scripts.credHelper, scripts.sshWrapper, scripts.commitHook].filter(Boolean),
-    ]));
+    ]);
     // NOTE: host ~/Library/Caches is deliberately NOT allow-listed -- CFFIXED_USER_HOME
     // (see env) redirects the macOS-API cache/Library resolution into the sandbox
     // HOME, so nothing needs the host copy. (Xcode/SwiftPM-heavy workflows that
@@ -913,10 +935,13 @@ export function buildSeatbeltLaunch({
     if (gnupgHome) writeRegexes.push(...subtrees(gnupgHome));
     if (claudeDir && existsSync(claudeDir)) readRegexes.push(...subtrees(claudeDir));
     // The shims, the commit-msg hook and the MCP bridge all exec through the
-    // host node binary: guarantee it stays readable (and executable) even when
-    // it lives outside the default trees (nvm/Volta/fnm under $HOME), the same
-    // way bwrap ro-binds SANDBOX_NODE_PATH.
-    if (nodeBin) readRegexes.push(...subtrees(dirname(nodeBin)));
+    // host node binary: guarantee the binary FILE stays readable (dyld reads it
+    // to exec) even when it lives outside the default trees (nvm/Volta/fnm under
+    // $HOME). bwrap ro-binds just the file (SANDBOX_NODE_PATH), not its dir --
+    // match that: `subtrees(dirname(nodeBin))` would expose every unrelated tool
+    // in a shared bin dir (/usr/local/bin, ~/.local/bin). Ancestors are already
+    // covered (metadata) by ancestorExactRegexes above; both spellings here.
+    if (nodeBin) readRegexes.push(...pathVariants(nodeBin).map((p) => `^${escapeSeatbeltRegex(p)}$`));
     if (gitCommonDir) {
       readRegexes.push(...subtrees(gitCommonDir));
       writeRegexes.push(...subtrees(gitCommonDir));
@@ -1115,7 +1140,7 @@ export function buildSeatbeltLaunch({
       )];
     }
     const profileText = buildSeatbeltProfileText({
-      readRegexes, writeRegexes, readLiterals, writeLiterals,
+      readRegexes, readMetadataRegexes, writeRegexes, readLiterals, writeLiterals,
       siblingDenyWriteRegexes: siblingDeny, siblingDenyReadRegexes: siblingDeny,
       reAllowWriteRegexes: ownReAllow, reAllowReadRegexes: ownReAllow,
       denyWriteRegexes,

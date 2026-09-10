@@ -29,7 +29,7 @@ import assert from 'node:assert/strict';
 import { execFileSync, spawn as spawnFn, spawnSync } from 'node:child_process';
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir, homedir } from 'node:os';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
 import { buildSeatbeltLaunch, seatbeltEnvArgs } from './sandbox-seatbelt.js';
 import { SANDBOX_PATH, buildSandboxSpawn } from './sandbox.js';
 
@@ -326,6 +326,38 @@ test('a node shim script loads from the server tree (module-loader realpath)', S
   assert.ok(res.stdout.includes('loaded-ok'), `shim script not loadable: ${fmtResult(res)}`);
 });
 
+test('ancestor dirs are metadata-only: real $HOME resolves but does not readdir (#3)', SKIP_OPTS, (t) => {
+  if (!checkRunnable(t)) return;
+  // A throwaway-HOME launch (like a /usage capture) still allow-lists the real
+  // ~/.claude etc., which forces an ancestor rule for the real $HOME. That rule
+  // is file-read-METADATA only: lstat/realpath through it must work, but
+  // `ls ~` (readdir) must be refused -- otherwise the capture can enumerate the
+  // host home's top-level entries.
+  const opts = baseOpts();
+  const sb = buildSeatbeltLaunch(opts);
+  trackDir(sb.dir);
+  sb.cwd = opts.cwd;
+  const lstatOk = runInSeatbelt(sb, [sb.nodeBin, '-e', `console.log(require('fs').lstatSync(${JSON.stringify(HOME)}).isDirectory())`], { cwd: opts.cwd });
+  assertAllowed(lstatOk, sb, 'lstat real $HOME');
+  assert.ok(lstatOk.stdout.includes('true'), `lstat of $HOME failed: ${fmtResult(lstatOk)}`);
+  const readdir = runInSeatbelt(sb, [sb.nodeBin, '-e', `try{require('fs').readdirSync(${JSON.stringify(HOME)});console.log('LISTED')}catch(e){console.log('DENIED '+e.code)}`], { cwd: opts.cwd });
+  assert.ok(readdir.stdout.includes('DENIED'), `real $HOME must not be listable: ${fmtResult(readdir)}`);
+});
+
+test('node binary dir is not readable as a tree (#4)', SKIP_OPTS, (t) => {
+  if (!checkRunnable(t)) return;
+  // bwrap ro-binds just the node FILE; the seatbelt profile must not read-allow
+  // its whole directory (a shared bin dir would expose every unrelated tool).
+  // The binary itself must still exec (covered by the realpath test above).
+  const opts = baseOpts();
+  const sb = buildSeatbeltLaunch(opts);
+  trackDir(sb.dir);
+  sb.cwd = opts.cwd;
+  const dir = dirname(sb.nodeBin);
+  const res = runInSeatbelt(sb, [sb.nodeBin, '-e', `try{const l=require('fs').readdirSync(${JSON.stringify(dir)});console.log('LISTED '+l.length)}catch(e){console.log('DENIED '+e.code)}`], { cwd: opts.cwd });
+  assert.ok(res.stdout.includes('DENIED'), `node bin dir must not be listable: ${fmtResult(res)}`);
+});
+
 test('project dir is writable', SKIP_OPTS, (t) => {
   if (!checkRunnable(t)) return;
   const opts = baseOpts();
@@ -454,10 +486,13 @@ test('KERN_PROCARGS2 (other processes argv/env): denied inside, or a documented 
 
   // A dedicated same-UID sibling that OUTLIVES the sandboxed read and carries a
   // marker in its env -- exactly the cross-session leak shape (a peer session /
-  // the ccserver server holding CCSERVER_TOKEN). More reliable than targeting
-  // the test runner's own pid.
+  // the ccserver server holding CCSERVER_TOKEN). Use `node` (not `sh -c`): a
+  // shell can exec into a state where KERN_PROCARGS2 does not expose the prefix
+  // env var, making the outside sanity check below flaky; a node process
+  // reliably carries its full environ (this is exactly the real target shape --
+  // the ccserver server and every agent session are node).
   const MARKER = `CCSERVER_SECRET_${Math.random().toString(36).slice(2)}`;
-  const sleeper = spawnFn('/bin/sh', ['-c', 'sleep 30'], {
+  const sleeper = spawnFn(process.execPath, ['-e', 'setTimeout(() => {}, 30000)'], {
     env: { ...process.env, [MARKER]: 'do-not-leak' }, stdio: 'ignore', detached: true,
   });
   try {
@@ -512,14 +547,21 @@ test('toolchain sysctls stay readable inside the sandbox (allow-list not too tig
     '#include <sys/sysctl.h>',
     '#include <stdio.h>',
     'int main(void){',
-    '  const char *names[] = { "hw.ncpu", "hw.logicalcpu", "hw.memsize", "hw.pagesize",',
+    '  const char *need[] = { "hw.ncpu", "hw.logicalcpu", "hw.memsize", "hw.pagesize",',
     '    "hw.machine", "hw.cachelinesize", "machdep.cpu.brand_string", "kern.osrelease",',
     '    "kern.osversion", "kern.version", "kern.hostname", "kern.boottime",',
     '    "kern.maxfilesperproc", "kern.argmax", "vm.loadavg" };',
+    // hw.ephemeral_storage / kern.osvariant_status DO fall under the broad
+    // hw. / kern.os prefixes but are re-denied by name -- they must NOT read.
+    '  const char *blocked[] = { "hw.ephemeral_storage", "kern.osvariant_status" };',
     '  int bad = 0;',
-    '  for (unsigned i = 0; i < sizeof(names)/sizeof(*names); i++) {',
+    '  for (unsigned i = 0; i < sizeof(need)/sizeof(*need); i++) {',
     '    size_t sz = 0;',
-    '    if (sysctlbyname(names[i], NULL, &sz, NULL, 0) != 0) { printf("FAIL %s\\n", names[i]); bad = 1; }',
+    '    if (sysctlbyname(need[i], NULL, &sz, NULL, 0) != 0) { printf("FAIL %s\\n", need[i]); bad = 1; }',
+    '  }',
+    '  for (unsigned i = 0; i < sizeof(blocked)/sizeof(*blocked); i++) {',
+    '    size_t sz = 0;',
+    '    if (sysctlbyname(blocked[i], NULL, &sz, NULL, 0) == 0) { printf("LEAK %s\\n", blocked[i]); bad = 1; }',
     '  }',
     '  if (!bad) printf("ALL_OK\\n");',
     '  return bad;',
@@ -538,7 +580,7 @@ test('toolchain sysctls stay readable inside the sandbox (allow-list not too tig
   const res = runInSeatbelt(sb, [bin], { cwd: opts.cwd });
   try {
     assertAllowed(res, sb, 'toolchain sysctls');
-    assert.ok(String(res.stdout).includes('ALL_OK'), `some toolchain sysctl was denied: ${fmtResult(res)}`);
+    assert.ok(String(res.stdout).includes('ALL_OK'), `a toolchain sysctl was denied or a sensitive one leaked: ${fmtResult(res)}`);
   } catch (err) {
     preserveProfile(sb, 'toolchain_sysctls');
     throw err;
