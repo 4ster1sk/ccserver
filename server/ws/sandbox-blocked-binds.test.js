@@ -30,6 +30,11 @@ before(() => {
     docker: false,
     gitBroker: false,
     persistentHome: false,
+    // Off so buildSandboxSpawn is deterministic across calls: an enabled
+    // guard mints a fresh `ccserver-commit-guard-<uuid>` runtime dir per
+    // call, which would make the null-vs-claude deepEqual below spuriously
+    // fail on the guard-config bind path.
+    commitMessageGuard: { enabled: false },
     binds: [
       { src: '~/.ssh', mode: 'ro' },
       { src: '~/.config/gh', mode: 'ro' },

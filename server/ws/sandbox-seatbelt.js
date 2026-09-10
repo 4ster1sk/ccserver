@@ -85,7 +85,11 @@ let defaultKeychainProbed = false;
 export function _resetKeychainProbeForTest() { defaultKeychainProbed = false; }
 
 export function seedClaudeCredentialsFromHostKeychain(hostHome, { runSecurity = null, probe = probeHostKeychain } = {}) {
-  if (process.platform !== 'darwin' && !runSecurity) return false;
+  // Non-darwin: never shell out to `security`. An injected `runSecurity` or a
+  // non-default `probe` is a test seam (production always calls this with
+  // neither), so let those through -- otherwise the latch / probe-path tests
+  // can only run on macOS.
+  if (process.platform !== 'darwin' && !runSecurity && probe === probeHostKeychain) return false;
   // These env overrides make Claude ignore the stored credential entirely.
   if (process.env.ANTHROPIC_API_KEY || process.env.CLAUDE_CODE_OAUTH_TOKEN) return false;
   const claudeDir = join(hostHome, '.claude');
