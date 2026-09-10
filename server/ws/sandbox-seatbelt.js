@@ -214,6 +214,20 @@ export function escapeSeatbeltLiteral(s) {
   return String(s).replace(/\\/g, '\\\\').replace(/"/g, '\\"');
 }
 
+// Credential trees an operator-configured extra bind must never re-expose to
+// the sandbox, unconditionally (even with gitBroker off): raw ~/.ssh keys and
+// the ~/.config/gh token are exactly the any-repo exposures the git broker
+// replaces, and a stale sandbox.config.json predating that change must not
+// silently reintroduce them. Shared by both backends' extra-bind filters
+// (buildBwrapArgs and buildSeatbeltLaunch) so a new path is added in one place.
+// `resolvedSrc` MUST already be resolve()'d so `~/.config/../.ssh/id_rsa`
+// collapses onto ~/.ssh before the prefix test (Seatbelt/bwrap then mediate
+// the resolved path and would grant it otherwise).
+export function isBlockedCredentialBind(resolvedSrc, home) {
+  return [join(home, '.ssh'), join(home, '.config', 'gh')]
+    .some((p) => resolvedSrc === p || resolvedSrc.startsWith(`${p}/`));
+}
+
 // Assemble the profile text. Each list holds ready-made `regex #"..."` bodies
 // (see subtreeRegex) or exact-path literals. Seatbelt is last-match-wins:
 // the deny lines beat the allow lines ONLY because they are emitted AFTER
@@ -514,6 +528,15 @@ export function buildSeatbeltLaunch({
   controlSockDenies = [],
   hostRuntimeDir = null,
 }) {
+  // Defense in depth behind buildSandboxSpawn / sessionManager's cwd='/'
+  // refusal: a projectDir of "/" makes subtrees('/') compile to "^/(/.*)?$",
+  // silently granting file-read*/file-write* over the whole filesystem (a
+  // fail-open sandbox). buildMinimalSeatbeltSpawn's /usage + /codex-usage
+  // callers pin a fixed non-root cwd, but guard the shared primitive so a new
+  // caller can't reintroduce the hole. See docs/seatbelt-root-read-abort-diagnosis.md.
+  if (resolve(cwd) === '/') {
+    throw new Error('Cannot build a seatbelt sandbox for the filesystem root (/) -- the project rule would grant the whole filesystem.');
+  }
   const launchId = randomUUID();
   // The launch dir holds the in-sandbox XDG_RUNTIME_DIR (`<dir>/runtime`, see
   // env below). Tools bind unix sockets directly under $XDG_RUNTIME_DIR
@@ -569,7 +592,17 @@ export function buildSeatbeltLaunch({
     // use_shell=1) -- which is exactly why bare-word backslash escaping
     // (`/a\ b/c`, leading `/` keeps the path class) works and a raw
     // unescaped path with spaces would not.
-    const shEscapeWord = (s) => String(s).replace(/[^A-Za-z0-9_@%+=:,./-]/g, '\\$&');
+    //
+    // A newline is the one char this cannot escape: `sh` treats backslash +
+    // newline as a line continuation and splices it out, silently corrupting
+    // the value. The only value passed here is an internal launch-dir path
+    // (join(binDir, ...)), which can't contain one -- throw if that ever
+    // changes rather than emit a broken helper line.
+    const shEscapeWord = (s) => {
+      const str = String(s);
+      if (/[\n\r]/.test(str)) throw new Error('shEscapeWord: value contains a newline (would become a line continuation under sh -c)');
+      return str.replace(/[^A-Za-z0-9_@%+=:,./-]/g, '\\$&');
+    };
     const shim = (name, target) => {
       const p = join(binDir, name);
       writeFileSync(p, `#!/bin/sh\nexec ${shQuote(nodeBin)} ${shQuote(target)} "$@"\n`, { mode: 0o755 });
@@ -1027,15 +1060,13 @@ export function buildSeatbeltLaunch({
     }
 
     // Operator extra binds become allow rules (no remount, so src is used
-    // as-is; dest is ignored). Blocked paths are skipped with a warning.
-    // resolve() collapses `..` first: without it `~/.config/../.ssh/id_rsa`
-    // slips past the ~/.ssh prefix check (Seatbelt then mediates the resolved
-    // path and grants it anyway).
-    const BLOCKED = [join(hostHome, '.ssh'), join(hostHome, '.config', 'gh')];
+    // as-is; dest is ignored). Blocked credential trees (~/.ssh, ~/.config/gh)
+    // are skipped with a warning -- see isBlockedCredentialBind. resolve()
+    // collapses `..` first so `~/.config/../.ssh/id_rsa` can't slip past it.
     for (const b of extraBinds || []) {
       if (!b || !b.src) continue;
       const src = resolve(expandAgainstHome(String(b.src), hostHome));
-      if (BLOCKED.some((p) => src === p || src.startsWith(`${p}/`))) {
+      if (isBlockedCredentialBind(src, hostHome)) {
         console.warn(`[sandbox] ignoring configured bind of ${src}: raw ssh keys / gh config are no longer exposed to the sandbox (see the git broker)`);
         continue;
       }

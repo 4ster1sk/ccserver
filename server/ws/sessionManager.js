@@ -619,14 +619,22 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
   // become "^/(/.*)?$" (seatbelt, see subtrees()) or a "/" bind (bwrap),
   // silently granting the whole filesystem -- a fail-open sandbox. Shell
   // sessions only run sandboxed under forceSandbox or an explicit per-launch
-  // sandbox request, so the refusal is gated on those.
+  // sandbox request, so the refusal is gated on those. The "would grant the
+  // whole filesystem" wording only fits when a sandbox would actually be
+  // built: `sandbox:true` on a host with no available backend (forceSandbox
+  // off) constructs no sandbox, so the raw-flag check still refuses the launch
+  // (a `/` cwd is invalid regardless of backend) but drops the counterfactual
+  // clause from the message.
   if (cwd === '/' && (!shell || sandbox || cfg.forceSandbox)) {
+    const wouldSandbox = process.platform !== 'win32' && sandboxAvailable();
     return {
       sessionId: id,
       session: null,
       error: !shell
         ? 'Cannot launch in the filesystem root (/) -- claude aborts immediately there. Choose a working directory first.'
-        : 'Cannot launch a sandboxed shell in the filesystem root (/) -- the sandbox would grant the whole filesystem. Choose a working directory first.',
+        : wouldSandbox
+          ? 'Cannot launch a sandboxed shell in the filesystem root (/) -- the sandbox would grant the whole filesystem. Choose a working directory first.'
+          : 'Cannot launch a sandboxed shell in the filesystem root (/). Choose a working directory first.',
     };
   }
 

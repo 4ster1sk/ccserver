@@ -319,11 +319,15 @@ function handleRequest(line, conn, ctx) {
   }
   // Connection auth: on macOS Seatbelt this socket sits in a shared /tmp dir
   // reachable by every concurrent sandboxed session (bwrap binds it per-session
-  // so this is belt-and-suspenders there). Without a matching per-session token
-  // -- delivered to the sandbox via CCSANDBOX_GIT_BROKER_TOKEN, and unreadable
-  // from a peer session's env now that KERN_PROCARGS2 is denied -- a session
-  // could borrow another session's repo-scoped credentials. Fail closed: no
-  // configured token rejects everything.
+  // so this is belt-and-suspenders there). The per-session token (delivered to
+  // the sandbox via CCSANDBOX_GIT_BROKER_TOKEN) keeps an unauthorized connect()
+  // from borrowing another session's repo-scoped credentials -- but on macOS it
+  // is an audit / accident-prevention layer, NOT a hard boundary: a same-UID
+  // peer session can still recover this token by reading the target's env via
+  // the numeric-MIB KERN_PROCARGS2 (unblockable under Seatbelt -- see
+  // sandbox-seatbelt.js's KNOWN LIMITATION). The real boundary there is the
+  // repo-scoped allow-list below. Fail closed: no configured token rejects
+  // everything.
   if (!tokenEq(req && req.token, ctx.token)) {
     conn.end(`${JSON.stringify({ ok: false, reason: 'unauthorized' })}\n`);
     return;
@@ -490,8 +494,10 @@ export function startGitBroker({ cwd, blockedPatterns = null }) {
 
   // Per-session connection token: the sandbox gets it via
   // CCSANDBOX_GIT_BROKER_TOKEN, the --serve child via CCSANDBOX_BROKER_TOKEN.
-  // A concurrent session (which cannot read this env now that the Seatbelt
-  // profile denies KERN_PROCARGS2) is rejected with reason:"unauthorized".
+  // A concurrent session with no/wrong token is rejected with
+  // reason:"unauthorized" (see handleRequest -- on macOS this is an audit
+  // layer, not a hard boundary, since KERN_PROCARGS2 leaks the token to a
+  // same-UID peer).
   const token = randomBytes(24).toString('base64url');
   const serveArgs = [__filename, '--serve', '--sock', sockPath, '--allowlist', allowlistPath, '--cwd', cwd];
   if (commitGuardPath) serveArgs.push('--commit-guard', commitGuardPath);

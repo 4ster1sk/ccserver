@@ -29,7 +29,7 @@ import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { startGitBroker, hostRuntimeDir, ensureHostRuntimeDir, PTY_HOST_SOCK_NAME, META_SOCKET_DIR_NAME } from './git-broker.js';
 import { buildGuardConfig } from './commitGuard.js';
-import { buildSeatbeltLaunch, seatbeltEnvArgs, seedClaudeCredentialsFromHostKeychain } from './sandbox-seatbelt.js';
+import { buildSeatbeltLaunch, seatbeltEnvArgs, seedClaudeCredentialsFromHostKeychain, isBlockedCredentialBind } from './sandbox-seatbelt.js';
 import { recordSandboxHome as recordSandboxHomeDb, listSandboxRowsBySlug, forgetSandboxHome } from './projects.js';
 import { APPS } from './appLaunch.js';
 
@@ -1608,18 +1608,15 @@ function buildBwrapArgs({ cwd, docker, gpg, extraBinds, extraEnv, authSock, stat
   // User-configured extra binds (ssh keys, custom config, etc.). Use *-try
   // so a missing source is skipped rather than aborting the launch.
   //
-  // Raw ~/.ssh (private keys) and ~/.config/gh (gh token) are always
-  // blocked here, unconditionally (even if gitBroker is off): those are
-  // exactly the unrestricted, any-repo credential exposures this feature
-  // replaces, and a stale sandbox.config.json predating this change must
-  // not silently reintroduce them.
-  const BLOCKED_BIND_PATHS = [join(HOME, '.ssh'), join(HOME, '.config', 'gh')];
+  // Raw ~/.ssh (private keys) and ~/.config/gh (gh token) are always blocked
+  // here, unconditionally (even if gitBroker is off) -- see
+  // isBlockedCredentialBind (shared with the seatbelt backend).
   for (const b of extraBinds) {
     if (!b || !b.src) continue;
     // resolve() collapses `..` first: without it `~/.config/../.ssh` slips
     // past the prefix check and bwrap then binds the resolved ~/.ssh anyway.
     const src = resolve(expandHome(String(b.src)));
-    if (BLOCKED_BIND_PATHS.some((p) => src === p || src.startsWith(`${p}/`))) {
+    if (isBlockedCredentialBind(src, HOME)) {
       console.warn(`[sandbox] ignoring configured bind of ${src}: raw ssh keys / gh config are no longer exposed to the sandbox (see the git broker)`);
       continue;
     }

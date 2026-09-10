@@ -20,6 +20,7 @@ import {
   buildSeatbeltProfileText,
   escapeSeatbeltLiteral,
   escapeSeatbeltRegex,
+  isBlockedCredentialBind,
   pathVariants,
   pathVariantsDeep,
   seatbeltEnvArgs,
@@ -450,6 +451,30 @@ test('buildSeatbeltLaunch skips blocked extra binds like bwrap does', () => {
   const allowLines = text.split('\n').filter((l) => /^\s*\(allow file-(read|write)\*/.test(l)).join('\n');
   assert.ok(!allowLines.includes(subtreeRegex(join(fakeHome, '.ssh'))), '~/.ssh never allow-listed');
   assert.ok(!text.includes(escapeSeatbeltRegex(join(fakeHome, '.ssh', 'id_rsa'))), 'no raw key path via ..');
+});
+
+test('isBlockedCredentialBind: the shared filter matches ~/.ssh and ~/.config/gh trees only', () => {
+  const home = '/home/u';
+  assert.equal(isBlockedCredentialBind('/home/u/.ssh', home), true, 'the dir itself');
+  assert.equal(isBlockedCredentialBind('/home/u/.ssh/id_ed25519', home), true, 'a file under it');
+  assert.equal(isBlockedCredentialBind('/home/u/.config/gh/hosts.yml', home), true, 'gh config');
+  assert.equal(isBlockedCredentialBind('/home/u/.sshfoo', home), false, 'a sibling with a shared prefix is not blocked');
+  assert.equal(isBlockedCredentialBind('/home/u/.config/github', home), false, 'a sibling of gh/ is not blocked');
+  assert.equal(isBlockedCredentialBind('/srv/shared', home), false, 'an unrelated path');
+  // The caller passes a resolve()'d src, so `..` is already collapsed by the
+  // time this runs (join() collapses it here) -- a `~/.config/../.ssh` path
+  // still lands on the blocked ~/.ssh tree.
+  assert.equal(isBlockedCredentialBind(join(home, '.config', '..', '.ssh', 'id_rsa'), home), true);
+});
+
+test('buildSeatbeltLaunch refuses the filesystem root as cwd (shared-primitive fail-open guard)', () => {
+  assert.throws(
+    () => buildSeatbeltLaunch(baseOpts({ cwd: '/' })),
+    /filesystem root/,
+    'a projectDir of "/" would make subtrees("/") grant the whole filesystem',
+  );
+  // A spelling that resolves to the root is caught too.
+  assert.throws(() => buildSeatbeltLaunch(baseOpts({ cwd: '/tmp/..' })), /filesystem root/);
 });
 
 test('profile allows pty ioctls and nested pty allocation', () => {
