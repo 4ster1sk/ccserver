@@ -1,10 +1,11 @@
 // buildMinimalSeatbeltSpawn (server/ws/sandbox.js): the macOS minimal launch
 // used by the background usage captures (server/usage.js, server/codexUsage.js).
 //
-// Regression for docs/usage-widget-macos-sandbox-investigation.md: the minimal
-// path used to (a) drop `app` before buildSeatbeltLaunch and (b) skip the
-// Keychain seed that full sessions do, so a Keychain-only host login never
-// reached a sandboxed `/usage` capture (30s timeout under forceSandbox:true).
+// Regression for the "Usage widget times out under macOS forceSandbox"
+// investigation: the minimal path used to (a) drop `app` before
+// buildSeatbeltLaunch and (b) skip the Keychain seed that full sessions do,
+// so a Keychain-only host login never reached a sandboxed `/usage` capture
+// (30s timeout under forceSandbox:true).
 //
 // Platform-independent by design (no IS_MACOS check inside; only the caller
 // buildMinimalSandboxSpawn branches on it), so this runs on Linux CI too.
