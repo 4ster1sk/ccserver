@@ -834,8 +834,20 @@ export function buildSeatbeltLaunch({
     // under hostHome -- without hostHome's ancestors a throwaway-HOME launch on
     // a host whose node lives outside $HOME EPERMs on lstat '/Users/<user>'
     // the moment Claude reads ~/.claude/.credentials.json).
+    //
+    // The node-based shims (gh / credential-helper / ssh / commit-hook / MCP
+    // bridge) are `#!/bin/sh exec <node> <serverdir>/server/ws/*.cjs`: node's
+    // module loader realpathSync's that script path, lstat-walking
+    // <serverdir> and its parents. Those are NOT the exact `.cjs` pins above
+    // (which cover open(), not the ancestor lstat), so without their
+    // ancestors here every shim dies with `EPERM lstat '<serverdir>'` unless
+    // the server happens to sit under a broadly-read tree (/opt, /usr/local).
+    // Exact-match only, like every other ancestor -- the server tree's
+    // contents stay closed.
     readRegexes.push(...ancestorExactRegexes([
       projectDir, effectiveHome, dir, ...tmpDirs, nodeBin, hostHome, ...appConfigDirs,
+      ...[scripts.entrypoint, scripts.mcpBridge, scripts.ghWrapper,
+        scripts.credHelper, scripts.sshWrapper, scripts.commitHook].filter(Boolean),
     ]));
     // NOTE: host ~/Library/Caches is deliberately NOT allow-listed -- CFFIXED_USER_HOME
     // (see env) redirects the macOS-API cache/Library resolution into the sandbox

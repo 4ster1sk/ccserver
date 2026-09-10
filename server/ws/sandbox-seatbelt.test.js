@@ -731,6 +731,26 @@ test('only executed host files are readable, never the server tree', () => {
   }
 });
 
+test('the shim scripts get ancestor lstat allows (node module-loader realpath)', () => {
+  // `#!/bin/sh exec <node> <serverdir>/server/ws/*.cjs`: node realpathSync's
+  // the entry script, lstat-walking <serverdir> and its parents. The exact
+  // `.cjs` pins cover open() but not the ancestor lstat -- without these the
+  // gh / credential-helper / ssh / commit-hook / MCP shims all die with
+  // `EPERM lstat '<serverdir>'` unless the server sits under a broadly-read
+  // tree. Exact-match only, so the server tree's contents stay closed.
+  const sb = buildSeatbeltLaunch(baseOpts());
+  trackDir(sb.dir);
+  const text = readFileSync(sb.profilePath, 'utf-8');
+  const readLine = text.split('\n').find((l) => l.startsWith('  (allow file-read*'));
+  // server/ws (holds the .cj), its parents up a few levels.
+  const wsDir = import.meta.dirname;                 // <repo>/server/ws
+  for (const anc of ancestorExactRegexes([join(wsDir, 'sandbox-gh-wrapper.cjs')])) {
+    assert.ok(readLine.includes(`(regex #"${anc}")`), `missing ancestor lstat allow: ${anc}`);
+  }
+  // still exact-match: server/ws must not be a subtree (contents closed).
+  assert.ok(!readLine.includes(subtreeRegex(wsDir)), 'server/ws is not a subtree allow');
+});
+
 test('sibling launch dirs are deny-pinned for read and write', () => {
   const sb = buildSeatbeltLaunch(baseOpts());
   trackDir(sb.dir);

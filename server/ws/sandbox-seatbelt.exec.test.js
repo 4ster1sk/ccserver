@@ -303,6 +303,29 @@ test('node realpathSync works (ancestor lstat regression)', SKIP_OPTS, (t) => {
   assert.ok(res.stdout.includes('package.json'), `unexpected output: ${fmtResult(res)}`);
 });
 
+test('a node shim script loads from the server tree (module-loader realpath)', SKIP_OPTS, (t) => {
+  if (!checkRunnable(t)) return;
+  // The gh / credential-helper / ssh / commit-hook / MCP shims are
+  // `#!/bin/sh exec <node> <serverdir>/server/ws/*.cjs`. node's loader
+  // realpathSync's the entry script -> lstat-walks <serverdir> + parents,
+  // which the exact `.cjs` read pins do NOT cover. Regression: every such
+  // shim died `EPERM lstat '<serverdir>'` unless the server sat under
+  // /opt|/usr/local. Run the real gh wrapper's --help-ish path: it must at
+  // least LOAD (a broker-unreachable error is fine; an EPERM/MODULE_NOT_FOUND
+  // crash is the bug).
+  const opts = baseOpts();
+  const sb = buildSeatbeltLaunch(opts);
+  trackDir(sb.dir);
+  sb.cwd = opts.cwd;
+  const res = runInSeatbelt(
+    sb,
+    [sb.nodeBin, '-e', `require('fs').realpathSync(${JSON.stringify(opts.scripts.ghWrapper)}); console.log('loaded-ok')`],
+    { cwd: opts.cwd },
+  );
+  assertAllowed(res, sb, 'load shim script');
+  assert.ok(res.stdout.includes('loaded-ok'), `shim script not loadable: ${fmtResult(res)}`);
+});
+
 test('project dir is writable', SKIP_OPTS, (t) => {
   if (!checkRunnable(t)) return;
   const opts = baseOpts();
