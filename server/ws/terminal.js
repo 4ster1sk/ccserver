@@ -49,10 +49,13 @@ export function attachTerminalHandler(chan) {
         const groupId = typeof msg.groupId === 'string' ? msg.groupId : null;
         const groupRole = typeof msg.groupRole === 'string' ? msg.groupRole : null;
         let mcpSocketPath = null;
+        let mcpToken = null;
         let resolvedCwd = null;
         let gitCommonDir = null;
         if (groupId && groupRole) {
-          mcpSocketPath = await resolveMcpSocketForSession(groupId, groupRole);
+          const mcpResolved = await resolveMcpSocketForSession(groupId, groupRole);
+          mcpSocketPath = mcpResolved ? mcpResolved.sockPath : null;
+          mcpToken = mcpResolved ? mcpResolved.token : null;
           if (!mcpSocketPath) {
             chan.send(JSON.stringify({
               type: 'error',
@@ -113,6 +116,7 @@ export function attachTerminalHandler(chan) {
           groupRole,
           projectName,
           mcpSocketPath,
+          mcpToken,
           gitCommonDir,
           // Default reuse (keep the previous persistent HOME); only an
           // explicit false (client's "新規作成" dialog) wipes it.

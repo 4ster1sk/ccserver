@@ -124,6 +124,21 @@ test('GET /dirs/home exposes metaAgentEnabled following sandbox.config.json', as
   }
 });
 
+// GET /dirs/home exposes toolsAvailable so the launch / settings UIs can
+// render the rtk / code-review-graph toggles disabled-with-a-note instead of
+// offering a checkbox the server silently drops (macOS seatbelt has no
+// provisioner -- see issue #22). Both true on this non-macOS test host.
+test('GET /dirs/home exposes toolsAvailable for the opt-in tool toggles', async () => {
+  const res = await app.inject({ method: 'GET', url: '/api/dirs/home' });
+  const { toolsAvailable } = res.json();
+  assert.ok(toolsAvailable && typeof toolsAvailable === 'object', 'toolsAvailable present');
+  assert.equal(typeof toolsAvailable.rtk, 'boolean');
+  assert.equal(typeof toolsAvailable.codeReviewGraph, 'boolean');
+  // Availability tracks the platform, not config: this CI host is not macOS.
+  assert.equal(toolsAvailable.rtk, process.platform !== 'darwin');
+  assert.equal(toolsAvailable.codeReviewGraph, process.platform !== 'darwin');
+});
+
 // GET /dirs/home reports availableApps.opencodeGo: toggle on + Go API key
 // present. Sync and network-free. Pinned to a temp config + temp,
 // initially keyless XDG_DATA_HOME so the host's real auth.json never leaks
@@ -171,8 +186,9 @@ test('GET /dirs/home exposes availableApps.opencodeGo following toggle + key', a
   }
 });
 
-// GET /dirs/home exposes sandboxAvailable (bwrap presence) so the launch
-// modal can disable the sandbox choice where it cannot work.
+// GET /dirs/home exposes sandboxAvailable (backend presence: bwrap on Linux,
+// sandbox-exec on macOS) so the launch modal can disable the sandbox choice
+// where it cannot work.
 test('GET /dirs/home exposes sandboxAvailable as a boolean', async () => {
   const res = await app.inject({ method: 'GET', url: '/api/dirs/home' });
   assert.equal(res.statusCode, 200);

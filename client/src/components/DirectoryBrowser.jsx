@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef, lazy, Suspense } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef, lazy, Suspense } from 'react';
 import { authFetch, getToken } from '../auth.js';
 import { displayPath } from '../displayPath.js';
 import { formatSize } from '../formatSize.js';
@@ -24,12 +24,29 @@ const COMBO_DEFAULT_APPS = { workerA: 'claude', workerB: 'opencode', orchestrato
 const COMBO_WORKER_APPS = ['claude', 'opencode', 'codex'];
 // Every launchable app id, in the order pickers list them.
 const ALL_APPS = ['claude', 'opencode', 'copilot', 'codex', 'commandcode'];
-// bwrap-missing warning copy shared by the sandbox picker note and the
+// macOS (seatbelt) copy for the opt-in tool toggles the server host cannot
+// provision (/api/dirs/home's toolsAvailable). See issue #22.
+const TOOL_UNAVAILABLE_NOTE = 'この ccserver ホスト (macOS) では非対応です';
+
+// Force any tool the server host cannot provision to false, so a selection
+// remembered from a Linux host never rides along in a launch payload the
+// server would silently drop. `avail` is /api/dirs/home's toolsAvailable
+// ({ rtk, codeReviewGraph }) or null (older server / not fetched -> untouched).
+function sanitizeSandboxOpts(opts, avail) {
+  if (!opts || !avail) return opts;
+  const tools = opts.tools || {};
+  const next = { ...tools };
+  if (avail.rtk === false) next.rtk = false;
+  if (avail.codeReviewGraph === false) next.codeReviewGraph = false;
+  return { ...opts, tools: next };
+}
+// sandbox-unavailable warning copy shared by the sandbox picker note and the
 // browser header banner, so the two can't drift apart (see PR#135 review).
 // The short title variant is used for disabled launch-button tooltips.
-const SANDBOX_UNAVAILABLE_NOTE = 'このサーバーにはbwrapがインストールされていないため、サンドボックス起動・コンボ起動はできません。通常起動をご利用ください。';
-const FORCE_SANDBOX_UNAVAILABLE_NOTE = 'サーバー設定 (forceSandbox) でサンドボックスが強制されていますが、このホストにbwrapが無いため起動できません。bwrapをインストールするか、サーバー設定を見直してください。';
-const LAUNCHES_BLOCKED_TITLE = 'サーバー設定でサンドボックスが強制されていますが、このホストにbwrapが無いため起動できません';
+const SANDBOX_UNAVAILABLE_NOTE = 'このサーバーではサンドボックス機能が利用できないため、サンドボックス起動・コンボ起動はできません。通常起動をご利用ください。';
+const FORCE_SANDBOX_UNAVAILABLE_NOTE = 'サーバー設定 (forceSandbox) でサンドボックスが強制されていますが、このホストではサンドボックス機能を利用できません。サンドボックス基盤をインストールするか、サーバー設定を見直してください。';
+const LAUNCHES_BLOCKED_TITLE = 'サーバー設定でサンドボックスが強制されていますが、このホストではサンドボックス機能を利用できません';
+const COMBO_UNAVAILABLE_TITLE = 'コンボ起動は常時サンドボックス必須ですが、このサーバーではサンドボックス機能を利用できません';
 
 // Hard cap mirrored from the server (MAX_GROUP_MEMBERS - 1 orchestrator).
 const MAX_COMBO_WORKERS = 7;
@@ -129,7 +146,7 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, ini
   // the sandbox toggle is overridden -- every launch is sandboxed and the
   // "通常起動" choice is disabled. Set from /api/dirs/home.
   const [forceSandbox, setForceSandbox] = useState(false);
-  // Whether bwrap exists on the server host (/api/dirs/home's
+  // Whether a sandbox backend exists on the server host (/api/dirs/home's
   // sandboxAvailable). false disables the sandbox choice (and combo mode,
   // which always requires the sandbox). null until the fetch resolves;
   // while null everything stays enabled (old-server fallback, same as
@@ -140,6 +157,12 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, ini
   // the fetch resolves; while null every picker entry stays enabled
   // (old-server fallback).
   const [availableApps, setAvailableApps] = useState(null);
+  // Which opt-in tool toggles (rtk / code-review-graph) the server host can
+  // actually provision, from /api/dirs/home. false on macOS (seatbelt has no
+  // provisioner). null until the fetch resolves -> both stay enabled
+  // (old-server fallback). An unavailable tool renders its checkbox disabled
+  // with an explanation, like availableApps for CLIs.
+  const [toolsAvailable, setToolsAvailable] = useState(null);
   // Apps hidden via sandbox.config.json's "hiddenApps" (issue #105 -- CLIs the
   // operator hasn't contracted for): removed from every picker below
   // entirely, regardless of install status. From /api/dirs/home; empty until
@@ -236,7 +259,7 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, ini
 
   const chooseSandbox = useCallback((val) => {
     if (forceSandbox) return; // server forbids unsandboxed launches
-    if (val && sandboxAvailable === false) return; // no bwrap on the server host
+    if (val && sandboxAvailable === false) return; // no sandbox backend on the server host
     setSandboxDefault(val);
     localStorage.setItem(SANDBOX_KEY, val ? '1' : '0');
   }, [forceSandbox, sandboxAvailable]);
@@ -409,6 +432,15 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, ini
     saveSandboxOpts(path, next);
   }, []);
 
+  // sandboxOpts with any host-unavailable tool forced off -- the shape every
+  // launch payload uses, so a toggle remembered on a Linux host cannot ride
+  // along on a macOS host where the server would drop it anyway.
+  const effectiveSandboxOpts = useMemo(
+    () => sanitizeSandboxOpts(sandboxOpts, toolsAvailable),
+    [sandboxOpts, toolsAvailable],
+  );
+  const toolDisabled = (id) => toolsAvailable ? toolsAvailable[id] === false : false;
+
   const fetchDirs = useCallback(async (path) => {
     setLoading(true);
     setError(null);
@@ -448,7 +480,7 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, ini
         setForceSandbox(true);
         setSandboxDefault(true);
       }
-      // bwrap missing on the server host: the sandbox choice (and combo
+      // No sandbox backend on the server host: the sandbox choice (and combo
       // mode, which always requires it) cannot work. Correct a remembered
       // sandbox default the same way stale app defaults are corrected
       // below. Missing field = older server: leave everything enabled.
@@ -516,6 +548,15 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, ini
             return next;
           });
         }
+      }
+
+      // Opt-in tools the server host cannot provision (rtk / code-review-graph
+      // are unavailable on macOS -- seatbelt has no provisioner). The toggles
+      // render disabled-with-an-explanation and effectiveSandboxOpts (below)
+      // forces the flags false in every launch payload, so a remembered
+      // per-directory selection from a Linux host can't smuggle one through.
+      if (data.toolsAvailable && typeof data.toolsAvailable === 'object') {
+        setToolsAvailable(data.toolsAvailable);
       }
     }).catch(() => {});
   }, []);
@@ -677,16 +718,16 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, ini
   // Sandbox choice + gpg/sshAgent suboptions for the single-launch pane.
   // The meta agent has no separate picker -- it inherits the global
   // sandboxDefault via the dedicated MetaLaunchDialog (see App.handleOpenMeta).
-  // Sandbox choice unavailable when bwrap is missing on the server host
+  // Sandbox choice unavailable when no sandbox backend exists on the server host
   // (combo mode is covered separately at its own toggle/button). Under
   // forceSandbox the toggle stays locked on -- launches will fail
   // server-side, and the note below says so.
   const sandboxChoiceDisabled = sandboxAvailable === false && !forceSandbox;
-  // Contradictory server config (forceSandbox but no bwrap): no launch can
-  // succeed, so the launch buttons are disabled as well (fail-closed UI).
+  // Contradictory server config (forceSandbox but no sandbox backend): no
+  // launch can succeed, so the launch buttons are disabled as well
+  // (fail-closed UI).
   // null (fetch pending / older server) keeps everything enabled.
   const launchesBlocked = forceSandbox && sandboxAvailable === false;
-  const launchesBlockedTitle = LAUNCHES_BLOCKED_TITLE;
   const sandboxPicker = (
     <>
       <div className="open-menu-sep" />
@@ -701,7 +742,7 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, ini
       <div
         className={`open-menu-item${sandboxChoiceDisabled ? ' open-menu-item-disabled' : ''}`}
         onClick={() => chooseSandbox(true)}
-        title={forceSandbox ? 'サーバー設定で強制' : (sandboxChoiceDisabled ? 'サーバーにbwrapがインストールされていないため使えません' : '')}
+          title={forceSandbox ? 'サーバー設定で強制' : (sandboxChoiceDisabled ? 'このサーバーではサンドボックス機能が利用できないため使えません' : '')}
       >
         <span className="open-menu-check">{sandboxDefault ? '✓' : ''}</span>
         🔒 サンドボックスで起動
@@ -723,21 +764,23 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, ini
           />
           ssh-agentを転送する
         </label>
-        <label className="open-menu-suboption">
+        <label className={`open-menu-suboption${toolDisabled('rtk') ? ' open-menu-suboption-disabled' : ''}`} title={toolDisabled('rtk') ? TOOL_UNAVAILABLE_NOTE : ''}>
           <input
             type="checkbox"
-            checked={sandboxOpts.tools.rtk}
+            disabled={toolDisabled('rtk')}
+            checked={toolDisabled('rtk') ? false : sandboxOpts.tools.rtk}
             onChange={(e) => updateSandboxOpts(currentPath, { ...sandboxOpts, tools: { ...sandboxOpts.tools, rtk: e.target.checked } })}
           />
-          rtk を導入する (sandbox 内にインストール)
+          rtk を導入する (sandbox 内にインストール){toolDisabled('rtk') ? `（${TOOL_UNAVAILABLE_NOTE}）` : ''}
         </label>
-        <label className="open-menu-suboption">
+        <label className={`open-menu-suboption${toolDisabled('codeReviewGraph') ? ' open-menu-suboption-disabled' : ''}`} title={toolDisabled('codeReviewGraph') ? TOOL_UNAVAILABLE_NOTE : ''}>
           <input
             type="checkbox"
-            checked={sandboxOpts.tools.codeReviewGraph}
+            disabled={toolDisabled('codeReviewGraph')}
+            checked={toolDisabled('codeReviewGraph') ? false : sandboxOpts.tools.codeReviewGraph}
             onChange={(e) => updateSandboxOpts(currentPath, { ...sandboxOpts, tools: { ...sandboxOpts.tools, codeReviewGraph: e.target.checked } })}
           />
-          code-review-graph MCP を導入する
+          code-review-graph MCP を導入する{toolDisabled('codeReviewGraph') ? `（${TOOL_UNAVAILABLE_NOTE}）` : ''}
         </label>
       </div>
       <p className="open-menu-note">
@@ -849,16 +892,16 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, ini
             className="btn btn-secondary launch-btn"
             onClick={() => onOpenShell(currentPath)}
             disabled={launchesBlocked}
-            title={launchesBlocked ? launchesBlockedTitle : ''}
+            title={launchesBlocked ? LAUNCHES_BLOCKED_TITLE : ''}
           >
             Terminal
           </button>
           <div className="open-split">
             <button
               className="btn btn-primary open-split-main"
-              onClick={() => onOpen(currentPath, { sandbox: sandboxDefault, sandboxOpts, app: appDefault, model: modelForApp(appDefault), permissionMode: permissionModeForApp(appDefault) })}
+              onClick={() => onOpen(currentPath, { sandbox: sandboxDefault, sandboxOpts: effectiveSandboxOpts, app: appDefault, model: modelForApp(appDefault), permissionMode: permissionModeForApp(appDefault) })}
               disabled={effectiveAppHidden || launchesBlocked}
-              title={effectiveAppHidden ? `${APP_LABELS[appDefault] || appDefault}は起動できません (非表示または未インストール)。起動方法を選択してください。` : (launchesBlocked ? launchesBlockedTitle : (sandboxDefault ? 'サンドボックスで起動' : '通常起動'))}
+              title={effectiveAppHidden ? `${APP_LABELS[appDefault] || appDefault}は起動できません (非表示または未インストール)。起動方法を選択してください。` : (launchesBlocked ? LAUNCHES_BLOCKED_TITLE : (sandboxDefault ? 'サンドボックスで起動' : '通常起動'))}
             >
               {sandboxDefault ? '🔒 ' : ''}{appDefault === 'claude' ? 'Claude Code' : appDefault === 'copilot' ? 'GitHub Copilot' : appDefault === 'codex' ? 'OpenAI Codex' : appDefault === 'commandcode' ? 'Command Code' : 'opencode'}
             </button>
@@ -876,7 +919,7 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, ini
             onClick={() => setMetaDialogOpen(true)}
             disabled={metaAgentEnabled !== true || launchesBlocked}
             aria-label="統括エージェント"
-            title={launchesBlocked ? launchesBlockedTitle : (metaAgentEnabled === true ? '統括エージェントを起動' : 'サーバー設定 (sandbox.config.json) で "metaAgentMcp": true にすると使えます')}
+            title={launchesBlocked ? LAUNCHES_BLOCKED_TITLE : (metaAgentEnabled === true ? '統括エージェントを起動' : 'サーバー設定 (sandbox.config.json) で "metaAgentMcp": true にすると使えます')}
           >
             <span className="meta-icon" aria-hidden="true">⌘</span><span className="meta-label"> 統括</span>
           </button>
@@ -904,7 +947,7 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, ini
                 className={`launch-mode-btn${launchMode === 'combo' ? ' active' : ''}`}
                 onClick={() => { if (sandboxAvailable === false) return; setLaunchMode('combo'); }}
                 disabled={sandboxAvailable === false}
-                title={sandboxAvailable === false ? 'コンボ起動は常時サンドボックス必須ですが、サーバーにbwrapがありません' : ''}
+                title={sandboxAvailable === false ? COMBO_UNAVAILABLE_TITLE : ''}
               >
                 コンボ起動
               </button>
@@ -1120,21 +1163,23 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, ini
                     />
                     ssh-agentを転送する (両ワーカー共通)
                   </label>
-                  <label className="open-menu-suboption">
+                  <label className={`open-menu-suboption${toolDisabled('rtk') ? ' open-menu-suboption-disabled' : ''}`} title={toolDisabled('rtk') ? TOOL_UNAVAILABLE_NOTE : ''}>
                     <input
                       type="checkbox"
-                      checked={sandboxOpts.tools.rtk}
+                      disabled={toolDisabled('rtk')}
+                      checked={toolDisabled('rtk') ? false : sandboxOpts.tools.rtk}
                       onChange={(e) => updateSandboxOpts(currentPath, { ...sandboxOpts, tools: { ...sandboxOpts.tools, rtk: e.target.checked } })}
                     />
-                    rtk を導入する (両ワーカー共通)
+                    rtk を導入する (両ワーカー共通){toolDisabled('rtk') ? `（${TOOL_UNAVAILABLE_NOTE}）` : ''}
                   </label>
-                  <label className="open-menu-suboption">
+                  <label className={`open-menu-suboption${toolDisabled('codeReviewGraph') ? ' open-menu-suboption-disabled' : ''}`} title={toolDisabled('codeReviewGraph') ? TOOL_UNAVAILABLE_NOTE : ''}>
                     <input
                       type="checkbox"
-                      checked={sandboxOpts.tools.codeReviewGraph}
+                      disabled={toolDisabled('codeReviewGraph')}
+                      checked={toolDisabled('codeReviewGraph') ? false : sandboxOpts.tools.codeReviewGraph}
                       onChange={(e) => updateSandboxOpts(currentPath, { ...sandboxOpts, tools: { ...sandboxOpts.tools, codeReviewGraph: e.target.checked } })}
                     />
-                    code-review-graph MCP を導入する (両ワーカー共通)
+                    code-review-graph MCP を導入する (両ワーカー共通){toolDisabled('codeReviewGraph') ? `（${TOOL_UNAVAILABLE_NOTE}）` : ''}
                   </label>
                 </div>
                 {(['workerA', 'workerB']).map((role) => (
@@ -1145,7 +1190,7 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, ini
                         checked={comboRoleSandbox[role] !== null}
                         onChange={(e) => setComboRoleSandbox((s) => ({
                           ...s,
-                          [role]: e.target.checked ? { ...sandboxOpts } : null,
+                          [role]: e.target.checked ? { ...effectiveSandboxOpts } : null,
                         }))}
                       />
                       {role} のサンドボックスを個別設定
@@ -1174,27 +1219,29 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, ini
                           />
                           {role} ssh-agent
                         </label>
-                        <label className="open-menu-suboption">
+                        <label className={`open-menu-suboption${toolDisabled('rtk') ? ' open-menu-suboption-disabled' : ''}`} title={toolDisabled('rtk') ? TOOL_UNAVAILABLE_NOTE : ''}>
                           <input
                             type="checkbox"
-                            checked={comboRoleSandbox[role].tools.rtk}
+                            disabled={toolDisabled('rtk')}
+                            checked={toolDisabled('rtk') ? false : comboRoleSandbox[role].tools.rtk}
                             onChange={(e) => setComboRoleSandbox((s) => ({
                               ...s,
                               [role]: { ...s[role], tools: { ...s[role].tools, rtk: e.target.checked } },
                             }))}
                           />
-                          {role} rtk を導入
+                          {role} rtk を導入{toolDisabled('rtk') ? `（${TOOL_UNAVAILABLE_NOTE}）` : ''}
                         </label>
-                        <label className="open-menu-suboption">
+                        <label className={`open-menu-suboption${toolDisabled('codeReviewGraph') ? ' open-menu-suboption-disabled' : ''}`} title={toolDisabled('codeReviewGraph') ? TOOL_UNAVAILABLE_NOTE : ''}>
                           <input
                             type="checkbox"
-                            checked={comboRoleSandbox[role].tools.codeReviewGraph}
+                            disabled={toolDisabled('codeReviewGraph')}
+                            checked={toolDisabled('codeReviewGraph') ? false : comboRoleSandbox[role].tools.codeReviewGraph}
                             onChange={(e) => setComboRoleSandbox((s) => ({
                               ...s,
                               [role]: { ...s[role], tools: { ...s[role].tools, codeReviewGraph: e.target.checked } },
                             }))}
                           />
-                          {role} code-review-graph MCP を導入
+                          {role} code-review-graph MCP を導入{toolDisabled('codeReviewGraph') ? `（${TOOL_UNAVAILABLE_NOTE}）` : ''}
                         </label>
                       </div>
                     )}
@@ -1232,7 +1279,7 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, ini
                       checked={comboRoleSandbox.orchestrator !== null}
                       onChange={(e) => setComboRoleSandbox((s) => ({
                         ...s,
-                        orchestrator: e.target.checked ? { ...sandboxOpts } : null,
+                        orchestrator: e.target.checked ? { ...effectiveSandboxOpts } : null,
                       }))}
                     />
                     オーケストレーターのサンドボックスを個別設定
@@ -1261,27 +1308,29 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, ini
                         />
                         オーケストレーター ssh-agent
                       </label>
-                      <label className="open-menu-suboption">
+                      <label className={`open-menu-suboption${toolDisabled('rtk') ? ' open-menu-suboption-disabled' : ''}`} title={toolDisabled('rtk') ? TOOL_UNAVAILABLE_NOTE : ''}>
                         <input
                           type="checkbox"
-                          checked={comboRoleSandbox.orchestrator.tools.rtk}
+                          disabled={toolDisabled('rtk')}
+                          checked={toolDisabled('rtk') ? false : comboRoleSandbox.orchestrator.tools.rtk}
                           onChange={(e) => setComboRoleSandbox((s) => ({
                             ...s,
                             orchestrator: { ...s.orchestrator, tools: { ...s.orchestrator.tools, rtk: e.target.checked } },
                           }))}
                         />
-                        オーケストレーター rtk を導入
+                        オーケストレーター rtk を導入{toolDisabled('rtk') ? `（${TOOL_UNAVAILABLE_NOTE}）` : ''}
                       </label>
-                      <label className="open-menu-suboption">
+                      <label className={`open-menu-suboption${toolDisabled('codeReviewGraph') ? ' open-menu-suboption-disabled' : ''}`} title={toolDisabled('codeReviewGraph') ? TOOL_UNAVAILABLE_NOTE : ''}>
                         <input
                           type="checkbox"
-                          checked={comboRoleSandbox.orchestrator.tools.codeReviewGraph}
+                          disabled={toolDisabled('codeReviewGraph')}
+                          checked={toolDisabled('codeReviewGraph') ? false : comboRoleSandbox.orchestrator.tools.codeReviewGraph}
                           onChange={(e) => setComboRoleSandbox((s) => ({
                             ...s,
                             orchestrator: { ...s.orchestrator, tools: { ...s.orchestrator.tools, codeReviewGraph: e.target.checked } },
                           }))}
                         />
-                        オーケストレーター code-review-graph MCP を導入
+                        オーケストレーター code-review-graph MCP を導入{toolDisabled('codeReviewGraph') ? `（${TOOL_UNAVAILABLE_NOTE}）` : ''}
                       </label>
                     </div>
                   )}
@@ -1307,7 +1356,7 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, ini
                 <button
                   className="btn btn-primary"
                   disabled={comboHasHiddenAppSelected || sandboxAvailable === false}
-                  title={sandboxAvailable === false ? 'コンボ起動は常時サンドボックス必須ですが、サーバーにbwrapがありません' : (comboHasHiddenAppSelected ? '非表示に設定されたアプリが選択されています。ロールのアプリを選び直してください。' : '')}
+                  title={sandboxAvailable === false ? COMBO_UNAVAILABLE_TITLE : (comboHasHiddenAppSelected ? '非表示に設定されたアプリが選択されています。ロールのアプリを選び直してください。' : '')}
                   onClick={() => {
                     // Build the payload BEFORE closing the menu: closeOpenMenu
                     // resets the draft model/sandbox state, and React state
@@ -1320,7 +1369,7 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, ini
                     const roleSpec = (role) => {
                       const spec = { app: comboApps[role] };
                       if (comboModels[role].trim()) spec.model = comboModels[role].trim();
-                      if (comboRoleSandbox[role]) spec.sandboxOpts = comboRoleSandbox[role];
+                      if (comboRoleSandbox[role]) spec.sandboxOpts = sanitizeSandboxOpts(comboRoleSandbox[role], toolsAvailable);
                       return spec;
                     };
                     // Preset selections win: they launch as a canonical
@@ -1338,13 +1387,13 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, ini
                             model: r.model.trim() ? r.model.trim() : null,
                           })),
                           orchestrator: { ...roleSpec('orchestrator'), instructions: orchestratorInstructions },
-                          sandboxOpts,
+                          sandboxOpts: effectiveSandboxOpts,
                         }
                       : {
                           workerA: roleSpec('workerA'),
                           workerB: roleSpec('workerB'),
                           orchestrator: { ...roleSpec('orchestrator'), instructions: orchestratorInstructions },
-                          sandboxOpts,
+                          sandboxOpts: effectiveSandboxOpts,
                         };
                     onOpenCombo(currentPath, cfg);
                     closeOpenMenu();
@@ -1355,9 +1404,9 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, ini
               ) : (
                 <button
                   className="btn btn-primary"
-                  onClick={() => { closeOpenMenu(); onOpen(currentPath, { sandbox: sandboxDefault, sandboxOpts, app: appDefault, model: modelForApp(appDefault), permissionMode: permissionModeForApp(appDefault) }); }}
+                  onClick={() => { closeOpenMenu(); onOpen(currentPath, { sandbox: sandboxDefault, sandboxOpts: effectiveSandboxOpts, app: appDefault, model: modelForApp(appDefault), permissionMode: permissionModeForApp(appDefault) }); }}
                   disabled={effectiveAppHidden || launchesBlocked}
-                  title={effectiveAppHidden ? `${APP_LABELS[appDefault] || appDefault}は起動できません (非表示または未インストール)` : (launchesBlocked ? launchesBlockedTitle : '')}
+                  title={effectiveAppHidden ? `${APP_LABELS[appDefault] || appDefault}は起動できません (非表示または未インストール)` : (launchesBlocked ? LAUNCHES_BLOCKED_TITLE : '')}
                 >
                   起動
                 </button>
@@ -1539,7 +1588,7 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, ini
                 if (launchesBlocked) return; // fail-closed UI: no launch can succeed
                 onOpen(dir.path, {
                   sandbox: sandboxDefault,
-                  sandboxOpts: loadSandboxOpts(dir.path, sandboxDefaults),
+                  sandboxOpts: sanitizeSandboxOpts(loadSandboxOpts(dir.path, sandboxDefaults), toolsAvailable),
                   app: appDefault,
                   model: modelForApp(appDefault),
                   permissionMode: permissionModeForApp(appDefault),

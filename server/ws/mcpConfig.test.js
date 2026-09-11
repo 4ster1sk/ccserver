@@ -429,3 +429,26 @@ test('copilot never gets crg injected (no MCP injection path at all)', () => {
   assert.deepEqual(args, []);
   assert.deepEqual(env, {});
 });
+
+// hostBridge (macOS seatbelt sandboxes): the fixed in-sandbox bridge path is
+// never bound there, so the group ccserver bridge must use the host node
+// invocation -- like a non-sandboxed session -- while the default stays fixed.
+test('hostBridge: claude group ccserver bridge runs as node <bridge script>', () => {
+  const { args } = buildMcpConfigArgsAndEnv('claude', { hostBridge: true });
+  const cfg = JSON.parse(args[1]);
+  assert.equal(cfg.mcpServers.ccserver.command, process.execPath);
+  assert.ok(cfg.mcpServers.ccserver.args[0].endsWith('sandbox-mcp-wrapper.cjs'));
+});
+
+test('hostBridge: opencode group ccserver bridge is a local node command', () => {
+  const { env } = buildMcpConfigArgsAndEnv('opencode', { hostBridge: true });
+  const cfg = JSON.parse(env.OPENCODE_CONFIG_CONTENT);
+  assert.equal(cfg.mcp.ccserver.command[0], process.execPath);
+  assert.ok(cfg.mcp.ccserver.command[1].endsWith('sandbox-mcp-wrapper.cjs'));
+});
+
+test('hostBridge: codex group ccserver bridge uses node with no extra args', () => {
+  const { args } = buildMcpConfigArgsAndEnv('codex', { hostBridge: true });
+  const ccserverArg = args.find((a) => a.startsWith('mcp_servers.ccserver='));
+  assert.ok(ccserverArg.includes(process.execPath), `node invocation expected (got ${ccserverArg})`);
+});

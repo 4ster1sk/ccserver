@@ -12,6 +12,10 @@ playwright-report/
 .saved-vikunja-tasks.json
 server/sandbox.config.json
 /tmp/
+# Stray sandbox HOME trees: buildSeatbeltLaunch's throwaway HOME is `<launch
+# dir>/home`, and a server started with a relative $HOME would resolve the
+# persistent HOME / agent config dirs under the repo. Never commit either.
+/home/
 .claude/
 ccserver.sqlite3
 ccserver.sqlite3-wal

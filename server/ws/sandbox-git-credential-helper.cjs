@@ -85,6 +85,10 @@ async function main() {
 
   const req = {
     op: 'credential',
+    // Per-session connection token (git-broker.js): the socket lives in a
+    // shared /tmp dir on macOS Seatbelt, so the broker authenticates the
+    // caller before vending anything.
+    token: process.env.CCSANDBOX_GIT_BROKER_TOKEN || '',
     protocol: input.protocol || 'https',
     host: input.host || '',
     path: input.path || '',

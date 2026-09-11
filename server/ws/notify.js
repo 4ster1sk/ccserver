@@ -28,6 +28,7 @@ import { hostname } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadSandboxConfig } from './sandbox.js';
+import { hostRuntimeDir } from './git-broker.js';
 import { vikunjaEnabled, createOrUpdateTask } from './vikunjaClient.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -77,9 +78,7 @@ function isValidWebhookUrl(url) {
 }
 
 export function getNotifySockPath() {
-  const base = process.env.XDG_RUNTIME_DIR
-    || (typeof process.getuid === 'function' ? `/run/user/${process.getuid()}` : '/tmp');
-  return join(base, NOTIFY_SOCKET_DIR_NAME, 'sock');
+  return join(hostRuntimeDir(), NOTIFY_SOCKET_DIR_NAME, 'sock');
 }
 
 // Whether the notify feature is on at all: a Discord webhook configured, a

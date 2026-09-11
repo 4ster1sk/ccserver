@@ -23,6 +23,7 @@ export default function SettingsView({
   onSessionModeChange,
   sandboxDefaults,
   onSandboxDefaultsChange,
+  toolsAvailable,
   navGuardMode,
   onNavGuardModeChange,
   notifyEnabled,
@@ -72,6 +73,7 @@ export default function SettingsView({
               onSessionModeChange={onSessionModeChange}
               sandboxDefaults={sandboxDefaults}
               onSandboxDefaultsChange={onSandboxDefaultsChange}
+              toolsAvailable={toolsAvailable}
               navGuardMode={navGuardMode}
               onNavGuardModeChange={onNavGuardModeChange}
               notifyEnabled={notifyEnabled}

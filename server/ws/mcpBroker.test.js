@@ -19,7 +19,12 @@ let control;
 let handoff;
 
 before(async () => {
-  runtimeDir = mkdtempSync(join(tmpdir(), 'ccserver-mcp-wire-'));
+  // Short base: the broker's socket paths (ccserver-mcp-<32hex>-<tag>.d/sock)
+  // plus a /var/folders/... macOS tmpdir() blow sockaddr_un's 104-byte limit,
+  // so listen() silently never binds. hostRuntimeDir() picks a short /tmp base
+  // on darwin for exactly this reason; mirror it here.
+  const base = process.platform === 'darwin' ? '/tmp' : tmpdir();
+  runtimeDir = mkdtempSync(join(base, 'ccs-mcp-'));
   process.env.XDG_RUNTIME_DIR = runtimeDir;
   // Group persistence must never touch the repo-root state file during tests.
   process.env.CCSERVER_GROUPS_PATH = join(runtimeDir, 'saved-groups.json');
@@ -41,12 +46,21 @@ after(() => {
 });
 
 // Newline-delimited JSON-RPC client over the UDS (MCP stdio framing).
-function mcpClient(sockPath) {
+// `target` is a bare sockPath string (notify/usage/meta/reviewer) or a broker
+// handle { sockPath, token } (control/handoff): a token means the bridge's
+// first frame `{"ccserver":{"token":...}}` is sent on connect, exactly as
+// sandbox-mcp-wrapper.cjs does, so the connection passes the broker's gate.
+function mcpClient(target) {
+  const sockPath = typeof target === 'string' ? target : target.sockPath;
+  const token = typeof target === 'string' ? null : (target.token || null);
   let id = 0;
   const pending = new Map();
   const sock = net.createConnection(sockPath);
   let buf = '';
   sock.setEncoding('utf-8');
+  sock.on('connect', () => {
+    if (token) sock.write(`${JSON.stringify({ ccserver: { token } })}\n`);
+  });
   sock.on('data', (chunk) => {
     buf += chunk;
     let nl;
@@ -63,6 +77,12 @@ function mcpClient(sockPath) {
         else resolve(msg.result);
       }
     }
+  });
+  // Never let a test hang if the broker drops the connection (e.g. a token
+  // gate refusal) with a call still outstanding.
+  sock.on('close', () => {
+    for (const { reject } of pending.values()) reject(new Error('broker connection closed with the request outstanding'));
+    pending.clear();
   });
   return {
     raw: sock,
@@ -94,7 +114,7 @@ async function callToolRaw(client, name, args) {
 }
 
 test('control socket: MCP initialize handshake works over the UDS', async () => {
-  const c = mcpClient(control.sockPath);
+  const c = mcpClient(control);
   await c.connected;
   const init = await c.call('initialize', {
     protocolVersion: '2024-11-05',
@@ -106,8 +126,50 @@ test('control socket: MCP initialize handshake works over the UDS', async () => 
   c.close();
 });
 
+// The control / handoff sockets sit in a shared runtime dir every concurrent
+// sandboxed session can connect() to on the seatbelt backend -- so the broker
+// must refuse a connection that does not present the per-broker token as its
+// first frame (see mcpBroker.js requireToken / sandbox-mcp-wrapper.cjs).
+test('control socket: a connection with no / wrong token never reaches an McpServer', async () => {
+  assert.ok(control.token && control.token.length >= 20, 'control broker minted a token');
+
+  // No frame at all: dropped after the grace window, initialize never answers.
+  const noTok = mcpClient(control.sockPath); // bare string -> sends no frame
+  await noTok.connected;
+  await assert.rejects(
+    Promise.race([
+      noTok.call('initialize', { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'x', version: '0' } }),
+      new Promise((_, rej) => setTimeout(() => rej(new Error('no reply (refused)')), 2000)),
+    ]),
+    /no reply|closed|ECONNRESET|EPIPE/,
+  );
+  noTok.close();
+
+  // Wrong token: connection destroyed immediately.
+  const badTok = mcpClient({ sockPath: control.sockPath, token: 'not-the-real-token-000000' });
+  const badClosed = new Promise((r) => badTok.raw.on('close', r));
+  await badTok.connected;
+  await badClosed;
+
+  // The broker is unharmed and still serves the real owner.
+  const ok = mcpClient(control);
+  await ok.connected;
+  const { tools } = await ok.call('tools/list');
+  assert.ok(tools.length > 0);
+  ok.close();
+});
+
+test('handoff socket: has its own token, distinct from the control token', async () => {
+  assert.ok(handoff.token && handoff.token !== control.token, 'per-channel token');
+  // The handoff token does not open the control socket.
+  const crossed = mcpClient({ sockPath: control.sockPath, token: handoff.token });
+  const closed = new Promise((r) => crossed.raw.on('close', r));
+  await crossed.connected;
+  await closed;
+});
+
 test('control socket: tools/list exposes all control tools', async () => {
-  const c = mcpClient(control.sockPath);
+  const c = mcpClient(control);
   await c.connected;
   const { tools } = await c.call('tools/list');
   const names = tools.map((t) => t.name);
@@ -125,7 +187,7 @@ test('control socket: tools/list exposes all control tools', async () => {
 // nothing beyond sessionId + the escape enum -- the wire can never carry a
 // raw byte, another key, or an ANSI sequence (no generic keystroke channel).
 test('new_session and send_key schemas: minimal inputs, no raw-key channel', async () => {
-  const c = mcpClient(control.sockPath);
+  const c = mcpClient(control);
   await c.connected;
   const { tools } = await c.call('tools/list');
 
@@ -165,7 +227,7 @@ test('new_session and send_key schemas: minimal inputs, no raw-key channel', asy
 // that adds a groupId input fails this test instead of silently opening a
 // cross-group hole.
 test('no control tool schema accepts a groupId from the wire', async () => {
-  const c = mcpClient(control.sockPath);
+  const c = mcpClient(control);
   await c.connected;
   const { tools } = await c.call('tools/list');
   for (const t of tools) {
@@ -181,7 +243,7 @@ test('no control tool schema accepts a groupId from the wire', async () => {
 // The handoff tool's only inputs are summary/status/nextRole -- a worker
 // must not be able to declare its own identity.
 test('handoff tool schema exposes only summary/status/nextRole (no identity inputs)', async () => {
-  const c = mcpClient(handoff.sockPath);
+  const c = mcpClient(handoff);
   await c.connected;
   const { tools } = await c.call('tools/list');
   const props = tools[0].inputSchema.properties;
@@ -199,7 +261,7 @@ test('handoff tool schema exposes only summary/status/nextRole (no identity inpu
 // authorization). The persisted-role fallback for omitted values is exercised
 // in mcpTools.test.js -- here the wire schema shape is asserted.
 test('open_tab schema: optional model/app, required cwd, no identity inputs', async () => {
-  const c = mcpClient(control.sockPath);
+  const c = mcpClient(control);
   await c.connected;
   const { tools } = await c.call('tools/list');
   const openTab = tools.find((t) => t.name === 'open_tab');
@@ -225,7 +287,7 @@ test('open_tab schema: optional model/app, required cwd, no identity inputs', as
 });
 
 test('control socket: tools/call list_group_sessions over the wire', async () => {
-  const c = mcpClient(control.sockPath);
+  const c = mcpClient(control);
   await c.connected;
   const out = await callTool(c, 'list_group_sessions', {});
   assert.equal(out.members.length, 2);
@@ -234,7 +296,7 @@ test('control socket: tools/call list_group_sessions over the wire', async () =>
 });
 
 test('handoff socket: exposes ONLY handoff_to_orchestrator and the doc-sharing tools', async () => {
-  const c = mcpClient(handoff.sockPath);
+  const c = mcpClient(handoff);
   await c.connected;
   const { tools } = await c.call('tools/list');
   assert.deepEqual(
@@ -245,8 +307,8 @@ test('handoff socket: exposes ONLY handoff_to_orchestrator and the doc-sharing t
 });
 
 test('handoff socket: worker handoff reaches the control socket wait_for_handoff', async () => {
-  const worker = mcpClient(handoff.sockPath);
-  const orch = mcpClient(control.sockPath);
+  const worker = mcpClient(handoff);
+  const orch = mcpClient(control);
   await Promise.all([worker.connected, orch.connected]);
 
   const waitPromise = callTool(orch, 'wait_for_handoff', { timeoutMs: 2000 });
@@ -268,8 +330,8 @@ test('handoff socket: worker handoff reaches the control socket wait_for_handoff
 // The handoff's fromSessionId/fromRole must come from the socket's closure
 // even if a hostile worker tries to declare a different identity on the wire.
 test('handoff socket: wire-supplied identity fields are ignored (closure wins)', async () => {
-  const worker = mcpClient(handoff.sockPath);
-  const orch = mcpClient(control.sockPath);
+  const worker = mcpClient(handoff);
+  const orch = mcpClient(control);
   await Promise.all([worker.connected, orch.connected]);
 
   const waitPromise = callTool(orch, 'wait_for_handoff', { timeoutMs: 2000 });
@@ -295,7 +357,7 @@ test('control socket: cross-group session refused over the wire (authorization b
   await groupManager.createGroup({ groupId: otherGroupId, cwd: '/srv/other', orchestratorDir: '/srv/other-orch' });
   groupManager.registerMember(otherGroupId, 'workerA', 'other-sess-x');
 
-  const c = mcpClient(control.sockPath);
+  const c = mcpClient(control);
   await c.connected;
   const out = await callTool(c, 'read_output', { sessionId: 'other-sess-x', tail: 100 });
   assert.equal(out.error, 'unauthorized');
@@ -304,7 +366,7 @@ test('control socket: cross-group session refused over the wire (authorization b
 });
 
 test('control socket: wait_for_handoff times out quietly with timedOut:true', async () => {
-  const c = mcpClient(control.sockPath);
+  const c = mcpClient(control);
   await c.connected;
   const out = await callTool(c, 'wait_for_handoff', { timeoutMs: 80 });
   assert.deepEqual(out, { timedOut: true });
@@ -318,7 +380,7 @@ test('control socket: wait_for_handoff times out quietly with timedOut:true', as
 // on the SECOND error. A permanent handler must remain for the server's
 // lifetime.
 test('post-startup errors on the broker server never crash the process (permanent error handler)', async () => {
-  const c = mcpClient(control.sockPath);
+  const c = mcpClient(control);
   await c.connected;
   c.close();
 
@@ -333,7 +395,7 @@ test('post-startup errors on the broker server never crash the process (permanen
   });
 
   // The server still serves connections.
-  const c2 = mcpClient(control.sockPath);
+  const c2 = mcpClient(control);
   await c2.connected;
   const { tools } = await c2.call('tools/list');
   assert.ok(tools.length > 0);
@@ -349,15 +411,16 @@ test('abrupt disconnect during handshake does not crash the broker', async () =>
     sock.on('connect', resolve);
     sock.on('error', reject);
   });
-  // Fire off an initialize frame, then slam the connection shut before the
-  // handshake can complete.
+  // Pass the token gate, fire off an initialize frame, then slam the
+  // connection shut before the handshake can complete.
+  sock.write(`${JSON.stringify({ ccserver: { token: control.token } })}\n`);
   sock.write(`${JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'rude', version: '1' } } })}\n`);
   sock.destroy();
 
   // Give the handshake a beat to (try to) settle, then confirm the broker
   // still accepts a normal client -- reaching here at all means no crash.
   await new Promise((r) => setTimeout(r, 100));
-  const c = mcpClient(control.sockPath);
+  const c = mcpClient(control);
   await c.connected;
   const { tools } = await c.call('tools/list');
   assert.ok(tools.length > 0);
@@ -373,11 +436,14 @@ test('oversized newline-less frame gets the connection dropped (buffer cap)', as
     sock.on('connect', resolve);
     sock.on('error', reject);
   });
+  // Pass the token gate first, then flood with a newline-less frame -- the
+  // post-auth transport buffer must still be bounded.
+  sock.write(`${JSON.stringify({ ccserver: { token: control.token } })}\n`);
   sock.write('x'.repeat(1024 * 1024 + 1));
   await closed;
 
   // Broker still alive and serving.
-  const c = mcpClient(control.sockPath);
+  const c = mcpClient(control);
   await c.connected;
   const { tools } = await c.call('tools/list');
   assert.ok(tools.length > 0);
@@ -857,7 +923,7 @@ test('control socket: repo_info succeeds over the wire (facade carries getGroup)
   await groupManager.createGroup({ groupId: gid, cwd: dir, orchestratorDir: join(dir, '..', 'wire-orch') });
   try {
     const ctrl = groupManager.getGroup(gid).controlBroker;
-    const c = mcpClient(ctrl.sockPath);
+    const c = mcpClient(ctrl);
     await c.connected;
     const result = await callToolRaw(c, 'repo_info', {});
     assert.equal(result.isError, undefined, 'repo_info must NOT surface as a tool error');
@@ -879,9 +945,13 @@ test('control socket: repo_info succeeds over the wire (facade carries getGroup)
 // waiter (its response would be written to a destroyed socket and lost).
 // The next orchestrator connection receives it.
 test('a handoff is not lost when the waiting connection dies mid-wait', async () => {
-  const waitA = mcpClient(control.sockPath);
+  const waitA = mcpClient(control);
   await waitA.connected;
+  // Deliberately abandoned: this call never gets a response (its connection is
+  // killed below). The mcpClient close handler rejects still-pending calls, so
+  // swallow it rather than let it surface as an unhandled rejection.
   const deadWait = callTool(waitA, 'wait_for_handoff', { timeoutMs: 5000 });
+  deadWait.catch(() => {});
   // Give the server a beat to register the waiter, then kill the connection.
   await new Promise((r) => setTimeout(r, 100));
   waitA.raw.destroy();
@@ -892,7 +962,7 @@ test('a handoff is not lost when the waiting connection dies mid-wait', async ()
   await new Promise((r) => setTimeout(r, 50));
 
   // The worker hands off only AFTER the orchestrator's connection died.
-  const worker = mcpClient(handoff.sockPath);
+  const worker = mcpClient(handoff);
   await worker.connected;
   const handoffRes = await callTool(worker, 'handoff_to_orchestrator', {
     summary: 'survives the dead wait',
@@ -902,7 +972,7 @@ test('a handoff is not lost when the waiting connection dies mid-wait', async ()
   worker.close();
 
   // A fresh orchestrator connection receives the event.
-  const waitB = mcpClient(control.sockPath);
+  const waitB = mcpClient(control);
   await waitB.connected;
   const ev = await callTool(waitB, 'wait_for_handoff', { timeoutMs: 3000 });
   assert.equal(ev.error, undefined);

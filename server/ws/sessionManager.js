@@ -4,7 +4,8 @@ import { execFileSync } from 'node:child_process';
 import { writeFileSync, readFileSync, unlinkSync, rmSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { buildSandboxSpawn, resolveApp, sandboxAvailable, sandboxUnavailableReason, loadSandboxConfig, persistentHomeDir, dockerSandboxAvailable, dockerdStatus, dockerdLockHeld, resolveTools } from './sandbox.js';
+import { buildSandboxSpawn, resolveApp, sandboxAvailable, sandboxBackend, sandboxUnavailableReason, forceSandboxUnavailableReason, loadSandboxConfig, persistentHomeDir, dockerSandboxAvailable, dockerdStatus, dockerdLockHeld, resolveTools } from './sandbox.js';
+import { releaseSeatbeltOverlay } from './sandbox-seatbelt.js';
 import { getGroupFilesDir, ensureGroupFilesDir } from './groupFiles.js';
 import { buildMcpConfigArgsAndEnv } from './mcpConfig.js';
 import { shouldInjectNotify, notifyEnabled, getNotifySockPath, notifyBrokerRunning } from './notify.js';
@@ -98,8 +99,8 @@ export function setSessionCreateListener(fn) {
 
 // Resolvers of the MCP socket a group member session should be launched with.
 // groupManager registers one: it (re)creates the member's handoff channel (or
-// the orchestrator's control broker) and returns its sockPath. Used by the
-// scheduled-prompt auto-resume path, where a group member's session is
+// the orchestrator's control broker) and returns { sockPath, token }. Used by
+// the scheduled-prompt auto-resume path, where a group member's session is
 // recreated outside the explicit launch flows.
 const mcpSocketResolvers = new Set();
 
@@ -107,14 +108,17 @@ export function setMcpSocketResolver(fn) {
   mcpSocketResolvers.add(fn);
 }
 
-// Resolve the MCP socket path for a group member being recreated. Resolves to
-// null when no resolver can produce one (group gone, broker failed, or not a
-// group member) -- the caller then launches without MCP injection.
+// Resolve the MCP socket for a group member being recreated: returns
+// { sockPath, token } (token gates the socket -- see mcpBroker.js), or null
+// when no resolver can produce one (group gone, broker failed, or not a group
+// member) -- the caller then launches without MCP injection.
 export async function resolveMcpSocketForSession(groupId, groupRole) {
   for (const fn of mcpSocketResolvers) {
     try {
-      const sockPath = await fn(groupId, groupRole);
-      if (sockPath) return sockPath;
+      const resolved = await fn(groupId, groupRole);
+      // Back-compat: a resolver may still return a bare sockPath string.
+      if (typeof resolved === 'string' && resolved) return { sockPath: resolved, token: null };
+      if (resolved && resolved.sockPath) return { sockPath: resolved.sockPath, token: resolved.token || null };
     } catch {
       // try the next resolver
     }
@@ -255,6 +259,8 @@ function buildSessionRecord(id, ptyProcess, meta) {
     sandboxGitBrokerProc: meta.sandboxGitBrokerProc ?? null, // host-side git-broker child process, killed on teardown
     sandboxGitBrokerDir: meta.sandboxGitBrokerDir ?? null, // its runtime dir (socket + allow-list), removed on teardown
     sandboxCommitGuardDir: meta.sandboxCommitGuardDir ?? null, // commit-msg guard's runtime dir (config json only, no process), removed on teardown
+    sandboxSeatbeltDir: meta.sandboxSeatbeltDir ?? null, // seatbelt profile/shim runtime dir (macOS only), removed on teardown
+    sandboxSeatbeltFiles: meta.sandboxSeatbeltFiles ?? null, // orchestrator rule copies in the project dir (macOS only), unlinked on teardown
     reuseSandboxHome: meta.reuseSandboxHome, // true = keep the previous persistent HOME, false = started fresh (wiped)
     // Plan5 Step5: which pty-host instance this session's pty actually lives
     // on. Decided once at creation (createSession()'s usePtyHost branch) and
@@ -585,7 +591,7 @@ function buildSessionRecord(id, ptyProcess, meta) {
   return session;
 }
 
-export async function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox, sandboxOpts, app, model, permissionMode, resumeLast, groupId = null, groupRole = null, mcpSocketPath = null, projectName = null, reuseSandboxHome = true, orchestratorClaudeMdSrc = null, gitCommonDir = null, groupFilesDir = null, isMetaAgent = false, isReviewJob = false, sandboxHomeCreatedBy = null, customLabel = null }) {
+export async function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox, sandboxOpts, app, model, permissionMode, resumeLast, groupId = null, groupRole = null, mcpSocketPath = null, mcpToken = null, projectName = null, reuseSandboxHome = true, orchestratorClaudeMdSrc = null, gitCommonDir = null, groupFilesDir = null, isMetaAgent = false, isReviewJob = false, sandboxHomeCreatedBy = null, customLabel = null }) {
   const id = randomUUID();
   // Read once and thread through: this hot path (every session launch) was
   // otherwise re-reading + re-parsing sandbox.config.json up to four times
@@ -610,13 +616,29 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
   // with a clear error instead of the opaque crash. Reachable via the
   // directory browser's own "/" fallback (used until the home-dir fetch
   // resolves, or if the user navigates all the way up and launches there),
-  // not just automated/edge-case callers. Shells are unaffected: plain
-  // /bin/bash starts fine at /.
-  if (!shell && cwd === '/') {
+  // not just automated/edge-case callers. Plain unsandboxed shells are
+  // unaffected: plain /bin/bash starts fine at /.
+  //
+  // A SANDBOXED shell at / is refused too: the project subtree rule would
+  // become "^/(/.*)?$" (seatbelt, see subtrees()) or a "/" bind (bwrap),
+  // silently granting the whole filesystem -- a fail-open sandbox. Shell
+  // sessions only run sandboxed under forceSandbox or an explicit per-launch
+  // sandbox request, so the refusal is gated on those. The "would grant the
+  // whole filesystem" wording only fits when a sandbox would actually be
+  // built: `sandbox:true` on a host with no available backend (forceSandbox
+  // off) constructs no sandbox, so the raw-flag check still refuses the launch
+  // (a `/` cwd is invalid regardless of backend) but drops the counterfactual
+  // clause from the message.
+  if (cwd === '/' && (!shell || sandbox || cfg.forceSandbox)) {
+    const wouldSandbox = process.platform !== 'win32' && sandboxAvailable();
     return {
       sessionId: id,
       session: null,
-      error: 'Cannot launch in the filesystem root (/) -- claude aborts immediately there. Choose a working directory first.',
+      error: !shell
+        ? 'Cannot launch in the filesystem root (/) -- claude aborts immediately there. Choose a working directory first.'
+        : wouldSandbox
+          ? 'Cannot launch a sandboxed shell in the filesystem root (/) -- the sandbox would grant the whole filesystem. Choose a working directory first.'
+          : 'Cannot launch a sandboxed shell in the filesystem root (/). Choose a working directory first.',
     };
   }
 
@@ -821,6 +843,13 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
     };
   }
 
+  // Seatbelt (macOS) has no fixed in-sandbox paths: the host node/bridge and
+  // sockets are directly visible, so every MCP bridge invocation -- including
+  // the group ccserver bridge -- must use the host form. bwrap keeps the
+  // fixed-path form. Non-sandboxed launches keep their existing behavior.
+  const seatbeltSandbox = sandboxRequested && sandboxBackend() === 'seatbelt';
+  const mcpBridgeMode = seatbeltSandbox ? 'host' : (sandboxRequested ? 'sandbox' : 'host');
+
   // Tool provisioning (rtk / code-review-graph): the server config supplies
   // the fallback default and the client's per-session sandboxOpts.tools (which
   // the launch menu defaults to ON for these, remembered per directory)
@@ -847,23 +876,32 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
   // time pty-host relaunches it). See setPtyHostSessionMeta's mcpArgs field
   // below.
   let mcpArgs = [];
-  if (sessionApp && (mcpSocketPath || useNotify || useUsage || useMeta || useReviewer || (sandboxRequested && tools.codeReviewGraph))) {
+  // code-review-graph is only provisionable under bwrap (mount-bound
+  // provisioner); seatbelt sandboxes never get the binary, so injecting the
+  // MCP server there would fail every session.
+  const crgInjectable = sandboxRequested && !seatbeltSandbox && tools.codeReviewGraph;
+  if (sessionApp && (mcpSocketPath || useNotify || useUsage || useMeta || useReviewer || crgInjectable)) {
     const injected = buildMcpConfigArgsAndEnv(sessionApp, {
       // ccserver (the group broker) only when the session has a group socket:
       // standalone notify sessions must not get a broken ccserver entry (its
       // bridge would point at a socket that is never bound for them).
       groupMcp: !!mcpSocketPath,
+      // Seatbelt sandboxes can't use the fixed in-sandbox bridge path (it is
+      // never bound there), so they take the host invocation. Non-sandboxed
+      // group sessions intentionally keep the fixed-path form (see
+      // groupInvocation in mcpConfig.js).
+      hostBridge: seatbeltSandbox,
       notify: useNotify ? {
-        mode: sandboxRequested ? 'sandbox' : 'host',
+        mode: mcpBridgeMode,
         sockPath: notifySocketPath,
         identity: notifyIdentity,
       } : undefined,
       usage: useUsage ? {
-        mode: sandboxRequested ? 'sandbox' : 'host',
+        mode: mcpBridgeMode,
         sockPath: usageSocketPath,
       } : undefined,
       meta: useMeta ? {
-        mode: sandboxRequested ? 'sandbox' : 'host',
+        mode: mcpBridgeMode,
         sockPath: metaSocketPath,
         identity: {
           sessionId: id,
@@ -875,13 +913,13 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
         },
       } : undefined,
       reviewer: useReviewer ? {
-        mode: sandboxRequested ? 'sandbox' : 'host',
+        mode: mcpBridgeMode,
         sockPath: reviewerSocketPath,
         identity: reviewerIdentity,
       } : undefined,
-      // code-review-graph MCP is injected only into sandboxed sessions (the
-      // tool is provisioned inside the sandbox, never on the host).
-      tools: sandboxRequested ? tools : null,
+      // code-review-graph MCP is injected only into sandboxed sessions that
+      // can actually provision it (bwrap; never on the host, never seatbelt).
+      tools: crgInjectable ? tools : null,
       cwd,
     });
     mcpEnv = injected.env;
@@ -889,9 +927,10 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
     args.push(...injected.args);
   }
 
-  // Optionally wrap the target in a filesystem sandbox (Linux only) so it can
-  // only see the project directory plus configured paths, with an isolated
-  // rootless docker inside. See sandbox.js.
+  // Optionally wrap the target in a filesystem sandbox (bwrap on Linux,
+  // sandbox-exec on macOS) so it can only see the project directory plus
+  // configured paths, with an isolated rootless docker inside on Linux.
+  // See sandbox.js.
   //
   // usePtyHost (plan5 Step2, section 2.1): pty-host's own spawn() builds the
   // sandbox itself (server/pty-host/ptyStore.js already imports
@@ -907,6 +946,8 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
   let sandboxGitBrokerProc = null;
   let sandboxGitBrokerDir = null;
   let sandboxCommitGuardDir = null;
+  let sandboxSeatbeltDir = null;
+  let sandboxSeatbeltFiles = null;
   let ptyProcess;
   // Plan5 Step5 (partitioning): decided once here and reused for BOTH the
   // spawn() call below and the subscribe() call after buildSessionRecord --
@@ -937,11 +978,11 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
         }
       }
     } else if (forceSandbox) {
-      const { reason } = sandboxUnavailableReason();
+      const { reason, hint } = forceSandboxUnavailableReason();
       return {
         sessionId: id,
         session: null,
-        error: `Cannot launch: sandbox.config.json sets "forceSandbox": true, but ${reason}. Install bwrap (bubblewrap) or disable forceSandbox.`,
+        error: `Cannot launch: sandbox.config.json sets "forceSandbox": true, but ${reason}. ${hint}`,
       };
     }
     let resolvedGroupFilesDir = groupFilesDir;
@@ -994,6 +1035,7 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
         // for shell sessions) keeps that combination working unchanged.
         app: sessionApp || 'claude',
         mcpSocketPath,
+        mcpToken,
         notifySocketPath,
         usageSocketPath,
         metaSocketPath,
@@ -1008,6 +1050,14 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
       useSandbox = !!sandboxRequested;
       sandboxDocker = !!rpty.sandboxInfo?.docker;
       sandboxStateDir = rpty.sandboxInfo?.stateDir || null;
+      // Read-only ownership reference for fireSchedule's retire-first guard:
+      // teardown itself stays pty-host's (the destroy path below is skipped
+      // in this mode), but an exited predecessor must still be recognisable
+      // as the overlay owner before a scheduled auto-resume spawns a
+      // successor into the same deterministic orchestratorDir.
+      sandboxSeatbeltFiles = Array.isArray(rpty.sandboxInfo?.seatbeltFiles)
+        ? rpty.sandboxInfo.seatbeltFiles
+        : null;
       // sandboxGitBrokerProc/sandboxGitBrokerDir/sandboxCommitGuardDir stay
       // null: pty-host itself owns and tears down whatever it built --
       // git-broker's process/dir (plan5 2.1) and, since this branch's own
@@ -1058,6 +1108,7 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
         env: ptyEnv,
         command,
         mcpSocketPath,
+        mcpToken,
         notifySocketPath,
         usageSocketPath,
         metaSocketPath,
@@ -1106,7 +1157,7 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
         } catch { resolvedGroupFilesDir = null; }
       }
       try {
-        const spawn = buildSandboxSpawn({ cwd, targetCommand: [command, ...args], app: sessionApp, sandboxOpts, mcpSocketPath, notifySocketPath, usageSocketPath, metaSocketPath, reviewerSocketPath, reuseSandboxHome, orchestratorClaudeMdSrc, gitCommonDir, groupFilesDir: resolvedGroupFilesDir, sandboxHomeCreatedBy });
+        const spawn = buildSandboxSpawn({ cwd, targetCommand: [command, ...args], app: sessionApp, sandboxOpts, mcpSocketPath, mcpToken, notifySocketPath, usageSocketPath, metaSocketPath, reviewerSocketPath, reuseSandboxHome, orchestratorClaudeMdSrc, gitCommonDir, groupFilesDir: resolvedGroupFilesDir, sandboxHomeCreatedBy });
         command = spawn.command;
         args = spawn.args;
         sandboxDocker = !!spawn.docker;
@@ -1114,16 +1165,18 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
         sandboxGitBrokerProc = spawn.gitBrokerProc || null;
         sandboxGitBrokerDir = spawn.gitBrokerDir || null;
         sandboxCommitGuardDir = spawn.commitGuardDir || null;
+        sandboxSeatbeltDir = spawn.seatbeltDir || null;
+        sandboxSeatbeltFiles = spawn.seatbeltFiles || null;
         useSandbox = true;
       } catch (err) {
         return { sessionId: id, session: null, error: `Failed to build sandbox: ${err.message}` };
       }
     } else if (forceSandbox) {
-      const { reason } = sandboxUnavailableReason();
+      const { reason, hint } = forceSandboxUnavailableReason();
       return {
         sessionId: id,
         session: null,
-        error: `Cannot launch: sandbox.config.json sets "forceSandbox": true, but ${reason}. Install bwrap (bubblewrap) or disable forceSandbox.`,
+        error: `Cannot launch: sandbox.config.json sets "forceSandbox": true, but ${reason}. ${hint}`,
       };
     }
 
@@ -1165,6 +1218,24 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
       },
     });
     } catch (err) {
+      // The sandbox (if any) was already built by this point -- clean up what
+      // buildSandboxSpawn created (brokers, guard/profile dirs), mirroring
+      // pty-host's own spawn-failure path (see ptyStore.js). Otherwise a
+      // failed launch leaks a live broker process and its runtime dirs.
+      if (sandboxStateDir) { try { rmSync(sandboxStateDir, { recursive: true, force: true }); } catch { /* best effort */ } }
+      if (sandboxGitBrokerProc) { try { sandboxGitBrokerProc.kill('SIGTERM'); } catch { /* already dead */ } }
+      if (sandboxGitBrokerDir) { try { rmSync(sandboxGitBrokerDir, { recursive: true, force: true }); } catch { /* best effort */ } }
+      if (sandboxCommitGuardDir) { try { rmSync(sandboxCommitGuardDir, { recursive: true, force: true }); } catch { /* best effort */ } }
+      if (sandboxSeatbeltDir) { try { rmSync(sandboxSeatbeltDir, { recursive: true, force: true }); } catch { /* best effort */ } }
+      if (Array.isArray(sandboxSeatbeltFiles)) {
+        // Same guard as destroySession(): a concurrent launch from the same
+        // orchestratorDir may already own these paths. (The failed session
+        // itself is not registered yet, so no self-exclusion is needed.)
+        releaseSeatbeltOverlay(
+          sandboxSeatbeltFiles,
+          [...sessions.values()].map((other) => other.sandboxSeatbeltFiles),
+        );
+      }
       return { sessionId: id, session: null, error: `Failed to spawn "${command}": ${err.message}` };
     }
   }
@@ -1186,6 +1257,8 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
     sandboxGitBrokerProc,
     sandboxGitBrokerDir,
     sandboxCommitGuardDir,
+    sandboxSeatbeltDir,
+    sandboxSeatbeltFiles,
     reuseSandboxHome,
     cols,
     rows,
@@ -1715,9 +1788,11 @@ async function fireSchedule(scheduleId) {
   // down, broker failed), the prompt is dropped rather than orphaned: a
   // member session without MCP can never hand off again, and in the
   // group-gone case nobody is waiting anyway.
-  const mcpSocketPath = entry.groupId && entry.groupRole
+  const mcpResolved = entry.groupId && entry.groupRole
     ? await resolveMcpSocketForSession(entry.groupId, entry.groupRole)
     : null;
+  const mcpSocketPath = mcpResolved ? mcpResolved.sockPath : null;
+  const mcpToken = mcpResolved ? mcpResolved.token : null;
   if (entry.groupId && !mcpSocketPath) {
     console.warn(`[scheduler] dropping prompt for group member ${entry.groupRole} of ${entry.groupId}: MCP socket unavailable`);
     return;
@@ -1756,6 +1831,24 @@ async function fireSchedule(scheduleId) {
     cwd = cwdRes.cwd;
     gitCommonDir = cwdRes.gitCommonDir;
   }
+  // An exited-but-not-yet-reaped predecessor of the same group+role still
+  // owns its seatbelt orchestrator overlay (sandboxSeatbeltFiles). Retire it
+  // now -- after every drop check (a dropped prompt must not destroy an
+  // exited session the user may still have open) but before the successor
+  // launches, or the successor sees the overlay files as pre-existing,
+  // claims no ownership, and the predecessor's later teardown unlinks the
+  // live successor's CLAUDE.md/AGENTS.md mid-session. Same retire-first
+  // ordering as routes/groups.js's orchestrator restart.
+  if (entry.groupId && entry.groupRole) {
+    for (const s of [...sessions.values()]) {
+      if (s.exited && s.groupId === entry.groupId && s.groupRole === entry.groupRole
+          && Array.isArray(s.sandboxSeatbeltFiles)) {
+        // Awaited: in pty-host mode the overlay unlink happens over there,
+        // so the successor must not spawn until the ack is back (#12).
+        await retireSessionForReuse(s.id);
+      }
+    }
+  }
   const res = await createSession({
     cwd,
     cols: 80,
@@ -1773,6 +1866,7 @@ async function fireSchedule(scheduleId) {
     groupId: entry.groupId,
     groupRole: entry.groupRole,
     mcpSocketPath,
+    mcpToken,
     orchestratorClaudeMdSrc,
     gitCommonDir,
   });
@@ -2204,6 +2298,25 @@ export function destroySession(id, { keepSchedule = true, reason = 'request' } =
         // best effort
       }
     }
+    if (session.sandboxSeatbeltDir) {
+      try {
+        rmSync(session.sandboxSeatbeltDir, { recursive: true, force: true });
+      } catch {
+        // best effort
+      }
+    }
+    // Orchestrator rule files materialized into the project dir by the
+    // seatbelt backend (NOT under seatbeltDir -- unlink each best-effort).
+    // A successor launched from the same deterministic orchestratorDir
+    // (restart / scheduled auto-resume) owns the same paths: only unlink
+    // files no other registered session still references, or the successor's
+    // overlay is deleted out from under it mid-session.
+    if (Array.isArray(session.sandboxSeatbeltFiles)) {
+      releaseSeatbeltOverlay(
+        session.sandboxSeatbeltFiles,
+        [...sessions.values()].filter((other) => other !== session).map((other) => other.sandboxSeatbeltFiles),
+      );
+    }
   } else {
     // Step3 (plan5): this session's restore metadata (see
     // setPtyHostSessionMeta in createSession()'s usePtyHost branch) is only
@@ -2215,6 +2328,27 @@ export function destroySession(id, { keepSchedule = true, reason = 'request' } =
   }
 
   sessions.delete(id);
+}
+
+// Retire-first for overlay reuse (#12): destroy the exited predecessor before
+// the caller spawns a successor into the same deterministic orchestratorDir,
+// and -- in pty-host mode -- wait for pty-host's destroy ack (overlay unlink
+// included) first. destroySession() alone is fire-and-forget there
+// (RemotePty kill/destroy send no-reply frames), so a successor spawned
+// immediately after would race the predecessor's unlink, and a UDS drop in
+// between would lose the destroy entirely while the successor (seeing
+// pre-existing overlay files) claims no ownership. Direct-spawn
+// destroySession() unlinks synchronously, so no wait is needed there.
+export async function retireSessionForReuse(id) {
+  const session = sessions.get(id);
+  if (!session) return;
+  if (isPtyHostEnabled()) {
+    try {
+      const shardIndex = session.shardIndex ?? shardIndexForKey(shardKeyForSession(session));
+      await getPtyHostClient(shardIndex).destroySession(id);
+    } catch { /* best effort -- fall through to local bookkeeping */ }
+  }
+  destroySession(id, { keepSchedule: true, reason: 'retire-first' });
 }
 
 let ptyHostDestroyedHandlerArmed = false;

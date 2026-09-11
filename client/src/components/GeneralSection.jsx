@@ -16,6 +16,7 @@ export default function GeneralSection({
   onSessionModeChange,
   sandboxDefaults,
   onSandboxDefaultsChange,
+  toolsAvailable,
   navGuardMode,
   onNavGuardModeChange,
   notifyEnabled,
@@ -25,6 +26,11 @@ export default function GeneralSection({
   const updateSandboxDefault = (key, value) => {
     onSandboxDefaultsChange({ ...sandboxDefaults, [key]: value });
   };
+  // rtk / code-review-graph are unavailable on macOS (seatbelt has no
+  // provisioner -- /api/dirs/home's toolsAvailable). null/absent (older
+  // server) leaves both enabled. See issue #22.
+  const toolDisabled = (id) => toolsAvailable ? toolsAvailable[id] === false : false;
+  const TOOL_UNAVAILABLE_NOTE = 'この ccserver ホスト (macOS) では非対応です';
   return (
     <section className="settings-section">
       <h3>一般</h3>
@@ -119,21 +125,23 @@ export default function GeneralSection({
         />
         ssh-agentを転送する
       </label>
-      <label className="general-setting-check">
+      <label className={`general-setting-check${toolDisabled('rtk') ? ' general-setting-check-disabled' : ''}`}>
         <input
           type="checkbox"
-          checked={!!sandboxDefaults.rtk}
+          disabled={toolDisabled('rtk')}
+          checked={toolDisabled('rtk') ? false : !!sandboxDefaults.rtk}
           onChange={(e) => updateSandboxDefault('rtk', e.target.checked)}
         />
-        rtk を導入する
+        rtk を導入する{toolDisabled('rtk') ? `（${TOOL_UNAVAILABLE_NOTE}）` : ''}
       </label>
-      <label className="general-setting-check">
+      <label className={`general-setting-check${toolDisabled('codeReviewGraph') ? ' general-setting-check-disabled' : ''}`}>
         <input
           type="checkbox"
-          checked={!!sandboxDefaults.codeReviewGraph}
+          disabled={toolDisabled('codeReviewGraph')}
+          checked={toolDisabled('codeReviewGraph') ? false : !!sandboxDefaults.codeReviewGraph}
           onChange={(e) => updateSandboxDefault('codeReviewGraph', e.target.checked)}
         />
-        code-review-graph MCP を導入する
+        code-review-graph MCP を導入する{toolDisabled('codeReviewGraph') ? `（${TOOL_UNAVAILABLE_NOTE}）` : ''}
       </label>
       <p className="settings-hint">
         ディレクトリ別に記憶済みの場所には適用されず、

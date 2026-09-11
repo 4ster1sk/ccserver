@@ -417,7 +417,19 @@ export class PtyHostClient {
     } catch (err) {
       throw new Error(`Failed to spawn "${params.command}": pty-host unreachable (${err.message})`);
     }
-    const res = await this._request('spawn', params);
+    let res;
+    try {
+      res = await this._request('spawn', params);
+    } catch (err) {
+      const msg = String(err?.message || err);
+      // pty-host's own spawn failures already carry an INFRA_ERROR_PREFIXES
+      // prefix ("Failed to build sandbox" / "Failed to spawn") -- only wrap
+      // transport-level failures (e.g. "not connected" if the socket dropped
+      // between _ensureConnected and here) so groups.js classifies them 500.
+      throw new Error(
+        msg.startsWith('Failed to') ? msg : `Failed to spawn "${params.command}": pty-host RPC failed (${msg})`,
+      );
+    }
     const rpty = new RemotePty(this, res.id, { cols: res.cols, rows: res.rows, pid: res.pid, sandbox: res.sandbox });
     this._remotePtys.set(res.id, rpty);
     return rpty;
@@ -427,6 +439,30 @@ export class PtyHostClient {
     await this._ensureConnected();
     const res = await this._request('list');
     return res.sessions;
+  }
+
+  // Acked destroy for retire-first reuse paths (#12): unlike
+  // RemotePty.destroy()'s fire-and-forget, this waits for pty-host's teardown
+  // (including the seatbelt overlay unlink) to complete before the caller
+  // spawns a successor into the same deterministic orchestratorDir. A
+  // fire-and-forget destroy followed by an immediate spawn races the
+  // successor's overlay materialization against the predecessor's unlink --
+  // and a UDS drop in between loses the destroy entirely. Best-effort:
+  // not-found / unreachable just resolve false so the successor still
+  // launches (its overlay copy overwrites, and the teardown guard covers the
+  // rest).
+  async destroySession(id) {
+    try {
+      await this._ensureConnected();
+    } catch {
+      return false;
+    }
+    try {
+      await this._request('destroy', { id });
+      return true;
+    } catch {
+      return false; // already reaped / gone -- nothing to wait for
+    }
   }
 
   // Reattaches to a session pty-host already has (plan5 Step3): unlike

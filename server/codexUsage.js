@@ -7,17 +7,17 @@
 // dialog. The result is cached so the client's top-bar Usage button can show
 // it instantly; a forced refresh re-captures on demand.
 //
-// The capture runs in a *minimal* filesystem sandbox when bwrap is available
-// (only Codex's own config is exposed — no project, no docker), falling back
-// to launching codex directly otherwise -- unless sandbox.config.json sets
-// "forceSandbox": true, in which case the capture fails rather than run
-// unsandboxed. Reading rate limits makes no billable API call, so this does
-// not itself consume plan usage.
+// The capture runs in a *minimal* filesystem sandbox when one is available
+// (bwrap on Linux, sandbox-exec on macOS; only Codex's own config is exposed
+// — no project, no docker), falling back to launching codex directly
+// otherwise -- unless sandbox.config.json sets "forceSandbox": true, in which
+// case the capture fails rather than run unsandboxed. Reading rate limits
+// makes no billable API call, so this does not itself consume plan usage.
 import { spawn } from 'node:child_process';
 import { homedir } from 'node:os';
-import { mkdirSync } from 'node:fs';
+import { mkdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
-import { buildMinimalSandboxSpawn, resolveApp, sandboxAvailable, loadSandboxConfig, isAppHidden } from './ws/sandbox.js';
+import { buildMinimalSandboxSpawn, resolveApp, sandboxAvailable, loadSandboxConfig, isAppHidden, forceSandboxUnavailableReason } from './ws/sandbox.js';
 import { buildSessionEnv } from './ws/sessionEnv.js';
 import { formatResets } from './usageResetFormat.js';
 
@@ -106,6 +106,7 @@ function capture() {
     let args = ['app-server'];
     let spawnCwd = homedir();
     let sandboxed = false;
+    let seatbeltDir = null;
 
     if (process.platform !== 'win32' && sandboxAvailable()) {
       try {
@@ -119,6 +120,9 @@ function capture() {
         args = spawnSpec.args;
         spawnCwd = CODEX_USAGE_CWD;
         sandboxed = true;
+        // macOS seatbelt launches mint a runtime dir (profile + throwaway
+        // HOME); removed in finish() below. Null on every other backend.
+        seatbeltDir = spawnSpec.seatbeltDir || null;
       } catch {
         // bwrap launch failed; fall through to the forceSandbox / direct path.
       }
@@ -128,7 +132,8 @@ function capture() {
     // the sandbox, so the direct-launch fallback below is not allowed -- fail
     // the capture with a clear error instead of running codex unsandboxed.
     if (!sandboxed && loadSandboxConfig().forceSandbox) {
-      resolve({ error: 'Cannot read usage: "forceSandbox": true but the sandbox is unavailable (bwrap missing / Windows)' });
+      const { reason } = forceSandboxUnavailableReason();
+      resolve({ error: `Cannot read usage: "forceSandbox": true but the sandbox is unavailable (${reason})` });
       return;
     }
 
@@ -144,6 +149,9 @@ function capture() {
         env: { ...cleanEnv },
       });
     } catch (err) {
+      if (seatbeltDir) {
+        try { rmSync(seatbeltDir, { recursive: true, force: true }); } catch { /* best effort */ }
+      }
       resolve({ error: `Failed to launch codex: ${err.message}`, sandboxed });
       return;
     }
@@ -157,6 +165,9 @@ function capture() {
       done = true;
       clearTimeout(hardTimer);
       try { proc.kill(); } catch { /* already gone */ }
+      if (seatbeltDir) {
+        try { rmSync(seatbeltDir, { recursive: true, force: true }); } catch { /* best effort */ }
+      }
       resolve({ ...res, sandboxed });
     };
 

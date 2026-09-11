@@ -3,7 +3,7 @@ import { join, resolve, basename } from 'node:path';
 import { homedir } from 'node:os';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { loadSandboxConfig, installedApps, sandboxAvailable } from '../ws/sandbox.js';
+import { loadSandboxConfig, installedApps, sandboxAvailable, sandboxToolsAvailable } from '../ws/sandbox.js';
 import { opencodeGoAvailable } from '../opencodeUsage.js';
 import { metaAgentEnabled, metaAgentDir } from '../ws/metaAgent.js';
 import { resolvedHostname } from '../ws/notify.js';
@@ -140,10 +140,15 @@ export async function dirsRoute(fastify, opts) {
     // metaAgentEnabled: the launch modal's メタエージェント mode is disabled
     // (with an explanation) unless the privileged ccserver-meta feature is
     // explicitly opted into via sandbox.config.json. Extra field as well.
-    // sandboxAvailable: whether /usr/bin/bwrap exists on this host. The
+    // sandboxAvailable: whether a sandbox backend is usable on this host
+    // (bwrap on Linux, sandbox-exec on macOS). The
     // launch modal disables the sandbox choice (and combo mode, which always
     // requires the sandbox) when false. Extra field as well.
-    return { home: homedir(), defaultApp, forceSandbox, hostname: resolvedHostname(), showUsage, availableApps: { ...installedApps(), opencodeGo: opencodeGoAvailable(cfg) }, hiddenApps, metaAgentEnabled: metaAgentEnabled(), metaAgentDir: metaAgentDir(), sandboxAvailable: sandboxAvailable() };
+    // toolsAvailable: which opt-in tool toggles (rtk / code-review-graph) this
+    // host can actually provision -- false on macOS (seatbelt has no
+    // provisioner wiring). The launch / settings UIs render an unavailable
+    // toggle disabled with an explanation, like availableApps for CLIs.
+    return { home: homedir(), defaultApp, forceSandbox, hostname: resolvedHostname(), showUsage, availableApps: { ...installedApps(), opencodeGo: opencodeGoAvailable(cfg) }, toolsAvailable: sandboxToolsAvailable(), hiddenApps, metaAgentEnabled: metaAgentEnabled(), metaAgentDir: metaAgentDir(), sandboxAvailable: sandboxAvailable() };
   });
 
   fastify.get('/dirs', async (request, reply) => {

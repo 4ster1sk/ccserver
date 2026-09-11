@@ -47,10 +47,11 @@
 // commitMessageGuard.enabled); omitted entirely, this is a no-op, same as
 // before plan8.
 
-import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync, rmSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, unlinkSync, writeFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { createServer } from 'node:net';
 import { execFileSync, spawn } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
+import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { isAbsolute, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { computeGitAllowlist, normalizeGitUrl, resolveOriginUrl } from './gitAllowlist.js';
@@ -63,8 +64,69 @@ const GH_EXEC_MAX_BYTES = 10 * 1024 * 1024;
 const __filename = fileURLToPath(import.meta.url);
 
 const UID = typeof process.getuid === 'function' ? process.getuid() : 0;
+// Canonical control-plane socket filenames (single source of truth): the
+// seatbelt profile's network-outbound deny pins must keep matching
+// pty-host/index.js's SOCK_NAME and metaAgent.js's socket path -- a
+// rename in either place would silently void the pin (both modules import
+// these from here, so a rename updates the pin automatically).
+// pty-host stays a single file; meta uses a dedicated `.d/sock` directory
+// (Issue #143 problem 1: directory bind survives a server restart, see
+// mcpBroker.js) so its pin is a directory + 'sock', not a single filename.
+export const PTY_HOST_SOCK_NAME = 'ccserver-pty-host.sock';
+export const META_SOCK_NAME = 'ccserver-meta.sock';
+export const META_SOCKET_DIR_NAME = 'ccserver-meta.d';
+// Host runtime dir for broker sockets and other per-launch state.
+// XDG_RUNTIME_DIR wins when set; otherwise Linux uses /run/user/<uid> while
+// macOS -- which has no /run -- falls back to a short /tmp base. NOT the
+// per-user tmpdir (/var/folders/... is ~50 chars on its own): broker socket
+// names (ccserver-git-broker-<uuid>/broker.sock,
+// ccserver-mcp-<id>-<tag>) appended to it would exceed darwin's 104-byte
+// sockaddr_un.sun_path limit and every bind would fail. /tmp is sticky
+// (1777); every caller mkdirs the per-UID dir 0o700.
+export function hostRuntimeDir() {
+  if (process.env.XDG_RUNTIME_DIR) return process.env.XDG_RUNTIME_DIR;
+  if (process.platform === 'darwin') return `/tmp/ccserver-runtime-${UID}`;
+  return `/run/user/${UID}`;
+}
+
+// Create (and verify) the per-UID runtime dir. mkdirSync's mode option never
+// fixes a pre-existing dir: on darwin the fallback base lives under the
+// sticky, world-writable /tmp, where another local user can pre-create it
+// (e.g. 0777) before our first bind -- the window reopens after every reboot
+// and macOS's periodic /tmp cleanup. Binding sockets into a hostile dir lets
+// its owner unlink/replace them (broker impersonation, credential theft), so
+// fail closed unless THIS uid owns a private 0700 dir. Linux's
+// /run/user/<uid> is root-owned via logind and needs no check (and an
+// XDG_RUNTIME_DIR override is the operator's explicit responsibility).
+export function ensureHostRuntimeDir() {
+  const base = hostRuntimeDir();
+  if (process.platform !== 'darwin' || process.env.XDG_RUNTIME_DIR) return base;
+  mkdirSync(base, { recursive: true, mode: 0o700 });
+  let st = statSync(base);
+  // mkdirSync's mode option never fixes a PRE-existing dir. When THIS uid
+  // already owns it, a too-loose mode (a past run's 0755, an earlier tool,
+  // a lax host umask) is ours to correct -- self-heal to 0700 rather than
+  // throwing on every sandbox / MCP-broker / pty-host launch on the host
+  // until the dir is deleted by hand (mcpBroker.js and rpcServer.js
+  // deliberately propagate this throw, so a non-heal here bricks those
+  // features). A dir owned by ANOTHER uid is still refused: binding sockets
+  // into a dir its owner can unlink/replace is the exact threat this guard
+  // exists for, and chmod cannot take ownership.
+  if (st.uid === UID && (st.mode & 0o777) !== 0o700) {
+    try { chmodSync(base, 0o700); } catch { /* fall through to the throw */ }
+    st = statSync(base);
+  }
+  if (st.uid !== UID || (st.mode & 0o777) !== 0o700) {
+    throw new Error(
+      `host runtime dir is not a private 0700 dir owned by uid ${UID}: ${base} `
+      + `(owner uid ${st.uid}, mode ${(st.mode & 0o777).toString(8)}); `
+      + 'remove it or fix its ownership/permissions, then relaunch',
+    );
+  }
+  return base;
+}
 function runtimeBase() {
-  return process.env.XDG_RUNTIME_DIR || `/run/user/${UID}`;
+  return hostRuntimeDir();
 }
 
 function fetchToken() {
@@ -237,12 +299,37 @@ async function handleGhExec(req, conn, ctx) {
   conn.end(`${JSON.stringify(result)}\n`);
 }
 
+// Constant-time compare that never throws and rejects length mismatches
+// (timingSafeEqual requires equal-length buffers).
+function tokenEq(a, b) {
+  if (typeof a !== 'string' || typeof b !== 'string' || a.length === 0) return false;
+  const ab = Buffer.from(a);
+  const bb = Buffer.from(b);
+  if (ab.length !== bb.length) return false;
+  try { return timingSafeEqual(ab, bb); } catch { return false; }
+}
+
 function handleRequest(line, conn, ctx) {
   let req;
   try {
     req = JSON.parse(line);
   } catch {
     conn.end(`${JSON.stringify({ ok: false, reason: 'bad-request' })}\n`);
+    return;
+  }
+  // Connection auth: on macOS Seatbelt this socket sits in a shared /tmp dir
+  // reachable by every concurrent sandboxed session (bwrap binds it per-session
+  // so this is belt-and-suspenders there). The per-session token (delivered to
+  // the sandbox via CCSANDBOX_GIT_BROKER_TOKEN) keeps an unauthorized connect()
+  // from borrowing another session's repo-scoped credentials -- but on macOS it
+  // is an audit / accident-prevention layer, NOT a hard boundary: a same-UID
+  // peer session can still recover this token by reading the target's env via
+  // the numeric-MIB KERN_PROCARGS2 (unblockable under Seatbelt -- see
+  // sandbox-seatbelt.js's KNOWN LIMITATION). The real boundary there is the
+  // repo-scoped allow-list below. Fail closed: no configured token rejects
+  // everything.
+  if (!tokenEq(req && req.token, ctx.token)) {
+    conn.end(`${JSON.stringify({ ok: false, reason: 'unauthorized' })}\n`);
     return;
   }
   if (req && req.op === 'credential') {
@@ -277,7 +364,10 @@ function runServer({ sock, allowlist, cwd, commitGuard }) {
       guardPatterns = [];
     }
   }
-  const ctx = { allowSet, cwd, guardPatterns };
+  // Per-session connection token (see handleRequest). Delivered via env, not
+  // argv: the broker process is unsandboxed, but keeping it out of the command
+  // line avoids incidental exposure via crash reports / process listings.
+  const ctx = { allowSet, cwd, guardPatterns, token: process.env.CCSANDBOX_BROKER_TOKEN || '' };
 
   try { unlinkSync(sock); } catch { /* fresh dir, usually not present */ }
 
@@ -321,26 +411,30 @@ function runServer({ sock, allowlist, cwd, commitGuard }) {
 
 // Synchronous readiness probe: spawn a short-lived helper that connects and expects a JSON line.
 // Uses execFileSync with timeout so the current thread can block without starving the event loop.
-function probeBrokerSync(sockPath, timeoutMs = 700) {
+function probeBrokerSync(sockPath, timeoutMs = 700, token = '') {
   const probeScript = `
     const net=require('net');
     const sock=process.argv[1];
+    const tok=process.argv[2]||'';
     const c=net.createConnection(sock);
     let buf='';
     const t=setTimeout(()=>process.exit(2), ${timeoutMs});
-    c.on('connect',()=>{ try{c.write('{\"op\":\"probe\"}\\n');}catch{} });
+    c.on('connect',()=>{ try{c.write(JSON.stringify({op:'probe',token:tok})+'\\n');}catch{} });
     c.on('data',d=>{ buf+=d; if(buf.includes('\\n')){ clearTimeout(t); process.stdout.write(buf); c.end(); }});
     c.on('error',()=>{ clearTimeout(t); process.exit(1); });
     c.on('close',()=>{ if(buf) process.exit(0); });
     c.on('end',()=>{ clearTimeout(t); process.exit(buf.includes('\\n')?0:1); });
   `;
   try {
-    const out = execFileSync(process.execPath, ['-e', probeScript, sockPath], {
+    const out = execFileSync(process.execPath, ['-e', probeScript, sockPath, token], {
       encoding: 'utf-8',
       timeout: timeoutMs + 500,
       stdio: ['ignore', 'pipe', 'pipe'],
     });
-    return typeof out === 'string' && out.includes('\n');
+    // A `\n`-terminated line means the broker is up and accepted our token
+    // (an unauthorized reply is still a valid line -- but the probe always
+    // sends the real token, so a well-formed response = ready + authed).
+    return typeof out === 'string' && out.includes('\n') && !out.includes('"unauthorized"');
   } catch {
     return false;
   }
@@ -373,6 +467,7 @@ export function startGitBroker({ cwd, blockedPatterns = null }) {
 
   const dir = join(runtimeBase(), `ccserver-git-broker-${randomUUID()}`);
   try {
+    ensureHostRuntimeDir();
     mkdirSync(dir, { recursive: true, mode: 0o700 });
   } catch (e) {
     throw new Error(`git broker failed to start for ${cwd}: ${e.message}`);
@@ -397,9 +492,19 @@ export function startGitBroker({ cwd, blockedPatterns = null }) {
     }
   }
 
+  // Per-session connection token: the sandbox gets it via
+  // CCSANDBOX_GIT_BROKER_TOKEN, the --serve child via CCSANDBOX_BROKER_TOKEN.
+  // A concurrent session with no/wrong token is rejected with
+  // reason:"unauthorized" (see handleRequest -- on macOS this is an audit
+  // layer, not a hard boundary, since KERN_PROCARGS2 leaks the token to a
+  // same-UID peer).
+  const token = randomBytes(24).toString('base64url');
   const serveArgs = [__filename, '--serve', '--sock', sockPath, '--allowlist', allowlistPath, '--cwd', cwd];
   if (commitGuardPath) serveArgs.push('--commit-guard', commitGuardPath);
-  const proc = spawn(process.execPath, serveArgs, { stdio: ['ignore', 'pipe', 'pipe'] });
+  const proc = spawn(process.execPath, serveArgs, {
+    stdio: ['ignore', 'pipe', 'pipe'],
+    env: { ...process.env, CCSANDBOX_BROKER_TOKEN: token },
+  });
 
   proc.stdout.on('data', (d) => process.stdout.write(`[git-broker] ${d}`));
   proc.stderr.on('data', (d) => process.stderr.write(`[git-broker] ${d}`));
@@ -439,14 +544,14 @@ export function startGitBroker({ cwd, blockedPatterns = null }) {
   }
 
   // Readiness probe: ensure the broker actually speaks the protocol
-  const probed = probeBrokerSync(sockPath, 500);
+  const probed = probeBrokerSync(sockPath, 500, token);
   if (!probed) {
     try { proc.kill('SIGKILL'); } catch {}
     try { rmSync(dir, { recursive: true, force: true }); } catch {}
     throw new Error(`git broker readiness probe failed for ${cwd}: no response on ${sockPath}`);
   }
 
-  return { proc, dir, sockPath, allowlistPath, allowlist, commitGuardPath };
+  return { proc, dir, sockPath, allowlistPath, allowlist, commitGuardPath, token };
 }
 
 // Entry point when this file is spawned directly by startGitBroker().

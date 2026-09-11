@@ -11,9 +11,13 @@
 // crashing the process.
 
 import { createServer } from 'node:net';
-import { rmSync } from 'node:fs';
+import { mkdirSync, rmSync } from 'node:fs';
+import { dirname } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { encodeFrame, FrameDecoder } from './protocol.js';
+// Shared runtime-dir convention + hostile-dir guard (leaf module: keeps the
+// standalone-runnable pty-host constraint).
+import { ensureHostRuntimeDir } from '../ws/git-broker.js';
 
 const RPC_TYPES = new Set(['spawn', 'write', 'resize', 'kill', 'destroy', 'list', 'subscribe', 'unsubscribe', 'ping']);
 
@@ -69,6 +73,17 @@ function dispatch(ptyStore, connId, { type, ...params }) {
 }
 
 export async function createRpcServer(ptyStore, { sockPath }) {
+  // The darwin default sock lives under /tmp/ccserver-runtime-<uid>,
+  // which nothing else creates (unlike Linux's logind-made /run/user/<uid>).
+  // 0o700 like git-broker's broker dir: keep the RPC socket private.
+  // ensureHostRuntimeDir() fails closed if a hostile other-UID dir squatted
+  // on the base (mkdir's mode never fixes a pre-existing dir).
+  // Propagate its throw: swallowing it would let listen() bind the control
+  // plane inside the hostile dir, which is exactly what the guard forbids.
+  ensureHostRuntimeDir();
+  try {
+    mkdirSync(dirname(sockPath), { recursive: true, mode: 0o700 });
+  } catch { /* listen() below reports real problems */ }
   try {
     rmSync(sockPath, { force: true });
   } catch {

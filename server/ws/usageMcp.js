@@ -23,6 +23,7 @@
 import { join } from 'node:path';
 import { getUsage } from '../usage.js';
 import { loadSandboxConfig, resolveClaude } from './sandbox.js';
+import { hostRuntimeDir } from './git-broker.js';
 
 // Issue #143 problem 1: a dedicated directory holding only `sock`, bound into
 // sandboxes as a directory rather than the socket file itself -- see
@@ -32,9 +33,7 @@ const USAGE_SOCKET_DIR_NAME = 'ccserver-usage.d';
 let usageBroker = null; // { server, sockPath, dir, connections } | null
 
 export function getUsageSockPath() {
-  const base = process.env.XDG_RUNTIME_DIR
-    || (typeof process.getuid === 'function' ? `/run/user/${process.getuid()}` : '/tmp');
-  return join(base, USAGE_SOCKET_DIR_NAME, 'sock');
+  return join(hostRuntimeDir(), USAGE_SOCKET_DIR_NAME, 'sock');
 }
 
 // Whether the get_usage MCP tool should exist on this server at all: claude

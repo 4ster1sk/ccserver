@@ -166,6 +166,27 @@ test('explicit sandbox request without bwrap is refused, not silently unsandboxe
   assert.match(res.error, /^Failed to build sandbox: /);
 });
 
+// Filesystem-root launches: claude/opencode abort immediately there (opaque
+// SIGABRT, no output), and a SANDBOXED shell at / would get a fail-open
+// sandbox -- the project subtree rule becomes "^/(/.*)?$" (seatbelt's
+// subtrees('/')) or a "/" bind (bwrap), silently granting the whole
+// filesystem. Plain unsandboxed shells are fine at /.
+test('createSession refuses cwd=/ for agents and sandboxed shells, not plain shells', async () => {
+  const agent = await sessionManager.createSession({ cwd: '/', cols: 80, rows: 24, shell: false, app: 'claude', sandbox: false });
+  assert.equal(agent.session, null, 'agent launch at / is refused');
+  assert.match(agent.error, /^Cannot launch in the filesystem root/);
+
+  const sbShell = await sessionManager.createSession({ cwd: '/', cols: 80, rows: 24, shell: true, sandbox: true });
+  assert.equal(sbShell.session, null, 'sandboxed shell at / is refused (fail-open profile)');
+  assert.match(sbShell.error, /^Cannot launch a sandboxed shell in the filesystem root/);
+
+  if (!loadSandboxConfig().forceSandbox) {
+    const plain = await sessionManager.createSession({ cwd: '/', cols: 80, rows: 24, shell: true, sandbox: false });
+    assert.ok(plain.session, 'plain unsandboxed shell at / still spawns');
+    sessionManager.destroySession(plain.sessionId, { keepSchedule: false });
+  }
+});
+
 // Permission mode state on sessions: any value normalizes to one of
 // 'standard' | 'auto-accept' | 'yolo' (unknown -> 'standard'); shells always
 // carry 'standard'. The CLI flag itself is commandcode-only (see
@@ -744,24 +765,28 @@ test('resolveGroupMcpSocket: creates a worker handoff channel, reuses/recreates 
   await groupManager.createGroup({ groupId: gid, cwd: '/srv/proj', orchestratorDir: '/srv/orch' });
   const group = groupManager.getGroup(gid);
 
-  // Worker: no channel yet -> created and registered.
-  const workerSock = await groupManager.resolveGroupMcpSocket(gid, 'workerA');
-  assert.ok(workerSock, 'worker channel socket path returned');
-  assert.equal(group.handoffChannels.get('workerA').sockPath, workerSock);
-  // Second call reuses the existing channel.
-  const workerSock2 = await groupManager.resolveGroupMcpSocket(gid, 'workerA');
-  assert.equal(workerSock2, workerSock);
+  // Worker: no channel yet -> created and registered. Returns { sockPath, token }.
+  const worker = await groupManager.resolveGroupMcpSocket(gid, 'workerA');
+  assert.ok(worker && worker.sockPath, 'worker channel socket path returned');
+  assert.ok(worker.token && worker.token.length >= 20, 'worker channel has a connection token');
+  assert.equal(group.handoffChannels.get('workerA').sockPath, worker.sockPath);
+  // Second call reuses the existing channel (same path + token).
+  const worker2 = await groupManager.resolveGroupMcpSocket(gid, 'workerA');
+  assert.deepEqual(worker2, worker);
 
   // Orchestrator: existing control broker is returned as-is.
-  const orchSock = await groupManager.resolveGroupMcpSocket(gid, 'orchestrator');
-  assert.equal(orchSock, group.controlBroker.sockPath);
+  const orch = await groupManager.resolveGroupMcpSocket(gid, 'orchestrator');
+  assert.equal(orch.sockPath, group.controlBroker.sockPath);
+  assert.equal(orch.token, group.controlBroker.token);
+  assert.notEqual(orch.token, worker.token, 'control and handoff tokens differ');
   // Simulate the orchestrator's pty exiting (broker stopped) -> resolver
-  // brings the broker back.
+  // brings the broker back (with a fresh token).
   groupManager.onOrchestratorExit(gid);
   assert.equal(group.controlBroker, null);
-  const orchSock2 = await groupManager.resolveGroupMcpSocket(gid, 'orchestrator');
-  assert.ok(orchSock2, 'control broker recreated');
-  assert.equal(group.controlBroker.sockPath, orchSock2);
+  const orch2 = await groupManager.resolveGroupMcpSocket(gid, 'orchestrator');
+  assert.ok(orch2 && orch2.sockPath, 'control broker recreated');
+  assert.equal(group.controlBroker.sockPath, orch2.sockPath);
+  assert.equal(group.controlBroker.token, orch2.token);
 
   // Unknown group -> null (caller drops the prompt rather than orphan).
   assert.equal(await groupManager.resolveGroupMcpSocket('no-such-group', 'workerA'), null);
@@ -988,6 +1013,42 @@ test('fireSchedule auto-resume of a dead orchestrator regenerates its CLAUDE.md 
   assert.ok(existsSync(generatedPath), 'the CLAUDE.md/AGENTS.md overlay source was (re)generated for the resume');
   const template = readFileSync(join(import.meta.dirname, 'orchestrator-template.md'), 'utf-8');
   assert.equal(readFileSync(generatedPath, 'utf-8'), template);
+
+  sessionManager.destroySession(member, { keepSchedule: false });
+  sessionManager.destroySession(workerKeepAlive.id, { keepSchedule: false });
+  groupManager.destroyGroup(gid);
+});
+
+// Retire-first ordering for the seatbelt overlay: an exited-but-not-reaped
+// orchestrator still owns its materialized CLAUDE.md/AGENTS.md
+// (sandboxSeatbeltFiles). fireSchedule must retire it before the successor
+// launches -- otherwise the successor sees the files as pre-existing, claims
+// no ownership, and the predecessor's later teardown unlinks the live
+// successor's overlay mid-session. Here the pty is killed directly so onExit
+// marks it exited while it stays registered (open viewer tab).
+test('fireSchedule retires an exited seatbelt-overlay predecessor before auto-resume', async () => {
+  const gid = randomUUID();
+  const orchestratorDir = join(runtimeDir, `orch-retire-${gid}`);
+  await groupManager.createGroup({ groupId: gid, cwd: '/tmp', orchestratorDir });
+
+  const workerKeepAlive = await shellMember('/tmp', gid, 'workerA');
+  const deadOrch = await shellMember('/tmp', gid, 'orchestrator');
+  const deadOrchId = deadOrch.id;
+
+  mkdirSync(orchestratorDir, { recursive: true });
+  writeFileSync(join(orchestratorDir, 'CLAUDE.md'), '# live rules\n');
+  deadOrch.sandboxSeatbeltFiles = [join(orchestratorDir, 'CLAUDE.md')];
+  deadOrch.ptyProcess.kill();
+  const t0 = Date.now();
+  while (!deadOrch.exited && Date.now() - t0 < 5000) await sleep(100);
+  assert.ok(deadOrch.exited, 'predecessor pty exited but stays registered');
+
+  assert.ok(sessionManager.setScheduledPrompt(deadOrchId, Date.now() + 700, 'MARKER_ORCH_RETIRE'));
+  await sleep(2500); // branch 3: retire-first + resolvers + createSession
+
+  assert.equal(sessionManager.getSession(deadOrchId), undefined, 'exited predecessor retired before resume');
+  const member = groupManager.getGroup(gid).members.get('orchestrator');
+  assert.ok(member && member !== deadOrchId, 'role rebound to the resumed session');
 
   sessionManager.destroySession(member, { keepSchedule: false });
   sessionManager.destroySession(workerKeepAlive.id, { keepSchedule: false });

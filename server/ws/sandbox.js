@@ -14,6 +14,10 @@
 // The ordering matters: bwrap creating the user namespace would break
 // newuidmap (no subuid mapping -> single uid), so rootlesskit must be the
 // outer layer. See memory: sandbox-dind-recipe.
+//
+// Architecture (macOS): sandbox-exec (Seatbelt) -> entrypoint -> target, with
+// no docker (see sandbox-seatbelt.js). A deny-by-default file policy replaces
+// bwrap's bind mounts -- strictly weaker isolation, no mount hiding.
 
 import { homedir } from 'node:os';
 import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
@@ -23,8 +27,9 @@ import { promisify } from 'node:util';
 import { randomUUID } from 'node:crypto';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { startGitBroker } from './git-broker.js';
+import { startGitBroker, hostRuntimeDir, ensureHostRuntimeDir, PTY_HOST_SOCK_NAME, META_SOCKET_DIR_NAME } from './git-broker.js';
 import { buildGuardConfig } from './commitGuard.js';
+import { buildSeatbeltLaunch, seatbeltEnvArgs, seedClaudeCredentialsFromHostKeychain, isBlockedCredentialBind, agentConfigDirs } from './sandbox-seatbelt.js';
 import { recordSandboxHome as recordSandboxHomeDb, listSandboxRowsBySlug, forgetSandboxHome } from './projects.js';
 import { APPS } from './appLaunch.js';
 
@@ -44,6 +49,14 @@ const SSH_CONFIG_FILE = join(__dirname, 'sandbox-ssh-config');
 const BWRAP = '/usr/bin/bwrap';
 const ROOTLESSKIT = '/usr/bin/rootlesskit';
 const BASH = '/usr/bin/bash';
+
+// macOS Seatbelt backend (see sandbox-seatbelt.js): sandbox-exec mediates
+// file access by policy instead of bwrap's bind mounts, so there is no mount
+// isolation and no nested dockerd. The bash lived at /bin/bash on macOS
+// (there is no /usr/bin/bash).
+export const IS_MACOS = process.platform === 'darwin';
+const SANDBOX_EXEC = '/usr/bin/sandbox-exec';
+const MACOS_BASH = '/bin/bash';
 
 // Fixed in-sandbox paths for the git-broker machinery (see buildBwrapArgs).
 const SANDBOX_NODE_PATH = '/ccserver-sandbox-node';
@@ -123,10 +136,12 @@ const RTK_DEFAULT = RTK_ASSET ? {
 const CRG_DEFAULT = { version: '2.3.7' };
 
 const HOME = homedir();
-// process.getuid is undefined on Windows; the sandbox is Linux-only, but this
-// module is imported unconditionally, so guard the top-level access.
-const UID = typeof process.getuid === 'function' ? process.getuid() : 0;
-const XDG_RUNTIME_DIR = process.env.XDG_RUNTIME_DIR || `/run/user/${UID}`;
+// Host runtime dir (commit-guard state, rootlesskit state dirs). darwin-aware
+// via git-broker.js: macOS has no /run/user, so without XDG_RUNTIME_DIR this
+// falls back to a short /tmp base there (NOT the per-user tmpdir: broker
+// socket names appended to /var/folders/... would exceed darwin's 104-byte
+// sockaddr_un.sun_path limit and every bind would fail).
+const XDG_RUNTIME_DIR = hostRuntimeDir();
 
 // RootlessKit's state dir (holds the API socket dockerd connects to) lives
 // under the runtime dir on the host; bwrap binds it in so dockerd can reach it.
@@ -793,6 +808,18 @@ export function resolveTools(sandboxOpts = null, cfgTools = null) {
   return { rtk: !!rtkSpec, codeReviewGraph: !!crgSpec, rtkSpec, crgSpec };
 }
 
+// Which opt-in tools can actually be provisioned on this host, keyed by the
+// same ids resolveTools() uses. Exposed via GET /dirs/home so the launch /
+// settings UIs can render the toggles disabled-with-an-explanation (mirrors
+// availableApps for agent CLIs) instead of offering a checkbox the server
+// silently ignores. macOS: the seatbelt backend has no provisioner wiring and
+// no darwin rtk asset map (see buildSandboxSpawn's IS_MACOS branch, which
+// force-disables both), so neither is available there.
+export function sandboxToolsAvailable() {
+  const ok = !IS_MACOS;
+  return { rtk: ok, codeReviewGraph: ok };
+}
+
 // Locate an executable named `cmd` on the given PATH (or return it as-is if
 // it already looks like a path). Mirrors `command -v` without spawning a
 // shell. Defaults to the sandbox's own runtime PATH (see SANDBOX_PATH) since
@@ -1065,6 +1092,27 @@ export function discoverSshAuthSock() {
     join(XDG_RUNTIME_DIR, 'gcr', 'ssh'),
   ]) candidates.push(p);
 
+  // macOS agents live outside the Linux runtime conventions above: 1Password
+  // and Secretive expose fixed-path sockets under ~/Library, and the system
+  // ssh-agent listens under a per-boot launchd dir. Missing paths are
+  // skipped by the stat gate below, so pushing them unconditionally here is
+  // harmless on hosts without these agents.
+  if (process.platform === 'darwin') {
+    try {
+      const home = homedir();
+      candidates.push(
+        join(home, 'Library', 'Group Containers', '2BUA8C4S2C.com.1password', 't', 'agent.sock'),
+        join(home, 'Library', 'Containers', 'com.maxgoedjen.secretive.Secretive', 'Data', 'socket.ssh'),
+      );
+    } catch { /* homedir unavailable -- skip */ }
+    try {
+      for (const d of readdirSync('/private/tmp')) {
+        if (!d.startsWith('com.apple.launchd.')) continue;
+        candidates.push(join('/private/tmp', d, 'Listeners'));
+      }
+    } catch { /* no launchd dir visible */ }
+  }
+
   // ccserver's own env, if any (often the empty agent — lowest priority).
   if (process.env.SSH_AUTH_SOCK) candidates.push(process.env.SSH_AUTH_SOCK);
 
@@ -1092,27 +1140,73 @@ export function discoverSshAuthSock() {
 }
 
 // Check that the tools needed for the docker-enabled sandbox are present.
+// Never true on macOS: sandbox-exec cannot host a nested rootless dockerd,
+// so the darwin branch of buildSandboxSpawn() always launches docker: false.
 export function dockerSandboxAvailable() {
+  if (IS_MACOS) return false;
   return [BWRAP, ROOTLESSKIT, '/usr/bin/slirp4netns', '/usr/bin/newuidmap']
     .every((p) => existsSync(p));
 }
 
+export function seatbeltAvailable() {
+  return existsSync(SANDBOX_EXEC);
+}
+
 export function sandboxAvailable() {
+  if (IS_MACOS) return seatbeltAvailable();
   return existsSync(BWRAP);
 }
 
-// Reason + hint for refusing an explicitly requested sandbox when no backend
-// is available. Shared by sessionManager.js (production refusal messages) and
-// routes/groups.test.js (pins the hint suffix + infra classification on the
-// real production shape instead of a second hardcoded same-prefix string).
+// Which isolation backend a sandboxed launch would use on this host:
+// 'bwrap' (Linux), 'seatbelt' (macOS via sandbox-exec), or 'none'.
+// sessionManager uses this to pick the MCP bridge invocation (fixed
+// in-sandbox paths only exist under bwrap) and platform-aware errors.
+export function sandboxBackend() {
+  if (process.platform === 'win32') return 'none';
+  if (IS_MACOS) return seatbeltAvailable() ? 'seatbelt' : 'none';
+  return sandboxAvailable() ? 'bwrap' : 'none';
+}
+
+// Platform-aware refusal text shared by sessionManager's three sandbox
+// guards, so the install hint can't drift between them.
 export function sandboxUnavailableReason() {
-  const reason = process.platform === 'win32'
-    ? 'the sandbox is Linux-only'
-    : 'bwrap is not available on this host';
-  const hint = process.platform === 'win32'
-    ? 'Launch without the sandbox.'
-    : 'Install bwrap (bubblewrap) or launch without the sandbox.';
-  return { reason, hint };
+  if (process.platform === 'win32') {
+    return {
+      reason: 'the sandbox is Linux-only',
+      hint: 'Launch without the sandbox.',
+    };
+  }
+  if (IS_MACOS) {
+    return {
+      reason: 'sandbox-exec is not available on this host',
+      hint: 'Launch without the sandbox.',
+    };
+  }
+  return {
+    reason: 'bwrap is not available on this host',
+    hint: 'Install bwrap (bubblewrap) or launch without the sandbox.',
+  };
+}
+
+export function forceSandboxUnavailableReason() {
+  // Keeps the historical Linux/Windows suffix byte-identical (asserted by
+  // routes/groups.test.js); only macOS gets its own hint.
+  if (IS_MACOS) {
+    return {
+      reason: 'sandbox-exec is not available on this host',
+      hint: 'Disable forceSandbox.',
+    };
+  }
+  if (process.platform === 'win32') {
+    return {
+      reason: 'the sandbox is Linux-only',
+      hint: 'Install bwrap (bubblewrap) or disable forceSandbox.',
+    };
+  }
+  return {
+    reason: 'bwrap is not available on this host',
+    hint: 'Install bwrap (bubblewrap) or disable forceSandbox.',
+  };
 }
 
 // Writes this launch's commit-message guard config (built-in patterns +
@@ -1127,6 +1221,11 @@ export function sandboxUnavailableReason() {
 function startCommitGuard(blockedPatterns) {
   const dir = join(XDG_RUNTIME_DIR, `ccserver-commit-guard-${randomUUID()}`);
   try {
+    // darwin: the base may be a hostile other-UID dir under sticky /tmp --
+    // same fail-closed verification as startGitBroker (git-broker.js). A
+    // throw here lands in the catch below (guard disabled), never writes
+    // the config into a directory a hostile local user owns.
+    ensureHostRuntimeDir();
     mkdirSync(dir, { recursive: true, mode: 0o700 });
     const configPath = join(dir, 'commit-guard.json');
     writeFileSync(configPath, JSON.stringify(buildGuardConfig(blockedPatterns)));
@@ -1148,7 +1247,7 @@ function startCommitGuard(blockedPatterns) {
 //             via env (see the tail of this function).
 //   commitGuard - { dir, configPath } from startCommitGuard(), or null when
 //             the commit-message guard is disabled/unavailable for this launch.
-function buildBwrapArgs({ cwd, docker, gpg, extraBinds, extraEnv, authSock, stateDir, claudeDir, gitBroker, commitGuard, mcpSocketPath, notifySocketPath, usageSocketPath, metaSocketPath, reviewerSocketPath, homeDir = null, orchestratorClaudeMdSrc = null, gitCommonDir = null, groupFilesDir = null, app = null, tools = null }) {
+function buildBwrapArgs({ cwd, docker, gpg, extraBinds, extraEnv, authSock, stateDir, claudeDir, gitBroker, commitGuard, mcpSocketPath, mcpToken = null, notifySocketPath, usageSocketPath, metaSocketPath, reviewerSocketPath, homeDir = null, orchestratorClaudeMdSrc = null, gitCommonDir = null, groupFilesDir = null, app = null, tools = null }) {
   const args = [
     '--die-with-parent',
     // Own PID namespace so the whole sandbox tree is reaped as a unit. Without
@@ -1258,6 +1357,10 @@ function buildBwrapArgs({ cwd, docker, gpg, extraBinds, extraEnv, authSock, stat
   if (mcpSocketPath) {
     args.push('--bind-try', dirname(mcpSocketPath), dirname(SANDBOX_MCP_SOCK_PATH));
     args.push('--setenv', 'CCSANDBOX_MCP_SOCK', SANDBOX_MCP_SOCK_PATH);
+    // Connection token for the group control / handoff socket (see mcpBroker.js).
+    // bwrap already binds the socket per-session, so this is belt-and-suspenders
+    // here; it is load-bearing on the seatbelt backend.
+    if (mcpToken) args.push('--setenv', 'CCSANDBOX_MCP_TOKEN', mcpToken);
   }
 
   // ccserver-notify: the same wrapper script, reached with the 'notify' argv
@@ -1321,27 +1424,21 @@ function buildBwrapArgs({ cwd, docker, gpg, extraBinds, extraEnv, authSock, stat
   // state (session history lives under ~/.copilot, so `--continue` works).
   // commandcode stores its API key auth at ~/.commandcode/auth.json -- without
   // this bind every sandboxed launch prompts for the key again.
-  const opencodeState = join(HOME, '.local', 'state', 'opencode');
-  mkdirSync(opencodeState, { recursive: true });
-  const copilotConfig = join(HOME, '.config', 'github-copilot');
-  const copilotHome = join(HOME, '.copilot');
-  const codexHome = join(HOME, '.codex');
-  mkdirSync(copilotConfig, { recursive: true });
-  mkdirSync(copilotHome, { recursive: true });
-  const commandcodeHome = join(HOME, '.commandcode');
-  mkdirSync(commandcodeHome, { recursive: true });
-  const appBinds = [
-    [join(HOME, '.claude'), 'rw'],
-    [join(HOME, '.claude.json'), 'rw'],
-    [join(HOME, '.local', 'share', 'claude'), 'rw'],
-    [join(HOME, '.config', 'opencode'), 'rw'],
-    [join(HOME, '.local', 'share', 'opencode'), 'rw'],
-    [opencodeState, 'rw'],
-    [copilotConfig, 'rw'],
-    [copilotHome, 'rw'],
-    [codexHome, 'rw'],
-    [commandcodeHome, 'rw'],
-  ];
+  // Resolved from the shared agentConfigDirs() list (see sandbox-seatbelt.js)
+  // so bwrap and seatbelt expose the same set -- extend it there, not here.
+  const appBindSrcs = agentConfigDirs(HOME);
+  // Ensure the state/config homes a sandboxed CLI writes to exist so the rw
+  // bind below applies even on a fresh host. Same subset as before: login /
+  // cache dirs that may legitimately be absent (~/.claude etc., ~/.codex)
+  // stay uncreated when missing.
+  for (const src of appBindSrcs.filter((p) =>
+    p.endsWith(join('.local', 'state', 'opencode'))
+    || p.endsWith(join('.config', 'github-copilot'))
+    || p === join(HOME, '.copilot')
+    || p === join(HOME, '.commandcode'))) {
+    mkdirSync(src, { recursive: true });
+  }
+  const appBinds = appBindSrcs.map((src) => [src, 'rw']);
   for (const [src, mode] of appBinds) {
     if (existsSync(src)) {
       args.push(mode === 'ro' ? '--ro-bind' : '--bind', src, src);
@@ -1491,6 +1588,10 @@ function buildBwrapArgs({ cwd, docker, gpg, extraBinds, extraEnv, authSock, stat
       '--setenv', 'CCSANDBOX_GIT_BROKER_SOCK', SANDBOX_BROKER_SOCK_PATH,
       '--setenv', 'CCSANDBOX_GIT_ALLOWLIST', SANDBOX_ALLOWLIST_PATH,
     );
+    // Per-session broker connection token (git-broker.js). bwrap binds the
+    // socket per-session so this is defense-in-depth here, but the broker
+    // requires it unconditionally now -- so both backends must supply it.
+    if (gitBroker.token) args.push('--setenv', 'CCSANDBOX_GIT_BROKER_TOKEN', gitBroker.token);
   }
 
   // Commit-message guard: an independently-toggled commit-msg hook (see
@@ -1526,16 +1627,15 @@ function buildBwrapArgs({ cwd, docker, gpg, extraBinds, extraEnv, authSock, stat
   // User-configured extra binds (ssh keys, custom config, etc.). Use *-try
   // so a missing source is skipped rather than aborting the launch.
   //
-  // Raw ~/.ssh (private keys) and ~/.config/gh (gh token) are always
-  // blocked here, unconditionally (even if gitBroker is off): those are
-  // exactly the unrestricted, any-repo credential exposures this feature
-  // replaces, and a stale sandbox.config.json predating this change must
-  // not silently reintroduce them.
-  const BLOCKED_BIND_PATHS = [join(HOME, '.ssh'), join(HOME, '.config', 'gh')];
+  // Raw ~/.ssh (private keys) and ~/.config/gh (gh token) are always blocked
+  // here, unconditionally (even if gitBroker is off) -- see
+  // isBlockedCredentialBind (shared with the seatbelt backend).
   for (const b of extraBinds) {
     if (!b || !b.src) continue;
-    const src = expandHome(String(b.src));
-    if (BLOCKED_BIND_PATHS.some((p) => src === p || src.startsWith(`${p}/`))) {
+    // resolve() collapses `..` first: without it `~/.config/../.ssh` slips
+    // past the prefix check and bwrap then binds the resolved ~/.ssh anyway.
+    const src = resolve(expandHome(String(b.src)));
+    if (isBlockedCredentialBind(src, HOME)) {
       console.warn(`[sandbox] ignoring configured bind of ${src}: raw ssh keys / gh config are no longer exposed to the sandbox (see the git broker)`);
       continue;
     }
@@ -1598,6 +1698,103 @@ function buildBwrapArgs({ cwd, docker, gpg, extraBinds, extraEnv, authSock, stat
   return args;
 }
 
+// Seatbelt remaps $HOME to the sandbox home, so buildSeatbeltLaunch points
+// claude/codex at CLAUDE_CONFIG_DIR / CODEX_HOME = <host ~>/.claude|.codex
+// unconditionally. Create those on the host first (like buildBwrapArgs mkdir's
+// the copilot/codex/commandcode dirs) so the first launch on a host that never
+// ran the CLI outside ccserver still gets a persistent config/credentials dir
+// instead of writing into the throwaway sandbox HOME. `base` is overridable
+// for tests (defaults to the real $HOME).
+export function ensureHostAgentConfigDirs(base = HOME) {
+  for (const d of [join(base, '.claude'), join(base, '.codex')]) {
+    try { mkdirSync(d, { recursive: true }); } catch { /* best effort */ }
+  }
+}
+
+// Shared seatbelt wiring (macOS): the host files this backend executes or
+// reads inside the sandbox. bwrap ro-binds these individually; with no
+// mounts they are allow-listed as exact literals instead of the whole
+// server tree (which would expose the server implementation to the agent).
+function seatbeltScripts() {
+  return {
+    ghWrapper: GH_WRAPPER_SCRIPT,
+    credHelper: CRED_HELPER_SCRIPT,
+    sshWrapper: SSH_WRAPPER_SCRIPT,
+    commitHook: COMMIT_MSG_HOOK_SCRIPT,
+    entrypoint: ENTRYPOINT,
+    mcpBridge: MCP_BRIDGE_SCRIPT,
+  };
+}
+
+function seatbeltSsh() {
+  const userKnownHosts = join(HOME, '.ssh', 'known_hosts');
+  return {
+    realSsh: which('ssh'),
+    configFile: SSH_CONFIG_FILE,
+    knownHostsDefault: DEFAULT_KNOWN_HOSTS,
+    userKnownHosts: existsSync(userKnownHosts) ? userKnownHosts : null,
+  };
+}
+
+function seatbeltGhPaths() {
+  // Same candidate set buildBwrapArgs ro-binds the gh wrapper over: deny the
+  // real binaries for process-exec while the git broker is on, so gh is only
+  // reachable through the PATH shim (the wrapper relays to the git broker on
+  // the host and never execs gh in-sandbox, so the pins cannot break
+  // brokered gh). Seatbelt mediates the symlink-RESOLVED path, so register
+  // both raw and realpath spellings (e.g. Homebrew's /opt/homebrew/bin/gh is
+  // a symlink into the Cellar) -- same rule as every other deny pin in the
+  // profile. NOTE: this pin is best-effort, unlike bwrap's mount (which hides
+  // the real binary entirely): process-exec is globally allowed and /tmp is
+  // writable, so a copied binary still runs. The hard boundary stays "gh
+  // credentials are unreadable in-sandbox" plus the git broker allowlist.
+  return [...new Set(
+    [which('gh'), '/usr/bin/gh', '/usr/local/bin/gh', '/opt/homebrew/bin/gh', join(HOME, '.local', 'bin', 'gh')]
+      .filter(Boolean)
+      .filter((p) => existsSync(p))
+      .flatMap((p) => { try { const r = realpathSync(p); return r === p ? [p] : [p, r]; } catch { return [p]; } }),
+  )];
+}
+
+export function seatbeltControlSockPaths(metaSocketPath) {
+  // Host control-plane unix sockets under hostRuntimeDir() (short /tmp base
+  // on darwin, inside the sandbox's tmp write rules): the pty-host RPC can
+  // spawn with sandbox:false (unsandboxed host exec -- a sandbox escape) and
+  // the meta socket is the privileged meta toolset's channel, so both are
+  // network-outbound deny-pinned for every seatbelt session. The meta pin is
+  // skipped only for the meta-agent session itself (its socket is its
+  // control channel). Filenames come from git-broker.js (leaf module, no
+  // cycle) -- the same constants pty-host/index.js and metaAgent.js build
+  // their socket paths from, so a rename updates the pin automatically.
+  // Also honor CCSERVER_PTY_HOST_SOCK when the operator overrode the
+  // pty-host socket.
+  const base = hostRuntimeDir();
+  const paths = [join(base, PTY_HOST_SOCK_NAME)];
+  // pty-host may be sharded (Issue #119 / plan5 Step5): shard 0 is
+  // PTY_HOST_SOCK_NAME, shard N>0 is ccserver-pty-host-<N>.sock (see
+  // getPtyHostSockPath() in pty-host/index.js). The shard count is fixed by
+  // CCSERVER_PTY_HOST_SHARDS at deploy time. Every shard's RPC socket accepts
+  // `spawn` with sandbox:false (unsandboxed host exec), so ALL of them -- not
+  // just shard 0 -- must be network-outbound deny-pinned, or a compromised
+  // agent connect()s to shard N and escapes the sandbox.
+  const rawShards = Number.parseInt(process.env.CCSERVER_PTY_HOST_SHARDS, 10);
+  const shardCount = Number.isInteger(rawShards) && rawShards > 0 ? rawShards : 1;
+  for (let i = 1; i < shardCount; i++) {
+    paths.push(join(base, `ccserver-pty-host-${i}.sock`));
+  }
+  if (process.env.CCSERVER_PTY_HOST_SOCK) {
+    // Operator override: shard 0 is the value verbatim, shard N is `<value>-N`
+    // (getPtyHostSockPath() again).
+    paths.push(process.env.CCSERVER_PTY_HOST_SOCK);
+    for (let i = 1; i < shardCount; i++) {
+      paths.push(`${process.env.CCSERVER_PTY_HOST_SOCK}-${i}`);
+    }
+  }
+  const meta = join(base, META_SOCKET_DIR_NAME, 'sock');
+  if (metaSocketPath !== meta) paths.push(meta);
+  return paths;
+}
+
 // Minimal sandbox: just enough to launch an agent CLI in an isolated
 // filesystem, with NO docker, gpg, ssh, or extra binds. bwrap creates its own
 // user namespace (--unshare-user) and network stays shared with the host (so
@@ -1606,7 +1803,72 @@ function buildBwrapArgs({ cwd, docker, gpg, extraBinds, extraEnv, authSock, stat
 // server/usage.js) and Codex's `account/rateLimits/read` JSON-RPC call (see
 // server/codexUsage.js). `app` selects which CLI's config/install dir gets
 // resolved; defaults to 'claude' for the original caller.
+// On macOS the same shape runs under sandbox-exec with a throwaway HOME
+// (never the persistent per-project one -- this stays a throwaway read).
+// macOS minimal launch assembly, extracted for testability: the IS_MACOS
+// branch of buildMinimalSandboxSpawn() below delegates here, but this helper
+// itself never checks process.platform (like buildSeatbeltLaunch), so Linux CI
+// can exercise the seatbelt opts assembly directly. deps.* are injectable for
+// unit tests (seed call counting / launch opts capture).
+export function buildMinimalSeatbeltSpawn({ cwd, targetCommand, app = 'claude' }, deps = {}) {
+  const {
+    resolveFn = resolveApp,
+    ensureDirsFn = ensureHostAgentConfigDirs,
+    seedFn = seedClaudeCredentialsFromHostKeychain,
+    launchFn = buildSeatbeltLaunch,
+  } = deps;
+  // Normalize like buildSandboxSpawn: a nullish/'' app resolves to 'claude'
+  // everywhere (resolveApp), so the `app === 'claude'` seed gate must see the
+  // same value -- a raw null would skip the Keychain seed for a default launch.
+  app = app || 'claude';
+  // installDir is load-bearing here too (not just the full launch): without
+  // it, CLIs installed outside the default allow trees (~/.opencode/bin,
+  // Volta/mise shims, custom npm prefixes) are exec-denied, and the usage
+  // callers silently fall back to an unsandboxed direct launch.
+  const { command, installDir } = resolveFn(app);
+  ensureDirsFn();
+  // macOS Claude Code keeps its OAuth login in the Keychain, which is
+  // unreachable under the Seatbelt profile (see buildSandboxSpawn's darwin
+  // branch). Seed the plaintext fallback the same way so a sandboxed
+  // /usage capture sees the same credentials as a full session.
+  // Non-fatal; no-op when the file already exists or outside darwin.
+  if (app === 'claude') {
+    try { seedFn(HOME); } catch { /* non-fatal: capture still attempts login fallback */ }
+  }
+  const sb = launchFn({
+    cwd, hostHome: HOME, homeDir: null, sandboxPathBase: SANDBOX_PATH,
+    nodeBin: realpathSync(process.execPath),
+    scripts: seatbeltScripts(), ssh: seatbeltSsh(),
+    gitBroker: null, commitGuard: null,
+    // Usage-capture CLIs have no business reaching the host control plane
+    // either (same escape via pty-host RPC / meta broker).
+    controlSockDenies: seatbeltControlSockPaths(null),
+    // Deny-write the whole host runtime dir tree so a capture cannot
+    // rename/rmdir it out from under live sessions' control plane.
+    hostRuntimeDir: hostRuntimeDir(),
+    sockets: {}, extraBinds: [], extraEnv: {}, authSock: null,
+    // Pass app through so app-specific env (e.g. opencode's host XDG dirs)
+    // resolves the same way as a full session launch.
+    app,
+    claudeDir: installDir, tools: null,
+  });
+  return {
+    command: SANDBOX_EXEC,
+    args: ['-f', sb.profilePath, '/usr/bin/env', ...seatbeltEnvArgs(sb.env),
+      MACOS_BASH, ENTRYPOINT, ...withClaude(targetCommand, command)],
+    docker: false,
+    stateDir: null,
+    seatbeltDir: sb.dir,
+    seatbeltFiles: null, // minimal launches never request an orchestrator overlay
+    gitBrokerProc: null,
+    gitBrokerDir: null,
+    commitGuardDir: null,
+  };
+}
 export function buildMinimalSandboxSpawn({ cwd, targetCommand, app = 'claude' }) {
+  if (IS_MACOS) {
+    return buildMinimalSeatbeltSpawn({ cwd, targetCommand, app });
+  }
   const { command, installDir } = resolveApp(app);
   const bwrapArgs = buildBwrapArgs({
     cwd,
@@ -1682,7 +1944,20 @@ export function buildMinimalSandboxSpawn({ cwd, targetCommand, app = 'claude' })
 //   sandboxHomeCreatedBy - optional attribution stored on the sandbox HOME's
 //                 bookkeeping row ('user' | 'meta-agent:<sessionId>' | ...).
 //                 Display only; never an authorization input.
-export function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, mcpSocketPath = null, notifySocketPath = null, usageSocketPath = null, metaSocketPath = null, reviewerSocketPath = null, reuseSandboxHome = true, orchestratorClaudeMdSrc = null, gitCommonDir = null, groupFilesDir = null, sandboxHomeCreatedBy = null }) {
+export function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, mcpSocketPath = null, mcpToken = null, notifySocketPath = null, usageSocketPath = null, metaSocketPath = null, reviewerSocketPath = null, reuseSandboxHome = true, orchestratorClaudeMdSrc = null, gitCommonDir = null, groupFilesDir = null, sandboxHomeCreatedBy = null }) {
+  // Normalize the app id up front: a nullish `app` resolves to 'claude' in
+  // resolveApp(), so every later `app === 'claude'` / `app === 'opencode'`
+  // check (and the Keychain seed gate) must see the same value.
+  app = app || 'claude';
+  // Defense in depth behind sessionManager's cwd='/' refusal: a sandbox
+  // with the filesystem root as projectDir is fail-open -- seatbelt's
+  // subtrees('/') becomes "^/(/.*)?$" and bwrap would bind "/" itself, both
+  // silently granting the whole filesystem. (The message deliberately avoids
+  // the 'Failed to build sandbox' prefix: this is a request rejection, not
+  // an infra fault.) See docs/seatbelt-root-read-abort-diagnosis.md.
+  if (resolve(cwd) === '/') {
+    throw new Error('Cannot build a sandbox for the filesystem root (/) -- the project rule would grant the whole filesystem. Choose a working directory first.');
+  }
   const { docker: cfgDocker, persistentHome, gpg: cfgGpg, sshAgent: cfgSshAgent, gitBroker: gitBrokerEnabled, commitMessageGuard, binds, env, tools: cfgTools, claudeBin } = loadSandboxConfig();
   const docker = cfgDocker && dockerSandboxAvailable();
   const gpg = sandboxOpts?.gpg ?? cfgGpg;
@@ -1769,7 +2044,101 @@ export function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, mcpSoc
   }
 
   const { command, installDir } = resolveApp(app, claudeBin);
-  const bwrapArgs = buildBwrapArgs({ cwd, docker, gpg, extraBinds: binds, extraEnv: env, authSock, stateDir, claudeDir: installDir, gitBroker, commitGuard, mcpSocketPath, notifySocketPath, usageSocketPath, metaSocketPath, reviewerSocketPath, homeDir, orchestratorClaudeMdSrc, gitCommonDir, groupFilesDir, app, tools });
+
+  // macOS: sandbox-exec (Seatbelt) instead of bwrap/rootlesskit. No mount
+  // isolation (deny-by-default file policy instead), no nested dockerd, and
+  // the host node/scripts/sockets are directly visible, so fixed in-sandbox
+  // paths become host paths (see buildSeatbeltLaunch). The persistent-HOME /
+  // git-broker / commit-guard setup above is shared with the Linux path.
+  if (IS_MACOS) {
+    if (cfgDocker) {
+      console.warn('[sandbox] docker is disabled on macOS (sandbox-exec cannot host a nested dockerd); launching without docker.');
+    }
+    let sbTools = tools;
+    if (tools.rtk) {
+      console.warn('[sandbox] rtk provisioning is disabled on macOS (no macOS binary pinned); launching without rtk.');
+      sbTools = { ...tools, rtk: false, rtkSpec: null };
+    }
+    if (sbTools.codeReviewGraph) {
+      console.warn('[sandbox] code-review-graph provisioning is disabled on macOS (sandbox-exec has no mounts, so /ccserver-sandbox-provision.sh is never present); launching without it.');
+      sbTools = { ...sbTools, codeReviewGraph: false, crgSpec: null };
+    }
+    ensureHostAgentConfigDirs();
+    // macOS Claude Code keeps its OAuth login in the Keychain, which is
+    // unreachable under the Seatbelt profile; buildSeatbeltLaunch points it at
+    // the plaintext ~/.claude/.credentials.json fallback instead. Seed that
+    // file from the host Keychain once so an existing host login carries over
+    // without a fresh in-sandbox login (no-op if the file already exists).
+    if (app === 'claude') {
+      try { seedClaudeCredentialsFromHostKeychain(HOME); } catch { /* non-fatal: in-sandbox login still works */ }
+    }
+    let sb;
+    try {
+      sb = buildSeatbeltLaunch({
+        cwd, hostHome: HOME, homeDir, sandboxPathBase: SANDBOX_PATH,
+        nodeBin: realpathSync(process.execPath),
+        scripts: seatbeltScripts(), ssh: seatbeltSsh(),
+        ghPaths: seatbeltGhPaths(),
+        // opencode sessions resolve host auth/state via XDG (see
+        // buildSeatbeltLaunch); other apps keep the sandbox HOME.
+        app,
+        // pty-host's RPC socket and the meta broker live under
+        // hostRuntimeDir() (short /tmp base on darwin) -- inside the
+        // sandbox's tmp write rules. The pty-host RPC can spawn with
+        // sandbox:false (unsandboxed host exec) and the meta socket is the
+        // privileged meta toolset's channel, so both are network-outbound
+        // deny-pinned. The meta pin is skipped only for the meta-agent
+        // session itself (metaSocketPath is set only there).
+        controlSockDenies: seatbeltControlSockPaths(metaSocketPath),
+        // The runtime dir (short /tmp base on darwin) holds every session's
+        // control-plane sockets; deny-write the whole tree so this sandbox
+        // cannot rename/rmdir it and break other sessions (only its own
+        // sockets are re-allowed inside buildSeatbeltLaunch).
+        hostRuntimeDir: hostRuntimeDir(),
+        gitBroker,
+        commitGuard: commitGuard ? { configPath: commitGuard.configPath } : null,
+        sockets: {
+          mcp: mcpSocketPath, notify: notifySocketPath, usage: usageSocketPath,
+          meta: metaSocketPath, reviewer: reviewerSocketPath,
+        },
+        mcpToken,
+        extraBinds: binds, extraEnv: env, authSock, gnupg: gpg, claudeDir: installDir,
+        orchestratorClaudeMdSrc, gitCommonDir, groupFilesDir, tools: sbTools,
+      });
+    } catch (err) {
+      // buildSeatbeltLaunch threw AFTER startGitBroker/startCommitGuard
+      // above: their handles never reach the caller, so kill/remove them
+      // here or the live broker process and its runtime dir leak.
+      if (gitBroker) { try { gitBroker.proc.kill('SIGTERM'); } catch { /* already dead */ } }
+      if (gitBroker) { try { rmSync(gitBroker.dir, { recursive: true, force: true }); } catch { /* best effort */ } }
+      if (commitGuard) { try { rmSync(commitGuard.dir, { recursive: true, force: true }); } catch { /* best effort */ } }
+      throw err;
+    }
+    // gpg needs no socket bind here (no mounts): the keyring is allow-listed
+    // in the profile with GNUPGHOME pointed at it (see buildSeatbeltLaunch).
+    // gpg-agent sockets are reached via gpgconf's socketdir like on Linux.
+    const seatbeltCmd = app === 'commandcode'
+      ? [MACOS_BASH, ENTRYPOINT, sb.nodeBin, ...withClaude(targetCommand, command)]
+      : [MACOS_BASH, ENTRYPOINT, ...withClaude(targetCommand, command)];
+    return {
+      command: SANDBOX_EXEC,
+      args: ['-f', sb.profilePath, '/usr/bin/env', ...seatbeltEnvArgs(sb.env), ...seatbeltCmd],
+      docker: false,
+      stateDir: null,
+      seatbeltDir: sb.dir,
+      // Orchestrator rule files materialized into the project dir (NOT under
+      // seatbeltDir) -- the caller removes them on teardown. overlayFiles
+      // covers pre-existing siblings' files too so the stillReferenced guard
+      // sees the successor (ruleCopies is ownership-only, for build-failure
+      // cleanup inside buildSeatbeltLaunch).
+      seatbeltFiles: sb.overlayFiles || sb.ruleCopies,
+      gitBrokerProc: gitBroker ? gitBroker.proc : null,
+      gitBrokerDir: gitBroker ? gitBroker.dir : null,
+      commitGuardDir: commitGuard ? commitGuard.dir : null,
+    };
+  }
+
+  const bwrapArgs = buildBwrapArgs({ cwd, docker, gpg, extraBinds: binds, extraEnv: env, authSock, stateDir, claudeDir: installDir, gitBroker, commitGuard, mcpSocketPath, mcpToken, notifySocketPath, usageSocketPath, metaSocketPath, reviewerSocketPath, homeDir, orchestratorClaudeMdSrc, gitCommonDir, groupFilesDir, app, tools });
   // command-code's launcher is a Node script. Run it explicitly via the
   // sandbox's node binary, bypassing the #!/usr/bin/env shebang which would
   // otherwise require /usr/bin/node to be present inside the sandbox's PATH.
@@ -1786,6 +2155,9 @@ export function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, mcpSoc
     // No proc for the commit guard (see startCommitGuard) -- just a runtime
     // dir to remove on teardown, same as gitBrokerDir but with no process to kill.
     commitGuardDir: commitGuard ? commitGuard.dir : null,
+    // macOS-only teardown handles (always null on the bwrap path).
+    seatbeltDir: null,
+    seatbeltFiles: null,
   };
 
   if (docker) {

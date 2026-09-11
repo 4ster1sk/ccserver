@@ -32,10 +32,13 @@
 import { createServer } from 'node:net';
 import { rmSync, rmdirSync, existsSync, mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
+import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { SocketTransport, buildControlMcpServer, buildHandoffMcpServer, buildNotifyMcpServer, buildUsageMcpServer, buildMetaMcpServer, buildReviewerMcpServer, MAX_TRANSPORT_BUFFER_CHARS } from './mcpServer.js';
+import { hostRuntimeDir, ensureHostRuntimeDir } from './git-broker.js';
 
-const UID = typeof process.getuid === 'function' ? process.getuid() : 0;
-const RUNTIME_BASE = process.env.XDG_RUNTIME_DIR || `/run/user/${UID}`;
+// Darwin-aware via git-broker.js (macOS has no /run/user): the same
+// hostRuntimeDir() every other broker socket path uses.
+const RUNTIME_BASE = hostRuntimeDir();
 
 // How long to wait (non-blocking) for the socket file after listen() reports
 // success, before giving up.
@@ -47,6 +50,25 @@ const SOCKET_FILE_POLL_MS = 20;
 // sends nothing is handed to the transport within a short grace window, never
 // held hostage on the frame.
 const IDENTITY_FRAME_GRACE_MS = 1000;
+
+// Connection token for the group control / handoff sockets. On macOS Seatbelt
+// these sockets sit in a shared /tmp runtime dir every concurrent sandboxed
+// session can `connect()` to (bwrap binds them per-session, so there this is
+// belt-and-suspenders) -- without a check any prompt-injected worker could
+// drive another group's orchestrator (send_input / read_output / close_tab).
+// The token is minted per broker, delivered to the one session that owns that
+// socket via env (CCSANDBOX_MCP_TOKEN), and sent by the in-sandbox bridge as
+// its first frame. Like the git-broker token: on macOS a same-UID peer can
+// still lift it from the owner's env via KERN_PROCARGS2, so it is an
+// audit / accident-prevention layer there, not a hard boundary -- the hard
+// boundary stays isSessionInGroup() on every tool call.
+export function mintBrokerToken() {
+  return randomBytes(24).toString('base64url');
+}
+function tokenEq(a, b) {
+  if (typeof a !== 'string' || typeof b !== 'string' || a.length === 0 || a.length !== b.length) return false;
+  try { return timingSafeEqual(Buffer.from(a), Buffer.from(b)); } catch { return false; }
+}
 
 function sockPathFor(groupId, tag) {
   const id = String(groupId).replace(/-/g, '');
@@ -79,17 +101,22 @@ function waitForSocketFile(sockPath, timeoutMs) {
 // listening on. Pass an explicit `sockPath` to host a server at a path of
 // your choosing (the process-global ccserver-notify socket, see notify.js);
 // otherwise the path is derived from groupId + tag.
-async function listenMcp({ groupId, tag, buildServer, sockPath }) {
+async function listenMcp({ groupId, tag, buildServer, sockPath, requireToken = null }) {
   const target = sockPath || sockPathFor(groupId, tag);
   // Issue #143 problem 1: the directory this socket lives alone in must exist
   // before bwrap can bind it into a sandbox (buildSandboxSpawn/createSession
   // run after this resolves, same ordering constraint as the socket file
   // itself below). Idempotent -- a second listenMcp() for the same target
   // (e.g. a restart) finds it already there.
+  // darwin's hostRuntimeDir() base is not pre-created by anything else
+  // (unlike Linux's logind-made /run/user/<uid>); ensureHostRuntimeDir()
+  // additionally fails closed if a hostile other-UID dir squatted on it.
+  // Propagate its throw (fail closed) -- only the mkdir stays best-effort.
+  ensureHostRuntimeDir();
   try {
-    mkdirSync(dirname(target), { recursive: true });
+    mkdirSync(dirname(target), { recursive: true, mode: 0o700 });
   } catch {
-    // best effort
+    // best effort -- listen() below reports real problems
   }
   // A socket file left over from a crash (teardown never ran) would make
   // listen() fail with EADDRINUSE. The path is group-scoped and derived, so
@@ -155,6 +182,17 @@ async function listenMcp({ groupId, tag, buildServer, sockPath }) {
       });
     };
 
+    // Fail closed when this socket is token-gated: no valid first frame means
+    // the connection never reaches an McpServer.
+    const rejectUnauthed = (why) => {
+      if (settled) return;
+      settled = true;
+      if (graceTimer) clearTimeout(graceTimer);
+      socket.removeListener('data', onFrameData);
+      console.error(`[mcp-broker] ${tag} connection refused: ${why}`);
+      try { socket.destroy(); } catch { /* already gone */ }
+    };
+
     const onFrameData = (chunk) => {
       buf += chunk;
       const nl = buf.indexOf('\n');
@@ -172,12 +210,22 @@ async function listenMcp({ groupId, tag, buildServer, sockPath }) {
         } catch {
           // not JSON / not an identity frame -- replay the whole buffer
         }
+        if (requireToken) {
+          if (!identity || !tokenEq(identity.token, requireToken)) {
+            rejectUnauthed(identity ? 'bad token' : 'no identity frame');
+            return;
+          }
+          // Never let the token ride on into the McpServer's identity.
+          const { token, ...rest2 } = identity; void token;
+          identity = rest2;
+        }
         settleConnection(seed, identity);
       } else if (buf.length > MAX_TRANSPORT_BUFFER_CHARS) {
         // No newline but the buffer is at the transport's cap: this can't be
         // a small identity frame -- replay everything and let the transport's
-        // own overflow handling drop the connection.
-        settleConnection(buf, null);
+        // own overflow handling drop the connection (or reject if token-gated).
+        if (requireToken) rejectUnauthed('no newline-terminated frame within the buffer cap');
+        else settleConnection(buf, null);
       }
     };
 
@@ -188,9 +236,11 @@ async function listenMcp({ groupId, tag, buildServer, sockPath }) {
 
     // A client that connects but sends nothing must not hang the broker:
     // after a short grace the (possibly empty) buffer is replayed with no
-    // identity, exactly like the legacy path.
+    // identity, exactly like the legacy path -- unless this socket is
+    // token-gated, in which case a silent client is refused.
     graceTimer = setTimeout(() => {
-      settleConnection(buf, null);
+      if (requireToken) rejectUnauthed('no identity frame within the grace window');
+      else settleConnection(buf, null);
     }, IDENTITY_FRAME_GRACE_MS);
   });
   // Permanent error handler: an EventEmitter 'error' with zero listeners
@@ -225,24 +275,35 @@ async function listenMcp({ groupId, tag, buildServer, sockPath }) {
 }
 
 // deps: { groupId, groupManager, sessionManager }
+// Returns { server, sockPath, dir, connections, token }: `token` gates every
+// connection (see mintBrokerToken / listenMcp's requireToken) and must be
+// handed to the orchestrator session's sandbox as CCSANDBOX_MCP_TOKEN.
 export async function startControlBroker(deps) {
-  return listenMcp({
+  const token = mintBrokerToken();
+  const handle = await listenMcp({
     groupId: deps.groupId,
     tag: 'control',
+    requireToken: token,
     // Per-connection deps: the liveness closure differs per accepted socket,
     // so the server is built with a connection-specific deps object, not the
     // shared one (a shared deps could never carry per-connection state).
     buildServer: (identity, connectionIsAlive) => buildControlMcpServer({ ...deps, connectionIsAlive }),
   });
+  return { ...handle, token };
 }
 
 // deps: { groupId, role, getSessionId, groupManager, sessionManager }
+// Returns the same shape as startControlBroker, incl. a per-channel `token`
+// for the one worker session that owns this handoff socket.
 export async function startHandoffChannel(deps) {
-  return listenMcp({
+  const token = mintBrokerToken();
+  const handle = await listenMcp({
     groupId: deps.groupId,
     tag: `handoff-${deps.role}`,
+    requireToken: token,
     buildServer: (identity, connectionIsAlive) => buildHandoffMcpServer({ ...deps, connectionIsAlive }),
   });
+  return { ...handle, token };
 }
 
 // The process-global notification broker (ccserver-notify, see notify.js).
