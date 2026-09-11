@@ -1,14 +1,15 @@
 import { useState, useRef, useEffect } from 'react';
 import { useWidgetPrefs } from '../hooks/useWidgetPrefs.js';
 import { useSystemStatsContext } from './widgets/SystemStatsProvider.jsx';
-import { CpuCard, MemoryCard, StorageCard, TempCard, GpuCard, IpmiCards, SystemCard, hasCpuUsage, hasGpuMetrics, hasSystemMetrics, hasMemoryOrStorage, hasTemperatures, hasIpmiData } from './widgets/MonitorCards.jsx';
+import { CpuCard, MemoryCard, StorageCard, TempCard, GpuCard, IpmiCards, SystemCard, hasCpuUsage, hasGpuMetrics, hasSystemMetrics, hasMemory, hasStorage, hasTemperatures, hasIpmiData } from './widgets/MonitorCards.jsx';
 import UsageWidget from './widgets/UsageWidget.jsx';
 
 const WIDGET_DEFS = [
   { id: 'usage', title: 'Usage', defaultVisible: true },
   { id: 'system', title: 'System', defaultVisible: true },
   { id: 'cpu', title: 'CPU', defaultVisible: true },
-  { id: 'memory-storage', title: 'Memory / Storage', defaultVisible: true },
+  { id: 'memory', title: 'Memory', defaultVisible: true },
+  { id: 'storage', title: 'Storage', defaultVisible: true },
   { id: 'temps', title: 'Temperatures', defaultVisible: false },
   { id: 'gpu', title: 'GPU', defaultVisible: true },
   { id: 'ipmi', title: 'IPMI', defaultVisible: false },
@@ -81,15 +82,30 @@ function RightSidebarInner({ usageProps = {}, prefs }) {
 
   // Usage機能が無効な環境では Usage を表示対象から除外する
   // (枠だけの「データがありません」を出さない。＋メニューにも出ない)。
-  const shownWidgets = usageProps?.hidden
+  // ただし CLI未インストール (emptyReason 'no-cli') は枠を残して親切
+  // メッセージを出すため除外しない。通常ウィジェット同様に隠す/移動/
+  // 追加の対象になる。showUsage:false や hiddenApps起因の不可視は
+  // hidden=true のまま完全除外される (App.jsx)。
+  const usageFullyHidden = !!usageProps?.hidden;
+  const shownWidgets = usageFullyHidden
     ? visibleWidgets.filter((w) => w.id !== 'usage')
     : visibleWidgets;
-  const addableWidgets = usageProps?.hidden
+  const addableWidgets = usageFullyHidden
     ? hiddenWidgets.filter((w) => w.id !== 'usage')
     : hiddenWidgets;
 
   const renderWidgetBody = (id) => {
     if (id === 'usage') {
+      if (usageProps?.emptyReason === 'no-cli') {
+        return (
+          <div className="usage-empty">
+            <div>CLIがインストールされていません</div>
+            <div className="usage-error-hint">
+              Claude / Codex CLIをインストールするか、OpenCode Goキーを設定すると使用量を表示できます
+            </div>
+          </div>
+        );
+      }
       return <UsageWidget {...usageProps} />;
     }
     const data = stats?.data;
@@ -100,16 +116,19 @@ function RightSidebarInner({ usageProps = {}, prefs }) {
     //   枠内にエラーを出す。単一バナーに集約すると枠が0件になり
     //   隠す/移動/追加の操作対象が消えるため。
     if (!data) {
+      // ipmi は showIpmi=false (無効/未対応) なら成功パス(下の switch)と同じく
+      // 常に非表示。ここで漏らすと、取得成功時とエラー時で挙動が非対称になる。
+      if (stats?.error && id === 'ipmi' && !showIpmi) return null;
       if (stats?.error && MONITOR_WIDGET_IDS.includes(id)) {
-        if (id === 'ipmi' && !showIpmi) return null;
         return <div className="error">Failed to load system stats: {stats.error}</div>;
       }
       return null;
     }
-    // 各カードはデータ欠落時に内部で null を描画するが、ここで返す React 要素
-    // 自体は null にならないため、下流の `.filter(body !== null)` では除外
-    // できない。空の WidgetShell を作らないよう、ここで描画可否を判定する。
-    // ただしバックエンドが部分200 + errors を返した項目は、欠測として隠すのではなく
+    // data 取得済みなら可視ウィジェットは必ず枠 (WidgetShell) を出す。
+    // データ欠落時は中身を空 (<></>) にして枠だけ残す。null を返すと
+    // 下流の `.filter(body !== null)` で枠ごと消え、＋メニューにも戻らず
+    // 隠す/移動の操作対象が消えるため (IPMI非対応時の不具合)。
+    // バックエンドが部分200 + errors を返した項目は、欠測として隠すのではなく
     // 枠内に項目別エラーを出す (HTTP 500時の !data 分岐と対になる処理)。
     const sectionError = (section) => data?.errors?.[section] ?? null;
     const sectionErrorBody = (section) => {
@@ -119,29 +138,28 @@ function RightSidebarInner({ usageProps = {}, prefs }) {
     };
     switch (id) {
       case 'system': {
-        if (!hasSystemMetrics(data)) return sectionErrorBody('system');
-        return <SystemCard data={data} hideTitle />;
+        if (!hasSystemMetrics(data)) return sectionErrorBody('system') ?? <></>;
+        return <SystemCard data={data} hideTitle bare />;
       }
       case 'cpu':
-        if (!hasCpuUsage(data)) return sectionErrorBody('cpu');
-        return <CpuCard data={data} hideTitle />;
-      case 'memory-storage':
-        if (!hasMemoryOrStorage(data)) return sectionErrorBody('memory');
-        return (
-          <>
-            <MemoryCard data={data} hideTitle />
-            <StorageCard data={data} hideTitle />
-          </>
-        );
+        if (!hasCpuUsage(data)) return sectionErrorBody('cpu') ?? <></>;
+        return <CpuCard data={data} hideTitle bare />;
+      case 'memory':
+        if (!hasMemory(data)) return sectionErrorBody('memory') ?? <></>;
+        return <MemoryCard data={data} hideTitle bare />;
+      case 'storage': {
+        if (!hasStorage(data)) return <></>;
+        return <StorageCard data={data} hideTitle bare />;
+      }
       case 'temps': {
-        if (!hasTemperatures(data)) return null;
-        return <TempCard data={data} hideTitle />;
+        if (!hasTemperatures(data)) return <></>;
+        return <TempCard data={data} hideTitle bare />;
       }
       case 'gpu':
-        if (!hasGpuMetrics(data)) return null;
-        return <GpuCard data={data} hideTitle />;
+        if (!hasGpuMetrics(data)) return <></>;
+        return <GpuCard data={data} hideTitle bare />;
       case 'ipmi': {
-        if (!showIpmi || !hasIpmiData(data)) return null;
+        if (!showIpmi || !hasIpmiData(data)) return <></>;
         return <IpmiCards data={data} showIpmi={showIpmi} hideTitle />;
       }
       default:
@@ -151,8 +169,9 @@ function RightSidebarInner({ usageProps = {}, prefs }) {
 
   const showMonitorStatus = shownWidgets.some((w) => MONITOR_WIDGET_IDS.includes(w.id));
 
-  // 描画可能な本体を持つウィジェットのみ枠を作る。取得済みで0件の場合は
-  // 下の空メッセージで空白回避する。
+  // 可視ウィジェットはデータ欠落時も空枠として残す (renderWidgetBody は
+  // data取得済みなら null を返さない)。null になるのはローディング中・
+  // 未知IDのみ。取得済みで0件の場合は下の空メッセージで空白回避する。
   const renderedWidgets = shownWidgets
     .map((w) => ({ w, body: renderWidgetBody(w.id) }))
     .filter(({ body }) => body !== null);
@@ -160,11 +179,10 @@ function RightSidebarInner({ usageProps = {}, prefs }) {
   // 描画されなかった可視ウィジェットを挟んだ移動も無反応に見えるため、
   // moveWidget には「非表示 or 今回非描画」を飛ばす述語を渡す。
   const renderedIds = new Set(renderedWidgets.map(({ w }) => w.id));
-  const usageHidden = !!usageProps?.hidden;
   const skipMoveIds = new Set([
     ...hiddenWidgets.map((w) => w.id),
     ...shownWidgets.filter((w) => !renderedIds.has(w.id)).map((w) => w.id),
-    ...(usageHidden ? ['usage'] : []),
+    ...(usageFullyHidden ? ['usage'] : []),
   ]);
 
   return (
@@ -281,7 +299,7 @@ function RightSidebarInner({ usageProps = {}, prefs }) {
 
 export { WIDGET_DEFS };
 
-export const MONITOR_WIDGET_IDS = ['system', 'cpu', 'memory-storage', 'temps', 'gpu', 'ipmi'];
+export const MONITOR_WIDGET_IDS = ['system', 'cpu', 'memory', 'storage', 'temps', 'gpu', 'ipmi'];
 
 function RightSidebarWithInternalPrefs({ usageProps }) {
   const prefs = useWidgetPrefs(WIDGET_DEFS);
