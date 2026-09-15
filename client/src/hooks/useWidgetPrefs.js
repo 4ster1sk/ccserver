@@ -1,5 +1,6 @@
 import { useState, useCallback, useEffect } from 'react';
 import { NARROW_DRAWER_QUERY } from './viewportQuery.js';
+import { loadEnumPref } from './enumPref.js';
 
 const SIDEBAR_OPEN_KEY = 'ccserver-sidebar-open';
 const SIDEBAR_OVERLAY_KEY = 'ccserver-sidebar-overlay';
@@ -102,6 +103,32 @@ function loadVisibility(id, defaultVisible) {
   }
 }
 
+// ウィジェット別オプションは可視状態と同じ名前空間だが、`:opt:` を挿んで分ける
+// (ccserver-widget:<id>:opt:<key>)。挿まないと key が 'visible' のとき
+// 可視状態のキー (ccserver-widget:<id>:visible) と衝突して壊す。
+// 値は列挙型のみを想定し、未知の値 (古いビルドの保存値・手書き) は既定へ倒す。
+const OPT_INFIX = ':opt:';
+
+function optionKey(id, key) {
+  return `${VIS_KEY_PREFIX}${id}${OPT_INFIX}${key}`;
+}
+
+function loadWidgetOption(id, key, choices, fallback) {
+  // 許可値検証つき読み取りは enumPref に一本化 (useSessionSidebarPrefs と共有)。
+  return loadEnumPref(optionKey(id, key), choices, fallback);
+}
+
+// widgetDefs の options 定義から `<id>:<key>` をキーにした一枚のマップを作る。
+function loadWidgetOptions(widgetDefs) {
+  const map = {};
+  for (const w of widgetDefs) {
+    for (const [key, def] of Object.entries(w.options ?? {})) {
+      map[`${w.id}:${key}`] = loadWidgetOption(w.id, key, def.choices, def.default);
+    }
+  }
+  return map;
+}
+
 export function useWidgetPrefs(widgetDefs) {
   const defaultIds = widgetDefs.map((w) => w.id);
   const [open, setOpenState] = useState(loadOpen);
@@ -119,6 +146,7 @@ export function useWidgetPrefs(widgetDefs) {
     migrateLegacyMemoryStorage(defaultIds);
     return loadOrder(defaultIds);
   });
+  const [options, setOptionsState] = useState(() => loadWidgetOptions(widgetDefs));
   const [hiddenIds, setHiddenIds] = useState(() => {
     const hidden = new Set();
     for (const w of widgetDefs) {
@@ -159,6 +187,17 @@ export function useWidgetPrefs(widgetDefs) {
     }
   }, []);
 
+  const setWidgetOption = useCallback((id, key, value) => {
+    setOptionsState((prev) => ({ ...prev, [`${id}:${key}`]: value }));
+    try {
+      localStorage.setItem(optionKey(id, key), value);
+    } catch {
+      // ignore
+    }
+  }, []);
+
+  const getWidgetOption = useCallback((id, key) => options[`${id}:${key}`], [options]);
+
   const moveWidget = useCallback((id, dir, isSkippable) => {
     if (dir !== 'up' && dir !== 'down') return;
     setOrderState((prev) => {
@@ -193,5 +232,5 @@ export function useWidgetPrefs(widgetDefs) {
     .filter((w) => w && !hiddenIds.has(w.id));
   const hiddenWidgets = widgetDefs.filter((w) => hiddenIds.has(w.id));
 
-  return { open, setOpen, overlay, setOverlay, order, visibleWidgets, hiddenWidgets, setWidgetVisible, moveWidget };
+  return { open, setOpen, overlay, setOverlay, order, visibleWidgets, hiddenWidgets, setWidgetVisible, moveWidget, getWidgetOption, setWidgetOption };
 }
