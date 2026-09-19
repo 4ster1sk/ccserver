@@ -14,7 +14,22 @@ import {
   computeNextLocalTime,
   resolveMcpSocketForSession,
   buildScheduleStateMsg as scheduleStateMsg,
+  persistSessionNetworkIsolateMode,
 } from './sessionManager.js';
+import { setNetworkBrokerMode } from './network-broker.js';
+
+// Shared message shape for the network-isolation globe toggle (see
+// TerminalView.jsx): `armed` is fixed for the session's whole life (whether
+// a broker/boundary exists at all -- decided at launch), `enabled` is the
+// live enforce/open policy, flippable anytime via set_network_isolation
+// without a sandbox restart.
+function networkIsolationStateMsg(session) {
+  return {
+    type: 'network_isolation_state',
+    armed: !!session.networkIsolateArmed,
+    enabled: session.networkIsolateMode === 'enforce',
+  };
+}
 
 // The /ws/terminal message dispatcher, factored out of the route registration
 // so it can be driven by something other than a real `ws` socket -- namely
@@ -152,6 +167,7 @@ export function attachTerminalHandler(chan) {
           })
         );
         chan.send(scheduleStateMsg(scheduledPromptPublic(session)));
+        chan.send(JSON.stringify(networkIsolationStateMsg(session)));
         break;
       }
 
@@ -241,6 +257,7 @@ export function attachTerminalHandler(chan) {
 
         // Send scheduled-prompt state on attach (available for all sessions)
         chan.send(scheduleStateMsg(scheduledPromptPublic(session)));
+        chan.send(JSON.stringify(networkIsolationStateMsg(session)));
         break;
       }
 
@@ -296,6 +313,37 @@ export function attachTerminalHandler(chan) {
               enabled: session.autoYes,
               log: session.autoYesLog,
             }));
+          }
+        }
+        break;
+      }
+
+      case 'set_network_isolation': {
+        if (currentSessionId) {
+          const session = getSession(currentSessionId);
+          if (session && session.networkIsolateArmed && session.networkBrokerPort && session.networkBrokerToken) {
+            const mode = msg.enabled ? 'enforce' : 'open';
+            const ok = await setNetworkBrokerMode({ port: session.networkBrokerPort, token: session.networkBrokerToken }, mode);
+            if (ok) {
+              session.networkIsolateMode = mode;
+              persistSessionNetworkIsolateMode(currentSessionId, mode);
+            }
+            chan.send(JSON.stringify({ ...networkIsolationStateMsg(session), ok }));
+          } else if (session) {
+            // No isolation for this session (or the broker handle is somehow
+            // incomplete) -- nothing to flip, but the client still gets a
+            // definitive answer instead of silence.
+            chan.send(JSON.stringify({ ...networkIsolationStateMsg(session), ok: false }));
+          }
+        }
+        break;
+      }
+
+      case 'get_network_isolation': {
+        if (currentSessionId) {
+          const session = getSession(currentSessionId);
+          if (session) {
+            chan.send(JSON.stringify(networkIsolationStateMsg(session)));
           }
         }
         break;

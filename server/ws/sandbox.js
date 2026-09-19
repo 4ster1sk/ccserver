@@ -30,6 +30,7 @@ import { fileURLToPath } from 'node:url';
 import { startGitBroker, hostRuntimeDir, ensureHostRuntimeDir, PTY_HOST_SOCK_NAME, META_SOCKET_DIR_NAME } from './git-broker.js';
 import { buildGuardConfig } from './commitGuard.js';
 import { buildSeatbeltLaunch, seatbeltEnvArgs, seedClaudeCredentialsFromHostKeychain, isBlockedCredentialBind, agentConfigDirs } from './sandbox-seatbelt.js';
+import { startNetworkBroker, buildIsolatedProxyEnv, normalizeNetworkSettings } from './network-broker.js';
 import { recordSandboxHome as recordSandboxHomeDb, listSandboxRowsBySlug, forgetSandboxHome } from './projects.js';
 import { APPS } from './appLaunch.js';
 
@@ -55,6 +56,17 @@ const BASH = '/usr/bin/bash';
 // isolation and no nested dockerd. The bash lived at /bin/bash on macOS
 // (there is no /usr/bin/bash).
 export const IS_MACOS = process.platform === 'darwin';
+
+// network.isolate is the master switch for the network-isolation feature
+// (see buildSandboxSpawn): when off, neither backend starts a broker and the
+// sandbox launches with open egress. When on, isolation is enabled for the
+// launch and
+// network.initialState selects the broker's starting live state -- 'enforce'
+// or 'open' -- which the running-session toggle can flip afterward without
+// a restart.
+export function macOSNetworkBrokerInitialState(initialState) {
+  return initialState === 'open' ? 'open' : 'enforce';
+}
 const SANDBOX_EXEC = '/usr/bin/sandbox-exec';
 const MACOS_BASH = '/bin/bash';
 
@@ -751,8 +763,17 @@ export function loadSandboxConfig() {
   const hiddenApps = Array.isArray(raw.hiddenApps)
     ? [...new Set(raw.hiddenApps.filter((a) => APP_IDS.includes(a)))]
     : [];
+  // Network isolation (see network-broker.js): isolate is the master
+  // switch for the whole feature (false by default: no broker, open egress,
+  // no live toggle on either backend). initialState never decides whether
+  // the structural boundary (bwrap firewall / seatbelt profile) exists at
+  // all, only the broker's starting state (see buildSandboxSpawn). Parse is
+  // shared with getNetworkSettings() (networkAllowlist.js, what the Settings
+  // GUI shows/saves) via normalizeNetworkSettings so the two structurally
+  // cannot drift apart -- see that function's header comment.
+  const network = normalizeNetworkSettings(raw.network);
   return {
-    docker, persistentHome, gpg, sshAgent, gitBroker, commitMessageGuard, forceSandbox, binds, env, tools, claudeBin, defaultApp, showUsage, opencodeGoUsage, usageMcp, metaAgentMcp, reviewerMcp, hiddenApps,
+    docker, persistentHome, gpg, sshAgent, gitBroker, commitMessageGuard, forceSandbox, binds, env, tools, claudeBin, defaultApp, showUsage, opencodeGoUsage, usageMcp, metaAgentMcp, reviewerMcp, hiddenApps, network,
     notify: {
       discordWebhook, subscriptions, hostname: notifyHostname, attribution: notifyAttribution,
       vikunja: {
@@ -1247,6 +1268,128 @@ function startCommitGuard(blockedPatterns) {
   }
 }
 
+// Network isolation for the bwrap backend (see network-broker.js).
+//
+// slirp4netns defaults (rootlesskit --net=slirp4netns): .2 is the host
+// gateway (guest -> 10.0.2.2 reaches the host loopback when host-loopback
+// forwarding is on -- hence an isolated launch must NOT pass
+// --disable-host-loopback), .3 is the virtual DNS resolver. The broker binds
+// 0.0.0.0 host-side, so the guest reaches it at the gateway address.
+export const BWRAP_ISOLATION_GATEWAY = '10.0.2.2';
+export const BWRAP_ISOLATION_DNS = '10.0.2.3';
+
+// In-netns firewall script for an isolated bwrap launch. Runs as the first
+// thing inside the freshly created network namespace (netns root == userns
+// root, so CAP_NET_ADMIN for the OWN netns is held and iptables/nft may
+// program it), BEFORE the sandbox entrypoint. Structural, not
+// proxy-compliance-dependent: even a client that ignores HTTP_PROXY cannot
+// send a single packet anywhere except the broker (and DNS, which only
+// resolves -- every TCP/UDP connection target is still dropped).
+//
+// Fail-closed by construction: `set -eu` plus a nonzero exit when neither
+// iptables nor nft exists in the sandbox (both are expected via the /usr
+// ro-bind; a stripped image refuses the launch instead of running open).
+// IPv6 output is dropped best-effort (slirp provides no v6 route, so there
+// is nothing to allow there -- only to deny).
+//
+// `forward` additionally locks down the FORWARD chain: with `docker: true`,
+// dockerd runs inside this same netns and bridges/NATs container egress
+// through FORWARD (not OUTPUT, which only covers packets locally generated
+// by processes in the netns root itself) -- so without this, a container
+// started inside the sandbox gets full internet egress plus reachability to
+// the host loopback broker address, bypassing the OUTPUT-only policy above.
+// The ESTABLISHED,RELATED accept is required for the broker's/DNS's own
+// response packets flowing back through FORWARD to reach the container.
+export function buildBwrapNetworkFilterScript({ brokerPort, gateway = BWRAP_ISOLATION_GATEWAY, dns = BWRAP_ISOLATION_DNS, forward = false } = {}) {
+  const port = Number(brokerPort);
+  if (!Number.isInteger(port) || port <= 0 || port > 65535) {
+    throw new Error('buildBwrapNetworkFilterScript: brokerPort must be a valid TCP port');
+  }
+  return [
+    'set -eu',
+    `CCSBROKER_PORT=${port}`,
+    `CCSGW=${gateway}`,
+    `CCSDNS=${dns}`,
+    'ccsfw() {',
+    '  if command -v iptables >/dev/null 2>&1; then',
+    '    iptables -P OUTPUT DROP',
+    '    iptables -A OUTPUT -o lo -j ACCEPT',
+    '    iptables -A OUTPUT -d "$CCSGW" -p tcp --dport "$CCSBROKER_PORT" -j ACCEPT',
+    '    iptables -A OUTPUT -d "$CCSDNS" -p udp --dport 53 -j ACCEPT',
+    '    iptables -A OUTPUT -d "$CCSDNS" -p tcp --dport 53 -j ACCEPT',
+    '    if command -v ip6tables >/dev/null 2>&1; then ip6tables -P OUTPUT DROP; fi',
+    ...(forward ? [
+      '    iptables -A FORWARD -m state --state ESTABLISHED,RELATED -j ACCEPT',
+      '    iptables -A FORWARD -d "$CCSGW" -p tcp --dport "$CCSBROKER_PORT" -j ACCEPT',
+      '    iptables -A FORWARD -d "$CCSDNS" -p udp --dport 53 -j ACCEPT',
+      '    iptables -A FORWARD -d "$CCSDNS" -p tcp --dport 53 -j ACCEPT',
+      '    iptables -P FORWARD DROP',
+      '    if command -v ip6tables >/dev/null 2>&1; then ip6tables -P FORWARD DROP; fi',
+    ] : []),
+    '    return 0',
+    '  fi',
+    '  if command -v nft >/dev/null 2>&1; then',
+    '    nft add table ip ccserver-fw',
+    "    nft add chain ip ccserver-fw out '{ type filter hook output priority 0; policy drop; }'",
+    '    nft add rule ip ccserver-fw out oifname lo accept',
+    '    nft add rule ip ccserver-fw out ip daddr "$CCSGW" tcp dport "$CCSBROKER_PORT" accept',
+    '    nft add rule ip ccserver-fw out ip daddr "$CCSDNS" udp dport 53 accept',
+    '    nft add rule ip ccserver-fw out ip daddr "$CCSDNS" tcp dport 53 accept',
+    // slirp4netns provides no IPv6 route, so there is nothing to allow here --
+    // only to deny (mirrors the iptables branch's best-effort `ip6tables -P
+    // OUTPUT DROP`, which nft's separate address-family tables need an
+    // explicit table for).
+    '    nft add table ip6 ccserver-fw6',
+    "    nft add chain ip6 ccserver-fw6 out '{ type filter hook output priority 0; policy drop; }'",
+    ...(forward ? [
+      "    nft add chain ip ccserver-fw fwd '{ type filter hook forward priority 0; policy drop; }'",
+      '    nft add rule ip ccserver-fw fwd ct state established,related accept',
+      '    nft add rule ip ccserver-fw fwd ip daddr "$CCSGW" tcp dport "$CCSBROKER_PORT" accept',
+      '    nft add rule ip ccserver-fw fwd ip daddr "$CCSDNS" udp dport 53 accept',
+      '    nft add rule ip ccserver-fw fwd ip daddr "$CCSDNS" tcp dport 53 accept',
+      "    nft add chain ip6 ccserver-fw6 fwd '{ type filter hook forward priority 0; policy drop; }'",
+    ] : []),
+    '    return 0',
+    '  fi',
+    "  echo '[sandbox] network isolation: neither iptables nor nft is available in the sandbox (fail-closed)' >&2",
+    '  return 11',
+    '}',
+    'ccsfw',
+  ].join('\n');
+}
+
+// Prepends the firewall prelude to a bwrap inner command ([shell, entrypoint,
+// ...args] shape from buildSandboxSpawn). The entrypoint + target argv pass
+// through as "$@" -- nothing is re-quoted, so project paths with spaces or
+// quotes survive intact. A filter failure exits nonzero before the entrypoint
+// ever runs (fail-closed at launch, same posture as a missing broker).
+export function wrapBwrapInnerWithNetworkFilter(innerCmd, filterScript) {
+  if (!Array.isArray(innerCmd) || innerCmd.length < 2) {
+    throw new Error('wrapBwrapInnerWithNetworkFilter: innerCmd must be [shell, entrypoint, ...args]');
+  }
+  if (typeof filterScript !== 'string' || !filterScript) {
+    throw new Error('wrapBwrapInnerWithNetworkFilter: filterScript must be a non-empty string');
+  }
+  const [shell, ...argv] = innerCmd;
+  return [shell, '-c', `${filterScript}\nexec "$@"`, 'ccserver-netfw', ...argv];
+}
+
+// Handle fields for the network-isolation broker (see network-broker.js),
+// null on every branch that doesn't start a broker for this launch. Both the
+// bwrap and seatbelt branches enable isolation on-demand only, when this launch actually
+// requested isolation (network.isolate) -- bwrap additionally needs
+// rootlesskit/slirp4netns/newuidmap present (see needBwrapIsolation in
+// buildSandboxSpawn); a host missing that tooling falls back to a plain,
+// unisolated launch with a warning instead of failing to boot.
+const NO_NETWORK_BROKER_HANDLE = Object.freeze({
+  sandboxNetworkBrokerProc: null,
+  sandboxNetworkBrokerDir: null,
+  networkBrokerPort: null,
+  networkBrokerToken: null,
+  networkIsolateArmed: false,
+  networkIsolateMode: null,
+});
+
 // Build the bwrap arguments (everything after the `bwrap` executable, up to
 // but not including the trailing `-- <cmd...>`).
 //   homeDir - host path of the persistent per-project HOME to bind at HOME
@@ -1257,7 +1400,14 @@ function startCommitGuard(blockedPatterns) {
 //             via env (see the tail of this function).
 //   commitGuard - { dir, configPath } from startCommitGuard(), or null when
 //             the commit-message guard is disabled/unavailable for this launch.
-function buildBwrapArgs({ cwd, docker, gpg, extraBinds, extraEnv, authSock, stateDir, claudeDir, gitBroker, commitGuard, mcpSocketPath, mcpToken = null, notifySocketPath, usageSocketPath, metaSocketPath, reviewerSocketPath, homeDir = null, orchestratorClaudeMdSrc = null, gitCommonDir = null, groupFilesDir = null, app = null, tools = null }) {
+//   usesRootlesskit - true when this launch is wrapped in rootlesskit (either
+//             for a nested dockerd, or for network isolation's private
+//             netns), so bwrap must NOT also create its own user namespace
+//             (rootlesskit's outer userns already provides one).
+//   networkBroker / networkBrokerHost - when set, injects HTTP(S)_PROXY env
+//             pointed at the broker (see buildIsolatedProxyEnv) before the
+//             sandbox's own extraEnv, so an operator override still wins.
+function buildBwrapArgs({ cwd, docker, usesRootlesskit = docker, gpg, extraBinds, extraEnv, authSock, stateDir, claudeDir, gitBroker, commitGuard, mcpSocketPath, mcpToken = null, notifySocketPath, usageSocketPath, metaSocketPath, reviewerSocketPath, homeDir = null, orchestratorClaudeMdSrc = null, gitCommonDir = null, groupFilesDir = null, app = null, tools = null, networkBroker = null, networkBrokerHost = BWRAP_ISOLATION_GATEWAY }) {
   const args = [
     '--die-with-parent',
     // Own PID namespace so the whole sandbox tree is reaped as a unit. Without
@@ -1307,9 +1457,11 @@ function buildBwrapArgs({ cwd, docker, gpg, extraBinds, extraEnv, authSock, stat
   // keeping /run private here and binding only what's needed, live host
   // sockets under /run stay reachable as bind sources (see gpg forwarding).
   args.push('--tmpfs', '/run', '--dir', XDG_RUNTIME_DIR);
-  if (docker) {
-    // rootlesskit (outer) provides the user namespace and its state dir holds
-    // the API socket dockerd needs; expose just that dir.
+  if (usesRootlesskit) {
+    // rootlesskit (outer) provides the user namespace -- for a nested
+    // dockerd its state dir holds the API socket dockerd needs, and for a
+    // network-isolation-only launch (docker:false) it's just rootlesskit's
+    // own runtime dir; either way, expose it.
     args.push('--bind', stateDir, stateDir);
   } else {
     // No outer rootlesskit: bwrap creates the user namespace itself.
@@ -1675,6 +1827,26 @@ function buildBwrapArgs({ cwd, docker, gpg, extraBinds, extraEnv, authSock, stat
     );
   }
 
+  // Network isolation (see network-broker.js): route the sandbox's HTTP(S)
+  // traffic through the host-side broker. Applied before extraEnv so an
+  // operator override (e.g. a manually configured HTTP_PROXY) still wins.
+  if (networkBroker && Number.isInteger(networkBroker.port) && networkBroker.token) {
+    for (const [k, v] of Object.entries(buildIsolatedProxyEnv({
+      host: networkBrokerHost,
+      port: networkBroker.port,
+      token: networkBroker.token,
+    }))) {
+      args.push('--setenv', k, v);
+    }
+    // docker + isolate: rootless dockerd otherwise installs its own FORWARD/
+    // NAT bridge rules on startup (including a blanket "docker0 -> anything"
+    // ACCEPT), which would sit ahead of the netns firewall's FORWARD
+    // default-DROP (see buildBwrapNetworkFilterScript) and defeat it. Tell
+    // the entrypoint to start dockerd with --iptables=false so it never
+    // touches the firewall the netns already owns.
+    if (docker) args.push('--setenv', 'CCSANDBOX_DOCKER_NO_IPTABLES', '1');
+  }
+
   // User-configured environment (e.g. SSH_AUTH_SOCK, GPG_TTY). Applied last so
   // it can override the defaults above.
   for (const [k, v] of Object.entries(extraEnv || {})) {
@@ -1954,7 +2126,13 @@ export function buildMinimalSandboxSpawn({ cwd, targetCommand, app = 'claude' })
 //   sandboxHomeCreatedBy - optional attribution stored on the sandbox HOME's
 //                 bookkeeping row ('user' | 'meta-agent:<sessionId>' | ...).
 //                 Display only; never an authorization input.
-export function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, mcpSocketPath = null, mcpToken = null, notifySocketPath = null, usageSocketPath = null, metaSocketPath = null, reviewerSocketPath = null, reuseSandboxHome = true, orchestratorClaudeMdSrc = null, gitCommonDir = null, groupFilesDir = null, sandboxHomeCreatedBy = null }) {
+// `deps.startNetworkBroker` lets tests inject a fake broker starter (no real
+// child process/rootlesskit needed), and `deps.dockerSandboxAvailable` lets
+// tests simulate a host with/without the rootlesskit/slirp4netns/newuidmap
+// tooling, to exercise the enablement logic below hermetically -- see
+// sandbox-network-isolation.test.js.
+export function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, mcpSocketPath = null, mcpToken = null, notifySocketPath = null, usageSocketPath = null, metaSocketPath = null, reviewerSocketPath = null, reuseSandboxHome = true, orchestratorClaudeMdSrc = null, gitCommonDir = null, groupFilesDir = null, sandboxHomeCreatedBy = null }, deps = {}) {
+  const { startNetworkBroker: startNetworkBrokerFn = startNetworkBroker, dockerSandboxAvailable: dockerSandboxAvailableFn = dockerSandboxAvailable } = deps || {};
   // Normalize the app id up front: a nullish `app` resolves to 'claude' in
   // resolveApp(), so every later `app === 'claude'` / `app === 'opencode'`
   // check (and the Keychain seed gate) must see the same value.
@@ -1968,8 +2146,28 @@ export function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, mcpSoc
   if (resolve(cwd) === '/') {
     throw new Error('Cannot build a sandbox for the filesystem root (/) -- the project rule would grant the whole filesystem. Choose a working directory first.');
   }
-  const { docker: cfgDocker, persistentHome, gpg: cfgGpg, sshAgent: cfgSshAgent, gitBroker: gitBrokerEnabled, commitMessageGuard, binds, env, tools: cfgTools, claudeBin } = loadSandboxConfig();
-  const docker = cfgDocker && dockerSandboxAvailable();
+  const { docker: cfgDocker, persistentHome, gpg: cfgGpg, sshAgent: cfgSshAgent, gitBroker: gitBrokerEnabled, commitMessageGuard, network: netCfg, binds, env, tools: cfgTools, claudeBin } = loadSandboxConfig();
+  const docker = cfgDocker && dockerSandboxAvailableFn();
+  // Network isolation (see network-broker.js): server-config-only, no
+  // per-launch client override -- the client has no isolation toggle, so
+  // sandbox.config.json's network.isolate always governs. Structural
+  // isolation for bwrap needs rootlesskit/slirp4netns/newuidmap (the same
+  // tooling dockerSandboxAvailable() already checks for nested dockerd); a
+  // host missing any of them falls back to a plain, unisolated bwrap launch
+  // (today's default behavior) instead of failing to boot.
+  const netIsolate = netCfg.isolate;
+  const rootlesskitToolingAvailable = !IS_MACOS && dockerSandboxAvailableFn();
+  // Structural isolation for bwrap: wrapped in rootlesskit for a private
+  // netns + in-netns firewall only when this launch actually asked for it
+  // (network.isolate) AND the tooling exists -- on-demand, not tied to the
+  // unrelated `docker` (nested dockerd) flag. A `docker:true` launch keeps its existing unrestricted
+  // slirp4netns NAT networking unless network.isolate is ALSO on; nested
+  // dockerd's own rootlesskit wrapping predates this feature and has nothing
+  // to do with it. Never true on macOS (seatbelt instead).
+  const needBwrapIsolation = rootlesskitToolingAvailable && netIsolate;
+  if (!IS_MACOS && !rootlesskitToolingAvailable && netIsolate) {
+    console.warn('[sandbox] network.isolate is enabled but rootlesskit/slirp4netns/newuidmap are not all installed on this host -- launching without network isolation.');
+  }
   const gpg = sandboxOpts?.gpg ?? cfgGpg;
   const sshAgent = sandboxOpts?.sshAgent ?? cfgSshAgent;
   // Opt-in tool provisioning (rtk / code-review-graph), merged like gpg/sshAgent
@@ -1981,9 +2179,10 @@ export function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, mcpSoc
   // explicit env.SSH_AUTH_SOCK in the config wins; otherwise auto-discover.
   const authSock = sshAgent ? (env.SSH_AUTH_SOCK || discoverSshAuthSock()) : null;
 
-  // Unique per launch (docker only); returned so the caller can remove it on
+  // Unique per launch (docker, and every isolated bwrap launch, need
+  // rootlesskit's own state dir); returned so the caller can remove it on
   // teardown. See newStateDir().
-  const stateDir = docker ? newStateDir() : null;
+  const stateDir = (docker || needBwrapIsolation) ? newStateDir() : null;
 
   // Persistent per-project HOME. reuseSandboxHome=false wipes the previous
   // one first so the launch starts from a clean environment; the caller
@@ -2033,6 +2232,45 @@ export function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, mcpSoc
   // network credential scope, so it's toggled by its own config flag and
   // wired into buildBwrapArgs separately below.
   const commitGuard = commitMessageGuard.enabled ? startCommitGuard(commitMessageGuard.blockedPatterns) : null;
+
+  // Network-isolation broker (see network-broker.js): started on-demand,
+  // only when this launch actually asked for it (network.isolate) -- bwrap
+  // needs the rootlesskit tooling too (needBwrapIsolation already folds that
+  // check in; on a host missing it, no broker starts and a plain unisolated
+  // bwrap launch runs instead, see the warning above). Seatbelt has no such
+  // tooling dependency, so IS_MACOS alone gates it there -- but only when
+  // network.isolate is on: an isolate:false launch keeps the historical open
+  // egress profile and starts no broker at all. When isolation is enabled, the
+  // running-session toggle can flip enforce/open freely without a restart --
+  // `state` here is this launch's STARTING policy from network.initialState
+  // (see macOSNetworkBrokerInitialState); `mode` is the operator-only
+  // enforce/audit from sandbox.config.json. A start failure is a real launch
+  // failure (fail-closed at the infra level, same posture as startGitBroker
+  // for an actual git repo) -- clean up gitBroker/commitGuard first since
+  // they were already started and would otherwise leak.
+  // NOTE (open-state proxy compliance): even in `open` the isolated Seatbelt
+  // profile denies direct TCP/UDP except the broker port, so traffic must
+  // flow via the injected HTTP(S)_PROXY. A proxy-ignoring tool stays blocked
+  // even while "open".
+  let networkBroker = null;
+  if (needBwrapIsolation || (IS_MACOS && netIsolate)) {
+    try {
+      networkBroker = startNetworkBrokerFn({
+        allowedHosts: netCfg.allowedHosts,
+        deniedHosts: netCfg.deniedHosts,
+        mode: netCfg.mode, // operator-only enforce/audit (sandbox.config.json)
+        // Starting live state from network.initialState (see
+        // macOSNetworkBrokerInitialState -- the on-demand toggle flips it
+        // later).
+        state: macOSNetworkBrokerInitialState(netCfg.initialState),
+      });
+    } catch (err) {
+      if (gitBroker) { try { gitBroker.proc.kill('SIGTERM'); } catch { /* already dead */ } }
+      if (gitBroker) { try { rmSync(gitBroker.dir, { recursive: true, force: true }); } catch { /* best effort */ } }
+      if (commitGuard) { try { rmSync(commitGuard.dir, { recursive: true, force: true }); } catch { /* best effort */ } }
+      throw err;
+    }
+  }
 
   // The git broker only gates /usr/bin/ssh and gh as seen by bwrap's own
   // filesystem. When docker is also on, code inside the sandbox can run its
@@ -2114,14 +2352,26 @@ export function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, mcpSoc
         mcpToken,
         extraBinds: binds, extraEnv: env, authSock, gnupg: gpg, claudeDir: installDir,
         orchestratorClaudeMdSrc, gitCommonDir, groupFilesDir, tools: sbTools,
+        // Network isolation (see seatbeltIsolatedNetworkRules): isolation-enabled
+        // only
+        // when this launch requested it (network.isolate) -- the broker
+        // started above is passed so the profile pins broker-only egress
+        // from the start, with network.initialState as its starting state.
+        // An isolate:false launch passes null and keeps the historical open
+        // egress. The live toggle (terminal.js) flips an isolation-enabled broker
+        // afterward without a restart.
+        networkBroker,
       });
     } catch (err) {
-      // buildSeatbeltLaunch threw AFTER startGitBroker/startCommitGuard
-      // above: their handles never reach the caller, so kill/remove them
-      // here or the live broker process and its runtime dir leak.
+      // buildSeatbeltLaunch threw AFTER startGitBroker/startCommitGuard (and
+      // possibly startNetworkBroker) above: their handles never reach the
+      // caller, so kill/remove them here or the live broker processes and
+      // their runtime dirs leak.
       if (gitBroker) { try { gitBroker.proc.kill('SIGTERM'); } catch { /* already dead */ } }
       if (gitBroker) { try { rmSync(gitBroker.dir, { recursive: true, force: true }); } catch { /* best effort */ } }
       if (commitGuard) { try { rmSync(commitGuard.dir, { recursive: true, force: true }); } catch { /* best effort */ } }
+      if (networkBroker) { try { networkBroker.proc.kill('SIGTERM'); } catch { /* already dead */ } }
+      if (networkBroker) { try { rmSync(networkBroker.dir, { recursive: true, force: true }); } catch { /* best effort */ } }
       throw err;
     }
     // gpg needs no socket bind here (no mounts): the keyring is allow-listed
@@ -2135,6 +2385,19 @@ export function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, mcpSoc
       args: ['-f', sb.profilePath, '/usr/bin/env', ...seatbeltEnvArgs(sb.env), ...seatbeltCmd],
       docker: false,
       stateDir: null,
+      // Network-isolation broker: isolation-enabled only when this launch requested
+      // isolation (the broker was started above iff network.isolate). The
+      // live toggle (terminal.js) flips this broker's enforce/open policy
+      // without a restart.
+      ...NO_NETWORK_BROKER_HANDLE,
+      ...(networkBroker ? {
+        sandboxNetworkBrokerProc: networkBroker.proc,
+        sandboxNetworkBrokerDir: networkBroker.dir,
+        networkBrokerPort: networkBroker.port,
+        networkBrokerToken: networkBroker.token,
+        networkIsolateArmed: true,
+        networkIsolateMode: networkBroker.state,
+      } : {}),
       seatbeltDir: sb.dir,
       // Orchestrator rule files materialized into the project dir (NOT under
       // seatbeltDir) -- the caller removes them on teardown. overlayFiles
@@ -2148,16 +2411,43 @@ export function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, mcpSoc
     };
   }
 
-  const bwrapArgs = buildBwrapArgs({ cwd, docker, gpg, extraBinds: binds, extraEnv: env, authSock, stateDir, claudeDir: installDir, gitBroker, commitGuard, mcpSocketPath, mcpToken, notifySocketPath, usageSocketPath, metaSocketPath, reviewerSocketPath, homeDir, orchestratorClaudeMdSrc, gitCommonDir, groupFilesDir, app, tools });
-  // command-code's launcher is a Node script. Run it explicitly via the
-  // sandbox's node binary, bypassing the #!/usr/bin/env shebang which would
-  // otherwise require /usr/bin/node to be present inside the sandbox's PATH.
-  // targetCommand is already resolved to an absolute path (e.g.
-  // /.../command-code/dist/index.mjs), so withClaude returns that path + args;
-  // we prepend the in-sandbox node.
-  const innerCmd = app === 'commandcode'
-    ? [BASH, '/ccserver-sandbox-entrypoint.sh', SANDBOX_NODE_PATH, ...withClaude(targetCommand, command)]
-    : [BASH, '/ccserver-sandbox-entrypoint.sh', ...withClaude(targetCommand, command)];
+  // buildBwrapArgs/buildBwrapNetworkFilterScript/wrapBwrapInnerWithNetworkFilter
+  // can throw (invalid bind/env input, or -- for the latter two -- an invalid
+  // broker port). gitBroker/commitGuard/networkBroker were already started
+  // above and their handles never reach the caller if we throw here, so clean
+  // them up first or the live broker processes and their runtime dirs leak
+  // (same posture as the seatbelt try/catch above).
+  let bwrapArgs;
+  let innerCmd;
+  try {
+    bwrapArgs = buildBwrapArgs({ cwd, docker, usesRootlesskit: docker || needBwrapIsolation, gpg, extraBinds: binds, extraEnv: env, authSock, stateDir, claudeDir: installDir, gitBroker, commitGuard, mcpSocketPath, mcpToken, notifySocketPath, usageSocketPath, metaSocketPath, reviewerSocketPath, homeDir, orchestratorClaudeMdSrc, gitCommonDir, groupFilesDir, app, tools, networkBroker });
+    // command-code's launcher is a Node script. Run it explicitly via the
+    // sandbox's node binary, bypassing the #!/usr/bin/env shebang which would
+    // otherwise require /usr/bin/node to be present inside the sandbox's PATH.
+    // targetCommand is already resolved to an absolute path (e.g.
+    // /.../command-code/dist/index.mjs), so withClaude returns that path + args;
+    // we prepend the in-sandbox node.
+    innerCmd = app === 'commandcode'
+      ? [BASH, '/ccserver-sandbox-entrypoint.sh', SANDBOX_NODE_PATH, ...withClaude(targetCommand, command)]
+      : [BASH, '/ccserver-sandbox-entrypoint.sh', ...withClaude(targetCommand, command)];
+    if (needBwrapIsolation) {
+      // Structural boundary, part 2 of 2 (part 1 is the private netns below):
+      // an in-netns firewall that drops everything except the broker's port.
+      // A prelude failure exits nonzero before the entrypoint runs, so a
+      // sandbox without its firewall never boots (fail-closed).
+      innerCmd = wrapBwrapInnerWithNetworkFilter(
+        innerCmd,
+        buildBwrapNetworkFilterScript({ brokerPort: networkBroker.port, forward: !!docker }),
+      );
+    }
+  } catch (err) {
+    if (gitBroker) { try { gitBroker.proc.kill('SIGTERM'); } catch { /* already dead */ } }
+    if (gitBroker) { try { rmSync(gitBroker.dir, { recursive: true, force: true }); } catch { /* best effort */ } }
+    if (commitGuard) { try { rmSync(commitGuard.dir, { recursive: true, force: true }); } catch { /* best effort */ } }
+    if (networkBroker) { try { networkBroker.proc.kill('SIGTERM'); } catch { /* already dead */ } }
+    if (networkBroker) { try { rmSync(networkBroker.dir, { recursive: true, force: true }); } catch { /* best effort */ } }
+    throw err;
+  }
 
   const gitBrokerFields = {
     gitBrokerProc: gitBroker ? gitBroker.proc : null,
@@ -2168,9 +2458,31 @@ export function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, mcpSoc
     // macOS-only teardown handles (always null on the bwrap path).
     seatbeltDir: null,
     seatbeltFiles: null,
+    // Network-isolation broker: isolation-enabled only when this launch requested
+    // isolation (needBwrapIsolation, see above -- also null on a host
+    // missing the rootlesskit tooling, same as a plain unisolated launch).
+    ...NO_NETWORK_BROKER_HANDLE,
+    ...(needBwrapIsolation && networkBroker ? {
+      sandboxNetworkBrokerProc: networkBroker.proc,
+      sandboxNetworkBrokerDir: networkBroker.dir,
+      networkBrokerPort: networkBroker.port,
+      networkBrokerToken: networkBroker.token,
+      networkIsolateArmed: true,
+      networkIsolateMode: networkBroker.state,
+    } : {}),
   };
 
-  if (docker) {
+  if (docker || needBwrapIsolation) {
+    // Both a nested-dockerd launch (docker:true) and an isolated launch
+    // (needBwrapIsolation) take the same rootlesskit wrapping for a private
+    // netns (stateDir was minted above for exactly this) -- but only an
+    // isolated launch skips --disable-host-loopback: that flag would cut the
+    // guest off the host-loopback broker reachable at the slirp gateway.
+    // Reachability then stays scoped by the in-netns firewall above (only
+    // the broker's port is reachable). A plain docker:true launch (isolation
+    // off) keeps --disable-host-loopback exactly as before this feature --
+    // there is no broker for it to reach, and no reason to widen its access
+    // to the host loopback.
     return {
       command: ROOTLESSKIT,
       args: [
@@ -2179,7 +2491,7 @@ export function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, mcpSoc
         '--mtu=65520',
         '--slirp4netns-sandbox=auto',
         '--slirp4netns-seccomp=auto',
-        '--disable-host-loopback',
+        ...(needBwrapIsolation ? [] : ['--disable-host-loopback']),
         '--port-driver=builtin',
         // Only /etc is copied-up (for resolv.conf). We intentionally do NOT
         // copy-up /run so live host sockets there remain usable as bind
