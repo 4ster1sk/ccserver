@@ -139,11 +139,6 @@ export function attachTerminalHandler(chan) {
           // absent/invalid -- createSession normalizes it; other apps and
           // shells never emit a flag from it).
           permissionMode: typeof msg.permissionMode === 'string' ? msg.permissionMode : 'standard',
-          // Meta-agent launch from the browser UI (same flag REST
-          // POST /api/sessions already accepts). The server still gates the
-          // actual MCP injection on metaAgentMcp + broker state, so a stale
-          // client can never conjure privileges by sending this.
-          isMetaAgent: !!msg.isMetaAgent,
           resumeLast: !!msg.resume,
           groupId,
           groupRole,
@@ -154,6 +149,11 @@ export function attachTerminalHandler(chan) {
           // Default reuse (keep the previous persistent HOME); only an
           // explicit false (client's "新規作成" dialog) wipes it.
           reuseSandboxHome: msg.reuseSandboxHome !== false,
+          // Trusted scratch-cwd exemption ONLY when the group-member branch
+          // above resolved cwd server-side (resolvedCwd); a standalone
+          // reconnect keeps using the client's msg.cwd and must pass the
+          // normal browseRoots containment check.
+          scratchCwd: resolvedCwd != null,
         });
         if (result.error) {
           chan.send(JSON.stringify({
@@ -176,10 +176,6 @@ export function attachTerminalHandler(chan) {
             cols: session.cols,
             rows: session.rows,
             isReconnect: false,
-            // Echo whether the meta MCP was really injected so the client
-            // can surface a silent downgrade (flag requested but the broker
-            // is off) instead of leaving it invisible.
-            isMetaAgent: !!session.isMetaAgent,
             // Effective gpgVault flag THIS session actually launched with
             // (server/ws/sandbox.js's resolved value, not just a requested
             // override) -- lets the client show whether GPG Vault is really
@@ -243,7 +239,6 @@ export function attachTerminalHandler(chan) {
             cols: session.cols,
             rows: session.rows,
             isReconnect: true,
-            isMetaAgent: !!session.isMetaAgent,
             gpgVaultActive: !!session.gpgVaultActive,
             viewers: session.sockets.size,
           })

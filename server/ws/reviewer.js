@@ -14,8 +14,8 @@
 // the same bridge wrapper as the other process-global servers (see
 // mcpConfig.js / sandbox-mcp-wrapper.cjs).
 // Opt-in via sandbox.config.json's "reviewerMcp" (default false, like
-// usageMcp/metaAgentMcp) -- this spawns real sandboxed sessions on any
-// caller's say-so, so it must not exist by accident.
+// usageMcp) -- this spawns real sandboxed sessions on any caller's say-so,
+// so it must not exist by accident.
 //
 // Worktree design (deliberately NOT worktree.js's resolveMemberWorktree,
 // see the issue-#102 plan): that resolver is role-scoped (one slot per
@@ -42,10 +42,10 @@
 // straight into the DB.
 //
 // This module imports sessionManager.js and routes/sessions.js LAZILY
-// (dynamic import inside runReview/the completion watcher), mirroring
-// metaAgent.js: the static import graph stays acyclic (sessionManager.js
-// statically imports this module's injection-decision exports below, so
-// this module must never statically import sessionManager.js back).
+// (dynamic import inside runReview/the completion watcher) so the static
+// import graph stays acyclic (sessionManager.js statically imports this
+// module's injection-decision exports below, so this module must never
+// statically import sessionManager.js back).
 //
 // Completion detection (issue #103 follow-up): the review session ITSELF
 // calling the `finish_review` MCP tool is the AUTHORITATIVE way a job
@@ -65,9 +65,10 @@
 
 import { randomUUID } from 'node:crypto';
 import { execFileSync, execFile } from 'node:child_process';
-import { existsSync, mkdirSync, rmSync, statSync } from 'node:fs';
+import { existsSync, mkdirSync, realpathSync, rmSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
+import { isContained } from '../pathPolicy.js';
 import { getDb } from '../db.js';
 import { projectHashForCwd } from './projectHash.js';
 import { loadSandboxConfig, persistentHomeDir, deleteSandboxHome } from './sandbox.js';
@@ -116,7 +117,7 @@ export function getReviewerSockPath() {
 }
 
 // Whether the reviewer feature is on at all: an explicit opt-in flag in
-// sandbox.config.json (default false), like usageMcp/metaAgentMcp.
+// sandbox.config.json (default false), like usageMcp.
 export function reviewerEnabled() {
   return loadSandboxConfig().reviewerMcp === true;
 }
@@ -777,6 +778,29 @@ export async function runReview(args = {}) {
   // and randomUUID() don't throw today, but nothing should have to keep being
   // true forever for the slot count to stay correct.
   try {
+    // browseRoots (issue #189): run_review's cwd is caller-supplied and the
+    // review session it launches runs in a server-synthesized worktree under
+    // the (scratch-exempt) review root -- so without this check, any session
+    // with reviewer MCP access could ask for a review of a repository
+    // OUTSIDE browseRoots and then read it through the resulting worktree.
+    // Must run before any host-side git command below (resolveDefaultBaseRef,
+    // worktree creation) touches the repo. realpath first so a symlinked
+    // path cannot smuggle an outside repo past the containment check.
+    const { browseRoots, browseRootsInvalid } = loadSandboxConfig();
+    if (browseRootsInvalid) {
+      return { ok: false, error: 'sandbox.config.json\'s "browseRoots" is invalid (must be an array of directory paths), so the allowed review targets cannot be determined' };
+    }
+    if (browseRoots.length > 0) {
+      let realCwd;
+      try {
+        realCwd = realpathSync(cwd);
+      } catch {
+        return { ok: false, error: 'cwd must be an existing directory' };
+      }
+      if (!isContained(realCwd, browseRoots)) {
+        return { ok: false, error: 'cwd is outside the allowed browseRoots (sandbox.config.json\'s "browseRoots")' };
+      }
+    }
     const baseRef = v.value.baseRef || resolveDefaultBaseRef(cwd);
     const jobId = randomUUID();
 
@@ -832,7 +856,7 @@ export async function runReview(args = {}) {
       model,
       sandbox: true,
       requestedBy: `reviewer:${jobId}`,
-    }, { isReviewJob: true });
+    }, { isReviewJob: true, scratchCwd: true });
     if (!launch.ok) {
       markReviewFinished(jobId, { status: 'failed', resultSummary: launch.message, postedToPr: false });
       removeReviewWorktree(cwd, jobId);

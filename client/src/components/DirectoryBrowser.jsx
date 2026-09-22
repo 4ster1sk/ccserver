@@ -6,7 +6,6 @@ import { isPreviewable } from '../previewExts.js';
 import { isAppSelectable } from '../appAvailability.js';
 import { PERMISSION_MODES, PERMISSION_MODE_LABELS } from '../permissionMode.js';
 import { loadSandboxDefaults, defaultSandboxOpts } from '../sandboxDefaults.js';
-import MetaLaunchDialog from './MetaLaunchDialog.jsx';
 
 // marked + DOMPurify only matter once someone opens a preview, so keep them
 // out of the initial bundle (same split as TerminalView in App.jsx).
@@ -122,9 +121,14 @@ function saveSandboxOpts(path, opts) {
   } catch { /* ignore */ }
 }
 
-export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, initialPath, metaAgentDir, onOpenMeta, sandboxDefaults }) {
+export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, initialPath, sandboxDefaults }) {
   const [currentPath, setCurrentPath] = useState(initialPath || localStorage.getItem(LAST_DIR_KEY) || '/');
   const [homeDir, setHomeDir] = useState(null);
+  // browseRoots (issue #189): the server's guaranteed-browsable start (the
+  // first allowed root when home() itself is outside them, home() otherwise).
+  // Used for the Home button and to recover when a remembered/restored path
+  // falls outside a newly-narrowed browseRoots (403 on fetch).
+  const [initialBrowsePath, setInitialBrowsePath] = useState(null);
   const [dirs, setDirs] = useState([]);
   const [files, setFiles] = useState([]);
   const [parentPath, setParentPath] = useState(null);
@@ -211,14 +215,6 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, ini
   const permissionModeForApp = (app) => (app === 'commandcode' ? commandcodePermissionMode : 'standard');
   const [openMenuOpen, setOpenMenuOpen] = useState(false);
   const [launchMode, setLaunchMode] = useState('single'); // 'single' | 'combo'
-  // Whether the privileged ccserver-meta feature is on (sandbox.config.json's
-  // "metaAgentMcp", via /api/dirs/home). null = not fetched yet; anything but
-  // true (including the field missing on an older server) disables the mode.
-  const [metaAgentEnabled, setMetaAgentEnabled] = useState(null);
-  const [metaDialogOpen, setMetaDialogOpen] = useState(false);
-  // Effective metaAgentDir: prefer prop from App, fallback to local fetch.
-  const [localMetaAgentDir, setLocalMetaAgentDir] = useState(null);
-  const effectiveMetaAgentDir = metaAgentDir || localMetaAgentDir;
   const [comboApps, setComboApps] = useState(() => loadComboApps());
   // Free-form per-role model identifiers; empty string = omitted (server uses
   // the persisted role preference, then the app default). null would mean
@@ -463,7 +459,9 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, ini
       const res = await authFetch(`/api/dirs?${params}`);
       if (!res.ok) {
         const body = await res.json().catch(() => ({}));
-        throw new Error(body.error || `HTTP ${res.status}`);
+        const err = new Error(body.error || `HTTP ${res.status}`);
+        err.status = res.status;
+        throw err;
       }
       const data = await res.json();
       setCurrentPath(data.current);
@@ -472,16 +470,33 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, ini
       setFiles(data.files || []);
     } catch (err) {
       setError(err.message);
+      // A remembered path (localStorage) or restored tab can fall outside a
+      // newly-narrowed browseRoots: the listing 403s and the Up/Home buttons
+      // alone cannot recover from it. Jump to the server's allowed start
+      // once, rather than leaving the browser stuck on an empty error view.
+      if (err.status === 403 && initialBrowsePath && path !== initialBrowsePath) {
+        setCurrentPath(initialBrowsePath);
+      }
     } finally {
       setLoading(false);
     }
-  }, [showHidden]);
+  }, [showHidden, initialBrowsePath]);
 
   useEffect(() => {
     authFetch('/api/dirs/home').then(r => r.json()).then(data => {
       setHomeDir(data.home);
+      if (data.initialBrowsePath) setInitialBrowsePath(data.initialBrowsePath);
+      // Present-but-unusable browseRoots: the server refuses all directory
+      // and file access (503) until it is fixed -- say so instead of
+      // rendering an empty browser.
+      if (data.browseRootsInvalid) {
+        setError('sandbox.config.json の "browseRoots" が不正です (ディレクトリパスの配列で指定してください)。サーバー設定を修正するまでファイル閲覧は無効です。');
+      }
       if (!initialPath && !localStorage.getItem(LAST_DIR_KEY)) {
-        setCurrentPath(data.home);
+        // browseRoots (issue #189): when set, home() itself may sit outside
+        // the allowed roots -- start browsing at initialBrowsePath instead
+        // (falls back to data.home on an older server that doesn't send it).
+        setCurrentPath(data.initialBrowsePath || data.home);
       }
       // Seed the app picker from the server's configured default, but only
       // if the user hasn't explicitly picked one on this browser yet.
@@ -511,11 +526,6 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, ini
           setLaunchMode('single');
         }
       }
-      // The privileged meta-agent feature is opt-in server-side; anything but
-      // an explicit true (missing field = older server) keeps the mode
-      // disabled in the launch modal.
-      setMetaAgentEnabled(data.metaAgentEnabled === true);
-      if (data.metaAgentDir) setLocalMetaAgentDir(data.metaAgentDir);
       // Apps hidden via sandbox.config.json's hiddenApps (issue #105): read
       // before the availability reconciliation below so a default that
       // points at a hidden (even if installed) app is also corrected.
@@ -576,8 +586,16 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, ini
 
   useEffect(() => {
     fetchDirs(currentPath);
-    localStorage.setItem(LAST_DIR_KEY, currentPath);
   }, [currentPath, fetchDirs]);
+
+  // Remembering the path is keyed on currentPath ONLY -- deliberately not on
+  // fetchDirs. fetchDirs' identity changes when /api/dirs/home resolves
+  // (initialBrowsePath), which re-runs the listing effect for the SAME path;
+  // folding the write in there re-wrote the (unchanged) path after that
+  // resolution and could clobber a concurrently-set value.
+  useEffect(() => {
+    localStorage.setItem(LAST_DIR_KEY, currentPath);
+  }, [currentPath]);
 
   const navigateTo = useCallback((path) => {
     setCurrentPath(path);
@@ -729,8 +747,6 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, ini
     || selectedWorkers.some((r) => !visibleComboApps.includes(r.app));
 
   // Sandbox choice + gpg/sshAgent suboptions for the single-launch pane.
-  // The meta agent has no separate picker -- it inherits the global
-  // sandboxDefault via the dedicated MetaLaunchDialog (see App.handleOpenMeta).
   // Sandbox choice unavailable when no sandbox backend exists on the server host
   // (combo mode is covered separately at its own toggle/button). Under
   // forceSandbox the toggle stays locked on -- launches will fail
@@ -869,7 +885,14 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, ini
           <button className="btn btn-secondary" onClick={navigateUp} disabled={!parentPath}>
             Up
           </button>
-          <button className="btn btn-secondary" onClick={() => homeDir && navigateTo(homeDir)} disabled={!homeDir}>
+          {/* browseRoots (issue #189): home() may sit outside the allowed
+              roots, where navigating would just 403 -- prefer the server's
+              initialBrowsePath (== home() when unrestricted). */}
+          <button
+            className="btn btn-secondary"
+            onClick={() => { const target = initialBrowsePath || homeDir; if (target) navigateTo(target); }}
+            disabled={!(initialBrowsePath || homeDir)}
+          >
             Home
           </button>
           <button className="btn btn-secondary" onClick={() => { fetchDirs(currentPath); }} disabled={loading}>
@@ -936,15 +959,6 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, ini
               &#9662;
             </button>
           </div>
-          <button
-            className="btn btn-secondary meta-launch-btn"
-            onClick={() => setMetaDialogOpen(true)}
-            disabled={metaAgentEnabled !== true || launchesBlocked}
-            aria-label="統括エージェント"
-            title={launchesBlocked ? LAUNCHES_BLOCKED_TITLE : (metaAgentEnabled === true ? '統括エージェントを起動' : 'サーバー設定 (sandbox.config.json) で "metaAgentMcp": true にすると使えます')}
-          >
-            <span className="meta-icon" aria-hidden="true">⌘</span><span className="meta-label"> 統括</span>
-          </button>
         </div>
       </div>
 
@@ -1470,27 +1484,6 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, onOpenCombo, ini
           </div>
         </div>
       )}
-
-      <MetaLaunchDialog
-        open={metaDialogOpen}
-        onClose={() => setMetaDialogOpen(false)}
-        onLaunch={({ app, model }) => {
-          setMetaDialogOpen(false);
-          // Prefer the caller-provided handler (App's handleOpenMeta which
-          // knows the fixed dir), fallback to direct onOpen with fixed dir.
-          // Pass effectiveMetaAgentDir explicitly so App doesn't need to
-          // refetch when its own metaAgentDir is still pending.
-          if (onOpenMeta) {
-            onOpenMeta({ app, model, sandbox: sandboxDefault, metaAgentDir: effectiveMetaAgentDir });
-          } else if (effectiveMetaAgentDir) {
-            onOpen(effectiveMetaAgentDir, { sandbox: sandboxDefault, sandboxOpts: null, app, model, isMetaAgent: true });
-          }
-        }}
-        availableApps={availableApps}
-        hiddenApps={hiddenApps}
-        defaultApp={appDefault}
-        metaAgentDir={effectiveMetaAgentDir}
-      />
 
       {openMenuOpen && manageOpen && (
         // Preset management dialog: stacked above the launch modal's own

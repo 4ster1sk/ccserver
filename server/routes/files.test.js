@@ -7,13 +7,15 @@
 import { test, before, after, mock } from 'node:test';
 import assert from 'node:assert/strict';
 import Fastify from 'fastify';
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync, symlinkSync, chmodSync, readdirSync } from 'node:fs';
+import multipart from '@fastify/multipart';
+import { mkdtempSync, rmSync, writeFileSync, readFileSync, mkdirSync, symlinkSync, chmodSync, readdirSync, existsSync } from 'node:fs';
 import { open } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { filesRoute, previewKind, PREVIEW_EXTS, PREVIEW_MAX_BYTES, SNIFF_BYTES } from './files.js';
+import { randomUUID } from 'node:crypto';
+import { filesRoute, openUploadTarget, previewKind, PREVIEW_EXTS, PREVIEW_MAX_BYTES, SNIFF_BYTES } from './files.js';
 import { PREVIEW_EXTS as CLIENT_PREVIEW_EXTS, isPreviewable } from '../../client/src/previewExts.js';
 
 // Characters that must not appear literally in this source file.
@@ -28,9 +30,51 @@ function contentUrl(path) {
   return `/api/files/content?path=${encodeURIComponent(path)}`;
 }
 
+// browseRoots (issue #189): points loadSandboxConfig() at a temp config for
+// the duration of `fn`, same pattern as sandbox-config.test.js's withConfig.
+function withConfig(json, fn) {
+  const cfgDir = mkdtempSync(join(tmpdir(), 'ccserver-files-cfg-'));
+  const path = join(cfgDir, 'sandbox.config.json');
+  return (async () => {
+    try {
+      writeFileSync(path, JSON.stringify(json));
+      const prev = process.env.CCSERVER_SANDBOX_CONFIG;
+      process.env.CCSERVER_SANDBOX_CONFIG = path;
+      try {
+        return await fn();
+      } finally {
+        if (prev === undefined) delete process.env.CCSERVER_SANDBOX_CONFIG;
+        else process.env.CCSERVER_SANDBOX_CONFIG = prev;
+      }
+    } finally {
+      rmSync(cfgDir, { recursive: true, force: true });
+    }
+  })();
+}
+
+function buildMultipart(boundary, parts) {
+  const bufs = [];
+  for (const p of parts) {
+    bufs.push(Buffer.from(`--${boundary}\r\n`));
+    if (p.filename) {
+      bufs.push(Buffer.from(`Content-Disposition: form-data; name="${p.name}"; filename="${p.filename}"\r\n`));
+      bufs.push(Buffer.from(`Content-Type: ${p.contentType || 'application/octet-stream'}\r\n\r\n`));
+      bufs.push(Buffer.isBuffer(p.data) ? p.data : Buffer.from(p.data));
+      bufs.push(Buffer.from('\r\n'));
+    } else {
+      bufs.push(Buffer.from(`Content-Disposition: form-data; name="${p.name}"\r\n\r\n`));
+      bufs.push(Buffer.from(String(p.data)));
+      bufs.push(Buffer.from('\r\n'));
+    }
+  }
+  bufs.push(Buffer.from(`--${boundary}--\r\n`));
+  return Buffer.concat(bufs);
+}
+
 before(async () => {
   dir = mkdtempSync(join(tmpdir(), 'ccserver-files-route-'));
   app = Fastify();
+  await app.register(multipart, { limits: { fileSize: 10 * 1024 * 1024 } });
   await app.register(filesRoute, { prefix: '/api' });
 });
 
@@ -455,4 +499,192 @@ test('GET /files/content answers 400 for a unix domain socket', { skip: process.
   } finally {
     await new Promise((resolve) => srv.close(resolve));
   }
+});
+
+// ---------------------------------------------------------------------------
+// browseRoots (issue #189). browseRoots unset (the default) is exercised by
+// every test above -- this section is additive, covering the restricted
+// case, and must never change what those tests assert.
+
+test('GET /files: a path outside browseRoots is refused with 403, inside is served', async () => {
+  const allowed = mkdtempSync(join(dir, 'allowed-'));
+  const outside = mkdtempSync(join(dir, 'outside-'));
+  const okFile = join(allowed, 'ok.txt');
+  const blockedFile = join(outside, 'blocked.txt');
+  writeFileSync(okFile, 'inside\n');
+  writeFileSync(blockedFile, 'outside\n');
+
+  await withConfig({ browseRoots: [allowed] }, async () => {
+    const ok = await app.inject({ method: 'GET', url: `/api/files?path=${encodeURIComponent(okFile)}` });
+    assert.equal(ok.statusCode, 200);
+    assert.equal(ok.body, 'inside\n');
+
+    const blocked = await app.inject({ method: 'GET', url: `/api/files?path=${encodeURIComponent(blockedFile)}` });
+    assert.equal(blocked.statusCode, 403);
+    assert.match(blocked.json().error, /browseRoots/);
+  });
+});
+
+test('GET /files/content: a path outside browseRoots is refused with 403, inside is served', async () => {
+  const allowed = mkdtempSync(join(dir, 'allowed-'));
+  const outside = mkdtempSync(join(dir, 'outside-'));
+  const okFile = join(allowed, 'ok.md');
+  const blockedFile = join(outside, 'blocked.md');
+  writeFileSync(okFile, '# inside\n');
+  writeFileSync(blockedFile, '# outside\n');
+
+  await withConfig({ browseRoots: [allowed] }, async () => {
+    const ok = await app.inject({ method: 'GET', url: contentUrl(okFile) });
+    assert.equal(ok.statusCode, 200);
+    assert.equal(ok.json().content, '# inside\n');
+
+    const blocked = await app.inject({ method: 'GET', url: contentUrl(blockedFile) });
+    assert.equal(blocked.statusCode, 403);
+    assert.match(blocked.json().error, /browseRoots/);
+  });
+});
+
+test('POST /files: an upload destination outside browseRoots is refused with 403 and nothing is written', async () => {
+  const allowed = mkdtempSync(join(dir, 'allowed-'));
+  const outside = mkdtempSync(join(dir, 'outside-'));
+
+  await withConfig({ browseRoots: [allowed] }, async () => {
+    const boundary = '----Boundary' + randomUUID().replace(/-/g, '');
+    const payload = buildMultipart(boundary, [
+      { name: 'destination', data: outside },
+      { name: 'files', filename: 'evil.txt', contentType: 'text/plain', data: Buffer.from('should not land') },
+    ]);
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/files',
+      headers: { 'content-type': `multipart/form-data; boundary=${boundary}` },
+      payload,
+    });
+    assert.equal(res.statusCode, 403);
+    assert.match(res.json().error, /browseRoots/);
+    assert.equal(existsSync(join(outside, 'evil.txt')), false, 'file must not be written outside browseRoots');
+  });
+});
+
+test('POST /files: an upload destination inside browseRoots still succeeds', async () => {
+  const allowed = mkdtempSync(join(dir, 'allowed-'));
+
+  await withConfig({ browseRoots: [allowed] }, async () => {
+    const boundary = '----Boundary' + randomUUID().replace(/-/g, '');
+    const payload = buildMultipart(boundary, [
+      { name: 'destination', data: allowed },
+      { name: 'files', filename: 'ok.txt', contentType: 'text/plain', data: Buffer.from('fine') },
+    ]);
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/files',
+      headers: { 'content-type': `multipart/form-data; boundary=${boundary}` },
+      payload,
+    });
+    assert.equal(res.statusCode, 200, res.body);
+    assert.equal(existsSync(join(allowed, 'ok.txt')), true);
+  });
+});
+
+// Fail closed (issue #189 self-review): a present-but-invalid browseRoots
+// must disable file access (503), never silently restore host-wide access.
+test('GET/POST /files: a present-but-invalid browseRoots fails closed with 503', async () => {
+  await withConfig({ browseRoots: '/srv/repos' }, async () => {
+    const get = await app.inject({ method: 'GET', url: '/api/files?path=/etc/passwd' });
+    assert.equal(get.statusCode, 503);
+    assert.match(get.json().error, /browseRoots/);
+
+    const preview = await app.inject({ method: 'GET', url: contentUrl('/etc/hostname') });
+    assert.equal(preview.statusCode, 503);
+
+    const boundary = '----Boundary' + randomUUID().replace(/-/g, '');
+    const payload = buildMultipart(boundary, [
+      { name: 'destination', data: '/tmp' },
+      { name: 'files', filename: 'x.txt', contentType: 'text/plain', data: Buffer.from('x') },
+    ]);
+    const post = await app.inject({
+      method: 'POST',
+      url: '/api/files',
+      headers: { 'content-type': `multipart/form-data; boundary=${boundary}` },
+      payload,
+    });
+    assert.equal(post.statusCode, 503);
+
+    // Destination-only body (no file part) must not report success either.
+    const boundary2 = '----Boundary' + randomUUID().replace(/-/g, '');
+    const payload2 = buildMultipart(boundary2, [{ name: 'destination', data: '/tmp' }]);
+    const post2 = await app.inject({
+      method: 'POST',
+      url: '/api/files',
+      headers: { 'content-type': `multipart/form-data; boundary=${boundary2}` },
+      payload: payload2,
+    });
+    assert.equal(post2.statusCode, 503);
+  });
+});
+
+// Regression (issue #189 self-review): a symlink planted at the target file
+// name used to be followed by writeFile(), so an upload of `notes.txt` into a
+// directory containing `notes.txt -> <anywhere>` wrote THROUGH the link --
+// a write-outside-browseRoots primitive requiring no race (the read side
+// already rejects the same link via its realpath containment check).
+test('POST /files: an upload target that is a symlink is refused and the link target is untouched', async () => {
+  const allowed = mkdtempSync(join(dir, 'allowed-'));
+  const outside = mkdtempSync(join(dir, 'outside-'));
+  const victim = join(outside, 'victim.txt');
+  writeFileSync(victim, 'ORIGINAL\n');
+  symlinkSync(victim, join(allowed, 'link.txt'));
+
+  await withConfig({ browseRoots: [allowed] }, async () => {
+    const boundary = '----Boundary' + randomUUID().replace(/-/g, '');
+    const payload = buildMultipart(boundary, [
+      { name: 'destination', data: allowed },
+      { name: 'files', filename: 'link.txt', contentType: 'text/plain', data: Buffer.from('PWNED\n') },
+    ]);
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/files',
+      headers: { 'content-type': `multipart/form-data; boundary=${boundary}` },
+      payload,
+    });
+    assert.equal(res.statusCode, 403, res.body);
+    assert.match(res.json().error, /symlink/);
+    assert.equal(readFileSync(victim, 'utf-8'), 'ORIGINAL\n',
+      'the symlink target outside browseRoots must not be overwritten');
+  });
+});
+
+// Regression (issue #189 self-review): the destination DIRECTORY itself can
+// be swapped for an outside-pointing symlink while a slow multipart body is
+// still being read. openUploadTarget pins the directory with an fd first and
+// verifies containment through that fd, so the swap cannot move the write
+// outside browseRoots (on Linux; the non-Linux fallback re-checks the path
+// immediately before the open).
+test('openUploadTarget: a destination directory symlink pointing outside is rejected through the opened fd', async () => {
+  const allowed = mkdtempSync(join(dir, 'allowed-'));
+  const outside = mkdtempSync(join(dir, 'outside-'));
+  symlinkSync(outside, join(allowed, 'linkdir'));
+
+  const res = await openUploadTarget(join(allowed, 'linkdir'), 'escaped.txt', [allowed]);
+  try {
+    assert.equal(res.outside, true, 'the real directory behind the link is outside browseRoots');
+    assert.equal(existsSync(join(outside, 'escaped.txt')), false, 'nothing may be created outside browseRoots');
+  } finally {
+    if (res.handle) await res.handle.close().catch(() => {});
+    if (res.dir) await res.dir.close().catch(() => {});
+  }
+});
+
+test('openUploadTarget: a real directory inside browseRoots still accepts the write', async () => {
+  const allowed = mkdtempSync(join(dir, 'allowed-'));
+
+  const res = await openUploadTarget(allowed, 'ok.txt', [allowed]);
+  try {
+    assert.equal(res.outside, false);
+    await res.handle.writeFile(Buffer.from('hi'));
+  } finally {
+    await res.handle.close().catch(() => {});
+    if (res.dir) await res.dir.close().catch(() => {});
+  }
+  assert.equal(readFileSync(join(allowed, 'ok.txt'), 'utf-8'), 'hi');
 });

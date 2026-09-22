@@ -40,6 +40,7 @@ import { federationConfig, derivePairingToken } from './federationConfig.js';
 import { resolvedHostname } from './notify.js';
 import { attachTerminalHandler } from './terminal.js';
 import { hostname as osHostname } from 'node:os';
+import { loadSandboxConfig } from './sandbox.js';
 
 const CONNECT_TIMEOUT_MS = 10_000;
 const FEDERATION_KEEPALIVE_MS = 30_000;
@@ -216,7 +217,15 @@ async function rpcGroupsDestroy(params) {
 
 async function rpcDirsList(params) {
   const { dirsMod } = await loadRouteDeps();
-  const res = await dirsMod.browseDirectory(params?.path || '/', !!params?.showHidden);
+  // browseRoots (issue #189) applies to federation-relayed directory
+  // browsing too -- a remote peer must not see more of this host than a
+  // local /api/dirs caller would. A present-but-invalid browseRoots is
+  // refused outright rather than falling back to unrestricted.
+  const { browseRoots, browseRootsInvalid } = loadSandboxConfig();
+  if (browseRootsInvalid) {
+    return { ok: false, error: 'sandbox.config.json "browseRoots" is invalid (must be an array of directory paths)' };
+  }
+  const res = await dirsMod.browseDirectory(params?.path || '/', !!params?.showHidden, browseRoots);
   if (!res.ok) return { ok: false, error: res.message };
   return { ok: true, listing: res.data };
 }

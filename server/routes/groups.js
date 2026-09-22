@@ -27,10 +27,11 @@ import { basename, join, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import * as groupManager from '../ws/groupManager.js';
 import { createSession, getSession, isInfrastructureError, retireSessionForReuse } from '../ws/sessionManager.js';
-import { sandboxAvailable, sandboxUnavailableReason } from '../ws/sandbox.js';
+import { sandboxAvailable, sandboxUnavailableReason, loadSandboxConfig } from '../ws/sandbox.js';
 import { isValidApp } from '../ws/appLaunch.js';
 import { projectHashForCwd } from '../ws/projectHash.js';
 import { normalizePresetInput } from '../ws/workerPresets.js';
+import { isContained } from '../pathPolicy.js';
 
 const ORCHESTRATOR_ROOT = join(homedir(), '.local', 'share', 'ccserver-sandbox', 'orchestrator');
 
@@ -195,6 +196,11 @@ export function orchestratorRestartSessionOpts({ group, app, model = null, sandb
     mcpSocketPath,
     mcpToken,
     orchestratorClaudeMdSrc,
+    // orchestratorDir is server-synthesized under the scratch tree (see
+    // ORCHESTRATOR_ROOT) -- the trusted in-process flag that skips the
+    // browseRoots cwd check (the group's PROJECT cwd was already validated
+    // against browseRoots at group creation).
+    scratchCwd: true,
   };
 }
 
@@ -212,6 +218,23 @@ export async function launchGroupFromSpec(body) {
 
   if (!validCwd(cwd)) {
     return { ok: false, code: 'validation', message: 'cwd must be an existing directory (not /)' };
+  }
+  // browseRoots (issue #189): the group's own project cwd IS the
+  // client-supplied, potentially-arbitrary path browseRoots exists to bound
+  // -- unlike orchestratorDir/worktree paths (createSession's own browseRoots
+  // check exempts those as server-synthesized scratch dirs, see
+  // pathPolicy.js's isCcserverScratchPath), which are never themselves
+  // checked against browseRoots. Checked here, once, at group creation: every
+  // worker's actual launch cwd is a worktree that shares this project's git
+  // object database (see worktree.js), so without this check a group could
+  // still be created for -- and read git history from -- a project outside
+  // browseRoots even though no individual session's cwd would ever expose it.
+  const { browseRoots, browseRootsInvalid } = loadSandboxConfig();
+  if (browseRootsInvalid) {
+    return { ok: false, code: 'validation', message: 'sandbox.config.json\'s "browseRoots" is invalid (must be an array of directory paths), so the allowed working directories cannot be determined. Fix the config and reload.' };
+  }
+  if (browseRoots.length > 0 && !isContained(resolve(cwd), browseRoots)) {
+    return { ok: false, code: 'validation', message: `cwd is outside the allowed browseRoots (sandbox.config.json's "browseRoots"). Choose a directory under one of: ${browseRoots.join(', ')}` };
   }
   // The orchestrator dir is derived from cwd, so a second group for the same
   // project would share it (cross-talk through resumeLast, CLAUDE.md fights).
@@ -368,6 +391,9 @@ export async function launchGroupFromSpec(body) {
     mcpSocketPath: controlBroker ? controlBroker.sockPath : null,
     mcpToken: controlBroker ? (controlBroker.token || null) : null,
     orchestratorClaudeMdSrc,
+    // orchestratorDir is server-synthesized scratch space -- see
+    // orchestratorRestartSessionOpts's comment.
+    scratchCwd: true,
   });
   if (orchRes.error || !orchRes.session) {
     const raw = orchRes.error || 'unknown error';
