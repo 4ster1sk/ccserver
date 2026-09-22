@@ -48,7 +48,15 @@ export function useRemoteSessions(enabled = true) {
     }
   }, []);
 
+  // 終了直後、次のポーリングを待たずに一覧から外す (タブを閉じた同じ tick で
+  // 「リモートのセッション」に一瞬出るのを防ぐ)。
+  const dropRemoteSession = useCallback((instanceId, sessionId) => {
+    const prev = lastByInstanceRef.current.get(instanceId);
+    if (prev) lastByInstanceRef.current.set(instanceId, prev.filter((s) => s.id !== sessionId));
+    setEntries((cur) => cur.filter((e) => !(e.instance.id === instanceId && e.session.id === sessionId)));
+  }, []);
+
   useVisiblePolling(refresh, POLL_MS, enabled);
 
-  return { remoteSessions: entries, refreshRemoteSessions: refresh };
+  return { remoteSessions: entries, refreshRemoteSessions: refresh, dropRemoteSession };
 }

@@ -29,13 +29,14 @@ const TerminalView = lazy(() => import('./components/TerminalView.jsx'));
 
 let tabIdCounter = 0;
 
-// Whether a tab's session can be fully terminated (DELETE /api/sessions/:id)
-// rather than merely detached: local terminal tabs with a known session id.
-// Remote tabs belong to another instance (a local DELETE would 404 or hit
-// the wrong session) and group tabs already destroy their members via
-// destroyGroupTab, so both stay on the detach-only "閉じる" path.
+// Whether a tab's session can be fully terminated rather than merely
+// detached: terminal tabs with a known session id. Local tabs DELETE
+// /api/sessions/:id; remote tabs go through the federation relay
+// (terminateSessionById picks the URL -- a local DELETE with a remote id
+// would 404 or hit the wrong session). Group tabs already destroy their
+// members via destroyGroupTab, so they stay on the "閉じる" path.
 function canTerminateTab(tab) {
-  return !!tab && tab.type === 'terminal' && !tab.remote && !!(tab.sessionId || tab.attachSessionId);
+  return !!tab && tab.type === 'terminal' && !!(tab.sessionId || tab.attachSessionId);
 }
 
 export default function App() {
@@ -482,6 +483,10 @@ export default function App() {
   // there was nothing to terminate), false on failure or when a concurrent
   // call is already in flight -- callers that persist "次回以降確認しない"
   // only after success (terminateSessionAndCloseTab below) rely on this.
+  // リモート (ペアリング先) のセッション一覧。terminateSessionById が
+  // 終了後に一覧から外すため、その宣言より前で呼ぶ。
+  const { remoteSessions, refreshRemoteSessions, dropRemoteSession } = useRemoteSessions();
+
   const terminateSessionById = useCallback(async (tabId) => {
     if (terminatingTabIdsRef.current.has(tabId)) return false;
     const tab = tabs.find((t) => t.id === tabId);
@@ -490,7 +495,10 @@ export default function App() {
     terminatingTabIdsRef.current.add(tabId);
     setIsTerminatingSession(true);
     try {
-      const res = await authFetch(`/api/sessions/${sessionId}`, { method: 'DELETE' });
+      const url = tab.remote
+        ? `/api/federation/instances/${encodeURIComponent(tab.remote.instanceId)}/sessions/${encodeURIComponent(sessionId)}`
+        : `/api/sessions/${sessionId}`;
+      const res = await authFetch(url, { method: 'DELETE' });
       if (res.status === 404) {
         // Session already gone server-side: termination is effectively done.
       } else if (!res.ok) {
@@ -510,9 +518,14 @@ export default function App() {
     // (triggered by tabs changing, further down) to catch up -- otherwise a
     // render in between shows it under "unopened" (see the comment on
     // serverSessions' declaration above).
-    setServerSessions((prev) => prev.filter((s) => s.id !== sessionId));
+    if (tab.remote) {
+      dropRemoteSession(tab.remote.instanceId, sessionId);
+      refreshRemoteSessions();
+    } else {
+      setServerSessions((prev) => prev.filter((s) => s.id !== sessionId));
+    }
     return true;
-  }, [tabs, doCloseTab]);
+  }, [tabs, doCloseTab, dropRemoteSession, refreshRemoteSessions]);
 
   const handleCloseTab = useCallback(async (tabId) => {
     // タブを閉じるとセッションは完全に終了する(下記 canTerminateTab を
@@ -537,7 +550,7 @@ export default function App() {
     if (tab && tab.type === 'terminal' && !tab.exited) {
       if (skipCloseConfirm) {
         // 確認済み(次回以降確認しない)なら、削除可能なタブは即座に終了、
-        // リモート等の削除不能なタブは従来通りデタッチにフォールバックする。
+        // sessionId 未確立などの削除不能なタブは従来通りデタッチにフォールバックする。
         if (canTerminateTab(tab)) {
           terminateSessionById(tabId);
         } else {
@@ -695,7 +708,6 @@ export default function App() {
   // the session alive, so this is the only destructive action here).
   // リモート (ペアリング先) の未オープンセッション: 開く/終了は
   // RemoteInstanceView の openSessionTab / destroySession と同じ経路。
-  const { remoteSessions, refreshRemoteSessions } = useRemoteSessions();
   const handleOpenRemoteSession = useCallback(({ instance, session }) => {
     if (sessionSidebarPrefs.mode !== 'sidebar') setSessionMenuOpen(false);
     else closeSessionSidebarIfOverlay();
