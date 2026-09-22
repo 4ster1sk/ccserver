@@ -68,8 +68,8 @@ function validateIdentity(nameReal, nameEmail) {
   if (/[\r\n]/.test(real) || /[\r\n]/.test(email)) {
     return { ok: false, error: 'nameReal/nameEmail must not contain newlines' };
   }
-  if (real.length < 5 || real.length > MAX_IDENTITY_LEN) {
-    return { ok: false, error: 'nameReal must be between 5 and 200 characters' };
+  if (real.length < 4 || real.length > MAX_IDENTITY_LEN) {
+    return { ok: false, error: 'nameReal must be between 4 and 200 characters' };
   }
   if (email.length > MAX_IDENTITY_LEN || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
     return { ok: false, error: 'nameEmail must look like a valid email address' };
