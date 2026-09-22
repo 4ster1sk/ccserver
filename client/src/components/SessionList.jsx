@@ -59,7 +59,8 @@ export default function SessionList({
             // サーバー保存の表示名があれば優先する (未確立タブは sessionId 不在のため対象外)。
             const sessionId = tab.sessionId || tab.attachSessionId || null;
             const customLabel = sessionId ? (customLabels?.get(sessionId) ?? null) : null;
-            const displayLabel = customLabel || tab.label;
+            // リモートタブのラベル先頭の「⇄ 」は一覧では出さない (ホストは下段バッジで示す)。
+            const displayLabel = customLabel || (tab.remote ? String(tab.label).replace(/^⇄\s*/, '') : tab.label);
             return (
               <div
                 key={tab.id}
@@ -78,9 +79,6 @@ export default function SessionList({
                   <span className="session-menu-item-top">
                     <TabIcon type={tab.type} app={tab.app} shell={tab.shell} />
                     <span className="session-menu-label">{displayLabel}</span>
-                    {tab.remote && (
-                      <span className="tab-remote-badge" title={`接続先: ${tab.remote.label}`}>⇄ {tab.remote.label}</span>
-                    )}
                     {!tab.shell && !tab.sandbox && <span className="session-badge no-sandbox">no sandbox</span>}
                     {tab.sandbox && <span className="session-badge sandbox">sandbox</span>}
                     {(() => {
@@ -90,7 +88,9 @@ export default function SessionList({
                     })()}
                   </span>
                   <span className="session-menu-status">
-                    {tab.cwd && <span className="session-menu-path" title={tab.cwd}>{baseName(tab.cwd)}</span>}
+                    {tab.remote && (
+                      <span className="tab-remote-badge" title={`接続先: ${tab.remote.label}`}>⇄ {tab.remote.label}</span>
+                    )}
                     <span className="session-menu-state">{statusText}</span>
                   </span>
                 </button>
@@ -135,7 +135,6 @@ export default function SessionList({
                     )}
                   </span>
                   <span className="session-menu-status">
-                    {tab.cwd && <span className="session-menu-path" title={tab.cwd}>{baseName(tab.cwd)}</span>}
                     <span className="session-menu-state">{statusText}</span>
                   </span>
                 </button>
@@ -186,7 +185,6 @@ export default function SessionList({
                   })()}
                 </span>
                 <span className="session-menu-status">
-                  {s.cwd && <span className="session-menu-path" title={s.cwd}>{baseName(s.cwd)}</span>}
                   <span className="session-menu-state">{appLabel(s)}</span>
                 </span>
               </button>
@@ -231,7 +229,6 @@ export default function SessionList({
                     <span className="session-menu-label">{dirName}</span>
                   </span>
                   <span className="session-menu-status">
-                    {g.cwd && <span className="session-menu-path" title={g.cwd}>{baseName(g.cwd)}</span>}
                     <span className="session-menu-state">{liveText}</span>
                   </span>
                 </button>
