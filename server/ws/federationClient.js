@@ -27,6 +27,7 @@ import * as pairing from './federationPairing.js';
 import { resolvedHostname } from './notify.js';
 import { federationPort } from './federationServer.js';
 import { getOrCreateLink } from './federationLink.js';
+import { derivePairingToken } from './federationConfig.js';
 
 const CONNECT_TIMEOUT_MS = 10_000;
 const RPC_TIMEOUT_MS = 15_000;
@@ -156,7 +157,9 @@ export async function initiatePairing({ remoteAddr, remoteToken, label }) {
       params: {
         hostnameLabel: myHostnameLabel(),
         claimedAddr: myClaimedAddr() || undefined,
-        federationToken: typeof remoteToken === 'string' && remoteToken ? remoteToken : undefined,
+        // M8 fix: never put the raw token on the wire -- see
+        // derivePairingToken's comment (federationConfig.js).
+        federationToken: derivePairingToken(remoteToken) || undefined,
       },
     });
   });
@@ -230,23 +233,32 @@ async function getReadyLink(row, { timeoutMs = LINK_READY_TIMEOUT_MS } = {}) {
 // header comment.
 export async function reconcilePending() {
   const rows = pairing.listPending();
-  const outcomes = [];
-  for (const row of rows) {
+  // M7 fix (vuln_scan report): each row's own round trip (getReadyLink's up
+  // to LINK_READY_TIMEOUT_MS wait, plus the pairing.status RPC's own 5s
+  // timeout) used to run one row at a time in a for...of, so a handful of
+  // unreachable/still-connecting peers among up to MAX_PENDING_ROWS pending
+  // rows could stack up to ~100s of serial waiting behind a single REST
+  // poll (routes/federation.js) -- from the browser's perspective, a UI
+  // that just hangs. Every row's reachability is independent, so there is
+  // no reason to serialize them: run them concurrently instead, same
+  // reasoning as sessionManager.js's pushAllowlistToArmedSessions. Total
+  // wall time is now bounded by the SLOWEST single row, not the sum of all
+  // of them.
+  const outcomes = await Promise.all(rows.map(async (row) => {
     const link = await getReadyLink(row);
     if (!link.connected) {
-      outcomes.push({ id: row.id, reachable: false });
-      continue;
+      return { id: row.id, reachable: false };
     }
     try {
       const resp = await link.rpc('pairing.status', {}, { timeoutMs: 5000 });
       if (resp.ok && (resp.myDecision === 'approved' || resp.myDecision === 'rejected')) {
         pairing.recordRemoteDecision(row.id, resp.myDecision);
       }
-      outcomes.push({ id: row.id, reachable: true });
+      return { id: row.id, reachable: true };
     } catch {
-      outcomes.push({ id: row.id, reachable: false });
+      return { id: row.id, reachable: false };
     }
-  }
+  }));
   return outcomes;
 }
 

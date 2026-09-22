@@ -36,7 +36,7 @@ import { randomUUID } from 'node:crypto';
 import { ensureIdentity, peerCertInfo } from './federationIdentity.js';
 import { LineFramer, FRAME_KINDS } from './federationProtocol.js';
 import * as pairing from './federationPairing.js';
-import { federationConfig } from './federationConfig.js';
+import { federationConfig, derivePairingToken } from './federationConfig.js';
 import { resolvedHostname } from './notify.js';
 import { attachTerminalHandler } from './terminal.js';
 import { hostname as osHostname } from 'node:os';
@@ -111,19 +111,33 @@ async function rpcPairingPropose(params, ctx) {
   if (ctx.selfPairing) return { ok: false, error: 'cannot pair with yourself' };
   const cfg = federationConfig();
   if (cfg.requireTokenForPairing && process.env.CCSERVER_TOKEN) {
-    if (params?.federationToken !== process.env.CCSERVER_TOKEN) {
+    // M8 fix: compare against the derived (never the raw) token -- see
+    // derivePairingToken's comment.
+    if (params?.federationToken !== derivePairingToken(process.env.CCSERVER_TOKEN)) {
       return { ok: false, error: 'federation token required' };
     }
   }
   const hostnameClaimed = typeof params?.hostnameLabel === 'string' && params.hostnameLabel
     ? params.hostnameLabel.slice(0, 200) : null;
-  const claimedAddr = typeof params?.claimedAddr === 'string' && params.claimedAddr
-    ? params.claimedAddr.slice(0, 200) : ctx.remoteAddr;
+  // M6 fix (vuln_scan report): `addr` here becomes `row.addr`, which
+  // establishAllLinks/reconcilePending dial via _dialOnce -- including for
+  // rows still in pending_local_approval/pending_remote_approval, i.e.
+  // BEFORE any human has approved this peer at all (see establishAllLinks's
+  // header comment for why pending rows are dialed too). Using the peer's
+  // self-reported params.claimedAddr here (as this used to) let an
+  // unapproved, merely-connecting peer point this server's outbound mTLS
+  // dial at any host:port of its choosing -- an internal-network probe/SSRF
+  // primitive that runs before any trust decision is made. The only address
+  // this server can actually trust for an INBOUND request is the real,
+  // observed TCP source (ctx.remoteAddr) -- never a value the peer merely
+  // claims. (claimedAddr is still accepted and ignored: keeping it
+  // unread here, rather than rejecting it outright, keeps compatibility
+  // with an older peer's protocol version that still sends the field.)
   const row = pairing.recordInboundRequest({
     fingerprint: ctx.peerFingerprint,
     certPem: ctx.peerPem,
     hostnameClaimed,
-    addr: claimedAddr,
+    addr: ctx.remoteAddr,
   });
   if (!row) return { ok: false, error: 'this instance previously revoked the pairing' };
   return {

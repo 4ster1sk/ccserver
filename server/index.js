@@ -2,6 +2,7 @@ import Fastify from 'fastify';
 import websocket from '@fastify/websocket';
 import multipart from '@fastify/multipart';
 import fastifyStatic from '@fastify/static';
+import { timingSafeEqual } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { dirsRoute } from './routes/dirs.js';
@@ -56,6 +57,42 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 // spoof X-Forwarded-Proto to influence its own response.
 const fastify = Fastify({ logger: true, trustProxy: ['127.0.0.1', '::1'] });
 
+// L5 fix (vuln_scan report): no security headers were set at all. The
+// client build has no inline scripts and no external resources at all
+// (verified: client/dist/index.html loads only same-origin /assets/*.js
+// and /assets/*.css; PreviewDialog.jsx's markdown renderer already
+// deliberately turns every <img> into a text placeholder and strips
+// every auto-fetching attribute via DOMPurify rather than relying on CSP
+// for that -- see its own header comment), so a same-origin-only CSP
+// costs nothing functionally while closing off script injection as a
+// no-op even if some other XSS-shaped bug ever put attacker HTML on the
+// page. style-src keeps 'unsafe-inline' (a much narrower risk than
+// script-src) since React/xterm.js set inline style attributes via the
+// DOM API in the ordinary course of rendering. No @fastify/helmet
+// dependency -- same "a few lines beats a plugin" reasoning as
+// authSessions.js's own manual cookie handling.
+const SECURITY_HEADERS = {
+  'Content-Security-Policy': [
+    "default-src 'self'",
+    "script-src 'self'",
+    "style-src 'self' 'unsafe-inline'",
+    "img-src 'self' data:",
+    "font-src 'self' data:",
+    "connect-src 'self'",
+    "frame-ancestors 'none'",
+    "base-uri 'self'",
+    "form-action 'self'",
+    "object-src 'none'",
+  ].join('; '),
+  'X-Content-Type-Options': 'nosniff',
+  'X-Frame-Options': 'DENY',
+  'Referrer-Policy': 'no-referrer',
+  'Cross-Origin-Opener-Policy': 'same-origin',
+};
+fastify.addHook('onSend', async (request, reply) => {
+  for (const [name, value] of Object.entries(SECURITY_HEADERS)) reply.header(name, value);
+});
+
 // SQLite (worker presets today, more stores in later phases): open + migrate
 // before anything that might touch it -- notably the CCSERVER_AUTH_MODE=passkey
 // hook below, which queries auth_sessions on every request (Issue #141 Step1
@@ -104,6 +141,20 @@ try {
 const AUTH_TOKEN = process.env.CCSERVER_TOKEN;
 const AUTH_MODE = resolveAuthMode();
 
+// L3 fix (vuln_scan report): `!==` short-circuits at the first differing
+// byte, so its timing leaks how many leading characters of a guess matched
+// the real token -- the same class of timing side-channel git-broker.js/
+// network-broker.js/mcpBroker.js already guard their own tokens against
+// (see each file's own tokenEq). Same fix here for CCSERVER_TOKEN, the
+// shared secret gating the entire HTTP/WS API in 'token' auth mode.
+function tokenEq(a, b) {
+  if (typeof a !== 'string' || typeof b !== 'string' || a.length === 0) return false;
+  const ab = Buffer.from(a);
+  const bb = Buffer.from(b);
+  if (ab.length !== bb.length) return false;
+  try { return timingSafeEqual(ab, bb); } catch { return false; }
+}
+
 // Endpoints under /api/auth that must work with NO session yet -- the ones
 // that exist to *create* one (login-token; WebAuthn authentication
 // options/verify) plus Step4's mode probe, which the client needs before it
@@ -136,7 +187,7 @@ if (AUTH_MODE === 'token') {
     const token =
       request.query.token ||
       request.headers.authorization?.replace(/^Bearer\s+/i, '');
-    if (token !== AUTH_TOKEN) {
+    if (!tokenEq(token, AUTH_TOKEN)) {
       reply.code(401).send({ error: 'Invalid or missing token' });
     }
   });
@@ -159,6 +210,30 @@ if (AUTH_MODE === 'token') {
   }
 } else {
   fastify.log.error(`Unknown CCSERVER_AUTH_MODE: ${AUTH_MODE} (expected none, token, or passkey)`);
+  process.exit(1);
+}
+
+// H3 fix (vuln_scan report): AUTH_MODE=none (the default when neither
+// CCSERVER_AUTH_MODE nor CCSERVER_TOKEN is set) plus the server's own
+// 0.0.0.0 bind meant every file/dir/session API was reachable with zero
+// authentication to anyone who could reach this host on the network --
+// safePath() in routes/files.js is intentionally host-wide (see
+// files.test.js), so this was full unauthenticated host file read/write,
+// not just "someone browses your project". Cross-device session sharing
+// (README's "複数端末からのセッション共有") genuinely needs a non-loopback
+// bind, so the fix isn't to force loopback by default -- it's to refuse the
+// specific none+non-loopback combination at boot unless an operator
+// explicitly opts in (e.g. a trusted isolated LAN with no other feasible
+// auth), rather than silently exposing it.
+const HOST = process.env.CCSERVER_HOST || '0.0.0.0';
+const isLoopbackHost = (h) => h === '127.0.0.1' || h === '::1' || h === 'localhost';
+if (AUTH_MODE === 'none' && !isLoopbackHost(HOST) && process.env.CCSERVER_ALLOW_UNAUTHENTICATED_LAN !== '1') {
+  fastify.log.error(
+    `Refusing to start: CCSERVER_AUTH_MODE=none with a non-loopback bind (host=${HOST}) would expose every file/session `
+    + 'API unauthenticated to anyone who can reach this host on the network. Set CCSERVER_AUTH_MODE=token '
+    + '(with CCSERVER_TOKEN) or CCSERVER_AUTH_MODE=passkey, set CCSERVER_HOST=127.0.0.1 for loopback-only access, '
+    + 'or set CCSERVER_ALLOW_UNAUTHENTICATED_LAN=1 to accept this risk explicitly.'
+  );
   process.exit(1);
 }
 
@@ -326,7 +401,7 @@ try {
   fastify.log.error({ err }, 'Failed to start ccserver federation listener');
 }
 
-await fastify.listen({ port: PORT, host: '0.0.0.0' });
+await fastify.listen({ port: PORT, host: HOST });
 
 // Re-arm scheduled prompts persisted before the last shutdown/restart. Missed
 // ones (server was down at their time) fire shortly after startup; live ones

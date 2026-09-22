@@ -341,3 +341,79 @@ test('a peer presenting our own certificate is refused as self-pairing', { skip 
   assert.match(resp.error, /yourself/);
   socket.destroy();
 });
+
+// --- M6/M8 (vuln_scan report) -----------------------------------------------
+
+// A fresh, throwaway peer identity independent of the suite-wide `peerKey`/
+// `peerCert`/`peerFingerprint()` above (whose row has already progressed
+// through pending -> active -> revoked by the time these run at the end of
+// the file) -- isolates these two regression tests from that shared state.
+function freshPeerIdentity(label) {
+  const dir = join(tmpRoot, `peer-${label}`);
+  mkdirSync(dir, { recursive: true });
+  execFileSync('openssl', [
+    'req', '-x509', '-newkey', 'ed25519', '-days', '36500', '-nodes',
+    '-keyout', join(dir, 'peer.key'), '-out', join(dir, 'peer.crt'), '-subj', `/CN=${label}`,
+  ], { stdio: 'ignore', cwd: tmpRoot });
+  const key = readFileSync(join(dir, 'peer.key'));
+  const cert = readFileSync(join(dir, 'peer.crt'));
+  const fingerprint = execFileSync('openssl', ['x509', '-in', join(dir, 'peer.crt'), '-noout', '-fingerprint', '-sha256'])
+    .toString().split('=')[1].trim();
+  return { key, cert, fingerprint };
+}
+
+function dialAs({ key, cert }) {
+  return new Promise((resolve, reject) => {
+    const s = tlsConnect({
+      host: '127.0.0.1', port: serverPort, key, cert, rejectUnauthorized: false,
+    }, () => resolve(s));
+    s.once('error', reject);
+  });
+}
+
+test('M6: an inbound pairing.propose cannot redirect the dial-back address via claimedAddr', { skip }, async () => {
+  const peer = freshPeerIdentity('m6');
+  const socket = await dialAs(peer);
+  const resp = await rpc(socket, 'pairing.propose', {
+    hostnameLabel: 'evil-host',
+    claimedAddr: 'internal-service.evil:9999',
+  });
+  assert.equal(resp.ok, true);
+  socket.destroy();
+
+  const row = pairing.getRawByFingerprint(peer.fingerprint);
+  assert.ok(row, 'row must exist');
+  assert.notEqual(row.remote_addr, 'internal-service.evil:9999', 'the peer-claimed address must never become the dial target');
+  assert.match(row.remote_addr, /^(::ffff:)?127\.0\.0\.1:\d+$/, 'the real observed TCP source address is used instead');
+});
+
+test('M8: requireTokenForPairing never accepts the raw token, only the derived pairing token', { skip }, async () => {
+  const { derivePairingToken } = await import('./federationConfig.js');
+  const cfgDir = mkdtempSync(join(tmpdir(), 'ccserver-federation-m8-'));
+  const cfgPath = join(cfgDir, 'sandbox.config.json');
+  writeFileSync(cfgPath, JSON.stringify({ federation: { requireTokenForPairing: true } }));
+  const prevCfg = process.env.CCSERVER_SANDBOX_CONFIG;
+  const prevToken = process.env.CCSERVER_TOKEN;
+  process.env.CCSERVER_SANDBOX_CONFIG = cfgPath;
+  process.env.CCSERVER_TOKEN = 'super-secret-admin-token';
+  try {
+    const rawPeer = freshPeerIdentity('m8-raw');
+    const socket1 = await dialAs(rawPeer);
+    const rawResp = await rpc(socket1, 'pairing.propose', { hostnameLabel: 'x', federationToken: 'super-secret-admin-token' });
+    assert.equal(rawResp.ok, false, 'the raw admin token must no longer authenticate the pairing propose');
+    socket1.destroy();
+
+    const derivedPeer = freshPeerIdentity('m8-derived');
+    const socket2 = await dialAs(derivedPeer);
+    const derivedResp = await rpc(socket2, 'pairing.propose', {
+      hostnameLabel: 'x',
+      federationToken: derivePairingToken('super-secret-admin-token'),
+    });
+    assert.equal(derivedResp.ok, true, 'the correctly derived pairing token must still authenticate it');
+    socket2.destroy();
+  } finally {
+    if (prevCfg === undefined) delete process.env.CCSERVER_SANDBOX_CONFIG; else process.env.CCSERVER_SANDBOX_CONFIG = prevCfg;
+    if (prevToken === undefined) delete process.env.CCSERVER_TOKEN; else process.env.CCSERVER_TOKEN = prevToken;
+    rmSync(cfgDir, { recursive: true, force: true });
+  }
+});
