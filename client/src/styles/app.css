@@ -3198,7 +3198,9 @@ body {
   font-family: 'JetBrains Mono', 'Fira Code', monospace;
   font-weight: 600;
   padding: 4px 8px;
-  line-height: 1;
+  /* Match .header-icon's height so text buttons line up with the icon
+     buttons beside them (same padding/border). */
+  line-height: 18px;
   background: transparent;
   border: 1px solid transparent;
   color: var(--text-muted);
@@ -3841,6 +3843,10 @@ body {
   .header-icon {
     width: 20px;
     height: 20px;
+  }
+
+  .auto-yes-toggle {
+    line-height: 20px;
   }
 
   .tab-item {
