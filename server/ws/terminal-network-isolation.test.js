@@ -44,7 +44,7 @@ async function isolationEnabledSession() {
   const res = await createSession({ cwd: '/tmp', cols: 80, rows: 24, shell: true, sandbox: false });
   assert.equal(res.error, undefined, res.error);
   cleanupSessionIds.push(res.sessionId);
-  const broker = startNetworkBroker({ allowedHosts: [] }); // starts in 'enforce' with nothing allowed
+  const broker = await startNetworkBroker({ allowedHosts: [] }); // starts in 'enforce' with nothing allowed
   cleanupBrokers.push(broker);
   const session = getSession(res.sessionId);
   // Same shape buildSandboxSpawn's bwrap branch would have set -- see
@@ -52,6 +52,7 @@ async function isolationEnabledSession() {
   session.networkIsolateArmed = true;
   session.networkBrokerPort = broker.port;
   session.networkBrokerToken = broker.token;
+  session.networkBrokerAdminToken = broker.adminToken;
   session.networkIsolateMode = 'enforce';
   return { sessionId: res.sessionId, session, broker };
 }

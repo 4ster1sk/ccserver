@@ -78,6 +78,40 @@ const SESSION_EXITED_TIMEOUT_MS = resolveExitedTimeoutMs();
 
 const sessions = new Map();
 
+// Persistent sandbox HOME paths currently being prepared by createSession().
+// buildSandboxSpawn became async when the network broker startup handshake was
+// moved to a pipe, so a launch is now observable between the existing
+// live-session conflict check and sessions.set(). Track that interval here:
+// destructive fresh launches must not race another launch, and the settings
+// deletion guard must treat a HOME being mounted/prepared as in use too.
+export class SandboxHomeLaunchReservations {
+  constructor() {
+    this.counts = new Map();
+  }
+
+  reserve(homePath, { fresh = false, liveSessions = [] } = {}) {
+    if (fresh && (
+      sandboxHomeConflict(homePath, liveSessions)
+      || (this.counts.get(homePath) || 0) > 0
+    )) return false;
+    this.counts.set(homePath, (this.counts.get(homePath) || 0) + 1);
+    return true;
+  }
+
+  release(homePath) {
+    if (!homePath) return;
+    const next = (this.counts.get(homePath) || 0) - 1;
+    if (next > 0) this.counts.set(homePath, next);
+    else this.counts.delete(homePath);
+  }
+
+  count(homePath) {
+    return this.counts.get(homePath) || 0;
+  }
+}
+
+const sandboxHomeLaunchReservations = new SandboxHomeLaunchReservations();
+
 // Observers of session exits (pty terminated, for any reason: normal exit,
 // user teardown, group destroy) and of session creations. Used by
 // groupManager to stop MCP brokers of dying sessions and to re-bind roles
@@ -257,6 +291,7 @@ function buildSessionRecord(id, ptyProcess, meta) {
     // to kill/remove on teardown) mirror sandboxGitBrokerProc/Dir.
     networkBrokerPort: meta.networkBrokerPort ?? null,
     networkBrokerToken: meta.networkBrokerToken ?? null,
+    networkBrokerAdminToken: meta.networkBrokerAdminToken ?? null,
     networkIsolateArmed: !!meta.networkIsolateArmed,
     networkIsolateMode: meta.networkIsolateMode ?? null, // 'enforce' | 'open', mutated live by the running-session toggle
     sandboxNetworkBrokerProc: meta.sandboxNetworkBrokerProc ?? null,
@@ -915,6 +950,7 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
   // sandboxGitBrokerProc/Dir.
   let networkBrokerPort = null;
   let networkBrokerToken = null;
+  let networkBrokerAdminToken = null;
   let networkIsolateArmed = false;
   let networkIsolateMode = null;
   let sandboxNetworkBrokerProc = null;
@@ -927,15 +963,24 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
     // under a live bind mount would corrupt that session. The client disables
     // the "new" option in the same situation (GET /api/sandbox/status), so
     // this is the authoritative backstop.
-    if (cfg.persistentHome && !reuseSandboxHome) {
+    let reservedSandboxHomePath = null;
+    if (cfg.persistentHome) {
       const targetPath = persistentHomeDir(cwd);
-      if (sandboxHomeConflict(targetPath, [...sessions.values()])) {
+      // Every persistent-HOME launch reserves the path across the async
+      // sandbox build. Reuse launches may coexist, but a fresh launch (which
+      // wipes the old HOME) must reject both live sessions and launches that
+      // have not reached sessions.set() yet.
+      if (!sandboxHomeLaunchReservations.reserve(targetPath, {
+        fresh: !reuseSandboxHome,
+        liveSessions: sessions.values(),
+      })) {
         return {
           sessionId: id,
           session: null,
           error: 'このプロジェクトのサンドボックスを利用中のセッションがあるため、新規作成（前回環境の破棄）できません。先にタブを閉じてください。',
         };
       }
+      reservedSandboxHomePath = targetPath;
     }
     // Group file exchange: every sandboxed group member gets its group's
     // blob directory read-only at /ccserver-group-files.
@@ -947,7 +992,7 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
       } catch { resolvedGroupFilesDir = null; }
     }
     try {
-      const spawn = buildSandboxSpawn({ cwd, targetCommand: [command, ...args], app: sessionApp, sandboxOpts, mcpSocketPath, mcpToken, notifySocketPath, usageSocketPath, metaSocketPath, reviewerSocketPath, reuseSandboxHome, orchestratorClaudeMdSrc, gitCommonDir, groupFilesDir: resolvedGroupFilesDir, sandboxHomeCreatedBy });
+      const spawn = await buildSandboxSpawn({ cwd, targetCommand: [command, ...args], app: sessionApp, sandboxOpts, mcpSocketPath, mcpToken, notifySocketPath, usageSocketPath, metaSocketPath, reviewerSocketPath, reuseSandboxHome, orchestratorClaudeMdSrc, gitCommonDir, groupFilesDir: resolvedGroupFilesDir, sandboxHomeCreatedBy });
       command = spawn.command;
       args = spawn.args;
       sandboxDocker = !!spawn.docker;
@@ -960,6 +1005,7 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
       sandboxSeatbeltFiles = spawn.seatbeltFiles || null;
       networkBrokerPort = spawn.networkBrokerPort || null;
       networkBrokerToken = spawn.networkBrokerToken || null;
+      networkBrokerAdminToken = spawn.networkBrokerAdminToken || null;
       networkIsolateArmed = !!spawn.networkIsolateArmed;
       networkIsolateMode = spawn.networkIsolateMode || null;
       sandboxNetworkBrokerProc = spawn.sandboxNetworkBrokerProc || null;
@@ -967,6 +1013,11 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
       useSandbox = true;
     } catch (err) {
       return { sessionId: id, session: null, error: `Failed to build sandbox: ${err.message}` };
+    } finally {
+      // After the await there is no further yield before pty.spawn and
+      // buildSessionRecord's sessions.set(), so releasing here cannot expose
+      // a successfully-built HOME between reservation and registration.
+      sandboxHomeLaunchReservations.release(reservedSandboxHomePath);
     }
   } else if (forceSandbox) {
     const { reason, hint } = forceSandboxUnavailableReason();
@@ -1049,6 +1100,7 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
     sandboxSeatbeltFiles,
     networkBrokerPort,
     networkBrokerToken,
+    networkBrokerAdminToken,
     networkIsolateArmed,
     networkIsolateMode,
     sandboxNetworkBrokerProc,
@@ -1359,7 +1411,7 @@ export function sandboxHomeInUse(cwd) {
 // guard: a sandbox that is currently mounted by a live session must not be
 // deleted from under it.
 export function sandboxHomeInUsePath(homePath) {
-  let n = 0;
+  let n = sandboxHomeLaunchReservations.count(homePath);
   for (const s of sessions.values()) {
     if (sandboxHomeConflict(homePath, [s])) n++;
   }
@@ -1376,7 +1428,7 @@ export function sandboxHomeInUsePath(homePath) {
 // (see buildSessionRecord), so the HTTP call is made straight from this
 // process.
 export async function pushAllowlistToArmedSessions({ allowedHosts, deniedHosts }) {
-  const armed = [...sessions.values()].filter((s) => s.networkIsolateArmed && s.networkBrokerPort && s.networkBrokerToken);
+  const armed = [...sessions.values()].filter((s) => s.networkIsolateArmed && s.networkBrokerPort && s.networkBrokerAdminToken);
   // Parallel, not sequential: each session's push is an independent HTTP
   // round-trip to a different broker process, so awaiting them one at a time
   // in a for...of would block the Settings PUT handler (which awaits this)
@@ -1386,7 +1438,7 @@ export async function pushAllowlistToArmedSessions({ allowedHosts, deniedHosts }
   const results = await Promise.all(armed.map(async (s) => {
     try {
       return await setNetworkBrokerLists(
-        { port: s.networkBrokerPort, token: s.networkBrokerToken },
+        { port: s.networkBrokerPort, token: s.networkBrokerAdminToken },
         { allowedHosts, deniedHosts },
       );
     } catch {
