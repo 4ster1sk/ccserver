@@ -268,3 +268,40 @@ test('overlay時はグループ再オープンでも閉じる', async ({ page })
   await page.getByRole('button', { name: 'セッションサイドバーを開く' }).click();
   await expect(page.locator('.left-sidebar [data-section="opened"] .session-menu-item[data-tab-type="group"]', { hasText: 'stub-proj' })).toBeVisible({ timeout: 15_000 });
 });
+
+test('remote sessions of paired instances are listed, openable and terminable', async ({ page }) => {
+  const instanceId = 'inst-remote-1';
+  let sessions = [
+    { id: 'rs-1', cwd: '/home/peer/alpha', app: 'claude', sandbox: false },
+    { id: 'rs-2', cwd: '/home/peer/beta', app: 'codex', sandbox: true },
+  ];
+  const deleted = [];
+  await page.route('**/api/federation/instances', (route) => route.fulfill({
+    json: { instances: [{ id: instanceId, status: 'active', label: 'peerhost', fingerprint: 'aa:bb:cc:dd:ee' }] },
+  }));
+  await page.route(`**/api/federation/instances/${instanceId}/sessions`, (route) => route.fulfill({ json: { sessions } }));
+  await page.route(`**/api/federation/instances/${instanceId}/sessions/*`, (route) => {
+    const id = route.request().url().split('/').pop();
+    deleted.push(id);
+    sessions = sessions.filter((s) => s.id !== id);
+    return route.fulfill({ json: { ok: true } });
+  });
+  await gotoApp(page);
+
+  const remoteItems = leftSidebar(page).locator('[data-section="unopened-remote"] .session-menu-item');
+  await expect(remoteItems).toHaveCount(2);
+  await expect(remoteItems.first().locator('.session-menu-label')).toHaveText('alpha');
+  await expect(remoteItems.first().locator('.tab-remote-badge')).toHaveText('⇄ peerhost');
+
+  // 開くとリモートタブになり、リモート一覧から消えて上段に移る。
+  await remoteItems.first().locator('.session-menu-select').click();
+  await expect(remoteItems).toHaveCount(1);
+  await expect(openedItems(page)).toHaveCount(1);
+  await expect(openedItems(page).first().locator('.tab-remote-badge')).toHaveText('⇄ peerhost');
+
+  // ✕ は federation 経由で DELETE する。
+  page.once('dialog', (d) => d.accept());
+  await remoteItems.first().locator('.session-menu-close').click();
+  await expect.poll(() => deleted).toEqual(['rs-2']);
+  await expect(remoteItems).toHaveCount(0);
+});

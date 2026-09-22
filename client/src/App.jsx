@@ -18,6 +18,7 @@ import { useWidgetPrefs } from './hooks/useWidgetPrefs.js';
 import { useSessionSidebarPrefs } from './hooks/useSessionSidebarPrefs.js';
 import { NARROW_DRAWER_QUERY } from './hooks/viewportQuery.js';
 import { useNotifications } from './hooks/useNotifications.js';
+import { useRemoteSessions } from './hooks/useRemoteSessions.js';
 import { loadNavGuardMode, saveNavGuardMode, useNavGuard } from './hooks/useNavGuard.js';
 import { authFetch } from './auth.js';
 import { getTheme, loadThemeId, saveThemeId, applyThemeCss } from './themes.js';
@@ -692,6 +693,34 @@ export default function App() {
   }, [handleOpenGroup, sessionSidebarPrefs.mode, closeSessionSidebarIfOverlay]);
   // Lower section's X: terminate the server-side session (tab close keeps
   // the session alive, so this is the only destructive action here).
+  // リモート (ペアリング先) の未オープンセッション: 開く/終了は
+  // RemoteInstanceView の openSessionTab / destroySession と同じ経路。
+  const { remoteSessions, refreshRemoteSessions } = useRemoteSessions();
+  const handleOpenRemoteSession = useCallback(({ instance, session }) => {
+    if (sessionSidebarPrefs.mode !== 'sidebar') setSessionMenuOpen(false);
+    else closeSessionSidebarIfOverlay();
+    openRemoteTerminalTab(instance, session.cwd, {
+      shell: !!session.shell,
+      attachSessionId: session.id,
+      app: session.app || 'claude',
+      sandbox: !!session.sandbox,
+      sandboxOpts: session.sandboxOpts || null,
+    });
+  }, [openRemoteTerminalTab, sessionSidebarPrefs.mode, closeSessionSidebarIfOverlay]);
+  const handleTerminateRemoteSession = useCallback(async ({ instance, session }) => {
+    const host = instance.label || instance.fingerprint?.slice(0, 8) || instance.id;
+    if (!window.confirm(`リモートセッションを終了しますか?\n${host}: ${session.cwd || session.id}`)) return;
+    try {
+      const res = await authFetch(`/api/federation/instances/${encodeURIComponent(instance.id)}/sessions/${encodeURIComponent(session.id)}`, { method: 'DELETE' });
+      if (!res.ok && res.status !== 404) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.error || `HTTP ${res.status}`);
+      }
+    } catch (err) {
+      window.alert(`セッションを終了できませんでした: ${err.message}`);
+    }
+    refreshRemoteSessions();
+  }, [refreshRemoteSessions]);
   const handleTerminateUnopenedSession = useCallback(async (session) => {
     const label = session.cwd || session.id;
     if (!window.confirm(`セッションを終了しますか?\n${label}`)) return;
@@ -798,6 +827,12 @@ export default function App() {
     if (t.attachSessionId) openedSessionIds.add(t.attachSessionId);
   }
   const unopenedSessions = serverSessions.filter((s) => !openedSessionIds.has(s.id));
+  // リモートはインスタンス単位でIDを区別する (ローカルのIDと混同しない)。
+  const openedRemoteKeys = new Set();
+  for (const t of tabs) {
+    if (t.remote && t.attachSessionId) openedRemoteKeys.add(`${t.remote.instanceId}:${t.attachSessionId}`);
+  }
+  const unopenedRemoteSessions = remoteSessions.filter(({ instance, session }) => !openedRemoteKeys.has(`${instance.id}:${session.id}`));
   // 開き済みグループタブのあるグループを除いた未オープン一覧。
   const openedGroupIds = new Set();
   for (const t of tabs) {
@@ -890,6 +925,9 @@ export default function App() {
             onCloseTab={handleCloseSessionTab}
             onOpenSession={handleOpenUnopenedSession}
             onTerminateSession={handleTerminateUnopenedSession}
+            unopenedRemoteSessions={unopenedRemoteSessions}
+            onOpenRemoteSession={handleOpenRemoteSession}
+            onTerminateRemoteSession={handleTerminateRemoteSession}
             onOpenGroup={handleOpenGroupFromList}
             customLabels={labelBySessionId}
             onRowContextMenu={handleRowContextMenu}
@@ -979,6 +1017,9 @@ export default function App() {
           onCloseTab={handleCloseSessionTab}
           onOpenSession={handleOpenUnopenedSession}
           onTerminateSession={handleTerminateUnopenedSession}
+          unopenedRemoteSessions={unopenedRemoteSessions}
+          onOpenRemoteSession={handleOpenRemoteSession}
+          onTerminateRemoteSession={handleTerminateRemoteSession}
           onOpenGroup={handleOpenGroupFromList}
           customLabels={labelBySessionId}
           onRowContextMenu={handleRowContextMenu}

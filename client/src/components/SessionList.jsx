@@ -30,6 +30,9 @@ export default function SessionList({
   onCloseTab,
   onOpenSession,
   onTerminateSession,
+  unopenedRemoteSessions = [],
+  onOpenRemoteSession,
+  onTerminateRemoteSession,
   customLabels,
   onRowContextMenu,
   unopenedGroups,
@@ -199,6 +202,54 @@ export default function SessionList({
               </button>
             </div>
           ))}
+        </div>
+      )}
+      {unopenedRemoteSessions.length > 0 && (
+        <div className="session-menu-section" data-section="unopened-remote">
+          <div className="session-menu-sep" />
+          <div className="session-menu-section-label">リモートのセッション</div>
+          {unopenedRemoteSessions.map((entry) => {
+            const { instance, session: s } = entry;
+            const host = instance.label || instance.fingerprint?.slice(0, 8) || instance.id;
+            const label = baseName(s.cwd) || s.id.slice(0, 8);
+            return (
+              <div
+                key={`${instance.id}:${s.id}`}
+                role="none"
+                className={`session-menu-item ${s.connected === false ? 'is-idle' : 'is-running'}`}
+                title={`${host}: ${s.cwd || s.id}`}
+              >
+                <button
+                  type="button"
+                  role="menuitem"
+                  className="session-menu-select"
+                  aria-label={`リモート (${host}): ${s.cwd || s.id}`}
+                  onClick={() => { onOpenRemoteSession(entry); }}
+                >
+                  <span className="session-menu-item-top">
+                    <TabIcon type="terminal" app={s.app} shell={!!s.shell} />
+                    <span className="session-menu-label">{label}</span>
+                    {s.sandbox
+                      ? <span className="session-badge sandbox">sandbox</span>
+                      : (!s.shell ? <span className="session-badge no-sandbox">no sandbox</span> : null)}
+                  </span>
+                  <span className="session-menu-status">
+                    <span className="tab-remote-badge" title={`接続先: ${host}`}>⇄ {host}</span>
+                    <span className="session-menu-state">{appLabel(s)}</span>
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  className="tab-close session-menu-close"
+                  title="リモートセッションを終了する"
+                  aria-label={`リモートセッションを終了する: ${host} ${s.cwd || s.id}`}
+                  onClick={() => { onTerminateRemoteSession(entry); }}
+                >
+                  &#10005;
+                </button>
+              </div>
+            );
+          })}
         </div>
       )}
       {(unopenedGroups || []).length > 0 && (
