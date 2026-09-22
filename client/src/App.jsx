@@ -719,25 +719,23 @@ export default function App() {
       sandboxOpts: session.sandboxOpts || null,
     });
   }, [openRemoteTerminalTab, sessionSidebarPrefs.mode, closeSessionSidebarIfOverlay]);
-  const handleTerminateRemoteSession = useCallback(async ({ instance, session }) => {
-    const host = instance.label || instance.fingerprint?.slice(0, 8) || instance.id;
-    if (!window.confirm(`リモートセッションを終了しますか?\n${host}: ${session.cwd || session.id}`)) return;
+  // 下段 (未オープン / リモート) の ✕: 開いているタブと同じ確認モーダル
+  // (closeConfirm kind 'unopened') を出し、「次回以降確認しない」の設定も共有する。
+  // target は { kind: 'local', session } | { kind: 'remote', instance, session }。
+  // 成功時 true、失敗 (alert 済み) や同一対象の二重実行時は false を返す。
+  const terminatingUnopenedRef = useRef(new Set());
+  const terminateUnopened = useCallback(async (target) => {
+    const { session } = target;
+    const remote = target.kind === 'remote';
+    const key = remote ? `${target.instance.id}:${session.id}` : session.id;
+    if (terminatingUnopenedRef.current.has(key)) return false;
+    terminatingUnopenedRef.current.add(key);
+    setIsTerminatingSession(true);
     try {
-      const res = await authFetch(`/api/federation/instances/${encodeURIComponent(instance.id)}/sessions/${encodeURIComponent(session.id)}`, { method: 'DELETE' });
-      if (!res.ok && res.status !== 404) {
-        const body = await res.json().catch(() => ({}));
-        throw new Error(body.error || `HTTP ${res.status}`);
-      }
-    } catch (err) {
-      window.alert(`セッションを終了できませんでした: ${err.message}`);
-    }
-    refreshRemoteSessions();
-  }, [refreshRemoteSessions]);
-  const handleTerminateUnopenedSession = useCallback(async (session) => {
-    const label = session.cwd || session.id;
-    if (!window.confirm(`セッションを終了しますか?\n${label}`)) return;
-    try {
-      const res = await authFetch(`/api/sessions/${session.id}`, { method: 'DELETE' });
+      const url = remote
+        ? `/api/federation/instances/${encodeURIComponent(target.instance.id)}/sessions/${encodeURIComponent(session.id)}`
+        : `/api/sessions/${session.id}`;
+      const res = await authFetch(url, { method: 'DELETE' });
       if (res.status === 404) {
         // Session already gone server-side: termination is effectively done.
       } else if (!res.ok) {
@@ -746,29 +744,56 @@ export default function App() {
       }
     } catch (err) {
       window.alert(`セッションを終了できませんでした: ${err.message}`);
+      return false;
+    } finally {
+      terminatingUnopenedRef.current.delete(key);
+      setIsTerminatingSession(terminatingTabIdsRef.current.size > 0 || terminatingUnopenedRef.current.size > 0);
     }
-    fetchServerSessions();
-  }, [fetchServerSessions]);
+    if (remote) {
+      dropRemoteSession(target.instance.id, session.id);
+      refreshRemoteSessions();
+    } else {
+      setServerSessions((prev) => prev.filter((s) => s.id !== session.id));
+      fetchServerSessions();
+    }
+    return true;
+  }, [dropRemoteSession, refreshRemoteSessions, fetchServerSessions]);
+  const requestTerminateUnopened = useCallback((target) => {
+    if (skipCloseConfirm) {
+      terminateUnopened(target);
+      return;
+    }
+    setDontAskAgain(false);
+    setCloseConfirm({ kind: 'unopened', target });
+  }, [skipCloseConfirm, terminateUnopened]);
+  const handleTerminateRemoteSession = useCallback(({ instance, session }) => {
+    requestTerminateUnopened({ kind: 'remote', instance, session });
+  }, [requestTerminateUnopened]);
+  const handleTerminateUnopenedSession = useCallback((session) => {
+    requestTerminateUnopened({ kind: 'local', session });
+  }, [requestTerminateUnopened]);
 
   // Close-confirm dialog's "セッションを終了": delegates the DELETE + tab
-  // close to terminateSessionById above, shown only for local terminal tabs
-  // with a known session id (canTerminateCloseConfirm below) -- group tabs
-  // already destroy their members via destroyGroupTab, and remote tabs
-  // belong to another instance (a local DELETE would 404 or hit the wrong
-  // session), so both keep the "閉じる" (detach) button instead.
+  // close to terminateSessionById above, shown only for terminal tabs with a
+  // known session id (canTerminateCloseConfirm below) -- group tabs already
+  // destroy their members via destroyGroupTab, so they keep the "閉じる"
+  // button instead. For kind 'unopened' (lower-section ✕) there is no tab:
+  // it delegates to terminateUnopened.
   // "次回以降確認しない" is persisted only after a successful termination
   // (terminateSessionById's return value): on failure the session is still
   // alive and the dialog stays open so the user can see the alert and retry
   // or cancel, rather than silently persisting a skip past a failure.
   const terminateSessionAndCloseTab = useCallback(async () => {
     if (!closeConfirm) return;
-    const ok = await terminateSessionById(closeConfirm.tabId);
+    const ok = closeConfirm.kind === 'unopened'
+      ? await terminateUnopened(closeConfirm.target)
+      : await terminateSessionById(closeConfirm.tabId);
     if (!ok) return;
     if (dontAskAgain) {
       setSkipCloseConfirmPersisted(true);
     }
     setCloseConfirm(null);
-  }, [closeConfirm, dontAskAgain, setSkipCloseConfirmPersisted, terminateSessionById]);
+  }, [closeConfirm, dontAskAgain, setSkipCloseConfirmPersisted, terminateSessionById, terminateUnopened]);
 
   // セッション表示名 (右クリック改名): サーバー保存の customLabel を
   // sessionId で引くマップ。一覧の上段・ターミナルヘッダーで使う。
@@ -857,7 +882,15 @@ export default function App() {
   // tabs with a known server-side session id only (group tabs destroy their
   // members on close already; remote tabs belong to another instance).
   const closeConfirmTab = closeConfirm ? tabs.find((t) => t.id === closeConfirm.tabId) : null;
-  const canTerminateCloseConfirm = canTerminateTab(closeConfirmTab);
+  const canTerminateCloseConfirm = closeConfirm?.kind === 'unopened' || canTerminateTab(closeConfirmTab);
+  let closeConfirmTargetText = null;
+  if (closeConfirm?.kind === 'unopened') {
+    const { target } = closeConfirm;
+    const where = target.session.cwd || target.session.id;
+    closeConfirmTargetText = target.kind === 'remote'
+      ? `⇄ ${target.instance.label || target.instance.fingerprint?.slice(0, 8) || target.instance.id}: ${where}`
+      : where;
+  }
   // Usage covers claude (Claude Code's /usage), codex (Codex's rate-limit
   // read) and opencode Go (the zen/go quota API); the UsageWidget (right
   // sidebar) itself has tabs to switch between them, so it is no longer tied
@@ -1226,12 +1259,13 @@ export default function App() {
       {closeConfirm && (
         <div className="resume-overlay" onClick={() => { if (!isTerminatingSession) setCloseConfirm(null); }}>
           <div className="resume-dialog" onClick={(e) => e.stopPropagation()}>
-            <h3>{closeConfirm.kind === 'group' ? 'グループを閉じますか?' : 'タブを閉じますか?'}</h3>
+            <h3>{closeConfirm.kind === 'group' ? 'グループを閉じますか?' : closeConfirm.kind === 'unopened' ? 'セッションを終了しますか?' : 'タブを閉じますか?'}</h3>
             <p>{closeConfirm.kind === 'group'
               ? 'グループの3つのセッション（ワーカー2つとオーケストレーター）を終了します。'
               : canTerminateCloseConfirm
                 ? 'セッションを終了します。終了後は再接続できません。'
                 : 'セッションは背後で動き続け、セッション一覧から再接続できます。'}</p>
+            {closeConfirmTargetText && <p className="close-confirm-target" title={closeConfirmTargetText}>{closeConfirmTargetText}</p>}
             <label className="close-confirm-checkbox">
               <input
                 type="checkbox"

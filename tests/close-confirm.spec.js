@@ -20,6 +20,16 @@ const sessionBadge = (page) => page.locator('.session-menu-count');
 const menuCloseButtons = (page) => sessionMenu(page).locator('[data-section="opened"] .session-menu-item .session-menu-close');
 const modal = (page) => page.locator('.resume-overlay', { hasText: 'タブを閉じますか?' });
 
+// 下段 (未オープン/リモート) の ✕ はアプリ内の確認モーダルを出す。
+// 「次回以降確認しない」設定済みならモーダルなしで即終了するため、
+// モーダル表示か件数減少のどちらかを待ち、出ていれば「セッションを終了」を押す。
+async function confirmTerminateIfPrompted(page, count, before) {
+  const btn = page.locator('.resume-overlay', { hasText: 'セッションを終了しますか?' })
+    .getByRole('button', { name: 'セッションを終了', exact: true });
+  await expect.poll(async () => (await btn.isVisible()) || (await count()) < before, { timeout: 10_000 }).toBe(true);
+  if (await btn.isVisible()) await btn.click();
+}
+
 async function badgeCount(page) {
   return sessionBadge(page).count();
 }
@@ -154,8 +164,8 @@ test('terminate button ends the session completely: tab closes and session is go
     const lowers = sessionMenu(page).locator('[data-section="unopened"] .session-menu-item');
     const before = await lowers.count();
     if (before === 0) break;
-    page.once('dialog', (d) => d.accept());
     await lowers.first().locator('.session-menu-close').click();
+    await confirmTerminateIfPrompted(page, () => lowers.count(), before);
     await expect.poll(async () => sessionMenu(page).locator('[data-section="unopened"] .session-menu-item').count(), { timeout: 10_000 }).toBeLessThan(before);
   }
   await page.keyboard.press('Escape').catch(() => {});

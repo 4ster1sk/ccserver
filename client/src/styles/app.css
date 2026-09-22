@@ -3501,6 +3501,15 @@ body {
   margin-right: auto;
 }
 
+.close-confirm-target {
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  font-size: 12px;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .close-confirm-checkbox {
   display: flex;
   align-items: center;
