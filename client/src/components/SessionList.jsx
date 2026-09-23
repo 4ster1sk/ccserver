@@ -85,7 +85,8 @@ export default function SessionList({
                     {!tab.shell && !tab.sandbox && <span className="session-badge no-sandbox">no sandbox</span>}
                     {tab.sandbox && <span className="session-badge sandbox">sandbox</span>}
                     {(() => {
-                      const badge = gpgVaultBadgeState(tab, vaultStatus?.data);
+                      // 一覧では Vault ありで起動したセッションにだけ鍵を出す。
+                      const badge = tab.gpgVaultActive ? gpgVaultBadgeState(tab, vaultStatus?.data) : null;
                       if (!badge) return null;
                       return <span className={`session-badge gpg-vault-${badge.state}`} title={badge.reason}>🔑</span>;
                     })()}
@@ -182,7 +183,7 @@ export default function SessionList({
                     ? <span className="session-badge sandbox">sandbox</span>
                     : (!s.shell ? <span className="session-badge no-sandbox">no sandbox</span> : null)}
                   {(() => {
-                    const badge = gpgVaultBadgeState(s, vaultStatus?.data);
+                    const badge = s.gpgVaultActive ? gpgVaultBadgeState(s, vaultStatus?.data) : null;
                     if (!badge) return null;
                     return <span className={`session-badge gpg-vault-${badge.state}`} title={badge.reason}>🔑</span>;
                   })()}
