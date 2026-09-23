@@ -82,14 +82,14 @@ export default function SessionList({
                   <span className="session-menu-item-top">
                     <TabIcon type={tab.type} app={tab.app} shell={tab.shell} />
                     <span className="session-menu-label">{displayLabel}</span>
-                    {!tab.shell && !tab.sandbox && <span className="session-badge no-sandbox">no sandbox</span>}
-                    {tab.sandbox && <span className="session-badge sandbox">sandbox</span>}
                     {(() => {
                       // 一覧では Vault ありで起動したセッションにだけ鍵を出す。
                       const badge = tab.gpgVaultActive ? gpgVaultBadgeState(tab, vaultStatus?.data) : null;
                       if (!badge) return null;
                       return <span className={`session-badge gpg-vault-${badge.state}`} title={badge.reason}>🔑</span>;
                     })()}
+                    {!tab.shell && !tab.sandbox && <span className="session-badge no-sandbox">no sandbox</span>}
+                    {tab.sandbox && <span className="session-badge sandbox">sandbox</span>}
                   </span>
                   <span className="session-menu-status">
                     {tab.remote && (
@@ -179,14 +179,14 @@ export default function SessionList({
                 <span className="session-menu-item-top">
                   <TabIcon type="terminal" app={s.app} shell={!!s.shell} />
                   <span className="session-menu-label">{s.customLabel || baseName(s.cwd) || s.id.slice(0, 8)}</span>
-                  {s.sandbox
-                    ? <span className="session-badge sandbox">sandbox</span>
-                    : (!s.shell ? <span className="session-badge no-sandbox">no sandbox</span> : null)}
                   {(() => {
                     const badge = s.gpgVaultActive ? gpgVaultBadgeState(s, vaultStatus?.data) : null;
                     if (!badge) return null;
                     return <span className={`session-badge gpg-vault-${badge.state}`} title={badge.reason}>🔑</span>;
                   })()}
+                  {s.sandbox
+                    ? <span className="session-badge sandbox">sandbox</span>
+                    : (!s.shell ? <span className="session-badge no-sandbox">no sandbox</span> : null)}
                 </span>
                 <span className="session-menu-status">
                   <span className="session-menu-state">{appLabel(s)}</span>
