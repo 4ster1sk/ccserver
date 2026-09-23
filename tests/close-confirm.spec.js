@@ -166,6 +166,8 @@ test('terminate button ends the session completely: tab closes and session is go
     if (before === 0) break;
     await lowers.first().locator('.session-menu-close').click();
     await confirmTerminateIfPrompted(page, () => lowers.count(), before);
+    // モーダルのクリックでポップアップが閉じるので開き直す。
+    if ((await sessionMenu(page).count()) === 0) await openMenu(page);
     await expect.poll(async () => sessionMenu(page).locator('[data-section="unopened"] .session-menu-item').count(), { timeout: 10_000 }).toBeLessThan(before);
   }
   await page.keyboard.press('Escape').catch(() => {});
