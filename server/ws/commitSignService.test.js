@@ -34,8 +34,8 @@ after(() => {
   rmSync(root, { recursive: true, force: true });
 });
 
-function payload({ email = KEY.nameEmail, time = NOW / 1000, tree = TREE } = {}) {
-  return Buffer.from(`tree ${tree}\nauthor ${KEY.nameReal} <${email}> ${time} +0000\ncommitter ${KEY.nameReal} <${email}> ${time} +0000\n\nsubject\n`).toString('base64');
+function payload({ email = KEY.nameEmail, time = NOW / 1000, tree = TREE, nameReal = KEY.nameReal } = {}) {
+  return Buffer.from(`tree ${tree}\nauthor ${nameReal} <${email}> ${time} +0000\ncommitter ${nameReal} <${email}> ${time} +0000\n\nsubject\n`).toString('base64');
 }
 
 function handler(over = {}, opts = {}) {
@@ -67,7 +67,7 @@ test('refusals carry a reason and never reach gpg', async () => {
   const { h, signed } = handler();
   const cases = [
     [{ payload: Buffer.from('arbitrary data').toString('base64'), dir: repo }, 'not-a-commit'],
-    [{ payload: payload({ email: 'someone@else.com' }), dir: repo }, 'identity-mismatch'],
+    [{ payload: payload({ email: 'someone@else.com', nameReal: 'Linus' }), dir: repo }, 'identity-mismatch'],
     [{ payload: payload({ time: NOW / 1000 - 86400 }), dir: repo }, 'stale-timestamp'],
     [{ payload: payload(), dir: outside }, 'outside-project'],
     [{ payload: payload(), dir: join(repo, 'escape') }, 'outside-project'],
@@ -182,7 +182,7 @@ test('approval mode "sign": each commit asks after the checks; only "approved" s
   assert.equal(signed.length, 1, 'a rejected commit never reaches gpg');
 
   // A commit the checks refuse never reaches the banner.
-  assert.equal((await h({ payload: payload({ email: 'x@y.z' }), dir: repo })).reason, 'identity-mismatch');
+  assert.equal((await h({ payload: payload({ email: 'x@y.z', nameReal: 'Linus' }), dir: repo })).reason, 'identity-mismatch');
   assert.equal(asked.length, 2);
 });
 

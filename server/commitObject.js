@@ -159,7 +159,7 @@ const sameEmail = (a, b) => a.trim().toLowerCase() === b.trim().toLowerCase();
 export function checkCommitPolicy(commit, { identity, nowSec = Math.floor(Date.now() / 1000), skewSec = COMMITTER_TIME_SKEW_SEC }) {
   for (const role of ['author', 'committer']) {
     const who = commit[role];
-    if (!sameEmail(who.email, identity.email) || who.name !== identity.name) {
+    if (!sameEmail(who.email, identity.email)) {
       return {
         code: 'identity-mismatch',
         message: `${role} "${who.name} <${who.email}>" is not the signing identity "${identity.name} <${identity.email}>"`

@@ -102,14 +102,22 @@ test('refuses non-UTF-8 headers', () => {
   assert.equal(code(() => parseCommitPayload(bad)), 'not-a-commit');
 });
 
-test('policy: author and committer must be the signing identity', () => {
+test('policy: author and committer email must match the signing identity email', () => {
   assert.equal(checkCommitPolicy(parseCommitPayload(commit()), { identity: ME, nowSec: NOW }), null);
   // Email compare is case-insensitive.
   assert.equal(checkCommitPolicy(parseCommitPayload(commit()), { identity: { ...ME, email: 'ADA@example.com' }, nowSec: NOW }), null);
+
+  // Email matches, name differs -> OK.
+  const otherName = commit({ headers: [`tree ${TREE}`, `author ${ME.name} <${ME.email}> ${NOW} +0000`, `committer Ada <${ME.email}> ${NOW} +0000`] });
+  assert.equal(checkCommitPolicy(parseCommitPayload(otherName), { identity: ME, nowSec: NOW }), null);
+
+  // Email differs -> mismatch (name does not matter).
+  const otherEmail = commit({ headers: [`tree ${TREE}`, `author ${ME.name} <${ME.email}> ${NOW} +0000`, `committer ${ME.name} <other@example.com> ${NOW} +0000`] });
+  assert.equal(checkCommitPolicy(parseCommitPayload(otherEmail), { identity: ME, nowSec: NOW }).code, 'identity-mismatch');
+
+  // Both name and email differ -> mismatch.
   const otherAuthor = commit({ headers: [`tree ${TREE}`, `author Linus <l@x> ${NOW - 86400 * 365} +0000`, `committer ${ME.name} <${ME.email}> ${NOW} +0000`] });
   assert.equal(checkCommitPolicy(parseCommitPayload(otherAuthor), { identity: ME, nowSec: NOW }).code, 'identity-mismatch');
-  const otherCommitter = commit({ headers: [`tree ${TREE}`, `author ${ME.name} <${ME.email}> ${NOW} +0000`, `committer Ada <${ME.email}> ${NOW} +0000`] });
-  assert.equal(checkCommitPolicy(parseCommitPayload(otherCommitter), { identity: ME, nowSec: NOW }).code, 'identity-mismatch');
 });
 
 test('policy: the committer date must be close to now', () => {
