@@ -4,6 +4,7 @@ qemu バックエンドの「常駐VMで共有する」(VM テンプレートの
 テンプレート無しなら `sandbox.config.json` の `qemu.persistent`) の仕組みと、
 後回しにした作業の設計メモ。実装は `server/ws/qemuVmPool.js` /
 `server/ws/qemuShares.js` / `server/ws/qemuQmp.js` / `server/ws/qemuAgents.js`。
+qemu バックエンドと netbroker の全体は [qemu-sandbox.md](qemu-sandbox.md)。
 
 ## いまの仕組み
 
