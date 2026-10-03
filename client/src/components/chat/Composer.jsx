@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { DEFAULT_VARIANT, findModel, modelVariants } from './useOpencodeChat.js';
 import { ACCEPT, addAttachments, formatBytes } from './attachments.js';
+import ContextGauge from './ContextGauge.jsx';
 
 const DRAFT_PREFIX = 'ccserver-chat-draft:';
 const MAX_HEIGHT_PX = 220;
@@ -22,10 +23,10 @@ function modelKey(ref) {
 
 // The input area: a growing textarea, send / stop, `/command` completion,
 // attachments (the 📎 button, pasting, dropping files) and the agent /
-// model / effort pickers. Enter sends on a desktop keyboard
+// model / effort pickers, and the context usage gauge. Enter sends on a desktop keyboard
 // (Shift+Enter for a newline); on touch devices Enter is a newline and the
 // button sends, since a soft keyboard has no Shift+Enter.
-export default function Composer({ draftKey, disabled, busy, onSend, onCommand, onInterrupt, commands, agents, models, agent, model, onAgent, onModel, onEffort }) {
+export default function Composer({ draftKey, disabled, busy, messages, onSend, onCommand, onInterrupt, commands, agents, models, agent, model, onAgent, onModel, onEffort }) {
   const isTouch = useMemo(() => 'ontouchstart' in window, []);
   const [text, setText] = useState(() => {
     try { return sessionStorage.getItem(DRAFT_PREFIX + draftKey) || ''; } catch { return ''; }
@@ -225,6 +226,7 @@ export default function Composer({ draftKey, disabled, busy, onSend, onCommand, 
           </select>
         )}
         {busy && <span className="chat-busy-hint">実行中 — 送信するとキューに入ります</span>}
+        <ContextGauge messages={messages} models={models} model={model} />
       </div>
     </div>
   );

@@ -141,6 +141,7 @@ export default function ChatView({ app = 'opencode', cwd, sandbox, sandboxOpts, 
             draftKey={session.sessionId || cwd}
             disabled={!chat.loaded}
             busy={chat.busy}
+            messages={chat.messages}
             onSend={chat.send}
             onCommand={guard(chat.runCommand)}
             onInterrupt={guard(chat.interrupt)}
