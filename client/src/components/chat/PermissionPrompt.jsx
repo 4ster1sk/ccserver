@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import Markdown from './Markdown.jsx';
 
 // A pending permission request (Permission.Request): what the agent wants
 // to do, answered once / always / reject.
@@ -15,6 +16,21 @@ export function PermissionPrompt({ request, onReply }) {
       setBusy(false);
     }
   };
+  // Claude Code's ExitPlanMode (the adapter puts the plan in `plan`):
+  // approving leaves Plan mode, rejecting keeps planning.
+  if (typeof request.plan === 'string') {
+    return (
+      <div className="chat-prompt-card form" role="alertdialog" aria-label="プランの承認">
+        <div className="chat-prompt-title">📋 プランの承認</div>
+        <div className="chat-plan-body"><Markdown text={request.plan} /></div>
+        {error && <div className="chat-msg-error">{error}</div>}
+        <div className="chat-prompt-actions">
+          <button type="button" className="btn btn-primary" disabled={busy} onClick={() => reply('once')}>承認して実装</button>
+          <button type="button" className="btn btn-secondary" disabled={busy} onClick={() => reply('reject')}>計画を続ける</button>
+        </div>
+      </div>
+    );
+  }
   const resources = Array.isArray(request.resources) ? request.resources : [];
   return (
     <div className="chat-prompt-card permission" role="alertdialog" aria-label="許可が必要です">

@@ -1,6 +1,7 @@
 import { memo, useMemo, useState } from 'react';
 import { toolSummary, toolText } from './chatReducer.js';
 import { diffStats, lineDiff } from './lineDiff.js';
+import Markdown from './Markdown.jsx';
 
 const OUTPUT_PREVIEW_CHARS = 20_000;
 
@@ -44,8 +45,14 @@ function DiffView({ lines }) {
   );
 }
 
+// Claude Code's ExitPlanMode carries the plan as markdown.
+function planText(name, input) {
+  return name === 'ExitPlanMode' && typeof input?.plan === 'string' ? input.plan : null;
+}
+
 // One tool call: header (status, name, the input in one line), expandable
-// to the full input, output and -- for edit/write -- a diff.
+// to the full input, output and -- for edit/write -- a diff (for a plan,
+// the plan).
 function ToolCard({ part }) {
   const { name, state } = part;
   const status = state?.status || 'streaming';
@@ -54,7 +61,8 @@ function ToolCard({ part }) {
   const [open, setOpen] = useState(false);
   const showDiff = diff && (open || status === 'completed');
   const output = toolText(state?.content);
-  const summary = toolSummary(name, input);
+  const plan = planText(name, input);
+  const summary = plan !== null ? (plan.split('\n').find((l) => l.trim()) || '').replace(/^#+\s*/, '') : toolSummary(name, input);
   const stats = diff ? diffStats(diff) : null;
 
   return (
@@ -69,7 +77,8 @@ function ToolCard({ part }) {
       {showDiff && <DiffView lines={diff} />}
       {open && (
         <div className="chat-tool-body">
-          {input !== undefined && !diff && (
+          {plan !== null && <div className="chat-tool-plan"><Markdown text={plan} /></div>}
+          {input !== undefined && !diff && plan === null && (
             <pre className="chat-tool-input">{typeof input === 'string' ? input : JSON.stringify(input, null, 2)}</pre>
           )}
           {status === 'error' && (

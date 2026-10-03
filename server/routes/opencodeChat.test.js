@@ -299,6 +299,26 @@ test('claude chat: the bundled bridge serves the conversation through the same p
   assert.equal((await post(`permission/${perms.data[0].id}/reply`, { decision: 'once' })).status, 200);
   await waitFor(() => session.chat.waiting === 0 && session.chat.busy === false);
 
+  // Plan mode: Build / Plan are primary agents (the agent picker), `/plan`
+  // is a command, and approving the plan (ExitPlanMode) returns to Build.
+  const agents = (await (await api('agent')).json()).data;
+  assert.deepEqual(agents.filter((a) => a.mode === 'primary').map((a) => a.id), ['build', 'plan']);
+  assert.equal((await (await api('command')).json()).data[0].name, 'plan');
+  const agentNow = async () => (await (await api(`session/${ocId}`)).json()).data.agent;
+  assert.equal(await agentNow(), 'build');
+  assert.equal((await post('command', { name: 'plan', text: '' })).status, 200);
+  assert.equal(await agentNow(), 'plan');
+  assert.equal((await post('prompt', { text: 'plan' })).status, 200);
+  await waitFor(() => session.chat.waiting === 1);
+  const plan = (await (await api(`session/${ocId}/permission`)).json()).data[0];
+  assert.equal(plan.plan, '1. do it');
+  assert.equal((await post(`permission/${plan.id}/reply`, { decision: 'once' })).status, 200);
+  await waitFor(() => session.chat.waiting === 0 && session.chat.busy === false);
+  assert.equal(await agentNow(), 'build');
+  assert.equal((await post('agent', { agent: 'plan' })).status, 200);
+  assert.equal(await agentNow(), 'plan');
+  assert.equal((await post('agent', { agent: 'build' })).status, 200);
+
   // writeToSession (scheduled prompts / MCP send_input) goes through the API.
   assert.equal(sessionManager.writeToSession(sessionId, 'from the scheduler', { submit: true }), true);
   await messagesWhen((d) => d.some((m) => m.type === 'user' && m.text === 'from the scheduler'));

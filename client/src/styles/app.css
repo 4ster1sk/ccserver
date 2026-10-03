@@ -4350,6 +4350,8 @@ body {
 
 .chat-tool-input { color: var(--text-secondary); }
 
+.chat-tool-plan { max-height: 360px; overflow: auto; }
+
 .chat-tool-error {
   font-size: 12px;
   color: var(--error);
@@ -4457,6 +4459,15 @@ body {
 }
 
 .chat-prompt-hint { font-size: 12px; color: var(--text-muted); }
+
+.chat-plan-body {
+  max-height: 40vh;
+  overflow-y: auto;
+  padding: 4px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-primary);
+}
 
 .chat-prompt-actions {
   display: flex;
