@@ -55,6 +55,29 @@ test('bwrap: a chat launch runs the agent under the bridge, with node, the bridg
   });
 });
 
+test('bwrap: a Claude Code chat launch binds its own bridge and passes the bridge flags', async () => {
+  await withConfig({ docker: false, gitBroker: false, persistentHome: false, commitMessageGuard: { enabled: false } }, async (dir) => {
+    const cwd = mkdtempSync(join(tmpdir(), 'ccserver-chat-proj-'));
+    const chatDir = join(dir, 'chat');
+    try {
+      const spawn = await buildSandboxSpawn({
+        cwd, targetCommand: ['claude', '--model', 'sonnet'], app: 'claude', sandboxOpts: null,
+        chat: { hostDir: chatDir, bridgeScript: join(chatDir, 'bridge.cjs'), bridgeArgs: ['--resume-last'] },
+      });
+      const sep = spawn.args.indexOf('--');
+      const bwrapArgs = spawn.args.slice(0, sep);
+      const inner = spawn.args.slice(sep + 1);
+      assert.deepEqual(inner.slice(3, 10), ['/ccserver-sandbox-chat-bridge.cjs', '--sock', '/ccserver-sandbox-chat.d/oc.sock', '--password-file', '/ccserver-sandbox-chat.d/password', '--resume-last', '--']);
+      assert.deepEqual(inner.slice(-2), ['--model', 'sonnet']);
+      const ro = bindPairs(bwrapArgs, '--ro-bind');
+      assert.ok(ro.some(([src, dst]) => src === join(chatDir, 'bridge.cjs') && dst === '/ccserver-sandbox-chat-bridge.cjs'));
+      assert.ok(!ro.some(([src]) => src === CHAT_BRIDGE_SCRIPT));
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+});
+
 test('bwrap: a terminal launch is untouched by chat mode', async () => {
   await withConfig({ docker: false, gitBroker: false, persistentHome: false, commitMessageGuard: { enabled: false } }, async () => {
     const cwd = mkdtempSync(join(tmpdir(), 'ccserver-chat-proj-'));

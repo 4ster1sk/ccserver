@@ -8,7 +8,7 @@ const LABELS = {
   sandbox: 'サンドボックスを準備中…',
   vm_boot: 'VM 起動中…',
   vm_setup: 'VM セットアップ中…',
-  opencode: 'opencode を起動中…',
+  agent: (appName) => `${appName} を起動中…`,
   session: 'セッションを作成中…',
 };
 
@@ -28,7 +28,7 @@ function StageIcon({ state }) {
 // The "⟳ VM 起動中…" list shown until the conversation opens. `stages` is
 // null until the server's first chat_state arrives; `launchError` is a
 // launch refused before any stage ran.
-export default function StartupProgress({ stages, launchError, exited, onShowLog, logOpen, onRelaunch }) {
+export default function StartupProgress({ stages, appName = 'opencode', launchError, exited, onShowLog, logOpen, onRelaunch }) {
   const [now, setNow] = useState(Date.now());
   const running = !launchError && !exited && (!stages || stages.some((s) => s.state === 'running' || s.state === 'pending'));
   useEffect(() => {
@@ -48,7 +48,7 @@ export default function StartupProgress({ stages, launchError, exited, onShowLog
         {list.map((s) => (
           <li key={s.id} className={`chat-stage chat-stage--${s.state}`}>
             <StageIcon state={s.state} />
-            <span className="chat-stage-label">{LABELS[s.id] || s.id}</span>
+            <span className="chat-stage-label">{typeof LABELS[s.id] === 'function' ? LABELS[s.id](appName) : LABELS[s.id] || s.id}</span>
             <span className="chat-stage-time">{elapsed(s, now) || ''}</span>
           </li>
         ))}

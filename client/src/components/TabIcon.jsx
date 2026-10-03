@@ -2,7 +2,7 @@
 const shellIcon = <svg className="tab-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><path d="M3.5 5l4 3-4 3"/><path d="M8.5 12h4"/></svg>;
 const opencodeIcon = <svg className="tab-icon" viewBox="0 0 16 16" fill="currentColor"><path fillRule="evenodd" d="M4 3h8v10H4V3zm7 1H5v8h6V4z"/><path opacity="0.45" d="M6 7h4v4H6V7z"/></svg>;
 const claudeIcon = <svg className="tab-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"><path d="M8 2v12M3.2 5l9.6 6M12.8 5l-9.6 6"/></svg>;
-// opencode in chat mode (ui 'chat'): a speech bubble next to the app icon.
+// An app in chat mode (ui 'chat'): a speech bubble in place of the app icon.
 const chatIcon = <svg className="tab-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"><path d="M2.5 4A1.5 1.5 0 014 2.5h8A1.5 1.5 0 0113.5 4v5A1.5 1.5 0 0112 10.5H7l-3 2.5v-2.5A1.5 1.5 0 012.5 9z"/></svg>;
 const codexIcon = <svg className="tab-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"><path d="M3 4.5 8 2l5 2.5v7L8 14l-5-2.5z"/><path d="m3 4.5 5 2.7 5-2.7M8 7.2V14"/></svg>;
 
@@ -23,7 +23,7 @@ export default function TabIcon({ type, app, shell, ui }) {
     if (shell) icons.push(shellIcon);
     if (app === 'opencode') icons.push(ui === 'chat' ? chatIcon : opencodeIcon);
     if (app === 'codex') icons.push(codexIcon);
-    if (app === 'claude' && !shell) icons.push(claudeIcon);
+    if (app === 'claude' && !shell) icons.push(ui === 'chat' ? chatIcon : claudeIcon);
     return <>{icons}</>;
   }
   return null;

@@ -183,7 +183,7 @@ export async function dirsRoute(fastify, opts) {
     //
     // forceSandboxReason is for WORDING ONLY ("forceSandbox で強制" vs
     // "browseRoots により必須"); the UI must never branch policy on it.
-    return { home, browseRoots, browseRootsInvalid, initialBrowsePath, defaultApp, forceSandbox, forceSandboxReason: cfg.forceSandboxReason, hostname: resolvedHostname(), showUsage, availableApps: { ...installedApps(), opencodeGo: opencodeGoAvailable(cfg) }, opencodeChat: opencodeChatAvailable(), toolsAvailable: sandboxToolsAvailable(), hiddenApps, sandboxAvailable: backends.bwrap.ok || backends.qemu.ok, sandboxBackend: sandboxBackend(), sandboxBackends: backends };
+    return { home, browseRoots, browseRootsInvalid, initialBrowsePath, defaultApp, forceSandbox, forceSandboxReason: cfg.forceSandboxReason, hostname: resolvedHostname(), showUsage, availableApps: { ...installedApps(), opencodeGo: opencodeGoAvailable(cfg) }, opencodeChat: opencodeChatAvailable(), chatApps: { opencode: opencodeChatAvailable(), claude: !!installedApps().claude }, toolsAvailable: sandboxToolsAvailable(), hiddenApps, sandboxAvailable: backends.bwrap.ok || backends.qemu.ok, sandboxBackend: sandboxBackend(), sandboxBackends: backends };
   });
 
   fastify.get('/dirs', async (request, reply) => {

@@ -153,9 +153,10 @@ export default function App() {
     const label = labelOverride || (shell ? `$ ${dirName}` : dirName);
     setTabs((prev) => [
       ...prev,
-      // ui: 'chat' renders the session with ChatView (opencode chat mode)
-      // instead of xterm.js; everything else about the tab is the same.
-      { id, type: 'terminal', label, cwd: dirPath, claudeSessionId, shell, sessionId, attachSessionId, sandbox, sandboxOpts, app, model, resume, reuseSandboxHome, ui: !shell && app === 'opencode' && ui === 'chat' ? 'chat' : 'terminal', exited: false },
+      // ui: 'chat' renders the session with ChatView (opencode / Claude Code
+      // chat mode) instead of xterm.js; everything else about the tab is the
+      // same.
+      { id, type: 'terminal', label, cwd: dirPath, claudeSessionId, shell, sessionId, attachSessionId, sandbox, sandboxOpts, app, model, resume, reuseSandboxHome, ui: !shell && (app === 'opencode' || app === 'claude') && ui === 'chat' ? 'chat' : 'terminal', exited: false },
     ]);
     setActiveTabId(id);
     // A VM Terminal's cwd is the guest's, not a host directory to browse.
@@ -823,6 +824,7 @@ export default function App() {
               <Suspense fallback={null}>
                 {tab.ui === 'chat' ? (
                   <ChatView
+                    app={tab.app}
                     cwd={tab.cwd}
                     sandbox={tab.sandbox}
                     sandboxOpts={tab.sandboxOpts}

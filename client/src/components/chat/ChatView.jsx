@@ -9,11 +9,15 @@ import MessageList from './MessageList.jsx';
 import Composer from './Composer.jsx';
 import { FormPrompt, PermissionPrompt } from './PermissionPrompt.jsx';
 
-// opencode in chat mode: the ccserver session (launch, startup stages, log)
-// over the terminal WebSocket, the conversation over opencode's own API
-// through ccserver's proxy. See server/ws/opencodeChat.js.
-export default function ChatView({ cwd, sandbox, sandboxOpts, reuseSandboxHome = true, model = null, resume = false, customLabel = null, notify, visible, onSessionId, onSandboxResolved, onExited, attachSessionId, onFocusTab }) {
-  const session = useChatSessionSocket({ cwd, sandbox, sandboxOpts, reuseSandboxHome, model, resume, attachSessionId, onSessionId, onSandboxResolved, onExited });
+const APP_NAMES = { opencode: 'opencode', claude: 'Claude Code' };
+
+// An app in chat mode: the ccserver session (launch, startup stages, log)
+// over the terminal WebSocket, the conversation over opencode's v2 API
+// through ccserver's proxy -- opencode's own, or Claude Code's through the
+// claude-chat-adapter. See server/ws/opencodeChat.js.
+export default function ChatView({ app = 'opencode', cwd, sandbox, sandboxOpts, reuseSandboxHome = true, model = null, resume = false, customLabel = null, notify, visible, onSessionId, onSandboxResolved, onExited, attachSessionId, onFocusTab }) {
+  const appName = APP_NAMES[app] || app;
+  const session = useChatSessionSocket({ app, cwd, sandbox, sandboxOpts, reuseSandboxHome, model, resume, attachSessionId, onSessionId, onSandboxResolved, onExited });
   // The conversation stays on screen after opencode exits (read-only, with
   // a relaunch banner); only a live session takes input.
   const ready = !!session.chat?.ready;
@@ -40,11 +44,11 @@ export default function ChatView({ cwd, sandbox, sandboxOpts, reuseSandboxHome =
   const prevBusy = useRef(false);
   const notifyUser = useCallback((body, tag) => {
     if (visibleRef.current && document.visibilityState === 'visible') return;
-    const n = notifyRef.current?.('opencode', { body, icon: '/icon-192.png', tag });
+    const n = notifyRef.current?.(appName, { body, icon: '/icon-192.png', tag });
     if (n) {
       n.onclick = () => { window.focus(); onFocusTab?.(); n.close(); };
     }
-  }, [onFocusTab]);
+  }, [onFocusTab, appName]);
   useEffect(() => {
     if (prevBusy.current && !chat.busy) notifyUser(`応答が完了しました — ${displayPath(cwd, homeDir)}`, `chat-done-${cwd}`);
     prevBusy.current = chat.busy;
@@ -69,7 +73,7 @@ export default function ChatView({ cwd, sandbox, sandboxOpts, reuseSandboxHome =
     <div className="chat-view">
       <div className={`terminal-header${!effectiveSandbox ? ' no-sandbox' : ''}`}>
         <span className="terminal-title" title={cwd}>
-          {effectiveSandbox ? '🔒 ' : '⚠️ '}💬 {customLabel ? `${customLabel} — ` : ''}opencode{title ? ` · ${title}` : ''} &mdash; {displayPath(cwd, homeDir)}
+          {effectiveSandbox ? '🔒 ' : '⚠️ '}💬 {customLabel ? `${customLabel} — ` : ''}{appName}{title ? ` · ${title}` : ''} &mdash; {displayPath(cwd, homeDir)}
         </span>
         <div className="header-actions">
           {status && (
@@ -82,7 +86,7 @@ export default function ChatView({ cwd, sandbox, sandboxOpts, reuseSandboxHome =
             type="button"
             className={`btn chat-header-btn${logOpen ? ' active' : ''}`}
             onClick={() => setLogOpen((v) => !v)}
-            title="起動ログ（opencode serve / ブリッジの出力）"
+            title={`起動ログ（${appName} / ブリッジの出力）`}
           >
             ログ
           </button>
@@ -101,6 +105,7 @@ export default function ChatView({ cwd, sandbox, sandboxOpts, reuseSandboxHome =
           <div className="chat-startup-wrap">
             <StartupProgress
               stages={session.launching ? null : session.chat?.stages || null}
+              appName={appName}
               launchError={session.error}
               exited={session.exited}
               logOpen={logOpen}
@@ -148,7 +153,7 @@ export default function ChatView({ cwd, sandbox, sandboxOpts, reuseSandboxHome =
       )}
       {ready && session.exited && (
         <div className="chat-banner chat-banner--error">
-          opencode が終了しました (code {session.exited.exitCode})
+          {appName} が終了しました (code {session.exited.exitCode})
           <button type="button" className="btn chat-link-btn" onClick={session.relaunch}>再起動して続きから</button>
         </div>
       )}

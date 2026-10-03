@@ -23,7 +23,7 @@
 // (SIGHUP) takes serve with it.
 //
 // Progress for the chat view's startup list goes out as the stage markers
-// described in chatStages.js (stage "opencode").
+// described in chatStages.js (stage "agent").
 
 const { spawn } = require('node:child_process');
 const fs = require('node:fs');
@@ -79,7 +79,7 @@ function shutdown(code) {
 }
 
 function fail(message) {
-  process.stdout.write(stageMarker('opencode', 'error', message));
+  process.stdout.write(stageMarker('agent', 'error', message));
   log(message);
   shutdown(1);
 }
@@ -104,7 +104,7 @@ function listen(port) {
     process.umask(prevMask);
     try { fs.chmodSync(sockPath, 0o600); } catch { /* best effort */ }
     log(`opencode serve is up on 127.0.0.1:${port}, relayed at ${sockPath}`);
-    process.stdout.write(stageMarker('opencode', 'done'));
+    process.stdout.write(stageMarker('agent', 'done'));
   });
 }
 
@@ -127,7 +127,7 @@ function main() {
   // backend just keeps it).
   try { fs.unlinkSync(opts.passwordFile); } catch { /* read-only */ }
 
-  process.stdout.write(stageMarker('opencode', 'running'));
+  process.stdout.write(stageMarker('agent', 'running'));
   startServe(opts.command, password, 1);
 }
 

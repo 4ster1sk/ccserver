@@ -108,10 +108,13 @@ const SANDBOX_REVIEWER_SOCK_PATH = '/ccserver-sandbox-reviewer.d/sock';
 const SANDBOX_MCP_BRIDGE_PATH = '/ccserver-sandbox-mcp-bridge';
 const MCP_BRIDGE_SCRIPT = join(__dirname, 'sandbox-mcp-wrapper.cjs');
 
-// opencode chat mode (see opencode-chat-bridge.cjs): the bridge script, and
-// a per-session host dir holding the server password file and the relay
-// socket the bridge creates. A directory bind (like the MCP sockets above),
-// so the socket the bridge creates inside is the host's file too.
+// Chat mode (see opencode-chat-bridge.cjs / claude-chat-bridge.cjs): the
+// app's bridge script, and a per-session host dir holding the server
+// password file and the relay socket the bridge creates. A directory bind
+// (like the MCP sockets above), so the socket the bridge creates inside is
+// the host's file too. CHAT_BRIDGE_SCRIPT is opencode's; a Claude Code
+// session brings its own bundled bridge (`chat.bridgeScript`, see
+// opencodeChat.js's prepareChatDir).
 export const CHAT_BRIDGE_SCRIPT = join(__dirname, 'opencode-chat-bridge.cjs');
 const SANDBOX_CHAT_BRIDGE_PATH = '/ccserver-sandbox-chat-bridge.cjs';
 const SANDBOX_CHAT_DIR = '/ccserver-sandbox-chat.d';
@@ -120,9 +123,14 @@ export const CHAT_PASSWORD_NAME = 'password';
 
 // The bridge invocation wrapped around the agent command (`agentArgv`) for
 // a chat launch: `node`, the bridge script and the socket/password paths as
-// the bridge itself sees them.
-export function chatBridgeArgv({ node, script, sock, passwordFile }, agentArgv) {
-  return [node, script, '--sock', sock, '--password-file', passwordFile, '--', ...agentArgv];
+// the bridge itself sees them, plus the bridge's own flags (`bridgeArgs`,
+// e.g. Claude Code's --resume-last).
+export function chatBridgeArgv({ node, script, sock, passwordFile, bridgeArgs = [] }, agentArgv) {
+  return [node, script, '--sock', sock, '--password-file', passwordFile, ...bridgeArgs, '--', ...agentArgv];
+}
+
+function chatBridgeOf(chat) {
+  return chat?.bridgeScript || CHAT_BRIDGE_SCRIPT;
 }
 
 // Fixed in-sandbox path for the tool-provisioning script (see resolveTools /
@@ -1612,11 +1620,11 @@ function buildBwrapArgs({ cwd, docker, usesRootlesskit = docker, gpg, gpgVault =
     args.push('--ro-bind', MCP_BRIDGE_SCRIPT, SANDBOX_MCP_BRIDGE_PATH);
   }
 
-  // opencode chat mode: the bridge (run by SANDBOX_NODE_PATH, bound below)
-  // and its per-session dir, writable so the bridge can create the relay
-  // socket and remove the password file once read.
+  // Chat mode: the bridge (run by SANDBOX_NODE_PATH, bound below) and its
+  // per-session dir, writable so the bridge can create the relay socket and
+  // remove the password file once read.
   if (chat) {
-    args.push('--ro-bind', CHAT_BRIDGE_SCRIPT, SANDBOX_CHAT_BRIDGE_PATH);
+    args.push('--ro-bind', chatBridgeOf(chat), SANDBOX_CHAT_BRIDGE_PATH);
     args.push('--bind', chat.hostDir, SANDBOX_CHAT_DIR);
   }
 
@@ -2382,7 +2390,7 @@ async function buildQemuSpawn({ cwd, targetCommand, app, homeDir, netCfg, extraE
       gpgVault: gpgVaultInfo ? { ...gpgVaultInfo, sockets: gpgVaultRelay.getRelaySocketPaths() } : null,
       sshAgentSock,
       mcp: { notify: notifySocketPath, usage: usageSocketPath, reviewer: reviewerSocketPath },
-      chat: chat ? { bridge: CHAT_BRIDGE_SCRIPT, passwordFile: join(chat.hostDir, CHAT_PASSWORD_NAME) } : null,
+      chat: chat ? { bridge: chatBridgeOf(chat), passwordFile: join(chat.hostDir, CHAT_PASSWORD_NAME) } : null,
     });
     // The per-session Go broker (ccserver-netbroker) runs the VM's entire network
     // (QEMU's NIC is attached to it). It always starts 'open'; the
@@ -2408,6 +2416,7 @@ async function buildQemuSpawn({ cwd, targetCommand, app, homeDir, netCfg, extraE
         script: GUEST_CHAT_BRIDGE,
         sock: GUEST_CHAT_SOCK,
         passwordFile: GUEST_CHAT_PASSWORD,
+        bridgeArgs: chat.bridgeArgs,
       }, agentLaunch.argv) : agentLaunch.argv,
       fallbackArgv: agent || APP_IDS.includes(targetCommand[0]) ? null : ['bash', '-l', '-i'],
       env: guestEnv,
@@ -2463,7 +2472,7 @@ async function buildQemuSpawn({ cwd, targetCommand, app, homeDir, netCfg, extraE
 // started by the pool with this launch's policy, which is part of the pool
 // key: a launch only ever joins a VM booted with exactly its own policy.
 //
-// chat (opencode chat mode): the bridge and password go to the VM in a
+// chat (chat mode): the bridge and password go to the VM in a
 // read-only share of their own (chat.hostDir/vm, removed with the chat dir)
 // that the session's guest bwrap binds at GUEST_RT_DIR, where a per-session
 // VM has them; the pool forwards the relay socket (qemuVmPool.js attach).
@@ -2489,7 +2498,7 @@ async function buildPooledQemuSpawn({ cwd, targetCommand, homeDir, netCfg, gpgVa
   if (chat) {
     chatFilesDir = join(chat.hostDir, 'vm');
     mkdirSync(chatFilesDir, { recursive: true, mode: 0o700 });
-    copyFileSync(CHAT_BRIDGE_SCRIPT, join(chatFilesDir, GUEST_CHAT_BRIDGE_NAME));
+    copyFileSync(chatBridgeOf(chat), join(chatFilesDir, GUEST_CHAT_BRIDGE_NAME));
     chmodSync(join(chatFilesDir, GUEST_CHAT_BRIDGE_NAME), 0o755);
     copyFileSync(join(chat.hostDir, CHAT_PASSWORD_NAME), join(chatFilesDir, GUEST_CHAT_PASSWORD_NAME));
     chmodSync(join(chatFilesDir, GUEST_CHAT_PASSWORD_NAME), 0o600);
@@ -2523,6 +2532,7 @@ async function buildPooledQemuSpawn({ cwd, targetCommand, homeDir, netCfg, gpgVa
         script: GUEST_CHAT_BRIDGE,
         sock: GUEST_CHAT_SOCK,
         passwordFile: GUEST_CHAT_PASSWORD,
+        bridgeArgs: chat.bridgeArgs,
       }, agentLaunch.argv) : agentLaunch.argv,
       fallbackArgv: agent || APP_IDS.includes(targetCommand[0]) ? null : ['bash', '-l', '-i'],
       env: guestEnv,
@@ -2549,8 +2559,9 @@ async function buildPooledQemuSpawn({ cwd, targetCommand, homeDir, netCfg, gpgVa
   };
 }
 
-// chat: { hostDir } for an opencode chat launch (see CHAT_BRIDGE_SCRIPT):
-// targetCommand is then `opencode serve ...`, run under the chat bridge.
+// chat: { hostDir, bridgeScript?, bridgeArgs? } for a chat launch (see
+// CHAT_BRIDGE_SCRIPT): targetCommand is then the agent in its chat form
+// (`opencode serve ...` / `claude ...`), run under the app's chat bridge.
 export async function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, notifySocketPath = null, usageSocketPath = null, reviewerSocketPath = null, reuseSandboxHome = true, sandboxHomeCreatedBy = null, isReviewJob = false, chat = null }, deps = {}) {
   const { dockerSandboxAvailable: dockerSandboxAvailableFn = dockerSandboxAvailable } = deps || {};
   // Normalize the app id up front: a nullish `app` resolves to 'claude' in
@@ -2755,6 +2766,7 @@ export async function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, 
       script: SANDBOX_CHAT_BRIDGE_PATH,
       sock: `${SANDBOX_CHAT_DIR}/${CHAT_SOCK_NAME}`,
       passwordFile: `${SANDBOX_CHAT_DIR}/${CHAT_PASSWORD_NAME}`,
+      bridgeArgs: chat.bridgeArgs,
     }, agentCmd) : agentCmd)];
   } catch (err) {
     if (gitBroker) { try { gitBroker.proc.kill('SIGTERM'); } catch { /* already dead */ } }

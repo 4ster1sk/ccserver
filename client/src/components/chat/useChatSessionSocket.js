@@ -12,7 +12,7 @@ const MAX_LOG_CHARS = 200_000;
 // rejoins, SESSION_NOT_FOUND re-launches (resuming the last conversation of
 // the directory), and the pty output becomes the log. The conversation
 // itself does not travel here -- see useOpencodeChat.
-export function useChatSessionSocket({ cwd, sandbox, sandboxOpts, reuseSandboxHome, model, resume, attachSessionId, onSessionId, onSandboxResolved, onExited }) {
+export function useChatSessionSocket({ app = 'opencode', cwd, sandbox, sandboxOpts, reuseSandboxHome, model, resume, attachSessionId, onSessionId, onSandboxResolved, onExited }) {
   const [sessionId, setSessionId] = useState(attachSessionId || null);
   const [chat, setChat] = useState(null); // server's publicChatState
   const [log, setLog] = useState('');
@@ -24,7 +24,7 @@ export function useChatSessionSocket({ cwd, sandbox, sandboxOpts, reuseSandboxHo
 
   const cbRef = useRef({ onSessionId, onSandboxResolved, onExited });
   cbRef.current = { onSessionId, onSandboxResolved, onExited };
-  const launchRef = useRef({ cwd, sandbox, sandboxOpts, reuseSandboxHome, model, resume });
+  const launchRef = useRef({ app, cwd, sandbox, sandboxOpts, reuseSandboxHome, model, resume });
   const reconnectNowRef = useRef(() => {});
   const relaunchRef = useRef(() => {});
 
@@ -47,7 +47,7 @@ export function useChatSessionSocket({ cwd, sandbox, sandboxOpts, reuseSandboxHo
         type: 'init', cwd: l.cwd, cols: 120, rows: 40, shell: false,
         sandbox: !!l.sandbox, sandboxOpts: l.sandboxOpts || null,
         reuseSandboxHome: l.reuseSandboxHome !== false,
-        app: 'opencode', model: l.model || null, ui: 'chat',
+        app: l.app || 'opencode', model: l.model || null, ui: 'chat',
         ...(resumeLast ? { resume: true } : {}),
       };
     };

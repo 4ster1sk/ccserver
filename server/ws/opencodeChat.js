@@ -1,14 +1,18 @@
-// opencode chat mode, server side (see opencode-chat-bridge.cjs for the
-// sandbox side and routes/opencodeChat.js for the browser-facing proxy).
+// Chat mode, server side (see opencode-chat-bridge.cjs / claude-chat-bridge.cjs
+// for the sandbox side and routes/opencodeChat.js for the browser-facing
+// proxy). Both bridges serve opencode's v2 API -- `opencode serve` itself,
+// or Claude Code through the claude-chat-adapter package -- so everything
+// here is the same for either app.
 //
 // A chat session's record carries `chat`:
 //
-//   { dir, sock, password, stages, ocSessionId, ready, error, resumeLast, model }
+//   { dir, sock, password, bridgeScript, bridgeArgs, stages, ocSessionId, ready, error, resumeLast, model }
 //
 //   dir/sock:  the per-session host dir and the relay socket in it (bound
 //              into bwrap, or the host end of the VM ssh's -L forward)
-//   password:  opencode serve's Basic-auth password, minted per session.
+//   password:  the bridge's Basic-auth password, minted per session.
 //              Only ccserver's proxy ever sends it; the browser never sees it
+//   bridgeScript/bridgeArgs: the app's bridge (host path) and its own flags
 //   stages:    the startup list (chatStages.js)
 //   ready:     the opencode session exists and the proxy may forward
 //
@@ -19,8 +23,9 @@ import { randomBytes } from 'node:crypto';
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { applyStage, chatStageIds, failCurrentStage, initialChatStages, parseStageMarkers } from './chatStages.js';
-import { CHAT_PASSWORD_NAME, CHAT_SOCK_NAME } from './sandbox.js';
+import { CHAT_BRIDGE_SCRIPT, CHAT_PASSWORD_NAME, CHAT_SOCK_NAME } from './sandbox.js';
 import { ensureHostRuntimeDir } from './git-broker.js';
+import { claudeChatBridgeSource } from './claudeChat.js';
 
 const REQUEST_TIMEOUT_MS = 30_000;
 // How much of the previous pty chunk is kept so a stage marker split across
@@ -34,7 +39,13 @@ const MARKER_CARRY_CHARS = 512;
 // failing, so two sessions could end up binding the same truncated name.
 const MAX_SOCK_PATH_BYTES = 103;
 
-export function prepareChatDir(sessionId) {
+// The bridge file a Claude Code chat session runs, inside its chat dir.
+export const CLAUDE_BRIDGE_NAME = 'bridge.cjs';
+
+// opts: { app, resumeLast, resumeId } -- resuming is the bridge's job for
+// Claude Code (it picks the transcript and shows its history); opencode's
+// bridge takes none of it (initChatSession reopens the session over the API).
+export function prepareChatDir(sessionId, { app = 'opencode', resumeLast = false, resumeId = null } = {}) {
   const base = ensureHostRuntimeDir();
   // Short on purpose (see MAX_SOCK_PATH_BYTES): the uuid's first 16 hex
   // digits are plenty to tell live sessions apart.
@@ -46,7 +57,11 @@ export function prepareChatDir(sessionId) {
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   const password = randomBytes(32).toString('base64url');
   writeFileSync(join(dir, CHAT_PASSWORD_NAME), `${password}\n`, { mode: 0o600 });
-  return { dir, sock, password };
+  if (app !== 'claude') return { dir, sock, password, bridgeScript: CHAT_BRIDGE_SCRIPT, bridgeArgs: [] };
+  const bridgeScript = join(dir, CLAUDE_BRIDGE_NAME);
+  writeFileSync(bridgeScript, claudeChatBridgeSource(), { mode: 0o644 });
+  const bridgeArgs = resumeId ? ['--resume', resumeId] : resumeLast ? ['--resume-last'] : [];
+  return { dir, sock, password, bridgeScript, bridgeArgs };
 }
 
 export function removeChatDir(dir) {
@@ -54,12 +69,12 @@ export function removeChatDir(dir) {
   try { rmSync(dir, { recursive: true, force: true }); } catch { /* best effort */ }
 }
 
-export function createChatState({ dir, sock, password, sandboxed, backend, pooled, resumeLast, model }) {
+export function createChatState({ dir, sock, password, bridgeScript = null, bridgeArgs = [], app = 'opencode', sandboxed, backend, pooled, resumeLast, model }) {
   const stages = initialChatStages(chatStageIds({ sandboxed, backend, pooled }));
   // The sandbox (if any) is built by the time the record exists.
   if (sandboxed) applyStage(stages, 'sandbox', 'done');
   return {
-    dir, sock, password, stages,
+    dir, sock, password, bridgeScript, bridgeArgs, app, stages,
     ocSessionId: null, ready: false, error: null,
     resumeLast: !!resumeLast, model: model || null,
     markerCarry: '', initStarted: false,
@@ -70,6 +85,7 @@ export function createChatState({ dir, sock, password, sandboxed, backend, poole
 export function publicChatState(chat) {
   if (!chat) return null;
   return {
+    app: chat.app,
     stages: chat.stages.map((s) => ({ ...s })),
     ocSessionId: chat.ocSessionId,
     ready: chat.ready,
@@ -77,13 +93,13 @@ export function publicChatState(chat) {
   };
 }
 
-// Feeds one pty chunk. Returns { changed, opencodeUp } so the caller can
+// Feeds one pty chunk. Returns { changed, agentUp } so the caller can
 // broadcast and start the session init.
 export function feedChatOutput(chat, data) {
   const text = chat.markerCarry + data;
   const markers = parseStageMarkers(text);
   let changed = false;
-  let opencodeUp = false;
+  let agentUp = false;
   let consumed = 0;
   for (const m of markers) {
     consumed = m.end;
@@ -92,12 +108,12 @@ export function feedChatOutput(chat, data) {
       chat.error = m.message || `${m.id} failed`;
       changed = true;
     }
-    if (m.id === 'opencode' && m.state === 'done') opencodeUp = true;
+    if (m.id === 'agent' && m.state === 'done') agentUp = true;
   }
   // Everything up to the last marker is spent; only a possible partial
   // marker at the tail is carried into the next chunk.
   chat.markerCarry = text.slice(Math.max(consumed, text.length - MARKER_CARRY_CHARS));
-  return { changed, opencodeUp };
+  return { changed, agentUp };
 }
 
 export function failChat(chat, message) {

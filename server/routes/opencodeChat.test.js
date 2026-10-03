@@ -1,7 +1,9 @@
-// opencode chat mode end to end, minus the sandbox: a real createSession()
-// with ui 'chat' runs the real chat bridge around a fake `opencode`
-// (ws/testdata/fake-opencode.cjs, as ~/.opencode/bin/opencode), and the browser side
-// goes through the real proxy route.
+// Chat mode end to end, minus the sandbox: a real createSession() with ui
+// 'chat' runs the real chat bridge around a fake `opencode`
+// (ws/testdata/fake-opencode.cjs, as ~/.opencode/bin/opencode) or a fake
+// Claude Code (the claude-chat-adapter package's test/fake-claude.cjs, as
+// ~/.local/bin/claude), and the browser side goes through the real proxy
+// route.
 
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
@@ -10,6 +12,7 @@ import { chmodSync, existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createRequire } from 'node:module';
 
 // sandbox.js fixes its agent search path ($HOME/.opencode/bin among them) at
 // import time, so HOME is pointed at a scratch dir holding the fake BEFORE
@@ -20,6 +23,7 @@ let sessionManager;
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const FAKE = join(__dirname, '..', 'ws', 'testdata', 'fake-opencode.cjs');
+const FAKE_CLAUDE = createRequire(import.meta.url).resolve('claude-chat-adapter/test/fake-claude.cjs');
 
 let tmpRoot;
 let binDir;
@@ -52,9 +56,11 @@ before(async () => {
   binDir = join(tmpRoot, 'home', '.opencode', 'bin');
   mkdirSync(binDir, { recursive: true });
   setEnv('HOME', join(tmpRoot, 'home'));
-  // An installed claude, so its chat refusal is about chat mode.
+  // An installed codex, so its chat refusal is about chat mode; a fake
+  // Claude Code speaking stream-json.
   mkdirSync(join(tmpRoot, 'home', '.local', 'bin'), { recursive: true });
-  writeFileSync(join(tmpRoot, 'home', '.local', 'bin', 'claude'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+  writeFileSync(join(tmpRoot, 'home', '.local', 'bin', 'codex'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+  writeFileSync(join(tmpRoot, 'home', '.local', 'bin', 'claude'), `#!/bin/sh\nexec "${process.execPath}" "${FAKE_CLAUDE}" "$@"\n`, { mode: 0o755 });
   const wrapper = join(binDir, 'opencode');
   writeFileSync(wrapper, `#!/bin/sh\nexec "${process.execPath}" "${FAKE}" "$@"\n`);
   chmodSync(wrapper, 0o755);
@@ -105,16 +111,16 @@ test('isAllowedChatRequest: the chat surface only', () => {
 
 test('a chat launch is refused for apps without a chat mode', async () => {
   const res = await sessionManager.createSession({
-    cwd: tmpRoot, cols: 80, rows: 24, shell: false, sandbox: false, app: 'claude', ui: 'chat',
+    cwd: tmpRoot, cols: 80, rows: 24, shell: false, sandbox: false, app: 'codex', ui: 'chat',
   });
   assert.equal(res.session, null);
-  assert.match(res.error, /chat mode/);
+  assert.match(res.error, /chat mode is not available for codex/);
 });
 
 test('chat session: stages, ready, proxy, prompt and event stream', async () => {
   const { sessionId, session } = await startChat();
   assert.equal(session.ui, 'chat');
-  assert.deepEqual(session.chat.stages.map((s) => s.id), ['opencode', 'session']);
+  assert.deepEqual(session.chat.stages.map((s) => s.id), ['agent', 'session']);
 
   // Not ready yet (or just became ready): the proxy answers 503 until then.
   await waitFor(() => session.chat.ready || session.chat.error);
@@ -193,7 +199,7 @@ test('destroying a chat session removes its socket dir and stops the bridge', as
   assert.equal((await fetch(`${baseUrl}/api/oc/${sessionId}/_meta`)).status, 404);
 });
 
-test('a bridge that cannot start opencode fails the opencode stage', async () => {
+test('a bridge that cannot start opencode fails the agent stage', async () => {
   const broken = join(binDir, 'opencode');
   writeFileSync(broken, `#!/bin/sh\nif [ "$1" = "--version" ]; then echo 2.0.22; exit 0; fi\necho "boom: no provider" >&2\nexit 3\n`);
   // A different mtime than the cached probe is not needed: the probe result
@@ -201,7 +207,7 @@ test('a bridge that cannot start opencode fails the opencode stage', async () =>
   try {
     const { session } = await startChat();
     await waitFor(() => session.chat.error);
-    const stage = session.chat.stages.find((s) => s.id === 'opencode');
+    const stage = session.chat.stages.find((s) => s.id === 'agent');
     assert.equal(stage.state, 'error');
     assert.match(stage.message, /exited \(3\): boom: no provider/);
     await waitFor(() => session.exited);
@@ -246,4 +252,59 @@ test('the chat monitor drives the session list activity: busy, waiting, idle', a
   assert.equal(sessionManager.activitySnapshot(session).level, 'busy');
   await waitFor(() => session.chat.busy === false);
   assert.equal(sessionManager.activitySnapshot(session).level, 'idle');
+});
+
+// Claude Code: the same proxy and monitor in front of claude-chat-bridge.cjs
+// (bundled with the claude-chat-adapter package into the chat dir).
+test('claude chat: the bundled bridge serves the conversation through the same proxy', async () => {
+  const { sessionId, session } = await startChat({ app: 'claude' });
+  assert.equal(session.chat.app, 'claude');
+  assert.deepEqual(session.chat.stages.map((s) => s.id), ['agent', 'session']);
+  await waitFor(() => session.chat.ready || session.chat.error);
+  assert.equal(session.chat.error, null);
+  const ocId = session.chat.ocSessionId;
+  assert.match(ocId, /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
+  assert.equal(existsSync(join(session.chat.dir, 'bridge.cjs')), true);
+  assert.equal(existsSync(join(session.chat.dir, 'password')), false, 'the bridge removes the password file once read');
+  const meta = await (await fetch(`${baseUrl}/api/oc/${sessionId}/_meta`)).json();
+  assert.equal(meta.app, 'claude');
+
+  const api = (path, opts) => fetch(`${baseUrl}/api/oc/${sessionId}/api/${path}`, opts);
+  const post = (path, body) => api(`session/${ocId}/${path}`, {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body || {}),
+  });
+  // The message list once it satisfies `pred` (turns finish asynchronously).
+  const messagesWhen = async (pred) => {
+    const deadline = Date.now() + 15000;
+    for (;;) {
+      const { data } = await (await api(`session/${ocId}/message`)).json();
+      if (pred(data)) return data;
+      if (Date.now() > deadline) throw new Error(`timed out; messages: ${JSON.stringify(data)}`);
+      await sleep(50);
+    }
+  };
+  assert.equal((await (await api('info')).json()).data.name, 'claude');
+  assert.deepEqual((await (await api('model')).json()).data.map((m) => m.id), ['default', 'sonnet']);
+
+  assert.equal((await post('prompt', { text: 'hello claude' })).status, 200);
+  const first = await messagesWhen((d) => d.length >= 2);
+  assert.deepEqual(first.map((m) => m.type), ['user', 'assistant']);
+  assert.equal(first[1].content[0].text, 'echo: hello claude');
+
+  // A permission is "waiting" for the session list, like opencode's.
+  assert.equal((await post('prompt', { text: 'tool' })).status, 200);
+  await waitFor(() => session.chat.waiting === 1);
+  const perms = await (await api(`session/${ocId}/permission`)).json();
+  assert.equal(perms.data[0].action, 'Bash');
+  assert.equal((await post(`permission/${perms.data[0].id}/reply`, { decision: 'once' })).status, 200);
+  await waitFor(() => session.chat.waiting === 0 && session.chat.busy === false);
+
+  // writeToSession (scheduled prompts / MCP send_input) goes through the API.
+  assert.equal(sessionManager.writeToSession(sessionId, 'from the scheduler', { submit: true }), true);
+  await messagesWhen((d) => d.some((m) => m.type === 'user' && m.text === 'from the scheduler'));
+
+  // On exit, its conversation id is what a later launch resumes.
+  session.ptyProcess?.kill?.('SIGTERM');
+  await waitFor(() => session.exited);
+  assert.equal(session.claudeSessionId, ocId);
 });

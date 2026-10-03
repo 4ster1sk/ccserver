@@ -1,8 +1,9 @@
-// Startup stages of an opencode chat session (the "⟳ VM 起動中…" list the
-// chat view shows before the conversation opens).
+// Startup stages of a chat session (the "⟳ VM 起動中…" list the chat view
+// shows before the conversation opens).
 //
 // The pty children that know when a stage begins/ends -- the qemu launcher
-// (vm_boot, vm_setup) and the chat bridge (opencode) -- report it in-band
+// (vm_boot, vm_setup) and the app's chat bridge (agent: opencode serve or
+// Claude Code up and answering) -- report it in-band
 // with an OSC sequence a terminal ignores:
 //
 //   ESC ] 777 ; ccserver-stage ; <stage> ; <state> [; <message>] BEL
@@ -10,8 +11,8 @@
 // sessionManager parses those out of the pty stream; the stages it owns
 // itself (sandbox, session) it sets directly. The writers are CommonJS
 // helpers that run outside this process, so they format the marker
-// themselves (see stageMarker in opencode-chat-bridge.cjs and
-// sandbox-qemu-launcher.cjs) -- keep the three in sync.
+// themselves (see stageMarker in opencode-chat-bridge.cjs,
+// claude-chat-bridge.cjs and sandbox-qemu-launcher.cjs) -- keep them in sync.
 
 export const STAGE_STATES = ['pending', 'running', 'done', 'error'];
 
@@ -24,7 +25,7 @@ export function chatStageIds({ sandboxed, backend, pooled = false }) {
   return [
     ...(sandboxed ? ['sandbox'] : []),
     ...(sandboxed && backend === 'qemu' && !pooled ? ['vm_boot', 'vm_setup'] : []),
-    'opencode',
+    'agent',
     'session',
   ];
 }

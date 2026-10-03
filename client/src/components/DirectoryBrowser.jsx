@@ -14,8 +14,19 @@ const LAST_DIR_KEY = 'ccserver-last-dir';
 const SANDBOX_KEY = 'ccserver-sandbox-default';
 const SANDBOX_OPTS_PREFIX = 'ccserver-sandbox-opts:';
 const APP_KEY = 'ccserver-app-default';
-// opencode only: render it as a terminal (TUI) or as a chat (opencode >= 2).
-const OPENCODE_UI_KEY = 'ccserver-opencode-ui';
+// The apps that can render as a chat instead of a terminal (TUI), and the
+// remembered choice per app (opencode's key predates the others).
+const CHAT_APPS = ['opencode', 'claude'];
+const uiKey = (app) => `ccserver-${app}-ui`;
+const loadUiChoices = () => Object.fromEntries(CHAT_APPS.map((app) => {
+  let v = null;
+  try { v = localStorage.getItem(uiKey(app)); } catch { /* ignore */ }
+  return [app, v === 'chat' ? 'chat' : 'terminal'];
+}));
+const CHAT_UNAVAILABLE_NOTE = {
+  opencode: 'チャット表示には opencode 2.0 以降が必要です',
+  claude: 'このサーバーではチャット表示を使えません',
+};
 // Every launchable app id, in the order pickers list them.
 const ALL_APPS = ['claude', 'opencode', 'codex'];
 // copy for the opt-in tool toggles the server host cannot
@@ -195,15 +206,16 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, initialPath, san
     return null;
   };
   const modelInputForApp = (app) => app === 'codex';
-  // Chat mode needs opencode >= 2 on the server (/api/dirs/home's
-  // opencodeChat; absent on an older server = unavailable).
-  const [opencodeChatAvailable, setOpencodeChatAvailable] = useState(false);
-  const [opencodeUi, setOpencodeUi] = useState(() => (localStorage.getItem(OPENCODE_UI_KEY) === 'chat' ? 'chat' : 'terminal'));
-  const chooseOpencodeUi = useCallback((val) => {
-    setOpencodeUi(val);
-    try { localStorage.setItem(OPENCODE_UI_KEY, val); } catch { /* ignore */ }
+  // Which apps the server can run as a chat (/api/dirs/home's chatApps:
+  // opencode >= 2, an installed Claude Code; absent on an older server =
+  // unavailable, except opencode's older opencodeChat flag).
+  const [chatAvailable, setChatAvailable] = useState({});
+  const [uiChoice, setUiChoice] = useState(loadUiChoices);
+  const chooseUi = useCallback((app, val) => {
+    setUiChoice((prev) => ({ ...prev, [app]: val }));
+    try { localStorage.setItem(uiKey(app), val); } catch { /* ignore */ }
   }, []);
-  const uiForApp = (app) => (app === 'opencode' && opencodeChatAvailable && opencodeUi === 'chat' ? 'chat' : 'terminal');
+  const uiForApp = (app) => (CHAT_APPS.includes(app) && chatAvailable[app] && uiChoice[app] === 'chat' ? 'chat' : 'terminal');
   const [openMenuOpen, setOpenMenuOpen] = useState(false);
   const [sandboxOpts, setSandboxOpts] = useState(() => loadSandboxOpts(currentPath, sandboxDefaults));
 
@@ -331,7 +343,9 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, initialPath, san
       // defaults are corrected
       // below. Missing field = older server: leave everything enabled.
       if (data.sandboxBackends) setSandboxBackends(data.sandboxBackends);
-      setOpencodeChatAvailable(data.opencodeChat === true);
+      setChatAvailable(data.chatApps && typeof data.chatApps === 'object'
+        ? Object.fromEntries(CHAT_APPS.map((app) => [app, data.chatApps[app] === true]))
+        : { opencode: data.opencodeChat === true });
       if (typeof data.sandboxAvailable === 'boolean') {
         setSandboxAvailable(data.sandboxAvailable);
         if (data.sandboxAvailable === false) {
@@ -801,33 +815,33 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, initialPath, san
                 {APP_LABELS[app]}
               </div>
             ))}
-            {appDefault === 'opencode' && (
+            {CHAT_APPS.includes(appDefault) && (
               <>
                 <div className="open-menu-label">表示</div>
                 <div className="open-menu-ui-row" role="radiogroup" aria-label="表示方法">
                   <button
                     type="button"
                     role="radio"
-                    aria-checked={uiForApp('opencode') === 'terminal'}
-                    className={`open-menu-ui-btn${uiForApp('opencode') === 'terminal' ? ' active' : ''}`}
-                    onClick={() => chooseOpencodeUi('terminal')}
+                    aria-checked={uiForApp(appDefault) === 'terminal'}
+                    className={`open-menu-ui-btn${uiForApp(appDefault) === 'terminal' ? ' active' : ''}`}
+                    onClick={() => chooseUi(appDefault, 'terminal')}
                   >
                     ⌨ ターミナル
                   </button>
                   <button
                     type="button"
                     role="radio"
-                    aria-checked={uiForApp('opencode') === 'chat'}
-                    className={`open-menu-ui-btn${uiForApp('opencode') === 'chat' ? ' active' : ''}`}
-                    onClick={() => chooseOpencodeUi('chat')}
-                    disabled={!opencodeChatAvailable}
-                    title={opencodeChatAvailable ? 'Web チャット画面で操作する' : 'チャットは opencode 2.0 以降が必要です'}
+                    aria-checked={uiForApp(appDefault) === 'chat'}
+                    className={`open-menu-ui-btn${uiForApp(appDefault) === 'chat' ? ' active' : ''}`}
+                    onClick={() => chooseUi(appDefault, 'chat')}
+                    disabled={!chatAvailable[appDefault]}
+                    title={chatAvailable[appDefault] ? 'Web チャット画面で操作する' : CHAT_UNAVAILABLE_NOTE[appDefault]}
                   >
                     💬 チャット
                   </button>
                 </div>
-                {!opencodeChatAvailable && (
-                  <div className="open-menu-note">チャット表示には opencode 2.0 以降が必要です</div>
+                {!chatAvailable[appDefault] && (
+                  <div className="open-menu-note">{CHAT_UNAVAILABLE_NOTE[appDefault]}</div>
                 )}
               </>
             )}

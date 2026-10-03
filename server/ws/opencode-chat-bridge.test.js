@@ -47,7 +47,7 @@ test('bridge: a serve that finds the database locked is retried until it comes u
   const dir = mkdtempSync(join(tmpdir(), 'ccs-bridge-'));
   const { p, output } = runBridge(dir, fakeServe(dir, { failures: 2, message: 'SQLiteError: database is locked' }));
   try {
-    await waitFor(() => output().includes('ccserver-stage;opencode;done') || p.exitCode !== null, 15000);
+    await waitFor(() => output().includes('ccserver-stage;agent;done') || p.exitCode !== null, 15000);
     assert.equal(p.exitCode, null, output());
     assert.equal(readFileSync(join(dir, 'count'), 'utf-8'), '3');
     assert.match(output(), /database is locked by another session; retrying/);
@@ -59,14 +59,14 @@ test('bridge: a serve that finds the database locked is retried until it comes u
   }
 });
 
-test('bridge: any other early exit fails the opencode stage without a retry', { timeout: 20000 }, async () => {
+test('bridge: any other early exit fails the agent stage without a retry', { timeout: 20000 }, async () => {
   const dir = mkdtempSync(join(tmpdir(), 'ccs-bridge-'));
   const { p, output } = runBridge(dir, fakeServe(dir, { failures: 1, message: 'no provider configured' }));
   try {
     const code = await new Promise((r) => p.once('exit', r));
     assert.equal(code, 1);
     assert.equal(readFileSync(join(dir, 'count'), 'utf-8'), '1');
-    assert.match(output(), /ccserver-stage;opencode;error;opencode serve exited \(1\): no provider configured/);
+    assert.match(output(), /ccserver-stage;agent;error;opencode serve exited \(1\): no provider configured/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

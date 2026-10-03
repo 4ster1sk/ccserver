@@ -490,6 +490,26 @@ test('qemu spawn: a chat launch runs the agent under the bridge and forwards its
   assert.equal(files['chat-password'].mode, 0o600);
 });
 
+test('qemu spawn: a Claude Code chat launch ships its own bridge and passes the bridge flags', { skip: process.platform !== 'linux' }, async () => {
+  const { deps, calls } = fakes();
+  deps.resolveQemuAgent = (app, targetCommand) => ({
+    hostDir: dir, relBin: 'claude', guestDir: '/opt/ccserver-agents/claude',
+    argv: ['/opt/ccserver-agents/claude/claude', ...targetCommand.slice(1)], env: {},
+  });
+  const chatDir = join(dir, 'chat-claude');
+  mkdirSync(chatDir);
+  writeFileSync(join(chatDir, 'password'), 'pw\n', { mode: 0o600 });
+  writeFileSync(join(chatDir, 'bridge.cjs'), '// bundled\n');
+  await launch(deps, { targetCommand: ['claude'], app: 'claude', chat: { hostDir: chatDir, bridgeScript: join(chatDir, 'bridge.cjs'), bridgeArgs: ['--resume', 'abc'] } });
+  assert.deepEqual(calls.prepare.argv, [
+    '/usr/bin/node', '/ccserver-sandbox/chat-bridge.cjs',
+    '--sock', '/tmp/ccserver-chat/oc.sock', '--password-file', '/ccserver-sandbox/chat-password', '--resume', 'abc', '--',
+    '/opt/ccserver-agents/claude/claude',
+  ]);
+  const files = Object.fromEntries(calls.prepare.runtime.files.map((f) => [f.dest, f]));
+  assert.equal(files['chat-bridge.cjs'].src, join(chatDir, 'bridge.cjs'));
+});
+
 test('qemu spawn, persistent: a chat launch runs the bridge from its own ro share and forwards its socket', { skip: process.platform !== 'linux' }, withConfig({ qemu: { persistent: true } }, async () => {
   const { deps } = fakes();
   const pool = fakePool();

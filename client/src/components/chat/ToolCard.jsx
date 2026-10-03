@@ -10,13 +10,25 @@ function StatusIcon({ status }) {
   return <span className="chat-spinner small" aria-label="実行中" />;
 }
 
-// edit: { path, oldString, newString } / write: { path, content }
+// opencode's edit: { path, oldString, newString } / write: { path, content };
+// Claude Code's Edit: { file_path, old_string, new_string } / Write:
+// { file_path, content } / MultiEdit: { file_path, edits: [Edit...] }.
+function editDiff(e) {
+  const oldS = e?.oldString ?? e?.old_string;
+  const newS = e?.newString ?? e?.new_string;
+  return typeof oldS === 'string' && typeof newS === 'string' ? lineDiff(oldS, newS) : null;
+}
+
 function toolDiff(name, input) {
   if (!input || typeof input !== 'object') return null;
-  if (name === 'edit' && typeof input.oldString === 'string' && typeof input.newString === 'string') {
-    return lineDiff(input.oldString, input.newString);
+  const tool = String(name || '').toLowerCase();
+  if (tool === 'edit') return editDiff(input);
+  if (tool === 'multiedit' && Array.isArray(input.edits)) {
+    const parts = input.edits.map(editDiff);
+    if (parts.some((d) => !d)) return null;
+    return parts.flatMap((d, i) => (i === 0 ? d : [{ op: ' ', text: '…' }, ...d]));
   }
-  if (name === 'write' && typeof input.content === 'string') return lineDiff('', input.content);
+  if (tool === 'write' && typeof input.content === 'string') return lineDiff('', input.content);
   return null;
 }
 

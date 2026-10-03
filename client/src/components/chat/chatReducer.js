@@ -156,7 +156,7 @@ export function toolText(content) {
 // A short one-line summary of a tool call's input for its card header.
 export function toolSummary(name, input) {
   if (!input || typeof input !== 'object') return typeof input === 'string' ? input.slice(0, 120) : '';
-  const pick = input.filePath || input.path || input.file || input.command || input.pattern || input.url || input.query || input.description;
+  const pick = input.filePath || input.file_path || input.notebook_path || input.path || input.file || input.command || input.pattern || input.url || input.query || input.description;
   if (typeof pick === 'string') return pick;
   const first = Object.values(input).find((v) => typeof v === 'string');
   return first ? first.slice(0, 120) : '';

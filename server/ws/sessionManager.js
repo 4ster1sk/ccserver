@@ -12,7 +12,7 @@ import { basename, join, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import { qemuVmPool } from './qemuVmPool.js';
 import { LAUNCHER_SCRIPT as QEMU_LAUNCHER } from './sandbox-qemu.js';
-import { buildSandboxSpawn, resolveApp, sandboxAvailable, sandboxUnavailableReason, forceSandboxUnavailableReason, loadSandboxConfig, resolveSandboxBackend, persistentHomeDir, dockerSandboxAvailable, dockerdStatus, dockerdLockHeld, resolveTools, opencodeSupportsStandalone, chatBridgeArgv, CHAT_BRIDGE_SCRIPT, CHAT_PASSWORD_NAME } from './sandbox.js';
+import { buildSandboxSpawn, resolveApp, sandboxAvailable, sandboxUnavailableReason, forceSandboxUnavailableReason, loadSandboxConfig, resolveSandboxBackend, persistentHomeDir, dockerSandboxAvailable, dockerdStatus, dockerdLockHeld, resolveTools, opencodeSupportsStandalone, chatBridgeArgv, CHAT_PASSWORD_NAME } from './sandbox.js';
 import { prepareChatDir, removeChatDir, createChatState, publicChatState, feedChatOutput, failChat, initChatSession, sendChatPrompt, startChatMonitor, stopChatMonitor } from './opencodeChat.js';
 import * as gpgVaultRelay from './gpgVaultRelay.js';
 import { brokerArmed, setSessionBrokerLists, setSessionBrokerOpMode } from './netbrokerClient.js';
@@ -313,9 +313,9 @@ function buildSessionRecord(id, ptyProcess, meta) {
     // startup-stage markers (see chatStages.js) -- none of the TUI
     // detectors below apply.
     if (session.chat) {
-      const { changed, opencodeUp } = feedChatOutput(session.chat, data);
+      const { changed, agentUp } = feedChatOutput(session.chat, data);
       if (changed) broadcastChatState(session);
-      if (opencodeUp) {
+      if (agentUp) {
         initChatSession(session.chat, {
           onChange: () => {
             // Ready is a chat session's "settled" (send_input's gate, a
@@ -501,7 +501,10 @@ function buildSessionRecord(id, ptyProcess, meta) {
     if (session.chat && failChat(session.chat, `プロセスが終了しました (${signal ? `signal ${signal}` : `code ${exitCode}`})`)) {
       broadcastChatState(session);
     }
-    if (!session.shell) {
+    if (session.chat && session.app === 'claude') {
+      // The bridge's conversation is Claude Code's session id itself.
+      session.claudeSessionId = session.chat.ocSessionId || null;
+    } else if (!session.shell) {
       session.claudeSessionId = extractResumeSessionId(
         session.app,
         session.outputBuffer.slice(-50).join('')
@@ -670,8 +673,9 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
   const sessionModel = shell ? null : normalizeModel(model);
   const sessionPermissionMode = 'standard';
 
-  // Chat mode (opencode >= 2 only): refused outright rather than silently
-  // started as a terminal, since the browser would render the wrong view.
+  // Chat mode (opencode >= 2, Claude Code): refused outright rather than
+  // silently started as a terminal, since the browser would render the
+  // wrong view.
   const sessionUi = shell ? 'terminal' : normalizeSessionUi(ui);
   if (sessionUi === 'chat' && !appSupportsChat(sessionApp, { opencodeV2: sessionApp === 'opencode' && opencodeSupportsStandalone(resolved.hostCommand) })) {
     return {
@@ -679,7 +683,7 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
       session: null,
       error: sessionApp === 'opencode'
         ? 'Cannot launch: chat mode needs opencode 2.0 or later (the installed opencode is older). Launch it as a terminal instead.'
-        : `Cannot launch: chat mode is only available for opencode, not ${sessionApp}.`,
+        : `Cannot launch: chat mode is not available for ${sessionApp}.`,
     };
   }
 
@@ -769,7 +773,7 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
     // (resolved.hostCommand) rather than assumed -- see appLaunch.js's
     // appStandaloneArgs comment: an opencode <2.0.0 install rejects the flag
     // outright, so this must never be passed without checking first.
-    args = sessionUi === 'chat' ? appChatArgs(sessionApp) : appLaunchArgs(sessionApp, {
+    args = sessionUi === 'chat' ? appChatArgs(sessionApp, { model: sessionModel }) : appLaunchArgs(sessionApp, {
       resumeId: claudeSessionId,
       resumeLast,
       model: sessionModel,
@@ -933,13 +937,13 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
   let sandboxNetworkBrokerDir = null;
   let ptyProcess;
 
-  // Chat mode: the dir holding serve's password and the bridge's relay
-  // socket. Made here, after every refusal above that needs no cleanup;
-  // each failure below removes it.
+  // Chat mode: the dir holding the bridge's password and relay socket (and,
+  // for Claude Code, the bridge itself). Made here, after every refusal
+  // above that needs no cleanup; each failure below removes it.
   let chatDir = null;
   if (sessionUi === 'chat') {
     try {
-      chatDir = prepareChatDir(id);
+      chatDir = prepareChatDir(id, { app: sessionApp, resumeLast, resumeId: claudeSessionId || null });
     } catch (err) {
       return { sessionId: id, session: null, error: `Failed to prepare the chat session: ${err.message}` };
     }
@@ -972,7 +976,7 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
       reservedSandboxHomePath = targetPath;
     }
     try {
-      const spawn = await buildSandboxSpawn({ cwd, targetCommand: [command, ...args], app: sessionApp, sandboxOpts, notifySocketPath, usageSocketPath, reviewerSocketPath, reuseSandboxHome, sandboxHomeCreatedBy, isReviewJob, chat: chatDir ? { hostDir: chatDir.dir } : null });
+      const spawn = await buildSandboxSpawn({ cwd, targetCommand: [command, ...args], app: sessionApp, sandboxOpts, notifySocketPath, usageSocketPath, reviewerSocketPath, reuseSandboxHome, sandboxHomeCreatedBy, isReviewJob, chat: chatDir ? { hostDir: chatDir.dir, bridgeScript: chatDir.bridgeScript, bridgeArgs: chatDir.bridgeArgs } : null });
       command = spawn.command;
       args = spawn.args;
       sandboxDocker = !!spawn.docker;
@@ -1027,9 +1031,10 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
   if (chatDir && !useSandbox) {
     [command, ...args] = chatBridgeArgv({
       node: process.execPath,
-      script: CHAT_BRIDGE_SCRIPT,
+      script: chatDir.bridgeScript,
       sock: chatDir.sock,
       passwordFile: join(chatDir.dir, CHAT_PASSWORD_NAME),
+      bridgeArgs: chatDir.bridgeArgs,
     }, [command, ...args]);
   }
 
@@ -1094,6 +1099,7 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
     ui: sessionUi,
     chat: chatDir ? createChatState({
       ...chatDir,
+      app: sessionApp,
       sandboxed: useSandbox,
       backend: useSandbox ? backend : null,
       pooled: !!qemuPoolLease,

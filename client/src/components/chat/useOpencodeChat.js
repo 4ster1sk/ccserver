@@ -94,7 +94,9 @@ export function useOpencodeChat({ sessionId, ocSessionId, enabled }) {
         setModels(data);
       } else if (k === 'agent') {
         const visible = data.filter((x) => !x.hidden && x.mode !== 'subagent');
-        if (visible.length === 0) return;
+        // None listed yet: serve may still be settling. Only subagents
+        // (Claude Code's): there is nothing to pick, and that is final.
+        if (data.length === 0) return;
         setAgents(visible);
       } else {
         setCommands(data);
