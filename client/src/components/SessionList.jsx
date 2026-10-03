@@ -104,7 +104,7 @@ export default function SessionList({
                 >
                   <span className="session-menu-item-top">
                     <ActivityDot activity={tab.activity} />
-                    <TabIcon type={tab.type} app={tab.app} shell={tab.shell} />
+                    <TabIcon type={tab.type} app={tab.app} shell={tab.shell} ui={tab.ui} />
                     <span className="session-menu-label">{displayLabel}</span>
                     {(() => {
                       // 一覧では Vault ありで起動したセッションにだけ鍵を出す。
@@ -155,7 +155,7 @@ export default function SessionList({
               >
                 <span className="session-menu-item-top">
                   <ActivityDot activity={s.activity} />
-                  <TabIcon type="terminal" app={s.app} shell={!!s.shell} />
+                  <TabIcon type="terminal" app={s.app} shell={!!s.shell} ui={s.ui} />
                   <span className="session-menu-label">{s.customLabel || baseName(s.cwd) || s.id.slice(0, 8)}</span>
                   {(() => {
                     const badge = s.gpgVaultActive ? gpgVaultBadgeState(s, vaultStatus?.data) : null;

@@ -128,6 +128,32 @@ export function appLaunchArgs(app, { resumeId, resumeLast, model, opencodeStanda
   ];
 }
 
+// How a session's agent is presented in the browser: 'terminal' (the TUI in
+// a pty, rendered by xterm.js) or 'chat' (opencode >= 2 only: `opencode
+// serve` behind ccserver's proxy, rendered by the chat view).
+export const SESSION_UIS = ['terminal', 'chat'];
+
+export function normalizeSessionUi(ui) {
+  return SESSION_UIS.includes(ui) ? ui : 'terminal';
+}
+
+// Whether `app` can run in chat mode. `opencodeV2` is the caller's probe of
+// the resolved binary (sandbox.js's opencodeSupportsStandalone: `serve`'s v2
+// HTTP API and its --stdio handshake both arrived in opencode 2.0.0).
+export function appSupportsChat(app, { opencodeV2 = false } = {}) {
+  return app === 'opencode' && opencodeV2;
+}
+
+// CLI args for a chat-mode launch: `opencode serve --stdio` on loopback with
+// a random port. --stdio prints `{"url": ...}` once listening and exits when
+// stdin closes (the chat bridge, opencode-chat-bridge.cjs, owns both ends).
+// Resume and model are API calls in chat mode, never CLI flags: serve has
+// no --session / --model.
+export function appChatArgs(app) {
+  if (app !== 'opencode') throw new Error(`${app} has no chat mode`);
+  return ['serve', '--stdio', '--hostname', '127.0.0.1'];
+}
+
 // The keystroke that submits the current prompt in each app's TUI, sent by
 // sessionManager.writeToSession({ submit: true }) after the typed text.
 // Every supported CLI accepts CR today (verified against all four TUIs; CR

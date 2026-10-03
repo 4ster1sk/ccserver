@@ -42,6 +42,11 @@ const REASONS = Object.assign(Object.create(null), {
   marker: '稼働中の表示を検出',
   movement: '画面が更新されている',
   quiet: '画面が静止している',
+  // opencode chat mode: read from its event stream, not the screen.
+  'chat-starting': '起動中',
+  'chat-busy': '応答を生成中',
+  'chat-idle': '応答済み',
+  'chat-waiting': '許可・質問への回答待ち',
 });
 
 // A level/reason is only trusted when it is one we actually defined. Anything

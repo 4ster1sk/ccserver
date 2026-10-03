@@ -18,6 +18,15 @@ function consoleState(plan) {
   return null;
 }
 
+// Whether the guest has started the session setup (SETUP_PREFIX, the first
+// bootcmd line): progress reporting only, boot success is consoleState's.
+function setupStarted(plan) {
+  if (!plan.setupPrefix) return false;
+  try {
+    return fs.readFileSync(plan.consoleLog, 'utf-8').includes(plan.setupPrefix + plan.readyToken);
+  } catch { return false; }
+}
+
 function consoleTail(plan, n = 25) {
   try {
     return fs.readFileSync(plan.consoleLog, 'utf-8').split('\n').slice(-n).join('\r\n');
@@ -36,4 +45,4 @@ function sshBanner(guestSshSock) {
   });
 }
 
-module.exports = { consoleState, consoleTail, sshBanner };
+module.exports = { consoleState, setupStarted, consoleTail, sshBanner };

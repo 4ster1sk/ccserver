@@ -14,6 +14,7 @@ import {
   buildScheduleStateMsg as scheduleStateMsg,
   networkIsolationStateMsg,
   setPooledVmNetworkMode,
+  chatStateMsg,
 } from './sessionManager.js';
 import { brokerArmed, setSessionBrokerMode } from './netbrokerClient.js';
 import { setupRequired } from '../paths.js';
@@ -94,6 +95,7 @@ export function attachTerminalHandler(chan) {
           // Default reuse (keep the previous persistent HOME); only an
           // explicit false (client's "新規作成" dialog) wipes it.
           reuseSandboxHome: msg.reuseSandboxHome !== false,
+          ui: msg.ui === 'chat' ? 'chat' : 'terminal',
         });
         if (result.error) {
           chan.send(JSON.stringify({
@@ -132,8 +134,10 @@ export function attachTerminalHandler(chan) {
             sandbox: !!session.sandbox,
             // How many clients (this one included) are watching the session.
             viewers: session.sockets.size,
+            ui: session.ui || 'terminal',
           })
         );
+        if (session.chat) chan.send(JSON.stringify(chatStateMsg(session)));
         chan.send(scheduleStateMsg(scheduledPromptPublic(session)));
         chan.send(JSON.stringify(networkIsolationStateMsg(session)));
         break;
@@ -193,8 +197,10 @@ export function attachTerminalHandler(chan) {
             // from another device must not inherit this client's guess.
             sandbox: !!session.sandbox,
             viewers: session.sockets.size,
+            ui: session.ui || 'terminal',
           })
         );
+        if (session.chat) chan.send(JSON.stringify(chatStateMsg(session)));
 
         for (const chunk of session.outputBuffer) {
           if (chan.readyState === 1) {

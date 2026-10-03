@@ -23,6 +23,7 @@ import { loadSandboxDefaults, saveSandboxDefaults } from './sandboxDefaults.js';
 import { isAppSelectable, isAppVisible } from './appAvailability.js';
 
 const TerminalView = lazy(() => import('./components/TerminalView.jsx'));
+const ChatView = lazy(() => import('./components/chat/ChatView.jsx'));
 
 let tabIdCounter = 0;
 
@@ -148,13 +149,15 @@ export default function App() {
       .catch(() => {});
   }, []);
 
-  const openTerminalTab = useCallback((dirPath, { claudeSessionId = null, shell = false, sessionId = null, attachSessionId = null, sandbox = false, sandboxOpts = null, app = 'claude', model = null, resume = false, reuseSandboxHome = true, label: labelOverride = null } = {}) => {
+  const openTerminalTab = useCallback((dirPath, { claudeSessionId = null, shell = false, sessionId = null, attachSessionId = null, sandbox = false, sandboxOpts = null, app = 'claude', model = null, resume = false, reuseSandboxHome = true, label: labelOverride = null, ui = 'terminal' } = {}) => {
     const id = `terminal-${++tabIdCounter}`;
     const dirName = dirPath.split(/[/\\]/).filter(Boolean).pop() || dirPath;
     const label = labelOverride || (shell ? `$ ${dirName}` : dirName);
     setTabs((prev) => [
       ...prev,
-      { id, type: 'terminal', label, cwd: dirPath, claudeSessionId, shell, sessionId, attachSessionId, sandbox, sandboxOpts, app, model, resume, reuseSandboxHome, exited: false },
+      // ui: 'chat' renders the session with ChatView (opencode chat mode)
+      // instead of xterm.js; everything else about the tab is the same.
+      { id, type: 'terminal', label, cwd: dirPath, claudeSessionId, shell, sessionId, attachSessionId, sandbox, sandboxOpts, app, model, resume, reuseSandboxHome, ui: !shell && app === 'opencode' && ui === 'chat' ? 'chat' : 'terminal', exited: false },
     ]);
     setActiveTabId(id);
     // A VM Terminal's cwd is the guest's, not a host directory to browse.
@@ -164,7 +167,7 @@ export default function App() {
   // The post-sandbox-dialog open flow: claude's resume prompt (if a saved
   // conversation exists), else a plain tab open. Carries the chosen
   // reuseSandboxHome through so a resumed conversation keeps the same HOME.
-  const continueOpen = useCallback((dirPath, { sandbox = false, sandboxOpts = null, app = 'claude', model = null, resume = false, skipResumePrompt = false, reuseSandboxHome = true } = {}) => {
+  const continueOpen = useCallback((dirPath, { sandbox = false, sandboxOpts = null, app = 'claude', model = null, resume = false, skipResumePrompt = false, reuseSandboxHome = true, ui = 'terminal' } = {}) => {
     // Only claude sessions carry a resumable conversation id (opencode resumes
     // the last session of the project itself via -c).
     if (!skipResumePrompt && app === 'claude') {
@@ -175,7 +178,7 @@ export default function App() {
         return;
       }
     }
-    openTerminalTab(dirPath, { sandbox, sandboxOpts, app, model, resume, reuseSandboxHome });
+    openTerminalTab(dirPath, { sandbox, sandboxOpts, app, model, resume, reuseSandboxHome, ui });
   }, [openTerminalTab]);
 
   // Sandboxed agent launch: before opening, ask the server whether a previous
@@ -307,6 +310,7 @@ export default function App() {
       model: session.model || null,
       sandbox: !!session.sandbox,
       sandboxOpts: session.sandboxOpts || null,
+      ui: session.ui === 'chat' ? 'chat' : 'terminal',
       // opencode/codex re-launches resume the last session of
       // the project (-c / --continue / resume --last), so a continued
       // conversation survives the dead pty like claude's does.
@@ -783,7 +787,7 @@ export default function App() {
             onClick={() => handleTabClick(tab.id)}
           >
             <span className="tab-label">
-              <TabIcon type={tab.type} app={tab.app} shell={tab.shell} />
+              <TabIcon type={tab.type} app={tab.app} shell={tab.shell} ui={tab.ui} />
             </span>
             {tab.type !== 'browser' && tab.type !== 'settings' && (
               <button
@@ -877,6 +881,24 @@ export default function App() {
               style={{ display: activeTabId === tab.id ? 'flex' : 'none', height: '100%', flexDirection: 'column' }}
             >
               <Suspense fallback={null}>
+                {tab.ui === 'chat' ? (
+                  <ChatView
+                    cwd={tab.cwd}
+                    sandbox={tab.sandbox}
+                    sandboxOpts={tab.sandboxOpts}
+                    reuseSandboxHome={tab.reuseSandboxHome !== false}
+                    model={tab.model || null}
+                    resume={!!tab.resume}
+                    customLabel={resolveTabLabel(tab)}
+                    notify={notify}
+                    visible={activeTabId === tab.id}
+                    onSessionId={(sid) => handleTabSessionId(tab.id, sid)}
+                    onSandboxResolved={(sb) => handleTabSandboxResolved(tab.id, sb)}
+                    onExited={(exited) => handleTabExited(tab.id, exited)}
+                    attachSessionId={tab.attachSessionId}
+                    onFocusTab={() => handleTabClick(tab.id)}
+                  />
+                ) : (
                 <TerminalView
                   cwd={tab.cwd}
                   onClose={() => handleCloseTab(tab.id)}
@@ -902,6 +924,7 @@ export default function App() {
                   tabId={tab.id}
                   onFocusTab={() => handleTabClick(tab.id)}
                 />
+                )}
               </Suspense>
             </div>
           ))}

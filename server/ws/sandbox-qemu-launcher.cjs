@@ -30,6 +30,13 @@ if (!planPath) {
 }
 const plan = JSON.parse(fs.readFileSync(planPath, 'utf-8'));
 const say = (msg) => process.stdout.write(`\r\x1b[2m[sandbox] ${msg}\x1b[0m\r\n`);
+// Startup progress for the chat view (format: server/ws/chatStages.js). An
+// unknown OSC, so a terminal session's xterm.js ignores it.
+const stage = (id, state, message) => {
+  const msg = message ? `;${String(message).replace(/[\x00-\x1f\x7f;]/g, ' ').slice(0, 300)}` : '';
+  process.stdout.write(`\x1b]777;ccserver-stage;${id};${state}${msg}\x07`);
+};
+let currentStage = null;
 
 const children = [];
 let qemu = null;
@@ -108,6 +115,8 @@ async function main() {
   if (plan.attach) return attach();
   const t0 = Date.now();
   say('VM を起動中…');
+  currentStage = 'vm_boot';
+  stage('vm_boot', 'running');
   for (let i = 0; i < plan.virtiofsd.length; i++) {
     const v = plan.virtiofsd[i];
     const p = spawnDaemon(v.bin, v.args, `virtiofsd-${i}.log`);
@@ -125,11 +134,17 @@ async function main() {
 
   const state = await waitFor(() => {
     if (qemu.exitCode !== null) return { fail: `qemu exited (${qemu.exitCode}); see ${plan.runDir}/qemu.log` };
+    if (currentStage === 'vm_boot' && boot.setupStarted(plan)) {
+      currentStage = 'vm_setup';
+      stage('vm_setup', 'running');
+    }
     return boot.consoleState(plan);
   }, plan.bootTimeoutMs, 'the VM to finish booting');
   if (state !== 'ready') throw new Error(`VM setup failed: ${state.fail}`);
   await waitFor(() => boot.sshBanner(plan.guestSshSock), 15000, 'sshd');
   say(`VM 起動完了 (${((Date.now() - t0) / 1000).toFixed(1)} 秒)`);
+  stage('vm_setup', 'done');
+  currentStage = null;
 
   const remoteCmd = buildRemoteCommand({
     cwd: plan.remote.cwd,
@@ -143,6 +158,7 @@ async function main() {
 
 main().catch(async (e) => {
   if (stopping) return;
+  if (currentStage) stage(currentStage, 'error', e.message);
   process.stdout.write(`\r\n[sandbox] ${e.message}\r\n${plan.attach ? '' : `--- console (tail) ---\r\n${boot.consoleTail(plan)}\r\n`}`);
   await stop(1);
 });

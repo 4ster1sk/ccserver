@@ -21,6 +21,7 @@ import { notificationsRoute } from './routes/notifications.js';
 import { authRoute } from './routes/auth.js';
 import { gpgVaultRoute } from './routes/gpgVault.js';
 import { setupRoute } from './routes/setup.js';
+import { opencodeChatRoute } from './routes/opencodeChat.js';
 import { terminalWs } from './ws/terminal.js';
 import { gracefulShutdown, restoreSchedules } from './ws/sessionManager.js';
 import {
@@ -271,6 +272,9 @@ function isSetupExempt(request) {
   if (!url.startsWith('/api') && !url.startsWith('/ws')) return true;
   if (url.startsWith('/ws/')) return true;
   const path = url.split('?')[0];
+  // A running chat session's conversation, the chat-view twin of /ws/ above:
+  // it reaches what is already running and writes no ccserver state.
+  if (path.startsWith('/api/oc/')) return true;
   if (path === '/api/setup-status') return true;
   if (path.startsWith('/api/auth/')) return true;
   if (request.method === 'GET' && (path.startsWith('/api/sessions') || path.startsWith('/api/system'))) return true;
@@ -307,6 +311,7 @@ await fastify.register(notificationsRoute, { prefix: '/api' });
 await fastify.register(authRoute, { prefix: '/api' });
 await fastify.register(gpgVaultRoute, { prefix: '/api' });
 await fastify.register(setupRoute, { prefix: '/api' });
+await fastify.register(opencodeChatRoute, { prefix: '/api' });
 await fastify.register(terminalWs);
 
 if (process.env.NODE_ENV === 'production') {

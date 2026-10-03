@@ -79,7 +79,7 @@ export async function sessionsRoute(fastify, opts) {
 
 // Shared implementation for POST /api/sessions. body:
 //   { cwd?, app?, model?, shell?, sandbox?, sandboxOpts?,
-//     resume?, reuseSandboxHome?, requestedBy? }
+//     resume?, reuseSandboxHome?, requestedBy?, ui? ('terminal' | 'chat') }
 // `cwd` is required and must be an existing directory.
 //
 // `isReviewJob` (2nd param) is DELIBERATELY not part of `body`. It forces
@@ -136,6 +136,7 @@ export async function createSessionViaApi(body, { isReviewJob = false } = {}) {
     model: typeof body.model === 'string' ? body.model : null,
     resumeLast: !!body.resume,
     reuseSandboxHome: body.reuseSandboxHome !== false,
+    ui: body.ui === 'chat' ? 'chat' : 'terminal',
     isReviewJob: isReviewJob === true,
     // Attribution for the sandbox HOME bookkeeping row ('user' | ...).
     // Display only.

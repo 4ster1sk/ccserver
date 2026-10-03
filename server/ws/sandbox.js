@@ -35,7 +35,7 @@ import { normalizeBrowseRoots, isContained, isCcserverScratchPath } from '../pat
 import { resolvePath, PATH_IDS } from '../paths.js';
 import { isRegularFile, readRegularFileText } from './regularFile.js';
 import { normalizeBridgeSettings } from './notifyBridgeSettings.js';
-import { qemuStatus, prepareQemuSession, buildGuestRuntime, currentGolden, LAUNCHER_SCRIPT as QEMU_LAUNCHER, QEMU_RESOURCE_LIMITS } from './sandbox-qemu.js';
+import { qemuStatus, prepareQemuSession, buildGuestRuntime, currentGolden, LAUNCHER_SCRIPT as QEMU_LAUNCHER, QEMU_RESOURCE_LIMITS, GUEST_CHAT_BRIDGE, GUEST_CHAT_PASSWORD, GUEST_CHAT_SOCK } from './sandbox-qemu.js';
 import { qemuVmPool as defaultQemuVmPool, poolKey } from './qemuVmPool.js';
 import { startGoNetworkBroker, netbrokerBin } from './netbrokerClient.js';
 import { resolveVmTemplate } from '../vmTemplates.js';
@@ -107,6 +107,23 @@ const SANDBOX_USAGE_SOCK_PATH = '/ccserver-sandbox-usage.d/sock';
 const SANDBOX_REVIEWER_SOCK_PATH = '/ccserver-sandbox-reviewer.d/sock';
 const SANDBOX_MCP_BRIDGE_PATH = '/ccserver-sandbox-mcp-bridge';
 const MCP_BRIDGE_SCRIPT = join(__dirname, 'sandbox-mcp-wrapper.cjs');
+
+// opencode chat mode (see opencode-chat-bridge.cjs): the bridge script, and
+// a per-session host dir holding the server password file and the relay
+// socket the bridge creates. A directory bind (like the MCP sockets above),
+// so the socket the bridge creates inside is the host's file too.
+export const CHAT_BRIDGE_SCRIPT = join(__dirname, 'opencode-chat-bridge.cjs');
+const SANDBOX_CHAT_BRIDGE_PATH = '/ccserver-sandbox-chat-bridge.cjs';
+const SANDBOX_CHAT_DIR = '/ccserver-sandbox-chat.d';
+export const CHAT_SOCK_NAME = 'oc.sock';
+export const CHAT_PASSWORD_NAME = 'password';
+
+// The bridge invocation wrapped around the agent command (`agentArgv`) for
+// a chat launch: `node`, the bridge script and the socket/password paths as
+// the bridge itself sees them.
+export function chatBridgeArgv({ node, script, sock, passwordFile }, agentArgv) {
+  return [node, script, '--sock', sock, '--password-file', passwordFile, '--', ...agentArgv];
+}
 
 // Fixed in-sandbox path for the tool-provisioning script (see resolveTools /
 // sandbox-provision.sh): bound read-only at launch when any opt-in tool is
@@ -1195,6 +1212,13 @@ export function installedApps() {
   };
 }
 
+// Whether the installed opencode can run in chat mode (opencode >= 2, see
+// appLaunch.js's appSupportsChat). Cached per binary like the probe itself.
+export function opencodeChatAvailable() {
+  const r = resolveApp('opencode');
+  return !!r.found && opencodeSupportsStandalone(r.hostCommand);
+}
+
 // The app ids actually offered by the launch pickers: installed on this host
 // AND not hidden via sandbox.config.json's hiddenApps (issue #105). Used by
 // the server-startup guard (index.js) to refuse to boot when hiddenApps has
@@ -1489,7 +1513,7 @@ function startCommitGuard(blockedPatterns) {
 //             (buildSandboxSpawn), not fetched in here -- mirrors
 //             gitBroker/commitGuard, which are also
 //             caller-resolved objects.
-function buildBwrapArgs({ cwd, docker, usesRootlesskit = docker, gpg, gpgVault = null, extraBinds, extraEnv, authSock, stateDir, claudeDir, gitBroker, commitGuard, notifySocketPath, usageSocketPath, reviewerSocketPath, homeDir = null, app = null, tools = null }) {
+function buildBwrapArgs({ cwd, docker, usesRootlesskit = docker, gpg, gpgVault = null, extraBinds, extraEnv, authSock, stateDir, claudeDir, gitBroker, commitGuard, notifySocketPath, usageSocketPath, reviewerSocketPath, homeDir = null, app = null, tools = null, chat = null }) {
   const args = [
     '--die-with-parent',
     // Own PID namespace so the whole sandbox tree is reaped as a unit. Without
@@ -1586,6 +1610,14 @@ function buildBwrapArgs({ cwd, docker, usesRootlesskit = docker, gpg, gpgVault =
   // SANDBOX_NODE_PATH (ro-bound with the git-broker branch below).
   if (notifySocketPath || usageSocketPath || reviewerSocketPath) {
     args.push('--ro-bind', MCP_BRIDGE_SCRIPT, SANDBOX_MCP_BRIDGE_PATH);
+  }
+
+  // opencode chat mode: the bridge (run by SANDBOX_NODE_PATH, bound below)
+  // and its per-session dir, writable so the bridge can create the relay
+  // socket and remove the password file once read.
+  if (chat) {
+    args.push('--ro-bind', CHAT_BRIDGE_SCRIPT, SANDBOX_CHAT_BRIDGE_PATH);
+    args.push('--bind', chat.hostDir, SANDBOX_CHAT_DIR);
   }
 
   // Agent CLI configuration + install dirs (claude + opencode + codex),
@@ -1749,7 +1781,7 @@ function buildBwrapArgs({ cwd, docker, usesRootlesskit = docker, gpg, gpgVault =
   // git-broker machinery, MCP bridge wrapper, and commit-msg hook. The
   // commit-msg hook (below) is a Node script bound at a fixed
   // shebang path, so it needs this bind as well.
-  if (gitBroker || commitGuard || notifySocketPath || usageSocketPath || reviewerSocketPath) {
+  if (gitBroker || commitGuard || notifySocketPath || usageSocketPath || reviewerSocketPath || chat) {
     const nodeBin = realpathSync(process.execPath);
     args.push('--ro-bind', nodeBin, SANDBOX_NODE_PATH);
   }
@@ -2272,7 +2304,7 @@ export function qemuLaunchPoolKey(sandboxOpts = null, deps = {}) {
 // vmTemplateId (sandboxOpts.vmTemplateId) picks the VM template (see
 // vmTemplates.js): its resources and cloud-config. null means the default
 // template, or sandbox.config.json's qemu values when there is none.
-async function buildQemuSpawn({ cwd, targetCommand, app, homeDir, netCfg, extraEnv, gpg, sshAgent, gpgVault, gpgVaultInfo, tools, gitBrokerEnabled, commitMessageGuard, ghUsageRecording, notifySocketPath, usageSocketPath, reviewerSocketPath, vmTemplateId = null }, deps = {}) {
+async function buildQemuSpawn({ cwd, targetCommand, app, homeDir, netCfg, extraEnv, gpg, sshAgent, gpgVault, gpgVaultInfo, tools, gitBrokerEnabled, commitMessageGuard, ghUsageRecording, notifySocketPath, usageSocketPath, reviewerSocketPath, vmTemplateId = null, chat = null }, deps = {}) {
   const {
     startGitBroker: startGitBrokerFn = startGitBroker,
     startCommitGuard: startCommitGuardFn = startCommitGuard,
@@ -2299,6 +2331,11 @@ async function buildQemuSpawn({ cwd, targetCommand, app, homeDir, netCfg, extraE
     console.warn(`[sandbox] qemu backend: ${join(homeDir, '.claude.json')}: ${what}`);
   }
   if (qemuCfg.persistent) {
+    // The relay socket would have to cross the guest-side bwrap of a shared
+    // VM; not wired up yet.
+    if (chat) {
+      throw new Error('チャットモードは永続 VM（persistent テンプレート）ではまだ使えません。ターミナルモードで起動するか、persistent でないテンプレートを選んでください。');
+    }
     return await buildPooledQemuSpawn({
       cwd, targetCommand, homeDir, netCfg, gpgVault, sshAgent,
       gitBrokerEnabled, notifySocketPath, usageSocketPath, reviewerSocketPath, vmTemplate, qemuCfg, agentLaunch,
@@ -2350,6 +2387,7 @@ async function buildQemuSpawn({ cwd, targetCommand, app, homeDir, netCfg, extraE
       gpgVault: gpgVaultInfo ? { ...gpgVaultInfo, sockets: gpgVaultRelay.getRelaySocketPaths() } : null,
       sshAgentSock,
       mcp: { notify: notifySocketPath, usage: usageSocketPath, reviewer: reviewerSocketPath },
+      chat: chat ? { bridge: CHAT_BRIDGE_SCRIPT, passwordFile: join(chat.hostDir, CHAT_PASSWORD_NAME) } : null,
     });
     // The per-session Go broker (ccserver-netbroker) runs the VM's entire network
     // (QEMU's NIC is attached to it). It always starts 'open'; the
@@ -2370,10 +2408,16 @@ async function buildQemuSpawn({ cwd, targetCommand, app, homeDir, netCfg, extraE
       // An agent runs from its read-only share (qemuAgents.js). A shell
       // session whose host $SHELL the image lacks falls back to bash rather
       // than failing.
-      argv: agentLaunch.argv,
+      argv: chat ? chatBridgeArgv({
+        node: '/usr/bin/node',
+        script: GUEST_CHAT_BRIDGE,
+        sock: GUEST_CHAT_SOCK,
+        passwordFile: GUEST_CHAT_PASSWORD,
+      }, agentLaunch.argv) : agentLaunch.argv,
       fallbackArgv: agent || APP_IDS.includes(targetCommand[0]) ? null : ['bash', '-l', '-i'],
       env: guestEnv,
       homeHostPath: homeDir,
+      sshForwards: chat ? [[join(chat.hostDir, CHAT_SOCK_NAME), GUEST_CHAT_SOCK]] : [],
       extraShares: agent ? [{ tag: 'agent', hostPath: agent.hostDir, guestPath: agent.guestDir, readonly: true }] : [],
       runtime,
       network: {
@@ -2490,7 +2534,9 @@ async function buildPooledQemuSpawn({ cwd, targetCommand, homeDir, netCfg, gpgVa
   };
 }
 
-export async function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, notifySocketPath = null, usageSocketPath = null, reviewerSocketPath = null, reuseSandboxHome = true, sandboxHomeCreatedBy = null, isReviewJob = false }, deps = {}) {
+// chat: { hostDir } for an opencode chat launch (see CHAT_BRIDGE_SCRIPT):
+// targetCommand is then `opencode serve ...`, run under the chat bridge.
+export async function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, notifySocketPath = null, usageSocketPath = null, reviewerSocketPath = null, reuseSandboxHome = true, sandboxHomeCreatedBy = null, isReviewJob = false, chat = null }, deps = {}) {
   const { dockerSandboxAvailable: dockerSandboxAvailableFn = dockerSandboxAvailable } = deps || {};
   // Normalize the app id up front: a nullish `app` resolves to 'claude' in
   // resolveApp(), so every later `app === 'claude'` / `app === 'opencode'`
@@ -2637,7 +2683,7 @@ export async function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, 
     return await buildQemuSpawn({
       cwd, targetCommand, app, homeDir, netCfg, extraEnv: env, gpg, sshAgent, gpgVault, gpgVaultInfo, tools,
       gitBrokerEnabled, commitMessageGuard, ghUsageRecording, notifySocketPath, usageSocketPath, reviewerSocketPath,
-      vmTemplateId: sandboxOpts?.vmTemplateId ?? null,
+      vmTemplateId: sandboxOpts?.vmTemplateId ?? null, chat,
     }, deps);
   }
 
@@ -2687,8 +2733,14 @@ export async function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, 
   let bwrapArgs;
   let innerCmd;
   try {
-    bwrapArgs = buildBwrapArgs({ cwd, docker, usesRootlesskit: docker, gpg, gpgVault: gpgVaultInfo, extraBinds: binds, extraEnv: env, authSock, stateDir, claudeDir: installDir, gitBroker, commitGuard, notifySocketPath, usageSocketPath, reviewerSocketPath, homeDir, app, tools });
-    innerCmd = [BASH, '/ccserver-sandbox-entrypoint.sh', ...withClaude(targetCommand, command)];
+    bwrapArgs = buildBwrapArgs({ cwd, docker, usesRootlesskit: docker, gpg, gpgVault: gpgVaultInfo, extraBinds: binds, extraEnv: env, authSock, stateDir, claudeDir: installDir, gitBroker, commitGuard, notifySocketPath, usageSocketPath, reviewerSocketPath, homeDir, app, tools, chat });
+    const agentCmd = withClaude(targetCommand, command);
+    innerCmd = [BASH, '/ccserver-sandbox-entrypoint.sh', ...(chat ? chatBridgeArgv({
+      node: SANDBOX_NODE_PATH,
+      script: SANDBOX_CHAT_BRIDGE_PATH,
+      sock: `${SANDBOX_CHAT_DIR}/${CHAT_SOCK_NAME}`,
+      passwordFile: `${SANDBOX_CHAT_DIR}/${CHAT_PASSWORD_NAME}`,
+    }, agentCmd) : agentCmd)];
   } catch (err) {
     if (gitBroker) { try { gitBroker.proc.kill('SIGTERM'); } catch { /* already dead */ } }
     if (gitBroker) { try { rmSync(gitBroker.dir, { recursive: true, force: true }); } catch { /* best effort */ } }

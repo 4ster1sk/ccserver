@@ -14,6 +14,8 @@ const LAST_DIR_KEY = 'ccserver-last-dir';
 const SANDBOX_KEY = 'ccserver-sandbox-default';
 const SANDBOX_OPTS_PREFIX = 'ccserver-sandbox-opts:';
 const APP_KEY = 'ccserver-app-default';
+// opencode only: render it as a terminal (TUI) or as a chat (opencode >= 2).
+const OPENCODE_UI_KEY = 'ccserver-opencode-ui';
 // Every launchable app id, in the order pickers list them.
 const ALL_APPS = ['claude', 'opencode', 'codex'];
 // copy for the opt-in tool toggles the server host cannot
@@ -193,6 +195,15 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, initialPath, san
     return null;
   };
   const modelInputForApp = (app) => app === 'codex';
+  // Chat mode needs opencode >= 2 on the server (/api/dirs/home's
+  // opencodeChat; absent on an older server = unavailable).
+  const [opencodeChatAvailable, setOpencodeChatAvailable] = useState(false);
+  const [opencodeUi, setOpencodeUi] = useState(() => (localStorage.getItem(OPENCODE_UI_KEY) === 'chat' ? 'chat' : 'terminal'));
+  const chooseOpencodeUi = useCallback((val) => {
+    setOpencodeUi(val);
+    try { localStorage.setItem(OPENCODE_UI_KEY, val); } catch { /* ignore */ }
+  }, []);
+  const uiForApp = (app) => (app === 'opencode' && opencodeChatAvailable && opencodeUi === 'chat' ? 'chat' : 'terminal');
   const [openMenuOpen, setOpenMenuOpen] = useState(false);
   const [sandboxOpts, setSandboxOpts] = useState(() => loadSandboxOpts(currentPath, sandboxDefaults));
 
@@ -320,6 +331,7 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, initialPath, san
       // defaults are corrected
       // below. Missing field = older server: leave everything enabled.
       if (data.sandboxBackends) setSandboxBackends(data.sandboxBackends);
+      setOpencodeChatAvailable(data.opencodeChat === true);
       if (typeof data.sandboxAvailable === 'boolean') {
         setSandboxAvailable(data.sandboxAvailable);
         if (data.sandboxAvailable === false) {
@@ -755,11 +767,11 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, initialPath, san
           <div className="open-split">
             <button
               className="btn btn-primary open-split-main"
-              onClick={() => onOpen(currentPath, { sandbox: sandboxDefault, sandboxOpts: effectiveSandboxOpts, app: appDefault, model: modelForApp(appDefault) })}
+              onClick={() => onOpen(currentPath, { sandbox: sandboxDefault, sandboxOpts: effectiveSandboxOpts, app: appDefault, model: modelForApp(appDefault), ui: uiForApp(appDefault) })}
               disabled={effectiveAppHidden || launchesBlocked}
               title={effectiveAppHidden ? `${APP_LABELS[appDefault] || appDefault}は起動できません (非表示または未インストール)。起動方法を選択してください。` : (launchesBlocked ? LAUNCHES_BLOCKED_TITLE : (sandboxDefault ? 'サンドボックスで起動' : '通常起動'))}
             >
-              {sandboxDefault ? '🔒 ' : ''}{appDefault === 'claude' ? 'Claude Code' : appDefault === 'codex' ? 'OpenAI Codex' : 'opencode'}
+              {sandboxDefault ? '🔒 ' : ''}{uiForApp(appDefault) === 'chat' ? '💬 ' : ''}{appDefault === 'claude' ? 'Claude Code' : appDefault === 'codex' ? 'OpenAI Codex' : 'opencode'}
             </button>
             <button
               className="btn btn-primary open-split-caret"
@@ -789,6 +801,36 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, initialPath, san
                 {APP_LABELS[app]}
               </div>
             ))}
+            {appDefault === 'opencode' && (
+              <>
+                <div className="open-menu-label">表示</div>
+                <div className="open-menu-ui-row" role="radiogroup" aria-label="表示方法">
+                  <button
+                    type="button"
+                    role="radio"
+                    aria-checked={uiForApp('opencode') === 'terminal'}
+                    className={`open-menu-ui-btn${uiForApp('opencode') === 'terminal' ? ' active' : ''}`}
+                    onClick={() => chooseOpencodeUi('terminal')}
+                  >
+                    ⌨ ターミナル
+                  </button>
+                  <button
+                    type="button"
+                    role="radio"
+                    aria-checked={uiForApp('opencode') === 'chat'}
+                    className={`open-menu-ui-btn${uiForApp('opencode') === 'chat' ? ' active' : ''}`}
+                    onClick={() => chooseOpencodeUi('chat')}
+                    disabled={!opencodeChatAvailable}
+                    title={opencodeChatAvailable ? 'Web チャット画面で操作する' : 'チャットは opencode 2.0 以降が必要です'}
+                  >
+                    💬 チャット
+                  </button>
+                </div>
+                {!opencodeChatAvailable && (
+                  <div className="open-menu-note">チャット表示には opencode 2.0 以降が必要です</div>
+                )}
+              </>
+            )}
             {modelInputForApp(appDefault) && (
               <div className="open-menu-model-row">
                 <input
@@ -808,7 +850,7 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, initialPath, san
               <button className="btn btn-secondary" onClick={closeOpenMenu}>キャンセル</button>
               <button
                 className="btn btn-primary"
-                onClick={() => { closeOpenMenu(); onOpen(currentPath, { sandbox: sandboxDefault, sandboxOpts: effectiveSandboxOpts, app: appDefault, model: modelForApp(appDefault) }); }}
+                onClick={() => { closeOpenMenu(); onOpen(currentPath, { sandbox: sandboxDefault, sandboxOpts: effectiveSandboxOpts, app: appDefault, model: modelForApp(appDefault), ui: uiForApp(appDefault) }); }}
                 disabled={effectiveAppHidden || launchesBlocked}
                 title={effectiveAppHidden ? `${APP_LABELS[appDefault] || appDefault}は起動できません (非表示または未インストール)` : (launchesBlocked ? LAUNCHES_BLOCKED_TITLE : '')}
               >
@@ -873,6 +915,7 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, initialPath, san
                   })(),
                   app: appDefault,
                   model: modelForApp(appDefault),
+                  ui: uiForApp(appDefault),
                 });
               }}
               role="button"

@@ -310,6 +310,10 @@ function guestAdminUserData(adminPubKey, fail) {
   };
 }
 export const FAIL_PREFIX = 'CCSERVER-FAIL-';
+// Printed first thing in bootcmd: the kernel is up and the session's setup
+// (users, mounts, runtime, template steps) has begun. Only progress
+// reporting reads it (the chat view's "VM 起動中…" -> "VM セットアップ中…").
+export const SETUP_PREFIX = 'CCSERVER-SETUP-';
 
 // Session user-data. Mounting and user creation happen in bootcmd (the
 // earliest stage, in a fixed order we control) instead of cloud-init's
@@ -349,6 +353,7 @@ export function buildSessionUserData({ user, uid, gid, home, cwd, shares, sshPub
     bootcmd: [
       ['sh', '-c', [
         'set -u',
+        `echo ${SETUP_PREFIX}${readyToken} > /dev/ttyS0`,
         // The host uid/gid must map 1:1 so virtiofs ownership matches; an
         // image account already holding either id is removed first.
         `o=$(getent passwd ${uid} | cut -d: -f1); [ -n "$o" ] && [ "$o" != ${shellQuote(user)} ] && userdel "$o"`,
@@ -517,6 +522,17 @@ function templateUserDataParts(template) {
 
 export const SERVICE_IP = '10.0.2.100';
 export const GUEST_RT_DIR = '/ccserver-sandbox';
+
+// opencode chat mode inside a VM: the bridge and password file (in the rt
+// share, see buildGuestRuntime) and the relay socket the bridge listens on,
+// which the session's ssh forwards to a host socket (-L, see
+// buildGuestSshArgs). The socket dir is the guest user's own: the bridge
+// creates it, sshd (as that user) connects to it.
+const GUEST_CHAT_BRIDGE_NAME = 'chat-bridge.cjs';
+const GUEST_CHAT_PASSWORD_NAME = 'chat-password';
+export const GUEST_CHAT_BRIDGE = `${GUEST_RT_DIR}/${GUEST_CHAT_BRIDGE_NAME}`;
+export const GUEST_CHAT_PASSWORD = `${GUEST_RT_DIR}/${GUEST_CHAT_PASSWORD_NAME}`;
+export const GUEST_CHAT_SOCK = '/tmp/ccserver-chat/oc.sock';
 export const GUEST_GNUPG_DIR = '/run/ccserver/gnupg-vault';
 export const GUEST_SSH_AGENT_SOCK = '/run/ccserver/ssh-agent.sock';
 export const SERVICE_PORTS = Object.freeze({
@@ -552,7 +568,9 @@ const MCP_SOCKETS = [
 // Returns { files: [{ src | data, dest, mode }] (dest relative to rt/),
 // links: [[guestPath, target]], services: [{ name, addr, unix, guestPath }],
 // gnupgFiles: [names], env, gitConfig: [[key, value]] }.
-export function buildGuestRuntime({ scripts, gitBroker = null, commitGuard = null, gpgVault = null, sshAgentSock = null, mcp = {} }) {
+//   chat:         { bridge, passwordFile } host paths for an opencode chat
+//                 launch (opencode-chat-bridge.cjs), or null
+export function buildGuestRuntime({ scripts, gitBroker = null, commitGuard = null, gpgVault = null, sshAgentSock = null, mcp = {}, chat = null }) {
   const rt = (name) => `${GUEST_RT_DIR}/${name}`;
   const files = [];
   const links = [];
@@ -563,7 +581,7 @@ export function buildGuestRuntime({ scripts, gitBroker = null, commitGuard = nul
   const service = (name, unix, guestPath) => {
     services.push({ name, addr: `${SERVICE_IP}:${SERVICE_PORTS[name]}`, unix, guestPath });
   };
-  const needNode = gitBroker || commitGuard || MCP_SOCKETS.some(([k]) => mcp[k]);
+  const needNode = gitBroker || commitGuard || chat || MCP_SOCKETS.some(([k]) => mcp[k]);
   // Wrapper shebangs are #!/ccserver-sandbox-node; the guest's own node runs them.
   if (needNode) links.push(['/ccserver-sandbox-node', '/usr/bin/node']);
 
@@ -660,6 +678,15 @@ export function buildGuestRuntime({ scripts, gitBroker = null, commitGuard = nul
   if (anyMcp) {
     files.push({ src: scripts.mcpBridge, dest: 'mcp-bridge.cjs', mode: 0o755 });
     links.push(['/ccserver-sandbox-mcp-bridge', rt('mcp-bridge.cjs')]);
+  }
+
+  // opencode chat mode: the bridge runs from the read-only rt share and
+  // reads the server password from it (a file, never the ssh command line).
+  if (chat) {
+    files.push(
+      { src: chat.bridge, dest: GUEST_CHAT_BRIDGE_NAME, mode: 0o755 },
+      { src: chat.passwordFile, dest: GUEST_CHAT_PASSWORD_NAME, mode: 0o600 },
+    );
   }
   return { files, links, services, gnupgFiles, env, gitConfig };
 }
@@ -907,9 +934,15 @@ export const DEFAULT_HOTPLUG_SLOTS = 8;
 
 // ssh into the guest through the broker's VM network: no host TCP port
 // exists. tty: a session terminal (-tt) rather than a one-shot command.
-export function buildGuestSshArgs({ keyPath, knownHosts, network, user, tty }) {
+//
+// forwards: [[hostSocket, guestSocket]] unix-socket forwards (-L) for the
+// session login (opencode chat mode's relay socket). Each host socket is
+// created 0600 and replaced if stale.
+export function buildGuestSshArgs({ keyPath, knownHosts, network, user, tty, forwards = [] }) {
   return [
     ...(tty ? ['-tt'] : ['-T']), '-q',
+    ...forwards.flatMap(([host, guest]) => ['-L', `${host}:${guest}`]),
+    ...(forwards.length ? ['-o', 'StreamLocalBindUnlink=yes', '-o', 'StreamLocalBindMask=0177', '-o', 'ExitOnForwardFailure=yes'] : []),
     '-i', keyPath,
     '-o', `ProxyCommand=${shellQuote(network.pipeBin)} pipe ${shellQuote(network.guestSshSock)}`,
     '-o', 'IdentitiesOnly=yes',
@@ -950,6 +983,8 @@ function generateSshKeyPair(dir, name, comment) {
 //                 live open state, never a host-connected netdev.
 //   templateCloudConfig: the VM template's validated cloud-config (see
 //                 validateTemplateCloudConfig), or null
+//   sshForwards:  [[hostSocket, guestSocket]] for the session ssh (see
+//                 buildGuestSshArgs), or none
 
 export function prepareQemuSession(opts) {
   return prepareVm({ ...opts, pooled: false });
@@ -967,7 +1002,7 @@ export function prepareQemuPoolVm({ network, env = {}, memoryMiB, cpus, diskGiB,
 // Two shares per session (project + HOME).
 export const POOL_HOTPLUG_SLOTS = 32;
 
-function prepareVm({ cwd, argv, fallbackArgv = null, env = {}, homeHostPath = null, extraShares = [], runtime = null, network, memoryMiB = 4096, cpus = 2, diskGiB = 32, bootTimeoutSec = 120, templateCloudConfig = null, hotplugSlots = DEFAULT_HOTPLUG_SLOTS, pooled }) {
+function prepareVm({ cwd, argv, fallbackArgv = null, env = {}, homeHostPath = null, extraShares = [], runtime = null, network, memoryMiB = 4096, cpus = 2, diskGiB = 32, bootTimeoutSec = 120, templateCloudConfig = null, hotplugSlots = DEFAULT_HOTPLUG_SLOTS, pooled, sshForwards = [] }) {
   if (!network?.vnetSock || !network?.guestSshSock) throw new Error('prepareQemuSession: a network broker is required');
   const golden = currentGolden();
   if (!golden) throw new Error('no golden VM image (run server/cli/qemu-image-build.js)');
@@ -1052,12 +1087,13 @@ function prepareVm({ cwd, argv, fallbackArgv = null, env = {}, homeHostPath = nu
     guestSshSock: network.guestSshSock,
     readyPrefix: READY_PREFIX,
     failPrefix: FAIL_PREFIX,
+    setupPrefix: SETUP_PREFIX,
     bootTimeoutMs: bootTimeoutSec * 1000,
     virtiofsd: fsShares.map((s) => ({ bin: vfsd, args: buildVirtiofsdArgs({ socketPath: s.socketPath, sharedDir: s.hostPath, readonly: s.readonly }), socketPath: s.socketPath })),
     qemu: { bin: BWRAP_BIN, args: null },
     ssh: {
       bin: '/usr/bin/ssh',
-      args: buildGuestSshArgs({ keyPath: clientKey.path, knownHosts, network, user: u.username, tty: true }),
+      args: buildGuestSshArgs({ keyPath: clientKey.path, knownHosts, network, user: u.username, tty: true, forwards: sshForwards }),
     },
     // Share hot-plug (qemuShares.js): free root ports, the virtiofsd binary
     // and the forced-command admin login (see GUEST_ADMIN_USER).

@@ -12,13 +12,14 @@ import { basename, join, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import { qemuVmPool } from './qemuVmPool.js';
 import { LAUNCHER_SCRIPT as QEMU_LAUNCHER } from './sandbox-qemu.js';
-import { buildSandboxSpawn, resolveApp, sandboxAvailable, sandboxUnavailableReason, forceSandboxUnavailableReason, loadSandboxConfig, resolveSandboxBackend, persistentHomeDir, dockerSandboxAvailable, dockerdStatus, dockerdLockHeld, resolveTools, opencodeSupportsStandalone } from './sandbox.js';
+import { buildSandboxSpawn, resolveApp, sandboxAvailable, sandboxUnavailableReason, forceSandboxUnavailableReason, loadSandboxConfig, resolveSandboxBackend, persistentHomeDir, dockerSandboxAvailable, dockerdStatus, dockerdLockHeld, resolveTools, opencodeSupportsStandalone, chatBridgeArgv, CHAT_BRIDGE_SCRIPT, CHAT_PASSWORD_NAME } from './sandbox.js';
+import { prepareChatDir, removeChatDir, createChatState, publicChatState, feedChatOutput, failChat, initChatSession, sendChatPrompt, startChatMonitor, stopChatMonitor } from './opencodeChat.js';
 import * as gpgVaultRelay from './gpgVaultRelay.js';
 import { brokerArmed, setSessionBrokerLists, setSessionBrokerOpMode } from './netbrokerClient.js';
 import { buildMcpConfigArgsAndEnv } from './mcpConfig.js';
 import { shouldInjectNotify, notifyEnabled, getNotifySockPath, notifyBrokerRunning } from './notify.js';
 import { buildAgentNotifyArgsAndEnv, shouldCaptureNotifications } from './agentNotifyConfig.js';
-import { attachNotifyDetector } from './notifyBridge.js';
+import { attachNotifyDetector, handleAgentNotification } from './notifyBridge.js';
 import { shouldInjectUsage, usageEnabled, getUsageSockPath, usageBrokerRunning } from './usageMcp.js';
 import { shouldInjectReviewer, reviewerEnabled, getReviewerSockPath, reviewerBrokerRunning } from './reviewer.js';
 import { createScreenModel, SCREEN_ROWS } from './screenModel.js';
@@ -39,6 +40,9 @@ import { isContained, isCcserverScratchPath } from '../pathPolicy.js';
 import {
   isValidApp,
   appLaunchArgs,
+  appChatArgs,
+  appSupportsChat,
+  normalizeSessionUi,
   appSubmitKey,
   extractResumeSessionId,
   detectPermissionPrompt,
@@ -200,6 +204,32 @@ function normalizeModel(model) {
   return typeof model === 'string' && model.length > 0 ? model : null;
 }
 
+// The first idle gap of a freshly-launched TUI (or a chat session becoming
+// ready): mark the session settled and wake anyone waiting on the settle
+// gate (send_input's waitUntilSettled).
+function markSettled(session) {
+  if (!session.settled) {
+    session.settled = true;
+    const waiters = session.settleWaiters;
+    session.settleWaiters = [];
+    for (const w of waiters) w();
+  }
+}
+
+// A scheduled prompt may be waiting for this (freshly auto-resumed) session
+// to settle before typing its text. Deliver it once quiet / ready.
+function deliverPendingInjection(session) {
+  if (!session.pendingInjection) return;
+  const inj = session.pendingInjection;
+  session.pendingInjection = null;
+  if (session.pendingInjectionTimer) {
+    clearTimeout(session.pendingInjectionTimer);
+    session.pendingInjectionTimer = null;
+  }
+  const delivered = injectIntoLiveSession(session, inj.text);
+  notifyFired(session, { at: inj.at, text: inj.text }, delivered);
+}
+
 // Builds the `session` record and wires its ptyProcess onData/onExit
 // listeners. The only caller is createSession(); factored out to keep that
 // function's spawn logic separate from the record/listener wiring.
@@ -211,6 +241,10 @@ function buildSessionRecord(id, ptyProcess, meta) {
     app: meta.app,
     model: meta.model,
     permissionMode: meta.permissionMode,
+    // 'terminal' (TUI in the pty) or 'chat' (opencode serve behind the chat
+    // proxy, see opencodeChat.js). `chat` holds the latter's state.
+    ui: meta.ui || 'terminal',
+    chat: meta.chat || null,
     // Operator-assigned display name (null = none; the UI falls back to the
     // directory basename). Set post-launch via setSessionLabel (PATCH
     // /api/sessions/:id), never from launch input -- launch bodies are
@@ -307,6 +341,40 @@ function buildSessionRecord(id, ptyProcess, meta) {
     session.lastOutputAt = Date.now();
     appendToBuffer(session, data);
 
+    // Chat mode: the pty carries only the bridge's / launcher's log and its
+    // startup-stage markers (see chatStages.js) -- none of the TUI
+    // detectors below apply.
+    if (session.chat) {
+      const { changed, opencodeUp } = feedChatOutput(session.chat, data);
+      if (changed) broadcastChatState(session);
+      if (opencodeUp) {
+        initChatSession(session.chat, {
+          onChange: () => {
+            // Ready is a chat session's "settled" (send_input's gate, a
+            // scheduled prompt waiting on a fresh resume).
+            if (session.chat.ready) {
+              markSettled(session);
+              deliverPendingInjection(session);
+              startChatMonitor(session.chat, {
+                isAlive: () => !session.exited && sessions.get(session.id) === session,
+                // The agent notification bridge (notifyBridge.js), for the
+                // events a TUI would have announced with OSC 9/777. Armed
+                // at launch exactly like the pty detector (chatNotify).
+                onNotify: session.chatNotify
+                  ? ({ title, body }) => {
+                    handleAgentNotification(session, { kind: 'notification', source: 'chat', title, body }).catch(() => {});
+                  }
+                  : null,
+              });
+            }
+            broadcastChatState(session);
+          },
+        }).catch((err) => console.warn(`[chat] ${session.id}: ${err.message}`));
+      }
+      broadcast(session, { type: 'output', data });
+      return;
+    }
+
     // Session-limit auto-resume detection -- role/app agnostic, applies to
     // every session per the plan (a shell session simply never matches).
     // See sessionLimitDetect.js for the regex/timezone-math and the
@@ -386,24 +454,10 @@ function buildSessionRecord(id, ptyProcess, meta) {
         // The first idle gap means a freshly-launched TUI has finished its
         // initialization burst: mark the session settled and wake anyone
         // waiting on the settle gate (send_input's waitUntilSettled).
-        if (!session.settled) {
-          session.settled = true;
-          const waiters = session.settleWaiters;
-          session.settleWaiters = [];
-          for (const w of waiters) w();
-        }
+        markSettled(session);
         // A scheduled prompt may be waiting for this (freshly auto-resumed)
         // session to settle before typing its text. Deliver it once quiet.
-        if (session.pendingInjection) {
-          const inj = session.pendingInjection;
-          session.pendingInjection = null;
-          if (session.pendingInjectionTimer) {
-            clearTimeout(session.pendingInjectionTimer);
-            session.pendingInjectionTimer = null;
-          }
-          const delivered = injectIntoLiveSession(session, inj.text);
-          notifyFired(session, { at: inj.at, text: inj.text }, delivered);
-        }
+        deliverPendingInjection(session);
       }, IDLE_TIMEOUT_MS);
 
       // Auto-yes detection for agent permission prompts. Claude uses Ink's
@@ -475,6 +529,10 @@ function buildSessionRecord(id, ptyProcess, meta) {
     session.exited = true;
     session.exitCode = exitCode;
     session.exitSignal = signal;
+    if (session.chat) stopChatMonitor(session.chat);
+    if (session.chat && failChat(session.chat, `プロセスが終了しました (${signal ? `signal ${signal}` : `code ${exitCode}`})`)) {
+      broadcastChatState(session);
+    }
     if (!session.shell) {
       session.claudeSessionId = extractResumeSessionId(
         session.app,
@@ -519,7 +577,7 @@ function buildSessionRecord(id, ptyProcess, meta) {
   return session;
 }
 
-export async function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox, sandboxOpts, app, model, resumeLast, reuseSandboxHome = true, isReviewJob = false, sandboxHomeCreatedBy = null, customLabel = null }) {
+export async function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox, sandboxOpts, app, model, resumeLast, reuseSandboxHome = true, isReviewJob = false, sandboxHomeCreatedBy = null, customLabel = null, ui = 'terminal' }) {
   const id = randomUUID();
   // Read once and thread through: this hot path (every session launch) was
   // otherwise re-reading + re-parsing sandbox.config.json up to four times
@@ -644,6 +702,19 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
   const sessionModel = shell ? null : normalizeModel(model);
   const sessionPermissionMode = 'standard';
 
+  // Chat mode (opencode >= 2 only): refused outright rather than silently
+  // started as a terminal, since the browser would render the wrong view.
+  const sessionUi = shell ? 'terminal' : normalizeSessionUi(ui);
+  if (sessionUi === 'chat' && !appSupportsChat(sessionApp, { opencodeV2: sessionApp === 'opencode' && opencodeSupportsStandalone(resolved.hostCommand) })) {
+    return {
+      sessionId: id,
+      session: null,
+      error: sessionApp === 'opencode'
+        ? 'Cannot launch: chat mode needs opencode 2.0 or later (the installed opencode is older). Launch it as a terminal instead.'
+        : `Cannot launch: chat mode is only available for opencode, not ${sessionApp}.`,
+    };
+  }
+
   // ccserver-notify injection (see notify.js): agent sessions get the
   // process-global notify MCP server when the
   // feature is enabled (Discord webhook configured or subscriptions exist)
@@ -730,7 +801,7 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
     // (resolved.hostCommand) rather than assumed -- see appLaunch.js's
     // appStandaloneArgs comment: an opencode <2.0.0 install rejects the flag
     // outright, so this must never be passed without checking first.
-    args = appLaunchArgs(sessionApp, {
+    args = sessionUi === 'chat' ? appChatArgs(sessionApp) : appLaunchArgs(sessionApp, {
       resumeId: claudeSessionId,
       resumeLast,
       model: sessionModel,
@@ -865,7 +936,7 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
   // agentNotifyConfig.js's "OFF INVARIANT"). cfg was already read at the top of
   // createSession -- do not re-read the config file here.
   const notifyBridgeCfg = cfg.notify?.bridge || null;
-  const agentNotify = buildAgentNotifyArgsAndEnv(sessionApp, notifyBridgeCfg);
+  const agentNotify = sessionUi === 'chat' ? { args: [], env: {} } : buildAgentNotifyArgsAndEnv(sessionApp, notifyBridgeCfg);
   args.push(...agentNotify.args);
 
   // Optionally wrap the target in a bwrap filesystem sandbox.
@@ -894,6 +965,18 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
   let sandboxNetworkBrokerDir = null;
   let ptyProcess;
 
+  // Chat mode: the dir holding serve's password and the bridge's relay
+  // socket. Made here, after every refusal above that needs no cleanup;
+  // each failure below removes it.
+  let chatDir = null;
+  if (sessionUi === 'chat') {
+    try {
+      chatDir = prepareChatDir(id);
+    } catch (err) {
+      return { sessionId: id, session: null, error: `Failed to prepare the chat session: ${err.message}` };
+    }
+  }
+
   if (sandboxRequested) {
     // A fresh (wipe) sandbox is refused while another sandbox of the same
     // project is still using the same persistent HOME -- deleting the host dir
@@ -911,6 +994,7 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
         fresh: !reuseSandboxHome,
         liveSessions: sessions.values(),
       })) {
+        removeChatDir(chatDir?.dir);
         return {
           sessionId: id,
           session: null,
@@ -920,7 +1004,7 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
       reservedSandboxHomePath = targetPath;
     }
     try {
-      const spawn = await buildSandboxSpawn({ cwd, targetCommand: [command, ...args], app: sessionApp, sandboxOpts, notifySocketPath, usageSocketPath, reviewerSocketPath, reuseSandboxHome, sandboxHomeCreatedBy, isReviewJob });
+      const spawn = await buildSandboxSpawn({ cwd, targetCommand: [command, ...args], app: sessionApp, sandboxOpts, notifySocketPath, usageSocketPath, reviewerSocketPath, reuseSandboxHome, sandboxHomeCreatedBy, isReviewJob, chat: chatDir ? { hostDir: chatDir.dir } : null });
       command = spawn.command;
       args = spawn.args;
       sandboxDocker = !!spawn.docker;
@@ -940,6 +1024,7 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
       sandboxNetworkBrokerDir = spawn.sandboxNetworkBrokerDir || null;
       useSandbox = true;
     } catch (err) {
+      removeChatDir(chatDir?.dir);
       return { sessionId: id, session: null, error: `Failed to build sandbox: ${err.message}` };
     } finally {
       // After the await there is no further yield before pty.spawn and
@@ -953,6 +1038,7 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
     // shape; the browseRoots one has its own INFRA_ERROR_PREFIXES entry
     // because the bwrap/disable-forceSandbox hint does not fit it.
     const { reason, hint } = forceSandboxUnavailableReason(backend);
+    removeChatDir(chatDir?.dir);
     if (cfg.forceSandboxReason === 'config') {
       return {
         sessionId: id,
@@ -966,6 +1052,17 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
       error: `Cannot launch: sandbox.config.json sets "browseRoots", so every session must run `
         + `sandboxed, but ${reason}. Install bwrap (bubblewrap) or unset browseRoots.`,
     };
+  }
+
+  // An unsandboxed chat launch runs the bridge on the host itself (a
+  // sandboxed one got it from buildSandboxSpawn).
+  if (chatDir && !useSandbox) {
+    [command, ...args] = chatBridgeArgv({
+      node: process.execPath,
+      script: CHAT_BRIDGE_SCRIPT,
+      sock: chatDir.sock,
+      passwordFile: join(chatDir.dir, CHAT_PASSWORD_NAME),
+    }, [command, ...args]);
   }
 
   try {
@@ -1015,6 +1112,7 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
     releaseSandboxArtifacts({
       sandboxStateDir, sandboxGitBrokerProc, sandboxGitBrokerDir, sandboxCommitGuardDir,
       sandboxNetworkBrokerProc, sandboxNetworkBrokerDir, qemuRunDir, qemuPoolLease,
+      chat: chatDir,
     });
     return { sessionId: id, session: null, error: `Failed to spawn "${command}": ${err.message}` };
   }
@@ -1025,6 +1123,15 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
     app: sessionApp,
     model: sessionModel,
     permissionMode: sessionPermissionMode,
+    ui: sessionUi,
+    chat: chatDir ? createChatState({
+      ...chatDir,
+      sandboxed: useSandbox,
+      backend: useSandbox ? backend : null,
+      pooled: !!qemuPoolLease,
+      resumeLast,
+      model: sessionModel,
+    }) : null,
     customLabel,
     sandbox: useSandbox,
     sandboxOpts,
@@ -1057,7 +1164,10 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
   // one property check. (Delivery-side settings -- channels, rate limits --
   // ARE re-read per notification, which is rare; see notifyBridge.js.)
   if (shouldCaptureNotifications({ shell, app: sessionApp, bridge: notifyBridgeCfg })) {
-    attachNotifyDetector(session, notifyBridgeCfg);
+    // A chat session's notifications come from its event stream (see the
+    // chat monitor above), not from pty escape sequences.
+    if (sessionUi === 'chat') session.chatNotify = true;
+    else attachNotifyDetector(session, notifyBridgeCfg);
   }
 
   return { sessionId: id, session };
@@ -1169,6 +1279,20 @@ export function setSessionLabel(id, label) {
 export function writeToSession(id, text, { submit = false } = {}) {
   const session = sessions.get(id);
   if (!session?.ptyProcess || session.exited) return false;
+  // A chat session has no TUI to type into: text accumulates until a submit
+  // sends it as one prompt over the API.
+  if (session.chat) {
+    if (!session.chat.ready) return false;
+    session.chatPendingInput = (session.chatPendingInput || '') + text;
+    if (submit) {
+      const prompt = session.chatPendingInput;
+      session.chatPendingInput = '';
+      if (prompt.trim()) {
+        sendChatPrompt(session.chat, prompt).catch((err) => console.warn(`[chat] ${id}: prompt failed: ${err.message}`));
+      }
+    }
+    return true;
+  }
   try {
     session.ptyProcess.write(text);
     if (session.idleTimer) {
@@ -1320,6 +1444,7 @@ function persistSchedules() {
         app: s.app || 'claude',
         model: normalizeModel(s.model) || null,
         permissionMode: 'standard',
+        ui: normalizeSessionUi(s.ui),
         claudeSessionId: s.claudeSessionId || null,
         source: s.source || 'manual',
       });
@@ -1535,6 +1660,11 @@ function refreshScheduleOnExit(session) {
 }
 
 function injectIntoLiveSession(session, text) {
+  if (session.chat) {
+    if (!session.chat.ready) return false;
+    sendChatPrompt(session.chat, text).catch((err) => console.warn(`[chat] ${session.id}: prompt failed: ${err.message}`));
+    return true;
+  }
   try {
     // Type the prompt text, then submit with Enter after a short delay so the
     // TUI registers the input before the newline is sent.
@@ -1604,7 +1734,8 @@ export function matchesScheduleTarget(session, entry) {
     && session.shell === entry.shell
     && session.app === entry.app
     && (session.model ?? null) === (entry.model ?? null)
-    && (session.permissionMode ?? 'standard') === (entry.permissionMode ?? 'standard');
+    && (session.permissionMode ?? 'standard') === (entry.permissionMode ?? 'standard')
+    && normalizeSessionUi(session.ui) === normalizeSessionUi(entry.ui);
 }
 
 async function fireSchedule(scheduleId) {
@@ -1651,6 +1782,7 @@ async function fireSchedule(scheduleId) {
     model: entry.model,
     permissionMode: entry.permissionMode,
     resumeLast: entry.app === 'opencode' || entry.app === 'codex',
+    ui: normalizeSessionUi(entry.ui),
   });
   if (!res?.session) {
     // Explain auto-resume failures because there is no client request to
@@ -1707,6 +1839,7 @@ export function setScheduledPrompt(id, at, text, { source = 'manual' } = {}) {
     app: session.app || 'claude',
     model: normalizeModel(session.model) || null,
     permissionMode: 'standard',
+    ui: normalizeSessionUi(session.ui),
     claudeSessionId: resumeIdForSession(session),
     sessionId: id,
     source,
@@ -1767,6 +1900,8 @@ export function restoreSchedules() {
       // Legacy schedules predate the permissionMode field; 'standard' (no
       // flag) is the safe direction.
       permissionMode: 'standard',
+      // Legacy schedules predate chat mode: a terminal.
+      ui: normalizeSessionUi(e.ui),
       claudeSessionId: e.claudeSessionId || null,
       // Legacy entries (no source field) fall back to 'manual' -- the safe
       // direction, since a manual schedule is protected from being clobbered
@@ -1823,6 +1958,14 @@ function sampleScreenActivity(session, now = Date.now()) {
 // (browser poll, MCP tool) advances the same history.
 export function activitySnapshot(session) {
   if (!session) return NO_ACTIVITY;
+  // Chat mode has no TUI screen to read: the chat monitor's state is exact.
+  if (session.chat) {
+    const base = { marker: null, markerVerified: true, screenIdleMs: null, changeRate: 0 };
+    if (session.exited) return { ...base, level: null, reason: 'exited' };
+    if (!session.chat.ready) return { ...base, level: 'low', reason: 'chat-starting' };
+    if (session.chat.waiting > 0) return { ...base, level: 'idle', reason: 'chat-waiting' };
+    return { ...base, level: session.chat.busy ? 'busy' : 'idle', reason: session.chat.busy ? 'chat-busy' : 'chat-idle' };
+  }
   const now = Date.now();
   sampleScreenActivity(session, now);
   const round = (n) => Math.round(n * 10) / 10;
@@ -1858,6 +2001,7 @@ export function listSessions() {
       app: session.app,
       model: session.model || null,
       permissionMode: 'standard',
+      ui: session.ui || 'terminal',
       customLabel: session.customLabel || null,
       // How hard this session's agent is working right now (see activity.js):
       // { level: 'idle'|'low'|'busy'|null, reason, marker, markerVerified,
@@ -1918,6 +2062,15 @@ export function listPooledQemuSessions() {
 // a session whose destroy timer never arms, i.e. a pty that outlives its
 // last real viewer forever. detachSocket is still the normal path (the ws
 // 'close' handler); this is the backstop for a socket that dies without one.
+// The chat view's startup list / readiness (see opencodeChat.js).
+export function chatStateMsg(session) {
+  return { type: 'chat_state', chat: publicChatState(session.chat) };
+}
+
+function broadcastChatState(session) {
+  broadcast(session, chatStateMsg(session));
+}
+
 function broadcast(session, payload) {
   if (!session?.sockets?.size) return;
   const str = typeof payload === 'string' ? payload : JSON.stringify(payload);
@@ -2070,8 +2223,11 @@ export function detachSocket(id, socketToDetach) {
 function releaseSandboxArtifacts(artifacts) {
   const {
     sandboxStateDir, sandboxGitBrokerProc, sandboxGitBrokerDir, sandboxCommitGuardDir,
-    sandboxNetworkBrokerProc, sandboxNetworkBrokerDir, qemuRunDir, qemuPoolLease,
+    sandboxNetworkBrokerProc, sandboxNetworkBrokerDir, qemuRunDir, qemuPoolLease, chat,
   } = artifacts;
+  // opencode chat mode: the password file / relay socket dir.
+  if (chat) stopChatMonitor(chat);
+  if (chat?.dir) removeChatDir(chat.dir);
   if (sandboxStateDir) { try { rmSync(sandboxStateDir, { recursive: true, force: true }); } catch { /* nothing to remove / still held — harmless */ } }
   if (sandboxGitBrokerProc) { try { sandboxGitBrokerProc.kill('SIGTERM'); } catch { /* already dead */ } }
   if (sandboxGitBrokerDir) { try { rmSync(sandboxGitBrokerDir, { recursive: true, force: true }); } catch { /* best effort */ } }

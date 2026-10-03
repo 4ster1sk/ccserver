@@ -3,7 +3,7 @@ import { join, resolve, basename } from 'node:path';
 import { homedir } from 'node:os';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { loadSandboxConfig, installedApps, sandboxBackend, backendStatus, sandboxToolsAvailable } from '../ws/sandbox.js';
+import { loadSandboxConfig, installedApps, sandboxBackend, backendStatus, sandboxToolsAvailable, opencodeChatAvailable } from '../ws/sandbox.js';
 import { opencodeGoAvailable } from '../opencodeUsage.js';
 import { resolvedHostname } from '../ws/notify.js';
 import { resolveWithinRoots, isContained } from '../pathPolicy.js';
@@ -183,7 +183,7 @@ export async function dirsRoute(fastify, opts) {
     //
     // forceSandboxReason is for WORDING ONLY ("forceSandbox で強制" vs
     // "browseRoots により必須"); the UI must never branch policy on it.
-    return { home, browseRoots, browseRootsInvalid, initialBrowsePath, defaultApp, forceSandbox, forceSandboxReason: cfg.forceSandboxReason, hostname: resolvedHostname(), showUsage, availableApps: { ...installedApps(), opencodeGo: opencodeGoAvailable(cfg) }, toolsAvailable: sandboxToolsAvailable(), hiddenApps, sandboxAvailable: backends.bwrap.ok || backends.qemu.ok, sandboxBackend: sandboxBackend(), sandboxBackends: backends };
+    return { home, browseRoots, browseRootsInvalid, initialBrowsePath, defaultApp, forceSandbox, forceSandboxReason: cfg.forceSandboxReason, hostname: resolvedHostname(), showUsage, availableApps: { ...installedApps(), opencodeGo: opencodeGoAvailable(cfg) }, opencodeChat: opencodeChatAvailable(), toolsAvailable: sandboxToolsAvailable(), hiddenApps, sandboxAvailable: backends.bwrap.ok || backends.qemu.ok, sandboxBackend: sandboxBackend(), sandboxBackends: backends };
   });
 
   fastify.get('/dirs', async (request, reply) => {
