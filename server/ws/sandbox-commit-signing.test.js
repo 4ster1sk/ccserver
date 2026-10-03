@@ -100,6 +100,30 @@ test('a signing launch: approved once, wrapper + public key + identity, no agent
   assert.ok(!s.args.some((a) => /S\.gpg-agent/.test(a)), 'no gpg-agent socket of any kind');
 });
 
+test('approval mode "sign": the launch does not ask, the handler asks per commit; the config sets the default', { skip: process.platform !== 'linux' }, async () => {
+  const perLaunch = deps();
+  const s1 = await buildSandboxSpawn({ cwd: repo, targetCommand: ['/bin/true'], app: 'claude', sandboxOpts: { commitSigning: true, commitSigningApproval: 'sign' } }, perLaunch.deps);
+  spawned.push(s1);
+  assert.equal(perLaunch.calls.approvals.length, 0);
+  assert.equal(perLaunch.calls.handlers[0].approveEachSign, true);
+  assert.equal(s1.commitSigningActive, true);
+
+  writeConfig({ commitSigningApproval: 'sign' });
+  try {
+    const fromConfig = deps();
+    spawned.push(await buildSandboxSpawn({ cwd: repo, targetCommand: ['/bin/true'], app: 'claude', sandboxOpts: { commitSigning: true } }, fromConfig.deps));
+    assert.equal(fromConfig.calls.approvals.length, 0);
+    assert.equal(fromConfig.calls.handlers[0].approveEachSign, true);
+
+    const overridden = deps();
+    spawned.push(await buildSandboxSpawn({ cwd: repo, targetCommand: ['/bin/true'], app: 'claude', sandboxOpts: { commitSigning: true, commitSigningApproval: 'launch' } }, overridden.deps));
+    assert.equal(overridden.calls.approvals.length, 1);
+    assert.equal(overridden.calls.handlers[0].approveEachSign, false);
+  } finally {
+    writeConfig({});
+  }
+});
+
 test('no signing requested: no approval, no wrapper, commitSigningActive false', { skip: process.platform !== 'linux' }, async () => {
   const { deps: d, calls } = deps();
   const s = await buildSandboxSpawn({ cwd: repo, targetCommand: ['/bin/true'], app: 'claude' }, d);

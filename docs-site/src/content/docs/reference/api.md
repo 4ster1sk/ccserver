@@ -44,6 +44,7 @@ CCSERVER_TOKEN=some-secret NODE_ENV=production node server/index.js
 | POST | `/api/commit-signing/import` / `generate` | 署名鍵の登録 (`{ keyArmored }`: `--export-secret-subkeys` の出力) / 生成 (`{ nameReal, nameEmail, passphrase }`) |
 | POST | `/api/commit-signing/unlock` / `lock` | パスフレーズでロック解除 (署名待ちのコミットがあればそのまま進む) / ロック。パスフレーズは記録しない |
 | POST | `/api/commit-signing/passkeys/enroll-options` / `enroll-verify` / `unlock-options` / `unlock-verify` / `clear` | パスキー (PRF) でのロック解除の登録・実行・解除 (`passkey` モード限定。登録にはパスフレーズが必要) |
+| POST | `/api/commit-signing/approvals/:id/approve-session` | 「署名のたびに承認」のコミット署名の承認要求を承認し、同じセッションの以降のコミットは確認なしで署名する |
 | POST | `/api/commit-signing/delete-key` | 署名鍵の削除 (`passkey` モードでは 5 分以内のステップアップが必要) |
 | GET | `/api/notify-settings` | 通知ブリッジの設定 (`settings`)、GUI が描画に使う語彙 (`choices`)、このホストで実際に到達可能なチャネル (`channelsAvailable`)、Web Push の公開鍵 (`vapidPublicKey`)、購読中の端末一覧 (`pushSubscriptions`、endpoint は含まない)、可観測カウンタ (`stats`) |
 | PUT | `/api/notify-settings` | 通知ブリッジ設定の部分更新。未知のキー・範囲外の数値・未知の app/channel/level は 400 で名指し。設定ファイルが壊れている場合は 500 で内容を保持 |

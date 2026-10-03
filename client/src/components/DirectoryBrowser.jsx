@@ -4,7 +4,7 @@ import { displayPath } from '../displayPath.js';
 import { formatSize } from '../formatSize.js';
 import { isPreviewable } from '../previewExts.js';
 import { isAppSelectable } from '../appAvailability.js';
-import { loadSandboxDefaults, defaultSandboxOpts } from '../sandboxDefaults.js';
+import { loadSandboxDefaults, defaultSandboxOpts, normalizeCommitSigningApproval } from '../sandboxDefaults.js';
 
 // marked + DOMPurify only matter once someone opens a preview, so keep them
 // out of the initial bundle (same split as TerminalView in App.jsx).
@@ -92,10 +92,12 @@ function loadSandboxOpts(path, globalDefaults) {
       // 旧形式の記憶 ({sshAgent} など) では tools キーが不在。
       // 不在 = 未選択なので一律 true にせずグローバル既定値にフォールバックする
       // (明示保存された true/false は引き続き尊重される)。
-      const fallbackTools = defaultSandboxOpts(globalDefaults || loadSandboxDefaults()).tools;
+      const fallback = defaultSandboxOpts(globalDefaults || loadSandboxDefaults());
+      const fallbackTools = fallback.tools;
       return {
         sshAgent: !!parsed.sshAgent,
         commitSigning: !!parsed.commitSigning,
+        commitSigningApproval: normalizeCommitSigningApproval(parsed.commitSigningApproval) ?? fallback.commitSigningApproval,
         tools: {
           rtk: parsed.tools?.rtk ?? fallbackTools.rtk,
           codeReviewGraph: parsed.tools?.codeReviewGraph ?? fallbackTools.codeReviewGraph,
@@ -590,7 +592,7 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, initialPath, san
           />
           ssh-agentを転送する
         </label>
-        <label className="open-menu-suboption" title="コミットはホストの署名鍵で署名されます (起動のたびに承認が必要)">
+        <label className="open-menu-suboption" title="コミットはホストの署名鍵で署名されます (起動時か署名のたびに承認が必要)">
           <input
             type="checkbox"
             checked={!!sandboxOpts.commitSigning}
@@ -598,6 +600,18 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, initialPath, san
           />
           コミットに署名する (ホストの署名鍵)
         </label>
+        {sandboxOpts.commitSigning && (
+          <label className="open-menu-suboption">
+            署名の承認:
+            <select
+              value={sandboxOpts.commitSigningApproval || 'launch'}
+              onChange={(e) => updateSandboxOpts(currentPath, { ...sandboxOpts, commitSigningApproval: e.target.value })}
+            >
+              <option value="launch">起動時に承認</option>
+              <option value="sign">署名のたびに承認</option>
+            </select>
+          </label>
+        )}
         <label className={`open-menu-suboption${toolDisabled('rtk') ? ' open-menu-suboption-disabled' : ''}`} title={toolDisabled('rtk') ? toolNote : ''}>
           <input
             type="checkbox"

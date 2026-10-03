@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   createSignHandler, waitForUnlock, resolvePendingUnlocks, installApprovalGuards,
-  requestLaunchApproval, resolveLaunchSigningKey,
+  requestLaunchApproval, resolveLaunchSigningKey, requestSignApproval, grantSessionSigning,
 } from './commitSignService.js';
 import { requestApproval, decideApproval, listApprovals, _resetWaitersForTests } from './approvals.js';
 import { closeDb } from '../db.js';
@@ -38,10 +38,10 @@ function payload({ email = KEY.nameEmail, time = NOW / 1000, tree = TREE } = {})
   return Buffer.from(`tree ${tree}\nauthor ${KEY.nameReal} <${email}> ${time} +0000\ncommitter ${KEY.nameReal} <${email}> ${time} +0000\n\nsubject\n`).toString('base64');
 }
 
-function handler(over = {}) {
+function handler(over = {}, opts = {}) {
   const signed = [];
   const recorded = [];
-  const h = createSignHandler({ cwd: repo, app: 'claude', key: KEY }, {
+  const h = createSignHandler({ cwd: repo, app: 'claude', key: KEY, ...opts }, {
     now: () => NOW,
     signPayload: async (buf, fpr) => { signed.push(fpr); return { signature: Buffer.from('SIG'), status: ['[GNUPG:] SIG_CREATED D'] }; },
     recordSignature: (r) => recorded.push(r),
@@ -160,4 +160,87 @@ test('resolveLaunchSigningKey: no key or an unusable key refuses with a clear me
   await assert.rejects(resolveLaunchSigningKey({ getSigningKey: async () => null }), /no signing key is set up/);
   await assert.rejects(resolveLaunchSigningKey({ getSigningKey: async () => { throw new Error('expired'); } }), /cannot be used: expired/);
   assert.equal(await resolveLaunchSigningKey({ getSigningKey: async () => KEY }), KEY);
+});
+
+test('approval mode "launch" (the default) never asks per commit', async () => {
+  const { h } = handler({ requestSignApproval: async () => assert.fail('asked') });
+  assert.equal((await h({ payload: payload(), dir: repo })).ok, true);
+});
+
+test('approval mode "sign": each commit asks after the checks; only "approved" signs', async () => {
+  const asked = [];
+  let answer = true;
+  const { h, signed } = handler({ requestSignApproval: async (ctx) => { asked.push(ctx); return answer; } }, { approveEachSign: true });
+  assert.equal((await h({ payload: payload(), dir: repo })).ok, true);
+  assert.equal(asked.length, 1);
+  assert.equal(asked[0].commit.subject, 'subject');
+  assert.equal(asked[0].dir, repo);
+
+  answer = false;
+  const r = await h({ payload: payload(), dir: repo });
+  assert.equal(r.reason, 'not-approved');
+  assert.equal(signed.length, 1, 'a rejected commit never reaches gpg');
+
+  // A commit the checks refuse never reaches the banner.
+  assert.equal((await h({ payload: payload({ email: 'x@y.z' }), dir: repo })).reason, 'identity-mismatch');
+  assert.equal(asked.length, 2);
+});
+
+test('requestSignApproval: kind, summary and payload', async () => {
+  for (const [status, ok] of [['approved', true], ['rejected', false], ['expired', false]]) {
+    const r = await requestSignApproval({
+      cwd: repo, app: 'claude', dir: repo, key: KEY, grantId: 'g1',
+      commit: { subject: 'fix bug', tree: TREE, parents: [] },
+    }, {
+      request: async (input) => {
+        assert.equal(input.kind, 'commit_signing_sign');
+        assert.match(input.summary, /fix bug/);
+        assert.equal(input.payload.grantId, 'g1');
+        assert.equal(input.payload.tree, TREE);
+        return { status };
+      },
+    });
+    assert.equal(r, ok);
+  }
+});
+
+test('grantSessionSigning: approves the launch\'s pending commits and stops asking; dispose forgets it', async () => {
+  const a = createSignHandler({ cwd: repo, app: 'claude', key: KEY, approveEachSign: true }, {
+    now: () => NOW,
+    signPayload: async () => ({ signature: Buffer.from('S'), status: [] }),
+    recordSignature: () => {},
+    checkObjects: async () => null,
+  });
+  const other = createSignHandler({ cwd: repo, app: 'claude', key: KEY, approveEachSign: true }, {
+    now: () => NOW,
+    signPayload: async () => ({ signature: Buffer.from('S'), status: [] }),
+    recordSignature: () => {},
+    checkObjects: async () => null,
+  });
+  const p1 = a({ payload: payload(), dir: repo });
+  const p2 = a({ payload: payload(), dir: repo });
+  const p3 = other({ payload: payload(), dir: repo });
+  await new Promise((r) => setTimeout(r, 50));
+  const pending = listApprovals().pending.filter((x) => x.kind === 'commit_signing_sign');
+  assert.equal(pending.length, 3);
+  // a's two requests share a grantId; other's one does not.
+  const count = (g) => pending.filter((x) => x.payload.grantId === g).length;
+  const mine = pending.filter((x) => count(x.payload.grantId) === 2);
+  const theirs = pending.find((x) => count(x.payload.grantId) === 1);
+  assert.equal(mine.length, 2);
+
+  assert.equal(grantSessionSigning(mine[0].id).ok, true);
+  assert.equal(grantSessionSigning(mine[0].id).code, 'already-resolved');
+  assert.equal((await p1).ok, true);
+  assert.equal((await p2).ok, true);
+  // Later commits of the same launch go through without asking.
+  assert.equal((await a({ payload: payload(), dir: repo })).ok, true);
+  assert.equal(listApprovals().pending.filter((x) => x.kind === 'commit_signing_sign').length, 1, 'only the other launch is still waiting');
+
+  other.dispose();
+  assert.equal(grantSessionSigning(theirs.id).code, 'not-found', 'a disposed launch cannot be granted');
+  decideApproval(theirs.id, 'rejected');
+  assert.equal((await p3).reason, 'not-approved');
+  assert.equal(grantSessionSigning('nope').code, 'not-found');
+  a.dispose();
 });

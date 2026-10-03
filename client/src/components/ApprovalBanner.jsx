@@ -11,8 +11,9 @@ import CommitSigningUnlockForm from './CommitSigningUnlockForm.jsx';
 // bar) so it is visible from every tab.
 //
 // Current callers: commit signing (server/ws/commitSignService.js) -- a
-// launch with signing asks every time, and a commit waiting on a locked key
-// asks for an unlock. An unlock request is answered by unlocking (the form
+// launch with signing asks at launch or before each commit (the latter can
+// be approved for the rest of the session at once), and a commit waiting on
+// a locked key asks for an unlock. An unlock request is answered by unlocking (the form
 // below), never by "承認": the server refuses that decision for it. Any
 // non-OK response or fetch error is treated as "nothing pending" instead
 // of surfacing errors, mirroring how App.jsx handles older-server endpoints.
@@ -27,6 +28,7 @@ const KIND_LABELS = {
   close_session: 'セッション強制終了',
   delete_sandbox: 'サンドボックス削除',
   commit_signing_launch: 'コミット署名ありで起動',
+  commit_signing_sign: 'コミットに署名',
   commit_signing_unlock: '署名鍵のロック解除',
 };
 
@@ -94,23 +96,23 @@ export default function ApprovalBanner() {
     return () => clearInterval(timer);
   }, [hasPending]);
 
-  const decide = useCallback(async (id, decision) => {
+  const post = useCallback(async (id, url, body) => {
     if (busyId) return;
     setBusyId(id);
     setActionError(null);
     try {
-      const res = await authFetch(`/api/approvals/${encodeURIComponent(id)}/decision`, {
+      const res = await authFetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ decision }),
+        body: JSON.stringify(body),
       });
       if (!res.ok) {
         // 404 = the approval row is gone, 409 = another browser tab already
         // decided it (the server answers already-resolved with 409): either
         // way the refresh below picks up the new state, no error to show.
         if (res.status !== 404 && res.status !== 409) {
-          const body = await res.json().catch(() => ({}));
-          setActionError({ id, message: body.error || `HTTP ${res.status}` });
+          const errBody = await res.json().catch(() => ({}));
+          setActionError({ id, message: errBody.error || `HTTP ${res.status}` });
         }
       }
     } catch (err) {
@@ -120,6 +122,15 @@ export default function ApprovalBanner() {
       refresh();
     }
   }, [busyId, refresh]);
+
+  const decide = useCallback((id, decision) => (
+    post(id, `/api/approvals/${encodeURIComponent(id)}/decision`, { decision })
+  ), [post]);
+
+  // Per-commit signing: approve this one and the rest of its session.
+  const approveSigningForSession = useCallback((id) => (
+    post(id, `/api/commit-signing/approvals/${encodeURIComponent(id)}/approve-session`, {})
+  ), [post]);
 
   if (!hasPending) return null;
 
@@ -155,6 +166,15 @@ export default function ApprovalBanner() {
                   onClick={() => decide(a.id, 'approved')}
                 >
                   承認
+                </button>
+              )}
+              {a.kind === 'commit_signing_sign' && (
+                <button
+                  className="btn btn-secondary"
+                  disabled={busyId === a.id}
+                  onClick={() => approveSigningForSession(a.id)}
+                >
+                  承認 (このセッションでは以降確認しない)
                 </button>
               )}
               <button

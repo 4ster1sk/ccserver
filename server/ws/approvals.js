@@ -15,18 +15,20 @@
 // requestedBy is attribution only (shown in the dialog) -- never an
 // authorization input; the caller's own trust boundary (whatever that is)
 // gates whether it may request an approval at all. Current callers: the
-// commit signing service (ws/commitSignService.js) -- its launch gate and
-// its "unlock the signing key" request.
+// commit signing service (ws/commitSignService.js) -- its launch gate, its
+// per-commit gate and its "unlock the signing key" request.
 
 import { randomUUID } from 'node:crypto';
 import { getDb } from '../db.js';
 
 // commit_signing_launch: a sandbox launch that would get the host commit
-//   signing service asks first, every launch (ws/commitSignService.js).
+//   signing service asks first, every launch (ws/commitSignService.js),
+//   unless the launch chose to ask per commit instead:
+// commit_signing_sign: one sandboxed commit is waiting to be signed.
 // commit_signing_unlock: a sandboxed commit is waiting for the signing key
 //   to be unlocked. "approved" is only ever set by the unlock itself (see
 //   setApprovalDecisionGuard); the passphrase never touches this table.
-export const APPROVAL_KINDS = ['close_session', 'delete_sandbox', 'commit_signing_launch', 'commit_signing_unlock'];
+export const APPROVAL_KINDS = ['close_session', 'delete_sandbox', 'commit_signing_launch', 'commit_signing_sign', 'commit_signing_unlock'];
 export const APPROVAL_DECISIONS = ['approved', 'rejected'];
 
 // Fixed per plan decision 4 [2026-08-24]: not configurable in v1.
@@ -186,6 +188,11 @@ export function decideApproval(id, decision, { guards = true } = {}) {
   } catch (err) {
     return { ok: false, code: 'internal', message: err.message };
   }
+}
+
+// One approval by id, or null.
+export function getApproval(id) {
+  return rowToApproval(getApprovalRow(id));
 }
 
 // Pending approvals of one kind (server-internal: e.g. resolving every

@@ -5,18 +5,26 @@
 
 export const SANDBOX_DEFAULT_SSH_AGENT_KEY = 'ccserver-default-sandbox-ssh-agent';
 export const SANDBOX_DEFAULT_COMMIT_SIGNING_KEY = 'ccserver-default-sandbox-commit-signing';
+export const SANDBOX_DEFAULT_COMMIT_SIGNING_APPROVAL_KEY = 'ccserver-default-sandbox-commit-signing-approval';
 export const SANDBOX_DEFAULT_RTK_KEY = 'ccserver-default-sandbox-rtk';
 export const SANDBOX_DEFAULT_CRG_KEY = 'ccserver-default-sandbox-code-review-graph';
 
 // すべて既定オフ。ツール導入は初回コスト (ダウンロード・pip) がかかるため
 // 明示のオプトインとする。commitSigning (ホスト側でのコミット署名) は
-// 起動のたびに承認を求め、署名鍵が未設定だと起動自体が失敗するため既定オフ。
+// 承認を求め、署名鍵が未設定だと起動自体が失敗するため既定オフ。
+// commitSigningApproval は承認のタイミング: 'launch' (起動時) | 'sign' (署名のたび)。
 export const SANDBOX_DEFAULTS = {
   sshAgent: false,
   commitSigning: false,
+  commitSigningApproval: 'launch',
   rtk: false,
   codeReviewGraph: false,
 };
+
+// 'launch' | 'sign' 以外は null。
+export function normalizeCommitSigningApproval(v) {
+  return v === 'launch' || v === 'sign' ? v : null;
+}
 
 function loadFlag(key, defaultValue) {
   try {
@@ -28,10 +36,20 @@ function loadFlag(key, defaultValue) {
   }
 }
 
+function loadCommitSigningApproval() {
+  try {
+    return normalizeCommitSigningApproval(localStorage.getItem(SANDBOX_DEFAULT_COMMIT_SIGNING_APPROVAL_KEY))
+      ?? SANDBOX_DEFAULTS.commitSigningApproval;
+  } catch {
+    return SANDBOX_DEFAULTS.commitSigningApproval;
+  }
+}
+
 export function loadSandboxDefaults() {
   return {
     sshAgent: loadFlag(SANDBOX_DEFAULT_SSH_AGENT_KEY, SANDBOX_DEFAULTS.sshAgent),
     commitSigning: loadFlag(SANDBOX_DEFAULT_COMMIT_SIGNING_KEY, SANDBOX_DEFAULTS.commitSigning),
+    commitSigningApproval: loadCommitSigningApproval(),
     rtk: loadFlag(SANDBOX_DEFAULT_RTK_KEY, SANDBOX_DEFAULTS.rtk),
     codeReviewGraph: loadFlag(SANDBOX_DEFAULT_CRG_KEY, SANDBOX_DEFAULTS.codeReviewGraph),
   };
@@ -41,6 +59,7 @@ export function saveSandboxDefaults(next) {
   try {
     localStorage.setItem(SANDBOX_DEFAULT_SSH_AGENT_KEY, next.sshAgent ? '1' : '0');
     localStorage.setItem(SANDBOX_DEFAULT_COMMIT_SIGNING_KEY, next.commitSigning ? '1' : '0');
+    localStorage.setItem(SANDBOX_DEFAULT_COMMIT_SIGNING_APPROVAL_KEY, normalizeCommitSigningApproval(next.commitSigningApproval) ?? SANDBOX_DEFAULTS.commitSigningApproval);
     localStorage.setItem(SANDBOX_DEFAULT_RTK_KEY, next.rtk ? '1' : '0');
     localStorage.setItem(SANDBOX_DEFAULT_CRG_KEY, next.codeReviewGraph ? '1' : '0');
   } catch {
@@ -53,6 +72,7 @@ export function defaultSandboxOpts(defaults = SANDBOX_DEFAULTS) {
   return {
     sshAgent: !!defaults.sshAgent,
     commitSigning: !!defaults.commitSigning,
+    commitSigningApproval: normalizeCommitSigningApproval(defaults.commitSigningApproval) ?? SANDBOX_DEFAULTS.commitSigningApproval,
     tools: {
       rtk: !!defaults.rtk,
       codeReviewGraph: !!defaults.codeReviewGraph,

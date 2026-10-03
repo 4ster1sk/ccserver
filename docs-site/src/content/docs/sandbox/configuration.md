@@ -35,6 +35,7 @@ $EDITOR ~/.config/ccserver/sandbox.config.json
   "docker": true,
   "sshAgent": false,
   "commitSigning": false,
+  "commitSigningApproval": "launch",
   "gitBroker": true,
   "ghUsageRecording": {
     "enabled": false,
@@ -71,7 +72,8 @@ $EDITOR ~/.config/ccserver/sandbox.config.json
 | `docker` | `true` | サンドボックス内部で rootless dockerd を起動。`false` で無効 (軽量・rootlesskit 不要)。 |
 | `persistentHome` | `true` | プロジェクト毎の永続 HOME を有効化 (詳細は [概要と永続 HOME](/ccserver/sandbox/overview/#サンドボックスの再利用-永続-home))。`false` で従来どおり毎回まっさらな tmpfs HOME。 |
 | `sshAgent` | `false` | ssh-agent を転送 ([認証情報の受け渡し](/ccserver/sandbox/credentials/) 参照)。UI で上書き可。 |
-| `commitSigning` | `false` | コミットをホストの署名鍵で署名する ([コミット署名](/ccserver/sandbox/commit-signing/) 参照)。サンドボックスには鍵もソケットも渡さない。起動のたびに承認を求め、鍵が無い・`gitBroker: false` なら起動を拒否。UI で上書き可。旧 `gpg` / `gpgVault` / `gpgVaultLockPolicy` は廃止 (無視して警告)。 |
+| `commitSigning` | `false` | コミットをホストの署名鍵で署名する ([コミット署名](/ccserver/sandbox/commit-signing/) 参照)。サンドボックスには鍵もソケットも渡さない。承認を求め (タイミングは `commitSigningApproval`)、鍵が無い・`gitBroker: false` なら起動を拒否。UI で上書き可。旧 `gpg` / `gpgVault` / `gpgVaultLockPolicy` は廃止 (無視して警告)。 |
+| `commitSigningApproval` | `"launch"` | コミット署名の承認のタイミング。`"launch"`: 起動時に 1 回 (却下で起動拒否)。`"sign"`: コミットを署名するたび (却下でそのコミットが失敗。バナーからそのセッションの以降の確認を省略できる)。UI で上書き可。 |
 | `gitBroker` | `true` | git/gh の認証情報スコープ制限 (同上)。 |
 | `ghUsageRecording` | 未設定（無効） | Issue #198 の任意・ローカル集計。`{ "enabled": true, "file": "/absolute/path/gh-usage-recording.json" }` を指定した新規サンドボックスセッションだけが、gh ブローカー経由の結果を固定カテゴリのカウンタとして保存する。コマンドライン・リポジトリ名・本文・パス・出力・認証情報・識別子は記録せず、ccserver が送信・アップロードすることもない。`node server/cli/gh-usage-report.js enable --file /absolute/path/gh-usage-recording.json`、`show`、`reset`、`disable` で管理できる。 |
 | `commitMessageGuard` | `{ enabled: true, blockedPatterns: [] }` | サンドボックス内の `git commit` を、メッセージが禁止パターンに一致する場合ブロックする commit-msg フック ([認証情報の受け渡し](/ccserver/sandbox/credentials/) 参照)。組み込みパターン (常時有効、設定不要): `Claude-Session:` 行、`https://claude.ai/code/session_...` の裸URL。`gitBroker` とは独立のフラグで、`gitBroker: false` でも有効なまま。`blockedPatterns` に正規表現の文字列を追加すると (例: `Co-Authored-By: ... noreply@anthropic.com` の行)、組み込みパターンに加えてブロックできる。`gitBroker` も有効な場合は、同じ禁止パターンで `gh pr create`/`edit`/`comment`/`review` の title/body/body-file もチェックされる (gh はローカルの commit-msg フックを通らないため別経路が必要 — 詳細は [認証情報の受け渡し](/ccserver/sandbox/credentials/) の gh CLI 節)。 |

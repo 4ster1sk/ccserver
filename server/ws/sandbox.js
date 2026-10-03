@@ -649,6 +649,11 @@ export function _resetAllowUnsandboxedAgentsWarningForTests() {
 
 // Same latch + seam for the retired gpg / gpgVault keys.
 let warnedRetiredGpgKeys = false;
+
+// 'launch' | 'sign', or null for anything else.
+export function normalizeCommitSigningApproval(v) {
+  return v === 'launch' || v === 'sign' ? v : null;
+}
 export function _resetRetiredGpgWarningForTests() {
   warnedRetiredGpgKeys = false;
 }
@@ -720,8 +725,12 @@ export function loadSandboxConfig() {
   // with the key in Settings > コミット署名; the sandbox itself gets no key
   // and no agent socket. Server-wide default for the per-launch
   // sandboxOpts.commitSigning; off unless enabled. A launch with it on asks
-  // for approval every time and is refused without a key.
+  // for approval and is refused without a key.
   const commitSigning = raw.commitSigning === true;
+  // When that approval is asked: 'launch' (before the launch, the default)
+  // or 'sign' (before each commit is signed). Default for the per-launch
+  // sandboxOpts.commitSigningApproval.
+  const commitSigningApproval = normalizeCommitSigningApproval(raw.commitSigningApproval) ?? 'launch';
   // Retired: `gpg` (forwarded the host's own gpg-agent -- an unrestricted
   // signing oracle) and `gpgVault` / `gpgVaultLockPolicy` (the managed
   // vault, also a socket into the sandbox). Ignored, said once.
@@ -976,7 +985,7 @@ export function loadSandboxConfig() {
   // booting its own. A VM template's own flag wins over this.
   qemu.persistent = qemuRaw.persistent === true;
   return {
-    docker, persistentHome, sshAgent, commitSigning, gitBroker, commitMessageGuard, forceSandbox, forceSandboxReason, binds, env, tools, claudeBin, defaultApp, showUsage, opencodeGoUsage, usageMcp, ghUsageRecording, hiddenApps, browseRoots, browseRootsInvalid, configError, network, networkAdvanced, backend, qemu,
+    docker, persistentHome, sshAgent, commitSigning, commitSigningApproval, gitBroker, commitMessageGuard, forceSandbox, forceSandboxReason, binds, env, tools, claudeBin, defaultApp, showUsage, opencodeGoUsage, usageMcp, ghUsageRecording, hiddenApps, browseRoots, browseRootsInvalid, configError, network, networkAdvanced, backend, qemu,
     notify: {
       discordWebhook, subscriptions, hostname: notifyHostname, attribution: notifyAttribution,
       // Agent notification bridge (plan-notify-bridge). Parsed by the same
@@ -1920,7 +1929,8 @@ export function buildMinimalSandboxSpawn({ cwd, targetCommand, app = 'claude' })
 // (e.g. ['claude', '--resume', id] or ['/bin/bash']) in the sandbox.
 //   app         - selects which agent the install-dir resolution applies to.
 //   sandboxOpts - optional per-launch override for the opt-in flags
-//                 ({ sshAgent, commitSigning, ... }, any key omittable). Lets a caller
+//                 ({ sshAgent, commitSigning, commitSigningApproval, ... },
+//                 any key omittable). Lets a caller
 //                 (the client, via the launch UI) pick these per session/
 //                 directory instead of only through the shared config file;
 //                 an omitted key falls back to loadSandboxConfig()'s value.
@@ -2520,7 +2530,7 @@ export async function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, 
   if (resolve(cwd) === '/') {
     throw new Error('Cannot build a sandbox for the filesystem root (/) -- the project rule would grant the whole filesystem. Choose a working directory first.');
   }
-  const { docker: cfgDocker, persistentHome, sshAgent: cfgSshAgent, commitSigning: cfgCommitSigning, gitBroker: gitBrokerEnabled, commitMessageGuard, ghUsageRecording, network: netCfg, binds, env, tools: cfgTools, claudeBin, browseRoots, browseRootsInvalid } = loadSandboxConfig();
+  const { docker: cfgDocker, persistentHome, sshAgent: cfgSshAgent, commitSigning: cfgCommitSigning, commitSigningApproval: cfgCommitSigningApproval, gitBroker: gitBrokerEnabled, commitMessageGuard, ghUsageRecording, network: netCfg, binds, env, tools: cfgTools, claudeBin, browseRoots, browseRootsInvalid } = loadSandboxConfig();
   // Defense in depth behind sessionManager's browseRoots cwd check (issue
   // #189): same reasoning as the '/' guard just above.
   if (browseRootsInvalid) {
@@ -2535,6 +2545,7 @@ export async function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, 
   // starts no broker.
   const sshAgent = sandboxOpts?.sshAgent ?? cfgSshAgent;
   const commitSigning = (sandboxOpts?.commitSigning ?? cfgCommitSigning) === true;
+  const commitSigningApproval = normalizeCommitSigningApproval(sandboxOpts?.commitSigningApproval) ?? cfgCommitSigningApproval;
   // Opt-in tool provisioning (rtk / code-review-graph), merged like sshAgent
   // from the config default + the client's per-session sandboxOpts.tools.
   // Thread cfgTools through instead of re-reading the config file.
@@ -2543,19 +2554,21 @@ export async function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, 
   // Commit signing (ws/commitSignService.js): decided before anything is
   // started or wiped, because it can refuse the launch -- no key, no git
   // broker to carry the requests, or the user saying no. A session that
-  // asked for signing never silently launches without it. The approval
-  // waits for the user (up to approvals.js's timeout).
+  // asked for signing never silently launches without it. In approval
+  // mode 'launch' the approval waits for the user here (up to approvals.js's
+  // timeout); in 'sign' the handler asks before each commit instead.
   let signing = null;
   if (commitSigning) {
     if (!gitBrokerEnabled) {
       throw new Error('commit signing needs the git broker (sandbox.config.json "gitBroker" is false) -- launch without signing or turn the broker on.');
     }
     const key = await resolveLaunchSigningKeyFn();
-    await requestLaunchApprovalFn({ cwd, app, backend: resolveSandboxBackend(sandboxOpts), key });
+    const approveEachSign = commitSigningApproval === 'sign';
+    if (!approveEachSign) await requestLaunchApprovalFn({ cwd, app, backend: resolveSandboxBackend(sandboxOpts), key });
     signing = {
       key,
       publicKey: await exportPublicKeyFn(),
-      handler: createSignHandlerFn({ cwd, app, key }),
+      handler: createSignHandlerFn({ cwd, app, key, approveEachSign }),
     };
   }
 

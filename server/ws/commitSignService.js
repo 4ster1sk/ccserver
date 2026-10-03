@@ -17,19 +17,24 @@
 // limit. What is deliberately NOT checked is the content -- the sandbox
 // could push the same tree unsigned anyway.
 //
-// Launch gate: every launch that would get this service asks first
-// (requestLaunchApproval); a rejected or unanswered request refuses the
-// launch.
+// Approval, one of two modes (sandboxOpts / sandbox.config.json
+// "commitSigningApproval"):
+//   'launch' -- the launch asks first (requestLaunchApproval); a rejected or
+//               unanswered request refuses the launch.
+//   'sign'   -- the launch does not ask; each commit that passes the checks
+//               asks instead (requestSignApproval), and the banner can let
+//               the rest of the session go without asking
+//               (grantSessionSigning).
 
 import { execFile } from 'node:child_process';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { realpathSync } from 'node:fs';
 import { isAbsolute, sep } from 'node:path';
 import { promisify } from 'node:util';
 import { parseCommitPayload, checkCommitPolicy, CommitPayloadError } from '../commitObject.js';
 import * as commitSigning from '../commitSigning.js';
 import { recordSignature } from '../commitSigningDb.js';
-import { requestApproval, decideApproval, listPendingApprovalIds, setApprovalDecisionGuard } from './approvals.js';
+import { requestApproval, decideApproval, getApproval, listPendingApprovalIds, setApprovalDecisionGuard } from './approvals.js';
 import { hardenedGitEnv } from './hostGitEnv.js';
 
 const execFileAsync = promisify(execFile);
@@ -55,8 +60,8 @@ export async function resolveLaunchSigningKey({ getSigningKey = commitSigning.ge
   return key;
 }
 
-// Every launch with signing asks the user first (plan decision: one dialog
-// per launch; a rejection refuses the launch). Resolves when approved,
+// Approval mode 'launch': the launch asks the user first (one dialog per
+// launch; a rejection refuses the launch). Resolves when approved,
 // throws otherwise.
 export async function requestLaunchApproval({ cwd, app, backend, key }, { request = requestApproval } = {}) {
   const { status } = await request({
@@ -70,6 +75,43 @@ export async function requestLaunchApproval({ cwd, app, backend, key }, { reques
       ? 'commit signing launch approval timed out -- launch refused'
       : 'commit signing launch approval was rejected -- launch refused');
   }
+}
+
+// --- per-commit approval ----------------------------------------------------------
+
+// grantId (one per sign handler, i.e. per launch) -> { granted }. granted:
+// the user chose "don't ask again for this session" on one of its requests.
+const signGrants = new Map();
+
+// Asks before one commit is signed (approval mode 'sign'). Resolves true
+// when approved.
+export async function requestSignApproval({ cwd, app, dir, commit, key, grantId }, { request = requestApproval } = {}) {
+  const { status } = await request({
+    kind: 'commit_signing_sign',
+    summary: `「${commit.subject.slice(0, 120)}」に署名します (${dir}, tree ${commit.tree.slice(0, 12)}, 鍵 ${key.keyId})`,
+    payload: {
+      cwd, dir, app: app || null, tree: commit.tree, parents: commit.parents,
+      subject: commit.subject.slice(0, 500), fingerprint: key.signingFingerprint, grantId,
+    },
+    requestedBy: app || null,
+  });
+  return status === 'approved';
+}
+
+// "Approve, and don't ask again for this session": approves the given
+// pending sign request and every other one from the same launch, and lets
+// that launch's later commits through without asking.
+//   { ok:true } | { ok:false, code:'not-found' | 'already-resolved', message }
+export function grantSessionSigning(approvalId) {
+  const approval = getApproval(approvalId);
+  const grant = approval?.kind === 'commit_signing_sign' ? signGrants.get(approval.payload?.grantId) : null;
+  if (!grant) return { ok: false, code: 'not-found', message: 'signing approval not found' };
+  if (approval.status !== 'pending') return { ok: false, code: 'already-resolved', message: `approval already ${approval.status}` };
+  grant.granted = true;
+  for (const id of listPendingApprovalIds('commit_signing_sign')) {
+    if (getApproval(id)?.payload?.grantId === approval.payload.grantId) decideApproval(id, 'approved', { guards: false });
+  }
+  return { ok: true };
 }
 
 // --- unlock ---------------------------------------------------------------------
@@ -158,13 +200,16 @@ function rateLimiter({ max, windowMs }) {
 }
 
 // One handler per launch (one per git broker). key: the signing key the
-// launch was approved with -- signing with any other key is refused.
+// launch resolved -- signing with any other key is refused.
+// approveEachSign: approval mode 'sign' (ask before each commit). The
+// returned function has dispose(), called when its broker exits.
 // Resolves a git-broker reply: { ok:true, signature, status } (signature
 // base64) or { ok:false, reason, message }.
-export function createSignHandler({ cwd, app, key }, deps = {}) {
+export function createSignHandler({ cwd, app, key, approveEachSign = false }, deps = {}) {
   const {
     signPayload = commitSigning.signPayload,
     waitForUnlock: wait = waitForUnlock,
+    requestSignApproval: askSign = requestSignApproval,
     recordSignature: record = recordSignature,
     checkObjects = objectsExist,
     rateLimit = RATE_LIMIT,
@@ -172,8 +217,11 @@ export function createSignHandler({ cwd, app, key }, deps = {}) {
   } = deps;
   const allow = rateLimiter(rateLimit);
   const identity = { name: key.nameReal, email: key.nameEmail };
+  const grantId = randomUUID();
+  const grant = { granted: false };
+  if (approveEachSign) signGrants.set(grantId, grant);
 
-  return async function handleSign(req) {
+  async function handleSign(req) {
     try {
       if (!req || typeof req.payload !== 'string') throw new SignRefusal('bad-request', 'payload is required');
       const payload = Buffer.from(req.payload, 'base64');
@@ -190,6 +238,12 @@ export function createSignHandler({ cwd, app, key }, deps = {}) {
       const missing = await checkObjects(dir, [commit.tree, ...commit.parents]);
       if (missing) throw new SignRefusal('unknown-object', `object ${missing} is not in the repository at ${dir}`);
       if (!allow(now())) throw new SignRefusal('rate-limited', 'too many signatures from this session; try again later');
+      // Asked only after the checks: a commit that would be refused anyway
+      // never reaches the banner.
+      if (approveEachSign && !grant.granted
+        && !(await askSign({ cwd, app, dir, commit, key, grantId }))) {
+        throw new SignRefusal('not-approved', 'signing this commit was not approved');
+      }
 
       let signed;
       try {
@@ -216,6 +270,8 @@ export function createSignHandler({ cwd, app, key }, deps = {}) {
       console.warn(`[commit-sign] refused in ${cwd}: ${reason}: ${err.message}`);
       return { ok: false, reason, message: err.message };
     }
-  };
+  }
+  handleSign.dispose = () => { signGrants.delete(grantId); };
+  return handleSign;
 }
 

@@ -753,6 +753,7 @@ export async function startGitBroker(
   proc.stderr.on('data', (d) => process.stderr.write(`[git-broker] ${d}`));
 
   if (signHandler) {
+    proc.on('exit', () => signHandler.dispose?.());
     proc.on('message', (msg) => {
       if (!msg || msg.type !== 'sign') return;
       Promise.resolve()

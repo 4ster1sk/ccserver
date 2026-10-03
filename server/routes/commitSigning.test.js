@@ -12,7 +12,7 @@ import { join } from 'node:path';
 import { commitSigningRoute } from './commitSigning.js';
 import { approvalsRoute } from './approvals.js';
 import { signingToolsAvailable, deleteSigningKey } from '../commitSigning.js';
-import { waitForUnlock, installApprovalGuards } from '../ws/commitSignService.js';
+import { waitForUnlock, installApprovalGuards, createSignHandler } from '../ws/commitSignService.js';
 import { listApprovals, _resetWaitersForTests } from '../ws/approvals.js';
 import { closeDb } from '../db.js';
 
@@ -118,4 +118,23 @@ test('import rejects junk', { skip: !haveGpg && 'gpg not installed' }, async () 
   assert.equal((await post('/api/commit-signing/import', {})).statusCode, 400);
   assert.equal((await post('/api/commit-signing/import', { keyArmored: 'not a key' })).statusCode, 400);
   assert.equal((await get('/api/commit-signing/status')).json().configured, false);
+});
+
+test('approve-session: grants a pending per-commit approval; unknown or resolved ids are refused', async () => {
+  const key = { nameReal: 'Ada', nameEmail: 'ada@example.com', signingFingerprint: 'F'.repeat(40), keyId: 'FFFF' };
+  const h = createSignHandler({ cwd: root, app: 'claude', key, approveEachSign: true }, {
+    now: () => 1_800_000_000_000,
+    signPayload: async () => ({ signature: Buffer.from('S'), status: [] }),
+    recordSignature: () => {},
+    checkObjects: async () => null,
+  });
+  const payload = Buffer.from(`tree ${'4b825dc642cb6eb9a060e54bf8d69288fbee4904'}\nauthor Ada <ada@example.com> 1800000000 +0000\ncommitter Ada <ada@example.com> 1800000000 +0000\n\nsubject\n`).toString('base64');
+  const signing = h({ payload });
+  await new Promise((r) => setTimeout(r, 50));
+  const [row] = listApprovals().pending.filter((a) => a.kind === 'commit_signing_sign');
+  assert.equal((await post(`/api/commit-signing/approvals/${row.id}/approve-session`, {})).statusCode, 200);
+  assert.equal((await signing).ok, true);
+  assert.equal((await post(`/api/commit-signing/approvals/${row.id}/approve-session`, {})).statusCode, 409);
+  assert.equal((await post('/api/commit-signing/approvals/nope/approve-session', {})).statusCode, 404);
+  h.dispose();
 });

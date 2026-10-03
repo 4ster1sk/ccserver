@@ -79,6 +79,18 @@ test('commitSigning is opt-in and only true for an explicit true value', () => {
   });
 });
 
+test('commitSigningApproval is "launch" unless explicitly "sign"', () => {
+  withConfig({ commitSigningApproval: 'sign' }, () => {
+    assert.equal(loadSandboxConfig().commitSigningApproval, 'sign');
+  });
+  withConfig({ commitSigningApproval: 'commit' }, () => {
+    assert.equal(loadSandboxConfig().commitSigningApproval, 'launch', 'an unknown value falls back to the default');
+  });
+  withConfig({}, () => {
+    assert.equal(loadSandboxConfig().commitSigningApproval, 'launch');
+  });
+});
+
 test('the retired gpg / gpgVault keys are ignored, with one warning per process', () => {
   _resetRetiredGpgWarningForTests();
   withConfig({ gpg: true, gpgVault: true, gpgVaultLockPolicy: { idleTimeoutMinutes: 5 } }, () => {

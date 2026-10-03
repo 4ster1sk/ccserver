@@ -108,8 +108,20 @@ export default function GeneralSection({
         />
         コミットに署名する (ホストの署名鍵)
       </label>
+      <div className="general-setting-row">
+        <label htmlFor="general-commit-signing-approval-select">コミット署名の承認</label>
+        <select
+          id="general-commit-signing-approval-select"
+          value={sandboxDefaults.commitSigningApproval || 'launch'}
+          onChange={(e) => updateSandboxDefault('commitSigningApproval', e.target.value)}
+        >
+          <option value="launch">起動時に承認</option>
+          <option value="sign">署名のたびに承認</option>
+        </select>
+      </div>
       <p className="settings-hint">
-        サンドボックスには鍵を渡さず、コミットをホストが署名します。設定 &gt; コミット署名で鍵の登録が必要で、起動のたびに承認を求めます。
+        サンドボックスには鍵を渡さず、コミットをホストが署名します。設定 &gt; コミット署名で鍵の登録が必要です。
+        承認は起動時に 1 回か、コミットを署名するたびに求めます (署名のたびの場合、承認バナーからそのセッションの以降の承認を省略できます)。
       </p>
       <label className={`general-setting-check${toolDisabled('rtk') ? ' general-setting-check-disabled' : ''}`}>
         <input

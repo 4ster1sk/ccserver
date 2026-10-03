@@ -18,7 +18,7 @@ import { reportSecurityEvent } from '../securityEvents.js';
 import * as signing from '../commitSigning.js';
 import * as signingDb from '../commitSigningDb.js';
 import { generatePrfSalt, wrapPassphrase, unwrapPassphrase } from '../commitSigningCrypto.js';
-import { resolvePendingUnlocks } from '../ws/commitSignService.js';
+import { resolvePendingUnlocks, grantSessionSigning } from '../ws/commitSignService.js';
 import {
   b64u, prfAuthenticationOptions, verifyPrfAssertion, zero, consumeFlow, startFlow,
 } from './prfCeremony.js';
@@ -168,6 +168,14 @@ export async function commitSigningRoute(fastify) {
 
   fastify.post('/commit-signing/lock', async () => {
     await signing.lockSigningKey();
+    return { success: true };
+  });
+
+  // "Approve, and don't ask again for this session" on a per-commit signing
+  // approval (ws/commitSignService.js grantSessionSigning).
+  fastify.post('/commit-signing/approvals/:id/approve-session', async (request, reply) => {
+    const res = grantSessionSigning(request.params.id);
+    if (!res.ok) return reply.code(res.code === 'not-found' ? 404 : 409).send({ error: res.message, code: res.code });
     return { success: true };
   });
 
