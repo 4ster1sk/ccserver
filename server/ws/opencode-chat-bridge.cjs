@@ -128,17 +128,30 @@ function main() {
   try { fs.unlinkSync(opts.passwordFile); } catch { /* read-only */ }
 
   process.stdout.write(stageMarker('opencode', 'running'));
-  log(`starting ${path.basename(opts.command[0])} ${opts.command.slice(1).join(' ')}`);
-  child = spawn(opts.command[0], opts.command.slice(1), {
+  startServe(opts.command, password, 1);
+}
+
+// opencode opens its database (~/.local/share/opencode) before it sets a
+// busy timeout, so a second serve starting while another one on the same
+// HOME holds the lock -- two chat sessions of one project, typically both
+// started the moment a persistent VM finishes booting -- exits at once with
+// "database is locked". That one is retried; any other early exit fails.
+const LOCKED_RETRIES = 5;
+const LOCKED_RE = /database is locked/i;
+
+function startServe(command, password, attempt) {
+  log(`starting ${path.basename(command[0])} ${command.slice(1).join(' ')}`);
+  child = spawn(command[0], command.slice(1), {
     stdio: ['pipe', 'pipe', 'pipe'],
     env: { ...process.env, OPENCODE_SERVER_PASSWORD: password },
   });
-  child.on('error', (e) => fail(`cannot start opencode: ${e.message}`));
+  const proc = child;
+  proc.on('error', (e) => fail(`cannot start opencode: ${e.message}`));
 
   let buf = '';
   let ready = false;
-  child.stdout.setEncoding('utf-8');
-  child.stdout.on('data', (chunk) => {
+  proc.stdout.setEncoding('utf-8');
+  proc.stdout.on('data', (chunk) => {
     if (ready) { process.stdout.write(chunk.replace(/\r?\n/g, '\r\n')); return; }
     buf += chunk;
     let nl;
@@ -161,14 +174,22 @@ function main() {
   // The last thing serve said on stderr: almost always why it did not come
   // up (no provider configured, a broken config file, ...).
   let lastErrLine = '';
-  child.stderr.setEncoding('utf-8');
-  child.stderr.on('data', (chunk) => {
+  let locked = false;
+  proc.stderr.setEncoding('utf-8');
+  proc.stderr.on('data', (chunk) => {
     process.stdout.write(chunk.replace(/\r?\n/g, '\r\n'));
+    if (LOCKED_RE.test(chunk)) locked = true;
     const lines = chunk.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
     if (lines.length) lastErrLine = lines[lines.length - 1];
   });
-  child.on('exit', (code, sig) => {
+  proc.on('exit', (code, sig) => {
     if (exiting) return;
+    if (!ready && locked && attempt < LOCKED_RETRIES) {
+      const delay = 1000 * attempt + Math.floor(Math.random() * 1000);
+      log(`opencode's database is locked by another session; retrying in ${(delay / 1000).toFixed(1)}s (${attempt}/${LOCKED_RETRIES - 1})`);
+      setTimeout(() => { if (!exiting) startServe(command, password, attempt + 1); }, delay);
+      return;
+    }
     const why = `opencode serve exited (${sig || code})${!ready && lastErrLine ? `: ${lastErrLine}` : ''}`;
     if (!ready) { fail(why); return; }
     log(why);
