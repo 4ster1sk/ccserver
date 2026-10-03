@@ -50,6 +50,7 @@ import {
 import { stripAnsi } from './stripAnsi.js';
 import { findSessionLimitReset } from './sessionLimitDetect.js';
 import { recordSessionLimitReset } from '../sessionLimitState.js';
+import { getChatDefaultModel, setChatDefaultModel } from '../chatDefaults.js';
 import {
   parseTimeoutEnv,
   DEFAULT_SESSION_TIMEOUT_MS,
@@ -333,6 +334,9 @@ function buildSessionRecord(id, ptyProcess, meta) {
                     handleAgentNotification(session, { kind: 'notification', source: 'chat', title, body }).catch(() => {});
                   }
                   : null,
+                // The last model / effort picked becomes what the app's next
+                // chat session starts with (chatDefaults.js).
+                onModelSelected: (model) => setChatDefaultModel(session.app, model),
               });
             }
             broadcastChatState(session);
@@ -1105,6 +1109,7 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
       pooled: !!qemuPoolLease,
       resumeLast,
       model: sessionModel,
+      defaultModel: getChatDefaultModel(sessionApp),
     }) : null,
     customLabel,
     sandbox: useSandbox,

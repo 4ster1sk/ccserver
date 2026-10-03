@@ -6,7 +6,7 @@
 //
 // A chat session's record carries `chat`:
 //
-//   { dir, sock, password, bridgeScript, bridgeArgs, stages, ocSessionId, ready, error, resumeLast, model }
+//   { dir, sock, password, bridgeScript, bridgeArgs, stages, ocSessionId, ready, error, resumeLast, model, defaultModel }
 //
 //   dir/sock:  the per-session host dir and the relay socket in it (bound
 //              into bwrap, or the host end of the VM ssh's -L forward)
@@ -15,6 +15,9 @@
 //   bridgeScript/bridgeArgs: the app's bridge (host path) and its own flags
 //   stages:    the startup list (chatStages.js)
 //   ready:     the opencode session exists and the proxy may forward
+//   model:     the launch's explicit `provider/model`, if any
+//   defaultModel: the app's recorded default model ref (chatDefaults.js),
+//              read at launch; used when there is no explicit model
 //
 // Everything here talks to serve over that socket.
 
@@ -69,14 +72,14 @@ export function removeChatDir(dir) {
   try { rmSync(dir, { recursive: true, force: true }); } catch { /* best effort */ }
 }
 
-export function createChatState({ dir, sock, password, bridgeScript = null, bridgeArgs = [], app = 'opencode', sandboxed, backend, pooled, resumeLast, model }) {
+export function createChatState({ dir, sock, password, bridgeScript = null, bridgeArgs = [], app = 'opencode', sandboxed, backend, pooled, resumeLast, model, defaultModel }) {
   const stages = initialChatStages(chatStageIds({ sandboxed, backend, pooled }));
   // The sandbox (if any) is built by the time the record exists.
   if (sandboxed) applyStage(stages, 'sandbox', 'done');
   return {
     dir, sock, password, bridgeScript, bridgeArgs, app, stages,
     ocSessionId: null, ready: false, error: null,
-    resumeLast: !!resumeLast, model: model || null,
+    resumeLast: !!resumeLast, model: model || null, defaultModel: defaultModel || null,
     markerCarry: '', initStarted: false,
   };
 }
@@ -171,6 +174,45 @@ export function modelRefFromString(model) {
   return { providerID: model.slice(0, i), id: model.slice(i + 1) };
 }
 
+// The model a session opened by initChatSession should use: the launch's
+// explicit one, else the app's recorded default. `fromDefault` tells the
+// caller a failure to apply it is no reason to fail the launch.
+function initialModel(chat) {
+  const explicit = modelRefFromString(chat.model);
+  if (explicit) return { model: explicit, fromDefault: false };
+  if (chat.defaultModel) return { model: chat.defaultModel, fromDefault: true };
+  return { model: null, fromDefault: false };
+}
+
+// Creates the conversation with `model`. A recorded default the agent
+// refuses (a model gone from its catalog) falls back to the agent's own.
+async function createSession(chat) {
+  const { model, fromDefault } = initialModel(chat);
+  let created = await chatRequest(chat, 'POST', '/api/session', model ? { model } : {});
+  if (fromDefault && created.status !== 200) {
+    created = await chatRequest(chat, 'POST', '/api/session', {});
+  }
+  if (created.status !== 200 || !created.body?.data?.id) {
+    throw new Error(`could not create the opencode session (HTTP ${created.status})`);
+  }
+  return created.body.data.id;
+}
+
+// A resumed conversation keeps its own model; only one the agent did not
+// remember (Claude Code's adapter starts every process on "default") gets
+// the recorded default. Best effort: the session works either way.
+async function applyModelOnResume(chat, id) {
+  if (!chat.defaultModel || modelRefFromString(chat.model)) return;
+  try {
+    const path = `/api/session/${encodeURIComponent(id)}`;
+    const info = await chatRequest(chat, 'GET', path);
+    const current = info.status === 200 ? info.body?.data?.model : null;
+    if (info.status === 200 && (!current?.id || current.id === 'default')) {
+      await chatRequest(chat, 'POST', `${path}/model`, { model: chat.defaultModel });
+    }
+  } catch { /* keep the agent's model */ }
+}
+
 // Opens the conversation once serve is up: the most recent session of the
 // directory for a resume, else a new one. Retries briefly -- on the qemu
 // backend the ssh -L forward may lag the bridge's "listening" a moment.
@@ -190,14 +232,8 @@ export async function initChatSession(chat, { onChange, sleep = (ms) => new Prom
           id = latest.id;
         }
       }
-      if (!id) {
-        const model = modelRefFromString(chat.model);
-        const created = await chatRequest(chat, 'POST', '/api/session', model ? { model } : {});
-        if (created.status !== 200 || !created.body?.data?.id) {
-          throw new Error(`could not create the opencode session (HTTP ${created.status})`);
-        }
-        id = created.body.data.id;
-      }
+      if (id) await applyModelOnResume(chat, id);
+      else id = await createSession(chat);
       chat.ocSessionId = id;
       chat.ready = true;
       applyStage(chat.stages, 'session', 'done');
@@ -236,11 +272,12 @@ export async function sendChatPrompt(chat, text) {
 //   chat.waiting  permission requests / forms waiting on the user
 //
 // onNotify(event) gets { title, body } for a finished turn and for anything
-// that starts waiting on the user.
+// that starts waiting on the user. onModelSelected(model) gets the model ref
+// whenever the conversation switches model / effort, from any browser.
 
 const MONITOR_RETRY_MS = [500, 1000, 2000, 5000, 10000];
 
-export function startChatMonitor(chat, { onChange, onNotify, isAlive }) {
+export function startChatMonitor(chat, { onChange, onNotify, onModelSelected, isAlive }) {
   if (chat.monitor) return chat.monitor;
   const waiting = new Set();
   let req = null;
@@ -295,6 +332,9 @@ export function startChatMonitor(chat, { onChange, onNotify, isAlive }) {
       case 'form.cancelled':
         waiting.delete(`frm:${d.id}`);
         setWaiting();
+        break;
+      case 'session.model.selected':
+        if (d.model) onModelSelected?.(d.model);
         break;
       default:
         break;
