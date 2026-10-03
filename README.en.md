@@ -80,8 +80,6 @@ The selected application and launch options are remembered in the browser. Codex
 
 Scheduled prompts can be created with the clock button in the terminal header. They persist in `~/.local/state/ccserver/scheduled-prompts.json` (overridable with `CCSERVER_SCHEDULES_PATH`) and can fire after the browser closes or the server restarts.
 
-**Session sharing** (opt-in, `CCSERVER_SESSION_SHARING=1`) lets multiple devices attach to one session. See the [session sharing guide](https://nananek.github.io/ccserver/guides/session-sharing/).
-
 ## MCP Tools
 
 - `ccserver-notify` provides `notify`, `subscribe`, `unsubscribe`, and `list_subscriptions` for Discord, webhook, and PWA notifications.

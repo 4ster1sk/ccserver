@@ -18,7 +18,6 @@
 - `ccserver-notify` MCP による Discord / webhook / PWA (Web Push) 通知 — [詳細](https://nananek.github.io/ccserver/guides/notify/)
 - サンドボックス内の AI CLI が出すデスクトップ通知の転送 (端末のエスケープシーケンスを捕捉) — [詳細](https://nananek.github.io/ccserver/guides/notify/)
 - 使用量 (Usage) 表示 (Claude Code `/usage` / Codex レート制限) — [詳細](https://nananek.github.io/ccserver/guides/usage/)
-- 複数端末からのセッション共有 (PC とスマートフォンで同じセッションを同時操作、オプトイン) — [詳細](https://nananek.github.io/ccserver/guides/session-sharing/)
 
 ## アーキテクチャ
 

@@ -79,8 +79,6 @@ L'application et les options sont mémorisées dans le navigateur. Codex reçoit
 
 Le bouton horloge permet de programmer des prompts. Ils persistent dans `~/.local/state/ccserver/scheduled-prompts.json` (remplaçable par `CCSERVER_SCHEDULES_PATH`) et peuvent s'exécuter après la fermeture du navigateur ou un redémarrage du serveur.
 
-Le partage de session est facultatif (`CCSERVER_SESSION_SHARING=1`) et permet à plusieurs appareils de se connecter à la même session. Voir le [guide de partage de session](https://nananek.github.io/ccserver/guides/session-sharing/).
-
 ## Outils MCP
 
 - `ccserver-notify` fournit `notify`, `subscribe`, `unsubscribe` et `list_subscriptions` pour Discord, les webhooks et les notifications PWA.

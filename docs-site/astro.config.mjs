@@ -37,7 +37,7 @@ export default defineConfig({
 						{ label: '認証 (ワンタイムトークン/パスキー)', slug: 'guides/auth' },
 						{ label: '使用量 (Usage)', slug: 'guides/usage' },
 						{ label: 'コードレビュー (ccserver-reviewer)', slug: 'guides/reviewer' },
-						{ label: 'セッション共有と寿命', slug: 'guides/session-sharing' },
+						{ label: 'セッションの寿命', slug: 'guides/session-lifetime' },
 					],
 				},
 				{

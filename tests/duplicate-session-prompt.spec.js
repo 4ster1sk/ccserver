@@ -41,7 +41,6 @@ function stubDuplicateSession(page, cwd, overrides = {}) {
           id: 'e2e-dup-session',
           cwd,
           connected: true,
-          viewers: 1,
           shell: false,
           sandbox: false,
           sandboxOpts: null,

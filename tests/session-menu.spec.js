@@ -168,8 +168,8 @@ test('lower section shows a session left running after a reload, and X terminate
   // while keeping its session alive. A reload is the realistic way a
   // running session ends up in the lower ("unopened") section instead: the
   // local tab state resets, but the untouched server-side session keeps
-  // running, the same situation another browser tab/device would see under
-  // the multi-device session-sharing feature.
+  // running, the same situation another browser tab would see when it
+  // re-attaches to a session the reloaded tab is no longer watching.
   await page.reload();
   await expect(openTerminalBtn(page)).toBeVisible();
 

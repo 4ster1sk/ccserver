@@ -66,11 +66,6 @@ export function schedulesPath() { return resolvePath(PATH_IDS.scheduledPrompts);
 
 const OUTPUT_BUFFER_MAX_BYTES = 512 * 1024;
 const IDLE_TIMEOUT_MS = 3000;
-// PTY size negotiation floor. The pty is sized to the SMALLEST viewport among
-// the attached clients, so a single client reporting a degenerate size would
-// otherwise collapse the pty for everyone.
-const MIN_PTY_COLS = 2;
-const MIN_PTY_ROWS = 1;
 
 // Both timeouts are operator-tunable. Parsed once at module load (env changes
 // mid-process are not a supported scenario) but exported as functions so the
@@ -100,30 +95,6 @@ export function resolveExitedTimeoutMs(env = process.env) {
 
 const SESSION_TIMEOUT_MS = resolveSessionTimeoutMs();
 const SESSION_EXITED_TIMEOUT_MS = resolveExitedTimeoutMs();
-
-// Session sharing (a second device attaching alongside the first instead of
-// evicting it, with the pty sized to the smallest of their viewports -- see
-// attachSocket/negotiateSize) is opt-in, off by default. A viewer that is
-// attached but not actually on screen -- a background browser tab, a stale
-// reconnect racing a visibility change -- can register a degenerate viewport
-// with no way for the client to notice or correct it: a hidden container can
-// measure 0px yet still yield a small non-zero size from the fit addon's own
-// floor, and because the pty runs at the SMALLEST of every attached viewport,
-// that one invisible client silently pins every real viewer's screen to a
-// tiny size until it fully disconnects. Until that is fixed at the source,
-// attaching a second client falls back to the pre-sharing behavior (evict the
-// incumbent) unless the operator opts in.
-export function resolveSessionSharingEnabled(env = process.env) {
-  const raw = env.CCSERVER_SESSION_SHARING;
-  if (raw == null) return false;
-  const s = String(raw).trim().toLowerCase();
-  if (['1', 'true', 'on', 'yes'].includes(s)) return true;
-  if (['0', 'false', 'off', 'no', ''].includes(s)) return false;
-  console.warn(`[session] ignoring invalid CCSERVER_SESSION_SHARING=${raw} (expected 1/0, true/false, on/off, yes/no); using false`);
-  return false;
-}
-
-const SESSION_SHARING_ENABLED = resolveSessionSharingEnabled();
 
 const sessions = new Map();
 
@@ -277,13 +248,10 @@ function buildSessionRecord(id, ptyProcess, meta) {
     sandboxNetworkBrokerDir: meta.sandboxNetworkBrokerDir ?? null,
     reuseSandboxHome: meta.reuseSandboxHome, // true = keep the previous persistent HOME, false = started fresh (wiped)
     ptyProcess,
-    // Every attached viewer, mapped to the viewport it last reported. With
-    // CCSERVER_SESSION_SHARING opted in, opening the session from a second
-    // device adds a socket here instead of evicting the first (see
-    // attachSocket), and the viewport values feed negotiateSize -- the pty is
-    // sized to the smallest of them. Off by default, this map holds at most
-    // one entry.
-    sockets: new Map(),
+    // The single attached client (at most one: attaching a second client
+    // evicts the incumbent -- see attachSocket). Null while nobody is
+    // watching; the destroy timer runs only in that state.
+    socket: null,
     outputBuffer: [],
     bufferSize: 0,
     cols: meta.cols,
@@ -555,7 +523,7 @@ function buildSessionRecord(id, ptyProcess, meta) {
     console.log(
       `[session] ${session.id} pty exited (code=${exitCode}, signal=${signal ?? 'none'}, `
       + `app=${session.app || (session.shell ? 'shell' : 'unknown')}, cwd=${session.cwd}, `
-      + `viewers=${session.sockets.size}, uptime=${Date.now() - session.createdAt}ms)`
+      + `connected=${!!session.socket}, uptime=${Date.now() - session.createdAt}ms)`
     );
 
     broadcast(session, {
@@ -565,7 +533,7 @@ function buildSessionRecord(id, ptyProcess, meta) {
       claudeSessionId: session.claudeSessionId,
     });
 
-    if (session.sockets.size === 0 && sessions.has(session.id)) {
+    if (!session.socket && sessions.has(session.id)) {
       startTimeout(session, SESSION_EXITED_TIMEOUT_MS);
     }
   });
@@ -1991,8 +1959,7 @@ export function listSessions() {
     result.push({
       id,
       cwd: session.cwd,
-      connected: session.sockets.size > 0,
-      viewers: session.sockets.size,
+      connected: !!session.socket,
       shell: session.shell,
       sandbox: session.sandbox,
       sandboxOpts: session.sandboxOpts || null,
@@ -2052,16 +2019,10 @@ export function listPooledQemuSessions() {
   return result;
 }
 
-// Send one message to every viewer attached to a session. A viewer whose
-// socket has gone away (or throws on send) must never break the pty data
-// path or starve the other viewers, so each send is isolated.
-//
-// Dead sockets are also dropped here. With a single socket per session a
-// stale one was simply overwritten by the next attach, but a SET of viewers
-// keeps anything nobody removed -- and a session whose set never empties is
-// a session whose destroy timer never arms, i.e. a pty that outlives its
-// last real viewer forever. detachSocket is still the normal path (the ws
-// 'close' handler); this is the backstop for a socket that dies without one.
+// Send one message to the client attached to a session. A socket that has
+// gone away (or throws on send) detaches the session instead of breaking the
+// pty data path: detachSocket is still the normal path (the ws 'close'
+// handler); this is the backstop for a socket that dies without one.
 // The chat view's startup list / readiness (see opencodeChat.js).
 export function chatStateMsg(session) {
   return { type: 'chat_state', chat: publicChatState(session.chat) };
@@ -2072,95 +2033,51 @@ function broadcastChatState(session) {
 }
 
 function broadcast(session, payload) {
-  if (!session?.sockets?.size) return;
+  const chan = session?.socket;
+  if (!chan) return;
   const str = typeof payload === 'string' ? payload : JSON.stringify(payload);
-  let dead = null;
-  for (const chan of session.sockets.keys()) {
-    if (chan.readyState !== 1) {
-      (dead ??= []).push(chan);
-      continue;
-    }
-    try {
-      chan.send(str);
-    } catch {
-      (dead ??= []).push(chan);
-    }
+  if (chan.readyState !== 1) {
+    removeViewer(session, chan);
+    return;
   }
-  // Pruning re-runs the size negotiation and can broadcast a `size` of its
-  // own; that recursion terminates because these sockets are gone from the
-  // map by then, so the nested call finds nothing left to prune.
-  if (dead) for (const chan of dead) removeViewer(session, chan);
+  try {
+    chan.send(str);
+  } catch {
+    removeViewer(session, chan);
+  }
 }
 
-// The pty has ONE size but a shared session can have several viewers with
-// different window sizes, so the pty runs at the smallest of them (the same
-// choice tmux makes by default): every viewer then sees the full screen,
-// with the roomier ones showing unused margin. Returns null when no viewer
-// has reported a usable viewport, meaning "leave the pty size alone".
-function negotiateSize(session) {
-  let cols = null;
-  let rows = null;
-  for (const viewport of session.sockets.values()) {
-    if (!viewport) continue;
-    const c = Number(viewport.cols);
-    const r = Number(viewport.rows);
-    if (Number.isFinite(c) && c > 0) cols = cols === null ? c : Math.min(cols, c);
-    if (Number.isFinite(r) && r > 0) rows = rows === null ? r : Math.min(rows, r);
-  }
-  if (cols === null || rows === null) return null;
-  return {
-    cols: Math.max(MIN_PTY_COLS, Math.trunc(cols)),
-    rows: Math.max(MIN_PTY_ROWS, Math.trunc(rows)),
-  };
-}
-
-// Resize the pty to the negotiated size and tell every viewer what the
-// agreed size is, so a client whose own request lost the negotiation can
-// render at the size the pty actually uses instead of its own.
-// Returns the size in force (negotiated, or the unchanged current one).
-export function applyNegotiatedSize(session) {
-  const target = negotiateSize(session);
-  const current = { cols: session.cols, rows: session.rows };
-  if (!target) return current;
-  if (target.cols === session.cols && target.rows === session.rows) return current;
-
+// Resize the pty to the attached client's requested size. Invalid values
+// leave the pty alone. Returns true when the session exists (whether or not
+// the size changed), false when it does not. A socket that is not the
+// attached one cannot steer the pty, so a recently-evicted client cannot
+// resize the session out from under its replacement.
+export function resizeSession(id, socket, cols, rows) {
+  const session = sessions.get(id);
+  if (!session) return false;
+  if (session.socket !== socket) return false;
+  const c = Number(cols);
+  const r = Number(rows);
+  if (!Number.isFinite(c) || !Number.isFinite(r) || c <= 0 || r <= 0) return true;
+  const target = { cols: Math.trunc(c), rows: Math.trunc(r) };
+  if (target.cols === session.cols && target.rows === session.rows) return true;
   if (!session.exited && session.ptyProcess) {
     try {
       session.ptyProcess.resize(target.cols, target.rows);
     } catch {
       // pty may have died between the exited check and here
-      return current;
+      return true;
     }
   }
   session.cols = target.cols;
   session.rows = target.rows;
-  broadcast(session, { type: 'size', cols: target.cols, rows: target.rows });
-  return target;
+  return true;
 }
 
-// Record one viewer's requested window size and re-run the negotiation.
-// Returns the size actually in force so the caller can answer the requester
-// even when its request did not win.
-export function setSocketViewport(id, socket, cols, rows) {
-  const session = sessions.get(id);
-  if (!session || !session.sockets.has(socket)) return null;
-  session.sockets.set(socket, normalizeViewport(cols, rows));
-  return applyNegotiatedSize(session);
-}
-
-function normalizeViewport(cols, rows) {
-  const c = Number(cols);
-  const r = Number(rows);
-  if (!Number.isFinite(c) || !Number.isFinite(r) || c <= 0 || r <= 0) return null;
-  return { cols: Math.trunc(c), rows: Math.trunc(r) };
-}
-
-// Attaching is additive when session sharing is opted in (see
-// SESSION_SHARING_ENABLED above): a second device joins the session instead
-// of evicting the first. With sharing off (the default), this instead
-// restores ccserver's original behavior -- the new client closes any
-// incumbent with code 4001 and takes the session over alone, so a single
-// misbehaving/hidden viewport can never end up in the size negotiation.
+// Attaching evicts any incumbent: the new client closes the previous one
+// with code 4001 and takes the session over alone. Only one client is ever
+// attached, so there is nothing to negotiate -- the pty simply follows the
+// attached client's viewport.
 export function attachSocket(id, socket, viewport = null) {
   const session = sessions.get(id);
   if (!session) return false;
@@ -2170,42 +2087,45 @@ export function attachSocket(id, socket, viewport = null) {
     session.timeoutTimer = null;
   }
 
-  if (!SESSION_SHARING_ENABLED) {
-    for (const existing of session.sockets.keys()) {
-      if (existing === socket) continue;
-      try { existing.send(JSON.stringify({ type: 'detached', reason: 'replaced' })); } catch { /* already gone */ }
-      try { existing.close(4001, 'Replaced by new client'); } catch { /* already gone */ }
-      session.sockets.delete(existing);
-    }
+  const existing = session.socket;
+  if (existing && existing !== socket) {
+    try { existing.send(JSON.stringify({ type: 'detached', reason: 'replaced' })); } catch { /* already gone */ }
+    try { existing.close(4001, 'Replaced by new client'); } catch { /* already gone */ }
   }
 
-  session.sockets.set(socket, normalizeViewport(viewport?.cols, viewport?.rows));
-  applyNegotiatedSize(session);
-  broadcast(session, { type: 'viewers', count: session.sockets.size });
+  session.socket = socket;
+  const c = Number(viewport?.cols);
+  const r = Number(viewport?.rows);
+  if (Number.isFinite(c) && Number.isFinite(r) && c > 0 && r > 0) {
+    const target = { cols: Math.trunc(c), rows: Math.trunc(r) };
+    if (target.cols !== session.cols || target.rows !== session.rows) {
+      if (!session.exited && session.ptyProcess) {
+        try {
+          session.ptyProcess.resize(target.cols, target.rows);
+        } catch {
+          // pty may have died between the exited check and here
+          return true;
+        }
+      }
+      session.cols = target.cols;
+      session.rows = target.rows;
+    }
+  }
   return true;
 }
 
-// Drop one viewer and settle the consequences: a wider negotiated size for
-// whoever is left, or the destroy timer once the session has no viewers at
-// all. No-op if this socket was not attached, so a duplicate detach (or a
-// prune racing the ws 'close' handler) cannot fire spurious viewer events.
+// Drop the attached client and arm the destroy timer. No-op if this socket
+// is not the attached one, so a duplicate detach cannot arm the timer twice.
 function removeViewer(session, socket) {
-  if (!session.sockets.delete(socket)) return;
-
-  if (session.sockets.size > 0) {
-    // A viewer leaving can widen the negotiated size (it may have been the
-    // smallest one), so re-run it for those still attached.
-    applyNegotiatedSize(session);
-    broadcast(session, { type: 'viewers', count: session.sockets.size });
-    return;
-  }
+  if (session.socket !== socket) return;
+  session.socket = null;
 
   const timeout = session.exited
     ? SESSION_EXITED_TIMEOUT_MS
     : SESSION_TIMEOUT_MS;
   if (timeout > 0) {
     console.log(
-      `[session] ${session.id} last viewer left; destroying in ${timeout}ms`
+      `[session] ${session.id} client detached; destroying in ${timeout}ms`
       + `${session.exited ? ' (pty already exited)' : ''}`
     );
   }
@@ -2254,7 +2174,7 @@ export function destroySession(id, { keepSchedule = true, reason = 'request' } =
     `[session] ${id} destroyed (reason=${reason}, `
     + `app=${session.app || (session.shell ? 'shell' : 'unknown')}, cwd=${session.cwd}, `
     + `uptime=${Date.now() - session.createdAt}ms, ptyExited=${session.exited}, `
-    + `viewers=${session.sockets.size})`
+    + `connected=${!!session.socket})`
   );
 
   if (session.timeoutTimer) {

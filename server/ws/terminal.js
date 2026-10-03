@@ -5,7 +5,7 @@ import {
   getSession,
   attachSocket,
   detachSocket,
-  setSocketViewport,
+  resizeSession,
   writeToSession,
   setScheduledPrompt,
   cancelScheduledPrompt,
@@ -132,8 +132,6 @@ export function attachTerminalHandler(chan) {
             // the session list (which reads the server's value) showed the
             // opposite for the very same session.
             sandbox: !!session.sandbox,
-            // How many clients (this one included) are watching the session.
-            viewers: session.sockets.size,
             ui: session.ui || 'terminal',
           })
         );
@@ -179,9 +177,9 @@ export function attachTerminalHandler(chan) {
         }
 
         currentSessionId = msg.sessionId;
-        // Joining, not taking over: any client already watching this session
-        // stays attached. The viewport rides along so the pty can be sized to
-        // the smallest window among everyone now watching.
+        // Taking over: any client already watching this session is evicted
+        // (code 4001). The viewport rides along so the pty follows this
+        // client's window size.
         attachSocket(msg.sessionId, chan, { cols: msg.cols, rows: msg.rows });
 
         chan.send(
@@ -193,10 +191,8 @@ export function attachTerminalHandler(chan) {
             rows: session.rows,
             isReconnect: true,
             gpgVaultActive: !!session.gpgVaultActive,
-            // Same effective value on re-attach (issue #251): a tab restored
-            // from another device must not inherit this client's guess.
+            // Same effective value on re-attach (issue #251).
             sandbox: !!session.sandbox,
-            viewers: session.sockets.size,
             ui: session.ui || 'terminal',
           })
         );
@@ -219,9 +215,8 @@ export function attachTerminalHandler(chan) {
           );
         }
 
-        // (No direct pty resize here: attachSocket above already registered
-        // this client's viewport and re-ran the negotiation, which resizes
-        // the pty and tells every viewer the agreed size.)
+        // (No direct pty resize here: attachSocket above already sized the
+        // pty to this client's viewport.)
 
         // Send auto-yes state on attach
         if (!session.shell) {
@@ -252,16 +247,8 @@ export function attachTerminalHandler(chan) {
 
       case 'resize': {
         if (currentSessionId && msg.cols && msg.rows) {
-          // The pty runs at the smallest viewport among the attached
-          // clients, so this request does not necessarily win. Reply with
-          // the size actually in force either way, so a client that lost the
-          // negotiation renders at the pty's size instead of its own (a
-          // change only it would see, since applyNegotiatedSize broadcasts
-          // solely when the agreed size actually moves).
-          const inForce = setSocketViewport(currentSessionId, chan, msg.cols, msg.rows);
-          if (inForce) {
-            chan.send(JSON.stringify({ type: 'size', cols: inForce.cols, rows: inForce.rows }));
-          }
+          // One client per session: the pty simply follows its viewport.
+          resizeSession(currentSessionId, chan, msg.cols, msg.rows);
         }
         break;
       }

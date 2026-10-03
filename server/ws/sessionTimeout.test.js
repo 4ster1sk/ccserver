@@ -94,7 +94,7 @@ test('resolveExitedTimeoutMs: defaults to 5min and can never be disabled', () =>
     'and clamped at the setTimeout ceiling on the other end');
 });
 
-test('with the idle timeout disabled, a session with no viewers is left alone', async () => {
+test('with the idle timeout disabled, a detached session is left alone', async () => {
   const res = await sessionManager.createSession({
     cwd: '/tmp', cols: 80, rows: 24, shell: true, sandbox: false,
   });
@@ -105,11 +105,11 @@ test('with the idle timeout disabled, a session with no viewers is left alone', 
     sessionManager.attachSocket(sessionId, socket);
     sessionManager.detachSocket(sessionId, socket);
 
-    assert.equal(session.sockets.size, 0, 'nobody is watching');
+    assert.equal(session.socket, null, 'nobody is watching');
     assert.equal(session.timeoutTimer, null, 'no destroy timer is armed at all');
 
     await sleep(1500); // well past the 1s exited timeout, which must not apply
-    assert.ok(sessionManager.getSession(sessionId), 'the live session survives with no viewers');
+    assert.ok(sessionManager.getSession(sessionId), 'the live session survives while detached');
     assert.equal(session.exited, false, 'and its pty was never killed');
   } finally {
     sessionManager.destroySession(sessionId, { reason: 'test' });

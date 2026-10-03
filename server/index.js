@@ -211,9 +211,8 @@ if (AUTH_MODE === 'token') {
 // authentication to anyone who could reach this host on the network --
 // safePath() in routes/files.js is intentionally host-wide (see
 // files.test.js), so this was full unauthenticated host file read/write,
-// not just "someone browses your project". Cross-device session sharing
-// (README's "複数端末からのセッション共有") genuinely needs a non-loopback
-// bind, so the fix isn't to force loopback by default -- it's to refuse the
+// not just "someone browses your project". The server binds non-loopback
+// so trusted devices on the LAN can reach it, so the fix isn't to force
 // specific none+non-loopback combination at boot unless an operator
 // explicitly opts in (e.g. a trusted isolated LAN with no other feasible
 // auth), rather than silently exposing it.

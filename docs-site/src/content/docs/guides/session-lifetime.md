@@ -1,45 +1,7 @@
 ---
-title: セッション共有と寿命
-description: 複数端末からの同時接続、PTY サイズの調停、セッションが破棄されるまでの時間と終了理由の調べ方
+title: セッションの寿命
+description: セッションが破棄されるまでの時間と終了理由の調べ方
 ---
-
-## 複数端末からの同時接続 (オプトイン)
-
-1 つのセッションを、PC とスマートフォンなど**複数の端末から同時に開く**機能です。tmux のセッション共有と同じ考え方で、入力も出力も全端末で共有されます。既定では無効で、環境変数 `CCSERVER_SESSION_SHARING` を `1` にした場合のみ有効になります。
-
-```ini
-# systemd ユニットファイルの例
-Environment=CCSERVER_SESSION_SHARING=1
-```
-
-有効にすると:
-
-- 後から接続した端末が既存の接続を切ることは**ありません**
-- どの端末からでも入力でき、結果は全端末に表示されます
-- 1 台でも接続していれば、後述の破棄タイマーは動きません
-
-既定 (無効) では、後から同じセッションに接続した端末が既存の接続を引き継ぎます (旧来の ccserver と同じ挙動)。引き継がれた側のターミナルには「Session taken over by another client」と表示されます。
-
-無効にしている理由は、画面サイズの調停 (次節) が**表示されていないタブでも有効なまま残るバグの温床**になっているためです。バックグラウンドに回った (あるいは切断に気づかずタブだけ残っている) 端末が過去に報告した極端に小さいビューポートを、実際には誰も見ていないのに握り続け、他の端末の画面まで小さいまま固定してしまうことがあります。根本修正までは、複数端末で同時に使いたい場合にのみ明示的に有効化してください。
-
-## 画面サイズの調停 (共有有効時のみ)
-
-`CCSERVER_SESSION_SHARING=1` で複数端末が同時接続している間、PTY (擬似端末) は 1 つのサイズしか持てません。そのため、**接続中の全端末のうち最も小さいサイズ**が採用されます。
-
-```
-PC:      120x40 ┐
-                ├─> PTY = 80x24
-スマホ:   80x24 ┘
-```
-
-広い端末には右と下に余白が出ますが、どの端末でも表示が崩れません。端末が接続・切断してサイズが変わると、各端末のターミナルに次のような 1 行が表示されます。
-
-```
-[他の端末が接続しました (計2台)。画面は最も小さい端末に合わせて80x24になります]
-[他の端末が切断しました。画面は120x40に戻ります]
-```
-
-小さい端末が切断すると、残った端末は自動的に元のサイズに戻ります。
 
 ## セッションの寿命
 
@@ -65,6 +27,10 @@ Environment=CCSERVER_SESSION_TIMEOUT_MS=0
 
 上限は `2147483647` (約24.8日) です。これは Node の `setTimeout` が扱える最大値で、これを超える値を指定すると警告を出したうえで上限にクランプします。**「破棄させたくない」という意図で巨大な値を指定しないでください** — その用途には `0` を使います (`setTimeout` は上限超えの遅延を黙って 1ms として扱うため、クランプが無ければ意図と正反対の即時破棄になります)。
 
+## 接続の扱い
+
+1 つのセッションに接続できるクライアントは常に 1 つだけです。後から同じセッションに接続した端末が既存の接続を引き継ぎ、引き継がれた側のターミナルには「Session taken over by another client」と表示されます。
+
 ## セッションの終了理由を調べる
 
 セッションの PTY 終了・破棄はログに記録されます。「気づいたらセッションが終わっていて resume が必要になった」場合は、まずここを確認してください。
@@ -74,9 +40,9 @@ journalctl --user -u ccserver | grep '\[session\]'
 ```
 
 ```
-[session] <id> pty exited (code=1, signal=none, app=claude, cwd=/srv/proj, viewers=0, uptime=3600000ms)
-[session] <id> last viewer left; destroying in 43200000ms
-[session] <id> destroyed (reason=idle-timeout, app=claude, cwd=/srv/proj, uptime=10800000ms, ptyExited=false, viewers=0)
+[session] <id> pty exited (code=1, signal=none, app=claude, cwd=/srv/proj, connected=false, uptime=3600000ms)
+[session] <id> client detached; destroying in 43200000ms
+[session] <id> destroyed (reason=idle-timeout, app=claude, cwd=/srv/proj, uptime=10800000ms, ptyExited=false, connected=false)
 ```
 
 `pty exited` があれば、セッションを終わらせたのは ccserver ではなく**起動していた CLI 自身**です (`code` が終了コード)。`destroyed` の `reason` は、どの経路がセッションを片付けたかを示します。
