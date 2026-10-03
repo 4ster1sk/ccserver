@@ -21,6 +21,6 @@ description: Usage ボタンと ccserver-usage MCP による利用率確認
 エージェントが**自分で**上記の Usage スナップショットを読める MCP ツール `get_usage` を提供します。`ccserver-notify` とは独立した別の MCP サーバーで、`server/usage.js` の `getUsage()` (上記ボタンが叩くのと同じキャッシュ/キャプチャロジック) を同一プロセス内で直接呼ぶだけです (HTTP 経由ではありません)。
 
 - **ツール**: `get_usage({ force?: boolean })` — `{ usage, updatedAt, cached, sandboxed?, error? }` を返します (`GET /api/usage` と同じ形)。`force: true` で強制再取得 (最大 15 秒程度かかることがあります)。
-- **注入条件**: **`claude` セッションのみ** (`/usage` は Claude Code CLI 固有の機能のため opencode/copilot には注入されません)。シェルセッションには注入されません。`ccserver-notify` と異なり、コンボのワーカー/オーケストレーター/スタンドアロンは区別せず、対象となる claude セッション全てに注入されます。
+- **注入条件**: **`claude` セッションのみ** (`/usage` は Claude Code CLI 固有の機能です)。シェルや他のエージェントセッションには注入されません。
 - **オプトイン**: デフォルトでは注入されません。サーバーに claude バイナリがインストールされ、設定ファイルで `usageMcp: true` を明示した場合のみ注入されます。Usage ボタンの `showUsage` 設定とは独立しています。
 - サンドボックス内外どちらでも動作します (サンドボックス内はソケットを bind、外はホストの node でブリッジを実行) — 仕組みは `ccserver-notify` と同じパターンですが、`get_usage` は接続元によらず同じ結果を返すため識別情報 (identity) は一切やり取りしません。

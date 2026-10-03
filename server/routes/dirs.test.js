@@ -10,6 +10,7 @@ import { mkdtempSync, rmSync, existsSync, writeFileSync, mkdirSync } from 'node:
 import { tmpdir, homedir } from 'node:os';
 import { join } from 'node:path';
 import { dirsRoute } from './dirs.js';
+import { sandboxAvailable } from '../ws/sandbox.js';
 
 // browseRoots (issue #189): points loadSandboxConfig() at a temp config for
 // the duration of `fn`, same pattern as sandbox-config.test.js's withConfig.
@@ -116,17 +117,15 @@ test('POST /dirs keeps the directory but reports failure when git init cannot ru
 
 // GET /dirs/home exposes toolsAvailable so the launch / settings UIs can
 // render the rtk / code-review-graph toggles disabled-with-a-note instead of
-// offering a checkbox the server silently drops (macOS seatbelt has no
-// provisioner -- see issue #22). Both true on this non-macOS test host.
+// offering a checkbox the server silently drops when no sandbox is available.
 test('GET /dirs/home exposes toolsAvailable for the opt-in tool toggles', async () => {
   const res = await app.inject({ method: 'GET', url: '/api/dirs/home' });
   const { toolsAvailable } = res.json();
   assert.ok(toolsAvailable && typeof toolsAvailable === 'object', 'toolsAvailable present');
   assert.equal(typeof toolsAvailable.rtk, 'boolean');
   assert.equal(typeof toolsAvailable.codeReviewGraph, 'boolean');
-  // Availability tracks the platform, not config: this CI host is not macOS.
-  assert.equal(toolsAvailable.rtk, process.platform !== 'darwin');
-  assert.equal(toolsAvailable.codeReviewGraph, process.platform !== 'darwin');
+  assert.equal(toolsAvailable.rtk, sandboxAvailable('bwrap'));
+  assert.equal(toolsAvailable.codeReviewGraph, sandboxAvailable('bwrap'));
 });
 
 // GET /dirs/home's forceSandbox is the EFFECTIVE flag (issue #251).
@@ -212,9 +211,8 @@ test('GET /dirs/home exposes availableApps.opencodeGo following toggle + key', a
   }
 });
 
-// GET /dirs/home exposes sandboxAvailable (backend presence: bwrap on Linux,
-// sandbox-exec on macOS) so the launch modal can disable the sandbox choice
-// where it cannot work.
+// GET /dirs/home exposes whether the bwrap backend is available so the launch
+// modal can disable the sandbox choice where it cannot work.
 test('GET /dirs/home exposes sandboxAvailable as a boolean', async () => {
   const res = await app.inject({ method: 'GET', url: '/api/dirs/home' });
   assert.equal(res.statusCode, 200);
@@ -233,15 +231,15 @@ test('GET /dirs/home exposes hiddenApps following sandbox.config.json', async ()
     let res = await app.inject({ method: 'GET', url: '/api/dirs/home' });
     assert.deepEqual(res.json().hiddenApps, []);
 
-    writeFileSync(cfg, JSON.stringify({ hiddenApps: ['copilot', 'codex'] }));
+    writeFileSync(cfg, JSON.stringify({ hiddenApps: ['opencode', 'codex'] }));
     res = await app.inject({ method: 'GET', url: '/api/dirs/home' });
-    assert.deepEqual(res.json().hiddenApps, ['copilot', 'codex']);
+    assert.deepEqual(res.json().hiddenApps, ['opencode', 'codex']);
 
     // Unknown entries are dropped by loadSandboxConfig's own validation --
     // the route just passes the already-validated array through.
-    writeFileSync(cfg, JSON.stringify({ hiddenApps: ['copilot', 'not-a-real-app'] }));
+    writeFileSync(cfg, JSON.stringify({ hiddenApps: ['opencode', 'not-a-real-app'] }));
     res = await app.inject({ method: 'GET', url: '/api/dirs/home' });
-    assert.deepEqual(res.json().hiddenApps, ['copilot']);
+    assert.deepEqual(res.json().hiddenApps, ['opencode']);
   } finally {
     if (savedConfigEnv === undefined) delete process.env.CCSERVER_SANDBOX_CONFIG;
     else process.env.CCSERVER_SANDBOX_CONFIG = savedConfigEnv;

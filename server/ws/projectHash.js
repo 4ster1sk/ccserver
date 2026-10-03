@@ -1,8 +1,6 @@
 // Deterministic per-project hash shared by every host-side dir that is keyed
-// off a project's cwd but must live outside it (the orchestrator dir in
-// routes/groups.js, the worktree root in worktree.js). A single shared
-// function keeps the two from drifting into separate hash domains for what
-// is conceptually the same "which project is this" question.
+// off a project's cwd but must live outside it (review worktrees, for
+// example). A single shared function keeps those paths in one hash domain.
 
 import { createHash } from 'node:crypto';
 import { resolve } from 'node:path';

@@ -48,8 +48,6 @@ function stubDuplicateSession(page, cwd, overrides = {}) {
           app: 'claude',
           model: null,
           permissionMode: 'standard',
-          groupId: null,
-          groupRole: null,
           customLabel: null,
           ...overrides,
         }],
@@ -155,20 +153,6 @@ test('cancelling the duplicate-session prompt (button or overlay click) launches
 
   await page.waitForTimeout(500);
   expect(frames.length).toBe(0);
-});
-
-test('a live combo-group member in the same directory does not trigger the prompt', async ({ page }) => {
-  // Group members are only ever meant to be reached through the group's own
-  // sub-tab UI (same rule fetchServerSessions applies) -- the duplicate
-  // check must ignore them entirely, not offer to attach a bare terminal tab
-  // directly onto a live group worker/orchestrator.
-  await stubDuplicateSession(page, DUP_CWD, { groupId: 'e2e-group', groupRole: 'workerA' });
-  const frames = sentFrames(page);
-  await gotoWithFixedDir(page, DUP_CWD);
-
-  await launchViaMenu(page);
-  await expect(page.locator('.resume-overlay')).toHaveCount(0);
-  await expect.poll(() => frames.some((f) => f.type === 'init')).toBe(true);
 });
 
 test('a directory with no live session skips the prompt entirely', async ({ page }) => {

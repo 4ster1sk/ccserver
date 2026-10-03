@@ -17,6 +17,18 @@
 
 const net = require('net');
 
+// Per-session broker token: from a file when CCSANDBOX_GIT_BROKER_TOKEN_FILE
+// is set (the qemu backend, so the token never appears on a host ssh command
+// line), else from the env var (bwrap). Missing/unreadable -> ''
+// and the broker refuses the request (fail closed).
+function brokerToken() {
+  const file = process.env.CCSANDBOX_GIT_BROKER_TOKEN_FILE;
+  if (file) {
+    try { return require('fs').readFileSync(file, 'utf-8').trim(); } catch { return ''; }
+  }
+  return process.env.CCSANDBOX_GIT_BROKER_TOKEN || '';
+}
+
 const action = process.argv[2];
 
 function readStdin() {
@@ -61,7 +73,10 @@ function requestCredential(req, sockPath) {
 
     const timer = setTimeout(() => { sock.destroy(); finish(null); }, 3000);
     let buf = '';
-    sock.on('connect', () => sock.end(`${JSON.stringify(req)}\n`));
+    // write, not end: the broker answers after one newline-framed line and
+    // closes, so no half-close is needed -- and the qemu backend's in-guest
+    // relay (systemd-socket-proxyd) tears down both directions on one.
+    sock.on('connect', () => sock.write(`${JSON.stringify(req)}\n`));
     sock.on('data', (chunk) => { buf += chunk; });
     sock.on('end', () => {
       clearTimeout(timer);
@@ -86,9 +101,9 @@ async function main() {
   const req = {
     op: 'credential',
     // Per-session connection token (git-broker.js): the socket lives in a
-    // shared /tmp dir on macOS Seatbelt, so the broker authenticates the
+    // shared /tmp directory, so the broker authenticates the
     // caller before vending anything.
-    token: process.env.CCSANDBOX_GIT_BROKER_TOKEN || '',
+    token: brokerToken(),
     protocol: input.protocol || 'https',
     host: input.host || '',
     path: input.path || '',

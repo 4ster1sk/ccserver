@@ -216,7 +216,7 @@ body {
 }
 
 /* Session hamburger menu (left end of the tab bar): terminal tabs are
-   listed vertically here, while browser/remote/settings + group tabs stay
+   listed vertically here, while browser/settings tabs stay
    in the horizontal .tab-list. Open/close follows the widget pattern
    (.sidebar-add-menu / .usage-menu): absolute dropdown, outside-click and
    Escape to close. Status is a left border line: running -> --success
@@ -379,15 +379,13 @@ body {
 
 /* エージェントの稼働度 (server/ws/activity.js)。上の左端の縦線が「ビューアが
    接続しているか」を表すのに対し、こちらは「中のエージェントが動いているか」
-   という別の軸なので、独立した点として一覧行 (.session-activity) とグループの
-   サブタブ (.group-subtab-activity) の両方に出す。
+   という別の軸なので、独立した点として一覧行 (.session-activity) に出す。
 
    色だけに頼らない: レベルごとに形が違う (中空 / 半分塗り / 塗りつぶし)ので、
    色が区別できなくても・モノクロでも読める。状態語は行の aria-label と
    title に入っている (activityLevel.js)。なお緑=空き / 赤=多忙は一般的な
    「緑=正常」とは逆向きなので、テキスト併記は必須。 */
-.session-activity,
-.group-subtab-activity {
+.session-activity {
   width: 8px;
   height: 8px;
   border-radius: 50%;
@@ -398,37 +396,32 @@ body {
 }
 
 /* 待機中 (入力待ち): 中空 */
-.session-activity.is-idle,
-.group-subtab-activity.is-idle {
+.session-activity.is-idle {
   color: var(--success);
 }
 
 /* 低活動 (稼働中だが画面はほとんど動いていない): 半分塗り */
-.session-activity.is-low,
-.group-subtab-activity.is-low {
+.session-activity.is-low {
   color: var(--warning);
   background: linear-gradient(90deg, currentColor 0 50%, transparent 50% 100%);
 }
 
 /* 稼働中 (出力が流れている): 塗りつぶし */
-.session-activity.is-busy,
-.group-subtab-activity.is-busy {
+.session-activity.is-busy {
   color: var(--error);
   background: currentColor;
 }
 
-/* 稼働中表示が未検証のCLI (codex / copilot / command-code) は画面の動きだけで
+/* 稼働中表示が未検証のCLI (codex) は画面の動きだけで
    判定しているため確度が一段低い。彩度を落として控えめに差をつけるだけに
    とどめる (根拠は title に書いてある)。常時「異常」に見えると実用の邪魔に
    なるので、形も色相も変えない。 */
-.session-activity.is-unverified,
-.group-subtab-activity.is-unverified {
+.session-activity.is-unverified {
   filter: saturate(0.45);
 }
 
 @media (prefers-reduced-motion: no-preference) {
-  .session-activity.is-busy,
-  .group-subtab-activity.is-busy {
+  .session-activity.is-busy {
     animation: activity-pulse 1.6s ease-in-out infinite;
   }
 }
@@ -585,215 +578,6 @@ body {
   white-space: nowrap;
 }
 
-/* Group tab: second-level sub-tab bar (workers + orchestrator) */
-.group-tab-view {
-  display: flex;
-  flex-direction: column;
-  height: 100%;
-  min-height: 0;
-}
-
-.group-subtab-bar {
-  display: flex;
-  align-items: stretch;
-  background: var(--bg-surface);
-  border-bottom: 1px solid var(--border);
-  flex-shrink: 0;
-  overflow-x: auto;
-  overflow-y: hidden;
-}
-
-.group-subtab-bar::-webkit-scrollbar {
-  height: 0;
-}
-
-.group-subtab-item {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 5px 14px;
-  cursor: pointer;
-  border-right: 1px solid var(--border);
-  border-bottom: 2px solid transparent;
-  color: var(--text-muted);
-  font-size: 12px;
-  white-space: nowrap;
-  user-select: none;
-  -webkit-user-select: none;
-  flex-shrink: 0;
-}
-
-.group-subtab-item:hover {
-  background: var(--bg-secondary);
-  color: var(--text-secondary);
-}
-
-.group-subtab-item.active {
-  background: var(--bg-primary);
-  color: var(--text-primary);
-  border-bottom-color: var(--accent);
-}
-
-.group-subtab-item.exited {
-  opacity: 0.6;
-}
-
-.group-subtab-item.current-turn {
-  color: var(--accent);
-}
-
-@media (prefers-reduced-motion: no-preference) {
-  .group-subtab-item.current-turn {
-    animation: tab-pulse 2s ease-in-out infinite;
-  }
-}
-
-.group-subtab-item.current-turn .group-subtab-label::after {
-  content: '';
-  width: 7px;
-  height: 7px;
-  background: var(--accent);
-  border-radius: 50%;
-  flex-shrink: 0;
-}
-
-.group-subtab-label {
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  /* 稼働度の点はここ (タブ左端) に入る。手番の点は .current-turn の ::after
-     で右端に出るので、2つが隣り合って紛らわしくなることはない。 */
-  /* Worker preset display names can be up to 80 chars -- cap the label so a
-     long name cannot blow out the subtab bar (full label stays on hover via
-     the item's title attribute). */
-  max-width: 240px;
-  overflow: hidden;
-}
-
-.group-subtab-exited {
-  color: var(--error);
-  font-size: 10px;
-}
-
-.group-subtab-model {
-  font-size: 10px;
-  color: var(--text-muted);
-  max-width: 90px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  flex-shrink: 0;
-}
-
-.group-subtab-item.no-sandbox .group-subtab-label::before {
-  content: '⚠️';
-  font-size: 11px;
-  flex-shrink: 0;
-}
-
-.group-restart-orch-btn {
-  /* Sits right of the Files trigger at the bar's right end */
-  margin: 3px 8px 3px 6px;
-  padding: 3px 10px;
-  font-size: 12px;
-  flex-shrink: 0;
-  align-self: center;
-}
-
-/* Project bar: the combo group's original repository directory, always
-   visible under the subtab bar (worktree paths alone never show it). */
-.group-project-bar {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 4px 12px;
-  font-size: 11px;
-  background: var(--bg-secondary);
-  border-bottom: 1px solid var(--border);
-  flex-shrink: 0;
-}
-
-.group-project-label {
-  color: var(--text-muted);
-  font-weight: 600;
-}
-
-.group-project-path {
-  font-family: 'JetBrains Mono', 'Fira Code', monospace;
-  color: var(--text-secondary);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  flex: 1;
-}
-
-.group-project-badge {
-  flex-shrink: 0;
-  padding: 1px 8px;
-  border-radius: 999px;
-  background: var(--accent);
-  color: var(--bg-primary);
-  font-size: 10px;
-  font-weight: 600;
-}
-
-.group-project-badge.shared {
-  background: transparent;
-  color: var(--text-muted);
-  border: 1px solid var(--border);
-}
-
-.group-files-trigger-btn {
-  margin: 3px 0 3px auto;
-  padding: 3px 10px;
-  font-size: 12px;
-  flex-shrink: 0;
-  align-self: center;
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  background: var(--bg-surface);
-  color: var(--text-primary);
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  cursor: pointer;
-}
-
-.group-files-trigger-btn:hover {
-  background: var(--border);
-}
-
-.group-files-badge {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-width: 18px;
-  height: 18px;
-  padding: 0 6px;
-  border-radius: 999px;
-  background: var(--accent);
-  color: var(--bg-primary);
-  font-size: 11px;
-  font-weight: 600;
-  line-height: 1;
-}
-
-.group-subtab-body {
-  flex: 1 1 auto;
-  min-height: 0;
-  position: relative;
-}
-
-.group-gone-banner {
-  margin: 8px 12px;
-  padding: 8px 12px;
-  background: var(--error-bg, rgba(255, 80, 80, 0.12));
-  color: var(--error);
-  border: 1px solid currentColor;
-  border-radius: 4px;
-  font-size: 12px;
-}
-
 /* Directory browser header notice (bwrap missing on the server host).
    Warning tone normally; error tone when forceSandbox makes the state
    contradictory (no launch can succeed). */
@@ -811,292 +595,19 @@ body {
   color: var(--error);
 }
 
-/* Group file exchange: trigger + modal (replaces always-mounted panel).
-   Stacking relies on .resume-overlay's z-index: 100, shared by every
-   fullscreen overlay in this file. */
-.group-files-dialog {
-  position: relative;
-  max-width: 560px;
-  max-height: 75vh;
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-  font-size: 12px;
-}
-
-.group-files-dialog.drag-over {
-  outline: 2px dashed var(--accent);
-  outline-offset: -2px;
-}
-
-.group-files-dialog-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  margin-bottom: 12px;
-}
-
-/* Two-class selector: `.group-files-dialog-header h3` alone would tie with
-   `.resume-dialog h3` (margin-bottom/font-size further down this file) and
-   lose by source order, resurrecting the resume-dialog heading styles. */
-.group-files-dialog .group-files-dialog-header h3 {
-  margin: 0;
-  font-size: 16px;
-}
-
-.group-files-dialog .group-files-list {
-  max-height: 50vh;
-}
-.group-files-header {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
-}
-.group-files-count {
-  color: var(--text-muted);
-}
-.group-files-upload-btn {
-  margin-left: auto;
-  padding: 3px 10px;
-  font-size: 12px;
-}
-.group-files-progress {
-  margin-top: 6px;
-  color: var(--accent);
-}
-.group-files-error {
-  margin-top: 6px;
-  color: var(--error);
-}
-.group-files-empty {
-  margin-top: 6px;
-  color: var(--text-muted);
-  font-size: 11px;
-}
-.group-files-list {
-  margin-top: 6px;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  max-height: 120px;
-  overflow-y: auto;
-}
-.group-files-item {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 4px 6px;
-  background: var(--bg-primary);
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  min-width: 0;
-}
-.group-files-name {
-  font-weight: 500;
-  color: var(--text-primary);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  flex: 1 1 auto;
-  min-width: 0;
-}
-/* Name / meta / times stack in one column. The times used to be the tail of
-   the nowrap+ellipsis meta line, so they were the first thing cut off (and
-   never visible on a phone); they now wrap instead of truncating. */
-.group-files-body {
-  flex: 1 1 auto;
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-.group-files-meta,
-.group-files-times {
-  color: var(--text-muted);
-  font-size: 10px;
-  overflow-wrap: anywhere;
-}
-.group-files-times {
-  display: flex;
-  flex-wrap: wrap;
-  column-gap: 12px;
-}
-.group-files-time {
-  white-space: nowrap;
-}
-.group-files-download-btn,
-.group-files-delete-btn {
-  padding: 2px 6px;
-  font-size: 11px;
-  flex-shrink: 0;
-}
-.group-files-drag-overlay {
-  position: absolute;
-  inset: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: rgba(0,0,0,0.4);
-  color: var(--text-primary);
-  font-weight: 600;
-  pointer-events: none;
-}
-
-/* Group document board: trigger + read-only modal for publish_doc/fetch_doc/
-   list_docs. Same structure as .group-files-* above, minus every
-   upload/delete/drag affordance -- this panel never writes. */
-.group-docs-trigger-btn {
-  margin: 3px 0 3px 0;
-  padding: 3px 10px;
-  font-size: 12px;
-  flex-shrink: 0;
-  align-self: center;
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  background: var(--bg-surface);
-  color: var(--text-primary);
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  cursor: pointer;
-}
-
-.group-docs-trigger-btn:hover {
-  background: var(--border);
-}
-
-.group-docs-badge {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-width: 18px;
-  height: 18px;
-  padding: 0 6px;
-  border-radius: 999px;
-  background: var(--accent);
-  color: var(--bg-primary);
-  font-size: 11px;
-  font-weight: 600;
-  line-height: 1;
-}
-
-.group-docs-dialog {
-  position: relative;
-  max-width: 560px;
-  max-height: 75vh;
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-  font-size: 12px;
-}
-
-.group-docs-dialog-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  margin-bottom: 12px;
-}
-
-/* Two-class selector for the same reason as .group-files-dialog
-   .group-files-dialog-header h3 above: avoid losing to .resume-dialog h3. */
-.group-docs-dialog .group-docs-dialog-header h3 {
-  margin: 0;
-  font-size: 16px;
-}
-
-.group-docs-dialog .group-docs-list {
-  max-height: 50vh;
-}
-.group-docs-header {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
-}
-.group-docs-count {
-  color: var(--text-muted);
-}
-.group-docs-error {
-  margin-top: 6px;
-  color: var(--error);
-}
-.group-docs-empty {
-  margin-top: 6px;
-  color: var(--text-muted);
-  font-size: 11px;
-}
-.group-docs-list {
-  margin-top: 6px;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  max-height: 120px;
-  overflow-y: auto;
-}
-.group-docs-item {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 4px 6px;
-  background: var(--bg-primary);
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  min-width: 0;
-}
-.group-docs-name {
-  font-weight: 500;
-  color: var(--text-primary);
-  font-family: 'JetBrains Mono', 'Fira Code', monospace;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  flex: 1 1 auto;
-  min-width: 0;
-}
-/* Same stacking as .group-files-body above. */
-.group-docs-body {
-  flex: 1 1 auto;
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-.group-docs-meta,
-.group-docs-times {
-  color: var(--text-muted);
-  font-size: 10px;
-  overflow-wrap: anywhere;
-}
-.group-docs-times {
-  display: flex;
-  flex-wrap: wrap;
-  column-gap: 12px;
-}
-.group-docs-time {
-  white-space: nowrap;
-}
-.group-docs-view-btn {
-  padding: 2px 6px;
-  font-size: 11px;
-  flex-shrink: 0;
-}
-
-.tab-content {
-  flex: 1;
-  overflow: hidden;
-  position: relative;
-  min-width: 0;
-}
-
 /* Right sidebar layout: .main-row sits between the tab bar and the dialogs,
    holding .tab-content and .right-sidebar side by side. */
 .main-row {
   flex: 1;
   display: flex;
   min-height: 0;
+  min-width: 0;
+}
+
+.tab-content {
+  flex: 1;
+  overflow: hidden;
+  position: relative;
   min-width: 0;
 }
 
@@ -1899,270 +1410,102 @@ body {
   color: var(--error);
 }
 
-/* Federation pairing (PairingRequestBanner / PairedInstancesSection):
-   fingerprints are shown large and monospace everywhere -- the whole point
-   is that a human visually compares two of these before trusting a peer
-   (plan section 4.4), so it must never be squeezed down like ordinary
-   metadata text. */
-.pairing-banner-fingerprint {
-  flex-shrink: 0;
-  font-family: 'JetBrains Mono', 'Fira Code', monospace;
-  font-size: 13px;
-  letter-spacing: 0.02em;
-  /* M5 fix: the full fingerprint (not a 4-byte prefix) is what's shown here
-     now, so it must be able to wrap instead of forcing the banner wide or
-     overflowing on narrow viewports. */
-  white-space: normal;
-  word-break: break-all;
-}
-
-.pairing-my-fingerprint {
-  margin: 0 0 12px;
-  font-size: 12px;
-  color: var(--text-secondary);
-}
-
-.pairing-my-fingerprint code {
-  font-family: 'JetBrains Mono', 'Fira Code', monospace;
-  font-size: 12px;
-  letter-spacing: 0.02em;
-  color: var(--text-primary);
-}
-
-.pairing-key-warning {
-  color: var(--error);
-}
-
-.pairing-status-badge {
-  flex-shrink: 0;
-  font-size: 11px;
-  border-radius: 999px;
-  padding: 1px 8px;
-  white-space: nowrap;
-  border: 1px solid var(--text-secondary);
-  color: var(--text-secondary);
-}
-
-.pairing-status-active {
-  border-color: var(--success);
-  color: var(--success);
-}
-
-.pairing-status-pending_local_approval,
-.pairing-status-pending_remote_approval {
-  border-color: var(--warning, #f9e2af);
-  color: var(--warning, #f9e2af);
-}
-
-.pairing-status-revoked,
-.pairing-status-rejected,
-.pairing-status-expired {
-  border-color: var(--error);
-  color: var(--error);
-}
-
-.pairing-label-btn {
-  align-self: flex-start;
-  background: none;
-  border: none;
-  padding: 0;
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--text-primary);
-  cursor: pointer;
-  text-align: left;
-}
-
-.pairing-label-btn:hover {
-  text-decoration: underline;
-}
-
-.pairing-fingerprint,
-.pairing-hostname,
-.pairing-addr {
-  font-family: 'JetBrains Mono', 'Fira Code', monospace;
-  font-size: 11px;
-  color: var(--text-secondary);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.pairing-modal-hint {
-  font-size: 12px;
-  color: var(--text-secondary);
-  margin: -8px 0 4px;
-}
-
-.pairing-field {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  font-size: 12px;
-  color: var(--text-secondary);
-  width: 100%;
-}
-
-.pairing-field input[type="text"],
-.pairing-field input[type="password"],
-.pairing-field select {
-  font-size: 13px;
-  padding: 6px 8px;
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  background: var(--bg-primary);
-  color: var(--text-primary);
-  width: 100%;
-}
-
-.pairing-field select:focus,
-.pairing-field input:focus {
-  border-color: var(--accent);
-  outline: none;
-}
-
-.pairing-field--checkbox {
-  flex-direction: row;
-  align-items: center;
-  gap: 8px;
-  font-size: 13px;
-  color: var(--text-primary);
-}
-
-.pairing-field--checkbox input[type="checkbox"] {
-  width: 16px;
-  height: 16px;
-  margin: 0;
-}
-
-.pairing-dialog,
-.remote-launch-dialog {
-  max-width: 520px;
-  max-height: 85vh;
-  overflow-y: auto;
-}
-
-.pairing-dialog .settings-error {
-  margin-top: 8px;
-}
-
-/* RemoteInstanceView (the "Remote" tab): mirrors settings-view's padding
-   and the sandbox-list row styling it reuses directly. */
-.remote-instance-view {
-  padding: 20px;
-  height: 100%;
-}
-
-.remote-instance-picker {
-  display: flex;
-  gap: 8px;
-  margin-bottom: 16px;
-  flex-wrap: wrap;
-}
-
-.remote-instance-tab {
-  font-size: 13px;
-  padding: 5px 12px;
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  background: var(--bg-secondary);
-  color: var(--text-secondary);
-  cursor: pointer;
-}
-
-.remote-instance-tab.active {
-  border-color: var(--accent);
-  color: var(--accent);
-}
-
-.remote-instance-body h3 {
-  font-size: 15px;
-  font-weight: 600;
-  margin: 20px 0 12px;
-  color: var(--text-secondary);
-}
-
-.remote-instance-body h3:first-of-type {
-  margin-top: 0;
-}
-
-.remote-instance-actions {
-  display: flex;
-  gap: 8px;
-}
-
-.remote-group-row {
-  align-items: flex-start;
-}
-
-.remote-dir-browse {
-  width: 100%;
-}
-
-.remote-dir-listing {
-  margin-top: 6px;
-  padding: 8px;
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  max-height: 160px;
-  overflow-y: auto;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  background: var(--bg-secondary);
-}
-
-.remote-dir-current {
-  font-family: 'JetBrains Mono', 'Fira Code', monospace;
-  font-size: 11px;
-  color: var(--text-secondary);
-  margin-bottom: 4px;
-}
-
-.remote-instance-header {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
-  padding: 8px 12px;
-  margin-bottom: 12px;
-  background: var(--bg-secondary);
+/* QEMU VM settings (VmSection.jsx) */
+.vm-form {
   border: 1px solid var(--border);
   border-radius: 6px;
-  font-size: 12px;
+  padding: 12px;
+  margin-bottom: 12px;
+  background: var(--bg-secondary);
 }
 
-.remote-instance-header-label {
-  font-weight: 600;
+.vm-form h4 {
+  font-size: 14px;
+  margin: 0 0 4px;
+}
+
+.vm-resource-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 12px;
+  padding: 8px 0;
+}
+
+.vm-resource-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 13px;
+}
+
+.vm-resource-field input,
+.vm-form .general-setting-row input[type="text"] {
+  background: var(--bg-primary);
   color: var(--text-primary);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 8px;
+  font-size: 14px;
+  min-width: 0;
 }
 
-.tab-remote-badge {
-  font-size: 10px;
-  font-weight: 600;
-  padding: 1px 6px;
-  border-radius: 999px;
-  background: var(--accent);
-  color: var(--bg-primary);
-  flex-shrink: 0;
-}
-
-.terminal-remote-badge {
+.vm-resource-hint {
   font-size: 11px;
-  font-weight: 600;
-  padding: 2px 8px;
-  border-radius: 999px;
-  background: var(--bg-surface);
-  border: 1px solid var(--accent);
-  color: var(--accent);
+  color: var(--text-secondary);
+}
+
+.vm-cloud-config {
+  width: 100%;
+  box-sizing: border-box;
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  font-size: 13px;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px;
+  resize: vertical;
+}
+
+.vm-form-error {
+  white-space: pre-wrap;
+}
+
+.vm-pool-settings {
+  display: flex;
+  align-items: flex-end;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.vm-persistent-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 12px;
+  font-size: 14px;
+  color: var(--text-primary);
+}
+
+/* Name + resources keep a usable width; the buttons wrap below them
+   instead of squeezing the name to nothing on a narrow content pane. */
+.vm-template-row {
+  flex-wrap: wrap;
+}
+
+.vm-template-row .sandbox-body {
+  min-width: 240px;
+}
+
+.vm-row-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
   flex-shrink: 0;
 }
 
-.terminal-remote-badge + .terminal-title {
-  margin-left: 4px;
+.vm-backend-note {
+  margin-left: 0;
 }
 
 .sandbox-delete-btn {
@@ -2386,63 +1729,7 @@ body {
   white-space: normal;
 }
 
-/* Launch-mode toggle + combo launch fields (openMenuOpen modal) */
-.launch-mode-toggle {
-  display: flex;
-  gap: 4px;
-  padding: 6px 10px 2px;
-}
-
-.launch-mode-btn {
-  flex: 1;
-  padding: 6px 0;
-  font-size: 12px;
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  background: var(--bg-secondary);
-  color: var(--text-secondary);
-  cursor: pointer;
-}
-
-.launch-mode-btn.active {
-  background: var(--accent);
-  border-color: var(--accent);
-  color: var(--bg-primary);
-  font-weight: 600;
-}
-
-/* Disabled launch-mode button (e.g. コンボ起動 when unavailable): reuses
-   .open-menu-item-disabled, but that rule loses to .launch-mode-btn's own
-   cursor (same specificity, later in file), so the not-allowed cursor needs
-   reinforcing here. */
-.launch-mode-btn.open-menu-item-disabled {
-  cursor: not-allowed;
-  opacity: 0.5;
-}
-
-.open-menu-app-row {
-  display: flex;
-  gap: 4px;
-  padding: 2px 10px 4px;
-}
-
-.open-menu-app-btn {
-  flex: 1;
-  padding: 5px 0;
-  font-size: 12px;
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  background: var(--bg-secondary);
-  color: var(--text-secondary);
-  cursor: pointer;
-}
-
-.open-menu-app-btn.active {
-  background: var(--bg-surface);
-  border-color: var(--accent);
-  color: var(--text-primary);
-}
-
+/* Textarea styling shared with settings (e.g. network allow/deny lists). */
 .open-menu-instructions {
   display: block;
   width: calc(100% - 20px);
@@ -2474,12 +1761,6 @@ body {
   border-radius: 4px;
 }
 
-.open-menu-role-sandbox {
-  padding: 0 10px 2px;
-  border-top: 1px dashed var(--border);
-  margin-top: 2px;
-}
-
 .open-dialog {
   max-height: 85vh;
   overflow-y: auto;
@@ -2495,6 +1776,7 @@ body {
 }
 
 .session-badge.sandbox,
+.session-badge.vm,
 .session-badge.permission-auto-accept {
   color: var(--warning, #f9e2af);
   background: rgba(249, 226, 175, 0.12);
@@ -3298,7 +2580,7 @@ body {
   background: rgba(243, 139, 168, 0.1);
 }
 
-/* Network-isolation toggle (see network-broker.js) -- .active means the
+/* Network-isolation toggle (see ccserver-netbroker) -- .active means the
    broker is currently enforcing the allow-list (isolation ON = red);
    not-active means it was temporarily flipped open (isolation OFF = green). */
 .network-isolate-toggle {
@@ -3575,6 +2857,18 @@ body {
   font-size: 13px;
   color: var(--text-secondary);
   margin-bottom: 16px;
+}
+
+.vm-running-list {
+  font-size: 13px;
+  color: var(--text-secondary);
+  background: var(--bg-surface);
+  padding: 8px 12px 8px 28px;
+  border-radius: 4px;
+  margin: 12px 0 16px;
+  max-height: 160px;
+  overflow-y: auto;
+  word-break: break-all;
 }
 
 .resume-actions {
@@ -4183,204 +3477,6 @@ body {
   color: var(--text-muted);
 }
 
-/* Worker presets in the combo launch modal */
-.open-menu-presets-row {
-  display: flex;
-  gap: 6px;
-  padding: 2px 10px 4px;
-}
-
-.open-menu-preset-select {
-  flex: 1;
-  min-width: 0;
-  padding: 5px 6px;
-  font-size: 12px;
-  font-family: inherit;
-  background: var(--bg-secondary);
-  color: var(--text-primary);
-  border: 1px solid var(--border);
-  border-radius: 4px;
-}
-
-.open-menu-manage-btn {
-  flex-shrink: 0;
-  white-space: nowrap;
-}
-
-.open-menu-selected-workers {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  margin: 2px 10px 6px;
-}
-
-.open-menu-selected-worker {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 4px;
-  padding: 4px 6px;
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  background: var(--bg-secondary);
-}
-
-.open-menu-selected-worker-name {
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--text-primary);
-  max-width: 40%;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.open-menu-selected-worker-role {
-  font-size: 10px;
-  color: var(--text-muted);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.open-menu-selected-worker-apps {
-  padding: 0;
-  flex: 1;
-  min-width: 140px;
-}
-
-.open-menu-selected-worker-apps .open-menu-app-btn {
-  padding: 3px 0;
-  font-size: 10px;
-}
-
-.open-menu-selected-worker-model {
-  min-width: 90px;
-  max-width: 160px;
-  padding: 3px 6px;
-  font-size: 11px;
-}
-
-.open-menu-selected-worker-actions {
-  display: flex;
-  gap: 2px;
-}
-
-.open-menu-selected-worker-actions .btn {
-  padding: 2px 6px;
-  font-size: 11px;
-  line-height: 1.4;
-}
-
-/* Preset management dialog (stacked above the launch modal overlay) */
-.preset-manage-overlay {
-  z-index: 110;
-}
-
-.preset-manage-dialog {
-  width: min(520px, 92vw);
-}
-
-.preset-manage-list {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  max-height: 32vh;
-  overflow-y: auto;
-  margin: 4px 10px;
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  padding: 4px;
-}
-
-.preset-manage-empty {
-  font-size: 12px;
-  color: var(--text-muted);
-  padding: 8px 4px;
-  text-align: center;
-}
-
-.preset-manage-item {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 4px;
-  border-radius: 4px;
-}
-
-.preset-manage-item.editing {
-  outline: 1px solid var(--accent);
-}
-
-.preset-manage-item-name {
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--text-primary);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.preset-manage-item-role {
-  font-size: 10px;
-  color: var(--text-muted);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.preset-manage-item-meta {
-  flex: 1;
-  font-size: 11px;
-  color: var(--text-secondary);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  text-align: right;
-}
-
-.preset-manage-item .btn {
-  padding: 2px 8px;
-  font-size: 11px;
-  flex-shrink: 0;
-}
-
-.preset-form-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin: 6px 10px;
-}
-
-.preset-form-row > span:first-child {
-  width: 52px;
-  flex-shrink: 0;
-  font-size: 12px;
-  color: var(--text-muted);
-}
-
-.preset-form-row input[type="text"] {
-  flex: 1;
-  padding: 5px 8px;
-  font-size: 12px;
-  font-family: inherit;
-  background: var(--bg-secondary);
-  color: var(--text-primary);
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  min-width: 0;
-}
-
-.preset-form-error {
-  margin: 4px 10px;
-  padding: 6px 8px;
-  font-size: 12px;
-  color: var(--danger, #e5534b);
-  border: 1px solid var(--danger, #e5534b);
-  border-radius: 4px;
-  white-space: normal;
-}
-
 /* File preview dialog (Files tab): a native <dialog> opened with showModal(),
    so it lives in the top layer (no z-index games), the page behind it is
    inert, and the browser handles Escape and focus restore. */
@@ -4430,8 +3526,7 @@ body {
   white-space: nowrap;
 }
 
-/* Wraps instead of being clipped by the dialog: DocPreview's meta carries two
-   locale-formatted times, which no longer fit one row on a phone. */
+/* Wrap long file metadata instead of clipping it on narrow screens. */
 .file-preview-meta {
   font-family: 'JetBrains Mono', 'Fira Code', monospace;
   font-size: 12px;
@@ -4713,6 +3808,33 @@ body {
 
 .login-token-form button {
   width: 100%;
+}
+
+.pairing-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  width: 100%;
+}
+
+.pairing-field input[type="text"],
+.pairing-field input[type="password"],
+.pairing-field select {
+  font-size: 13px;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  width: 100%;
+}
+
+.pairing-field select:focus,
+.pairing-field input:focus {
+  border-color: var(--accent);
+  outline: none;
 }
 
 /* Setup gate (issue #201): reuses .login-view/.login-card, but the content

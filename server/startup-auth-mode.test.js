@@ -12,7 +12,7 @@
 // startup-hidden-apps.test.js, but this file also needs to *talk* to the
 // booted server (real headers, real cookies) rather than just read its
 // logs -- so readiness is a real fetch loop against a free port, the same
-// pattern server/ws/federationTwoInstance.test.js uses for its two real
+// pattern server/startup-hidden-apps.test.js uses to boot real
 // server/index.js child processes.
 
 import { test } from 'node:test';
@@ -60,7 +60,7 @@ function getFreePort() {
 
 function tempEnvPaths(dir) {
   // One throwaway XDG triple instead of per-file CCSERVER_*_PATH overrides
-  // (issue #201): the registry puts the DB, the state JSONs, federation and
+  // (issue #201): the registry puts the DB, the state JSONs, legacy identity data and
   // the sandbox roots under these, so this covers strictly more than the
   // individual vars did. CCSERVER_LAYOUT=xdg skips the setup gate -- these
   // tests are about the auth hook, and running the wizard per case would be

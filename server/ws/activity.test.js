@@ -113,7 +113,7 @@ test('detectBusyMarker: each app only matches its own spelling', () => {
 test('detectBusyMarker: apps with no captured frames have no marker', () => {
   // Deliberately absent from the table (not installed on the host this was
   // verified against). They must return null rather than a guessed pattern.
-  for (const app of ['codex', 'copilot', 'commandcode']) {
+  for (const app of ['codex']) {
     assert.equal(appHasBusyMarker(app), false, `${app} must not carry an unverified marker`);
     assert.equal(detectBusyMarker(app, CLAUDE_BUSY), null);
   }
@@ -176,9 +176,9 @@ test('detectBusyMarker: a missed marker degrades to movement, never to green', (
 });
 
 test('detectBusyMarker: an app id colliding with Object.prototype is not a marker table entry', () => {
-  // Group members can carry an app string straight out of a state file on
-  // disk, so a prototype-chain lookup here would be a TypeError waiting for a
-  // hand-edited .saved-sessions.json -- and it would disagree with
+  // Restored schedules can carry an app string straight out of a state file
+  // on disk, so a prototype-chain lookup here would be a TypeError waiting for
+  // a hand-edited .scheduled-prompts.json -- and it would disagree with
   // appHasBusyMarker, which has always guarded correctly.
   for (const app of ['constructor', 'toString', '__proto__', 'valueOf', 'hasOwnProperty']) {
     assert.equal(appHasBusyMarker(app), false, `${app}: no entry`);
@@ -328,7 +328,7 @@ test('classifyActivity: opencode reaches the same verdicts from its own footer',
 
 test('classifyActivity: apps without a marker table still classify from movement', () => {
   const unverifiedQuietMs = QUIET_UNVERIFIED_MS + 500;
-  for (const app of ['codex', 'copilot', 'commandcode']) {
+  for (const app of ['codex']) {
     const moving = classifyActivity({ app, screenRows: ['working on it'], screenIdleMs: movingMs, changeRate: busyRate });
     assert.equal(moving.level, 'busy', `${app}: a moving screen is not idle`);
     assert.equal(moving.reason, 'movement');

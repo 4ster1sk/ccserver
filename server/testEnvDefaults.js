@@ -11,7 +11,7 @@
 //
 //   $HOME.       legacyDataRoot() is homedir()-based on purpose and ignores
 //                $XDG_DATA_HOME, so the SQLite DB (auth sessions, GPG vault
-//                key material, paired instances), the federation private key,
+//                key material, and other private runtime data,
 //                group-files, the sandbox HOMEs, worktrees and the dind
 //                data-root all resolve under the operator's real home.
 //   THE CHECKOUT. repoRoot() is import.meta.url-based, so nothing moves it.
@@ -34,10 +34,6 @@
 //                                       schedule list goes empty. The decoy
 //                                       .scheduled-prompts.json in the
 //                                       checkout was gone.
-//   sessionManager.gracefulShutdown()   writeFileSync(savedSessionsPath())
-//   groupManager.persistGroups() and
-//   its docs/files siblings             unlinkSync() their file when the last
-//                                       group is destroyed
 //
 // On a developer's machine $HOME is their real home, so those same three
 // lines land on their real DB, their real sidecar index and their real state

@@ -16,7 +16,7 @@ test.describe('Settings left menu', () => {
     // 左メニューの7項目がタブとして表示される (一般が先頭)。
     const sidebar = settings.locator('.settings-sidebar');
     const tabs = sidebar.getByRole('tab');
-    await expect(tabs).toHaveText(['一般', '作成済みサンドボックス', 'ネットワーク隔離', '通知', 'ペアリング済みインスタンス', 'パスキー', 'GPG連携']);
+    await expect(tabs).toHaveText(['一般', '作成済みサンドボックス', 'QEMU VM', 'ネットワーク隔離', '通知', 'ペアリング済みインスタンス', 'パスキー', 'GPG連携']);
     const panel = settings.locator('[role="tabpanel"]');
     await expect(panel).toBeVisible();
 

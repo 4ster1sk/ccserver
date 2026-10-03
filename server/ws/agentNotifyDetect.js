@@ -2,9 +2,8 @@
 //
 // The agent CLIs cannot reach a desktop notification daemon from inside the
 // sandbox: bwrap never binds the host's D-Bus session socket (so notify-send
-// is structurally dead), and the macOS seatbelt profile grants no Apple
-// Events (so osascript/terminal-notifier are dead too). What every one of
-// them CAN do is write an escape sequence to its own stdout -- which is the
+// is structurally dead). What every one of them CAN do is write an escape
+// sequence to its own stdout -- which is the
 // session pty, i.e. bytes ccserver already reads in sessionManager's
 // onData. That is the capture point this module parses.
 //

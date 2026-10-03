@@ -2,7 +2,7 @@
 // cycle (gpgVaultAgent.js's unlockVault/lockVault) always mints a brand new
 // tmpfs homeDir + gpg-agent process with brand new socket paths -- but
 // buildSandboxSpawn only ever snapshots those paths ONCE, at the moment a
-// sandbox launches, and bind-mounts (bwrap) or allow-lists (seatbelt) them.
+// sandbox launches, and bind-mounts them into bwrap.
 // Without this relay, an already-running gpgVault:true sandbox would keep
 // pointing at sockets that no longer exist after any later lock/unlock, so
 // its signing/SSH push would silently keep failing even though the UI
@@ -32,7 +32,7 @@
 //    outside any per-sandbox network isolation.
 //  - holds a COPY of the public pubring.kbx/trustdb.gpg/gpg.conf files, so
 //    this directory is a complete, generation-independent GNUPGHOME
-//    substitute usable as-is by macOS Seatbelt (which has no bind mounts, so
+//    substitute usable by supported bind-mount sandboxes (which do not expose host sockets directly, so
 //    GNUPGHOME must be one real directory containing everything). Refreshed
 //    on every gpgVault:true launch (ensureStarted), not just the first: the
 //    content is identical across unlock generations of ONE vault, but a
@@ -63,9 +63,8 @@ const RELAYS = {
 };
 
 // Every basename this relay dir has EVER exposed (including the ones dropped
-// by the audit-F1 fix). sandbox-seatbelt.js deny-pins all of these for
-// non-gpgVault launches, so a stale socket from an older server build (or a
-// future re-addition) can never become silently reachable.
+// by the audit-F1 fix). bwrap exposes only the active relay sockets for
+// gpgVault launches, so stale sockets are never reachable inside a sandbox.
 const ALL_KNOWN_BASENAMES = ['S.gpg-agent', 'S.gpg-agent.ssh', 'S.gpg-agent.extra', 'S.keyboxd', 'S.dirmngr'];
 
 const PUBLIC_FILES = ['pubring.kbx', 'trustdb.gpg', 'gpg.conf'];
@@ -94,7 +93,7 @@ export function getRelayDir() {
   return relayDir();
 }
 
-// Fixed, generation-independent socket paths sandbox.js/sandbox-seatbelt.js
+// Fixed, generation-independent socket paths sandbox.js
 // use instead of the vault's own (per-unlock) socket paths. Pure function of
 // hostRuntimeDir() -- safe to call before ensureStarted() (e.g. while still
 // deciding whether to launch), though the paths obviously won't have a
@@ -144,7 +143,7 @@ export function getAllRelaySocketPathsForDeny() {
 // unlocked), synchronous: called from buildSandboxSpawn (server/ws/sandbox.js)
 // right before it snapshots gpgVaultInfo, so the relay sockets and the
 // public-file copies are guaranteed to exist before bwrap's --bind-try /
-// seatbelt's profile-building runs later in the same call. May now be called
+// bwrap's bind-building runs later in the same call. May now be called
 // while the vault is LOCKED too (issue #185: buildSandboxSpawn no longer
 // gates gpgVault:true launches on isUnlocked() first) -- see the isUnlocked()
 // branch below for what that means for the public-file copy step. Unlike

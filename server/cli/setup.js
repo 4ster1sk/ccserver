@@ -118,7 +118,7 @@ try {
 // a successful applyMigration, are empty. A failure here (EISDIR on a
 // layout.json someone turned into a directory, EACCES, ENOSPC) used to leave
 // every file moved and the layout still v1, so ccserver booted as though it
-// had lost its DB, federation identity and every group. Rolling the moves
+// had lost its DB and every group. Rolling the moves
 // back returns the host to a state it can actually boot in.
 let breadcrumbs = [];
 try {

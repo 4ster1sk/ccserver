@@ -1,20 +1,12 @@
-// Shared tab-icon rendering for the top-level tab bar (App.jsx) and the group
-// sub-tab bar (GroupTabView.jsx): one helper so the per-app/per-kind glyphs
-// can't drift between the two. Mirrors the original inline App.jsx conditions
-// exactly -- including a shell tab that also carries an app label rendering
-// both icons (the pre-refactor behavior).
+// Shared tab-icon rendering for terminal tabs.
 const shellIcon = <svg className="tab-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><path d="M3.5 5l4 3-4 3"/><path d="M8.5 12h4"/></svg>;
 const opencodeIcon = <svg className="tab-icon" viewBox="0 0 16 16" fill="currentColor"><path fillRule="evenodd" d="M4 3h8v10H4V3zm7 1H5v8h6V4z"/><path opacity="0.45" d="M6 7h4v4H6V7z"/></svg>;
 const claudeIcon = <svg className="tab-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"><path d="M8 2v12M3.2 5l9.6 6M12.8 5l-9.6 6"/></svg>;
-// GitHub Copilot: a robot head (circle + antenna + eyes), stroke style
-// matching the other app icons.
-const copilotIcon = <svg className="tab-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"><path d="M8 2.5v2"/><path d="M4.5 5h7"/><circle cx="8" cy="9.5" r="4"/><path d="M5.8 8.2h.01M10.2 8.2h.01"/><path d="M5.8 11c1.2 1.1 3.2 1.1 4.4 0"/></svg>;
 const codexIcon = <svg className="tab-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"><path d="M3 4.5 8 2l5 2.5v7L8 14l-5-2.5z"/><path d="m3 4.5 5 2.7 5-2.7M8 7.2V14"/></svg>;
-const commandcodeIcon = <svg className="tab-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"><path d="m3 5 4 3-4 3M9 11h4"/><path d="M2 3h12v10H2z"/></svg>;
 
 // Session hamburger menu (SessionTabMenu.jsx / App.jsx's sidebar-mode toggle):
 // a terminal-prompt glyph ([>_]-ish), same "rect frame + chevron" family as
-// shellIcon/commandcodeIcon above, so the two open/close buttons that share
+// shellIcon above, so the two open/close buttons that share
 // one job (toggle the session list) also share one icon instead of each
 // hardcoding its own "☰" string.
 export const sessionMenuIcon = <svg className="tab-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"><rect x="1.5" y="2.5" width="13" height="11" rx="1.5"/><path d="M4 6.3l2.4 1.7-2.4 1.7"/><path d="M9 9.7h2.5"/></svg>;
@@ -26,24 +18,12 @@ export default function TabIcon({ type, app, shell }) {
   if (type === 'settings') {
     return <svg className="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>;
   }
-  // Cross-instance federation (plan Phase 1): a broadcast/Wi-Fi glyph, for
-  // the top-level "Remote" tab. A remote terminal tab itself just gets the
-  // usual per-app icon below, with its label carrying a "⇄ " prefix (see
-  // App.jsx's openRemoteTerminalTab) -- the same convention a shell tab's
-  // "$ " prefix already uses instead of a distinct icon.
-  if (type === 'remote') {
-    return <svg className="tab-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"><path d="M2.2 6.3a9 9 0 0 1 11.6 0"/><path d="M4.4 8.8a5.8 5.8 0 0 1 7.2 0"/><path d="M6.6 11.3a2.6 2.6 0 0 1 2.8 0"/><circle cx="8" cy="13.2" r="0.9" fill="currentColor" stroke="none"/></svg>;
-  }
-  if (type === 'group') {
-    return <svg className="tab-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"><rect x="1.5" y="2.5" width="5" height="4.5" rx="1"/><rect x="9.5" y="2.5" width="5" height="4.5" rx="1"/><rect x="1.5" y="9.5" width="5" height="4" rx="1"/><rect x="9.5" y="9.5" width="5" height="4" rx="1"/></svg>;
-  }
+
   if (type === 'terminal') {
     const icons = [];
     if (shell) icons.push(shellIcon);
     if (app === 'opencode') icons.push(opencodeIcon);
-    if (app === 'copilot') icons.push(copilotIcon);
     if (app === 'codex') icons.push(codexIcon);
-    if (app === 'commandcode') icons.push(commandcodeIcon);
     if (app === 'claude' && !shell) icons.push(claudeIcon);
     return <>{icons}</>;
   }

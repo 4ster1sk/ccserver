@@ -149,7 +149,7 @@ function warnOnce(session, st, kind, message) {
 // "WHO WROTE WHAT" above -- the agent never gets to set this.
 //
 // The project label falls back from the session's assigned projectName (only
-// combo members get one) to the basename of its cwd, which is the same rule
+// sessions get one) to the basename of its cwd, which is the same rule
 // notify.js's own `_from:` footer uses -- so the title and the footer always
 // name the same project rather than disagreeing for standalone sessions. The
 // filesystem root has no meaningful name, so it is omitted.
@@ -309,12 +309,10 @@ export async function handleAgentNotification(session, event, deps = {}) {
 }
 
 // The per-connection attribution notify.js appends as "_from: host · project ·
-// group · session". Same shape sessionManager builds for the MCP path.
+// session". Same shape sessionManager builds for the MCP path.
 function notifyIdentity(session) {
   return {
     sessionId: session.id,
-    groupId: session.groupId ?? null,
-    groupRole: session.groupRole ?? null,
     cwd: session.cwd,
     projectName: session.projectName ?? null,
     app: session.app ?? null,

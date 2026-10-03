@@ -77,11 +77,6 @@ export function buildAgentNotifyArgsAndEnv(app, bridge) {
   // opencode emits OSC 777 on its own (the literal is in its binary); which
   // config key would gate that is unverified, so nothing is injected and the
   // detector simply picks up whatever it emits.
-  //
-  // copilot and commandcode have no CLI-arg/env config injection at all (see
-  // mcpConfig.js's header) -- the same reason they get no MCP server. They are
-  // still selectable for capture: reading the pty costs nothing and works if
-  // they turn out to emit something.
   return off;
 }
 

@@ -1,8 +1,8 @@
 // Presentation for a session's activity level (server/ws/activity.js decides
 // the level; this only says how to draw it). Shared by the session list and
-// the combo group's sub-tab bar so the two can't drift apart -- the same
-// pattern as gpgVaultBadge.js and SessionList's appLabel.
-//
+// terminal tabs, following the same pattern as gpgVaultBadge.js and
+// SessionList's appLabel.
+
 // Colour never carries the state on its own:
 //   - each level has its own SHAPE (hollow / half-filled / filled dot), so it
 //     survives a colour-blind viewer and a monochrome screenshot;
@@ -12,8 +12,7 @@
 // green-means-good reading, which is another reason the words matter.
 
 // Object.create(null): these are looked up with a value that can come from
-// another ccserver instance over federation (the peer computes the level for
-// its own sessions and we render it). A plain object would answer
+// the server or browser. A plain object would answer
 // LEVELS['__proto__'] with Object.prototype -- truthy, so the "unknown level"
 // guard below would wave it through and the row would render with no class
 // and a title of "undefined — undefined / [object Object]".
@@ -46,8 +45,7 @@ const REASONS = Object.assign(Object.create(null), {
 });
 
 // A level/reason is only trusted when it is one we actually defined. Anything
-// else -- an unknown string from a newer server, a hostile value from a
-// federation peer -- is dropped rather than rendered.
+// else -- an unknown or hostile value -- is dropped rather than rendered.
 function lookup(table, key) {
   return typeof key === 'string' ? table[key] : undefined;
 }

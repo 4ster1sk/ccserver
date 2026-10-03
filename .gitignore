@@ -30,3 +30,6 @@ ccserver.sqlite3-wal
 ccserver.sqlite3-shm
 # Breadcrumb the setup wizard leaves behind (issue #201 R9).
 .ccserver-state-moved.txt
+
+# ccs-netbroker binary (npm run fetch:netbroker)
+.netbroker/

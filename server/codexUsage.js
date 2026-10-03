@@ -8,14 +8,14 @@
 // it instantly; a forced refresh re-captures on demand.
 //
 // The capture runs in a *minimal* filesystem sandbox when one is available
-// (bwrap on Linux, sandbox-exec on macOS; only Codex's own config is exposed
-// — no project, no docker), falling back to launching codex directly
+// (bwrap on Linux; only Codex's own config is exposed — no project, no
+// docker), falling back to launching codex directly
 // otherwise -- unless sandbox.config.json sets "forceSandbox": true, in which
 // case the capture fails rather than run unsandboxed. Reading rate limits
 // makes no billable API call, so this does not itself consume plan usage.
 import { spawn } from 'node:child_process';
 import { homedir } from 'node:os';
-import { mkdirSync, rmSync } from 'node:fs';
+import { mkdirSync } from 'node:fs';
 import { buildMinimalSandboxSpawn, resolveApp, sandboxAvailable, loadSandboxConfig, isAppHidden, forceSandboxUnavailableReason } from './ws/sandbox.js';
 import { buildSessionEnv } from './ws/sessionEnv.js';
 import { formatResets } from './usageResetFormat.js';
@@ -109,7 +109,6 @@ function capture() {
     let args = ['app-server'];
     let spawnCwd = homedir();
     let sandboxed = false;
-    let seatbeltDir = null;
 
     if (process.platform !== 'win32' && sandboxAvailable()) {
       try {
@@ -123,9 +122,6 @@ function capture() {
         args = spawnSpec.args;
         spawnCwd = codexUsageCwd();
         sandboxed = true;
-        // macOS seatbelt launches mint a runtime dir (profile + throwaway
-        // HOME); removed in finish() below. Null on every other backend.
-        seatbeltDir = spawnSpec.seatbeltDir || null;
       } catch {
         // bwrap launch failed; fall through to the forceSandbox / direct path.
       }
@@ -160,9 +156,6 @@ function capture() {
         env: { ...cleanEnv },
       });
     } catch (err) {
-      if (seatbeltDir) {
-        try { rmSync(seatbeltDir, { recursive: true, force: true }); } catch { /* best effort */ }
-      }
       resolve({ error: `Failed to launch codex: ${err.message}`, sandboxed });
       return;
     }
@@ -176,9 +169,6 @@ function capture() {
       done = true;
       clearTimeout(hardTimer);
       try { proc.kill(); } catch { /* already gone */ }
-      if (seatbeltDir) {
-        try { rmSync(seatbeltDir, { recursive: true, force: true }); } catch { /* best effort */ }
-      }
       resolve({ ...res, sandboxed });
     };
 
@@ -190,8 +180,7 @@ function capture() {
     // from a codex that died between spawn and the writes below is an
     // unhandled 'error' event -- and this module runs INSIDE the ccserver
     // process, so that takes the whole server down rather than one broker.
-    // (git-broker.js's execGh had the same gap; network-broker.js has had
-    // this guard on its own child for a while.)
+    // (git-broker.js's execGh had the same gap.)
     //
     // Unlike the gh relay, a failed write here means the JSON-RPC request
     // never reached codex, so no answer is coming: finish now instead of

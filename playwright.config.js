@@ -22,7 +22,7 @@ export default defineConfig({
   webServer: {
     // A throwaway XDG triple keeps the whole of the e2e server's state out
     // of the repo root and out of the operator's real dirs -- the DB and its
-    // WAL/SHM sidecars, the saved-*.json state files, federation, the
+    // WAL/SHM sidecars, the saved-*.json state files, legacy private data, the
     // sandbox home, dind. (It replaces three CCSERVER_*_PATH overrides that
     // only covered groups, sessions and the DB file itself; anything with an
     // env var set would also be reported as "env-override" by the wizard,
@@ -37,7 +37,7 @@ export default defineConfig({
     // subshell around it. The registry's legacyDataRoot() is homedir()-based
     // on purpose (see server/paths.js), so with the real $HOME `setup --yes`
     // finds and migrates the developer's live
-    // ~/.local/share/ccserver-sandbox -- their SQLite DB, federation private
+    // ~/.local/share/ccserver-sandbox -- their SQLite DB, legacy federation private
     // key and group-files -- into this throwaway directory. Verified: it does
     // exactly that.
     //

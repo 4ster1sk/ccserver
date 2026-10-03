@@ -7,7 +7,6 @@
 //
 // Which broker this reaches is decided by argv + which host socket was bound
 // in (see mcpBroker.js / notify.js / usageMcp.js / reviewer.js):
-//   plain      -> CCSANDBOX_MCP_SOCK  (the group's control / handoff socket)
 //   'notify'   -> CCSANDBOX_NOTIFY_MCP_SOCK (the process-global notify socket)
 //   'usage'    -> CCSANDBOX_USAGE_MCP_SOCK (the process-global usage socket)
 //   'reviewer' -> CCSANDBOX_REVIEWER_MCP_SOCK (the process-global reviewer socket)
@@ -24,12 +23,6 @@
 // reviewer.js). Usage mode carries no identity at all (get_usage answers the
 // same regardless of caller).
 //
-// Plain mode (the group control / handoff socket) writes a frame too when
-// CCSANDBOX_MCP_TOKEN is set: `{"ccserver": {"token": "<T>"}}`. The broker
-// gates the connection on that token (mcpBroker.js requireToken) -- the shared
-// /tmp runtime dir on the seatbelt backend is reachable by every concurrent
-// sandboxed session, so an unauthenticated connect must not reach an
-// McpServer. No token env -> no frame -> the broker refuses (fail closed).
 'use strict';
 const net = require('net');
 const mode = process.argv[2];
@@ -38,18 +31,14 @@ const IDENTITY_ENV = {
   reviewer: 'CCSERVER_REVIEWER_IDENTITY',
 };
 const wantsIdentityFrame = !!IDENTITY_ENV[mode];
-// Plain mode: the group control / handoff socket. Its first frame carries the
-// connection token (CCSANDBOX_MCP_TOKEN), which the broker checks before
-// building an McpServer. notify/reviewer already send a frame of their own;
-// usage sends none and is not token-gated.
-const plainToken = (!mode && process.env.CCSANDBOX_MCP_TOKEN) || null;
-const wantsFirstFrame = wantsIdentityFrame || !!plainToken;
+const wantsFirstFrame = wantsIdentityFrame;
 const MODE_SOCK_ENV = {
   notify: 'CCSANDBOX_NOTIFY_MCP_SOCK',
   usage: 'CCSANDBOX_USAGE_MCP_SOCK',
   reviewer: 'CCSANDBOX_REVIEWER_MCP_SOCK',
 };
-const sockPath = process.env[MODE_SOCK_ENV[mode] || 'CCSANDBOX_MCP_SOCK'];
+const sockEnv = MODE_SOCK_ENV[mode];
+const sockPath = sockEnv ? process.env[sockEnv] : null;
 if (!sockPath) {
   process.stderr.write('sandbox: MCP bridge not configured\n');
   process.exit(1);
@@ -77,9 +66,7 @@ function connect(attempt = 0) {
   sock.on('connect', () => {
     established = true;
     if (wantsFirstFrame) {
-      const frame = wantsIdentityFrame
-        ? parseIdentity(process.env[IDENTITY_ENV[mode]])
-        : { token: plainToken };
+      const frame = parseIdentity(process.env[IDENTITY_ENV[mode]]);
       sock.write(`${JSON.stringify({ ccserver: frame })}\n`);
     }
     process.stdin.pipe(sock);

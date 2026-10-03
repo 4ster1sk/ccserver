@@ -2,7 +2,7 @@
 // idle-based "input_needed" heuristic (see the notify-mcp plan / README) with
 // an explicit tool the agent can call when it actually needs attention.
 //
-// Process-wide concepts (NOT group-scoped like the control/handoff brokers):
+// Process-wide notification broker:
 //   - the subscription registry (webhook URLs registered at runtime via the
 //     MCP `subscribe` tool, seeded at boot from sandbox.config.json's
 //     `notify.subscriptions`),
@@ -15,11 +15,11 @@
 // (${XDG_RUNTIME_DIR}/ccserver-notify.d/sock, see getNotifySockPath). Each
 // session's sandbox binds that socket's directory in (Issue #143 problem 1);
 // the MCP config tells the agent to reach it through the same bridge wrapper
-// as the group brokers (see mcpConfig.js / sandbox-mcp-wrapper.cjs).
+// (see mcpConfig.js / sandbox-mcp-wrapper.cjs).
 //
 // This module imports mcpBroker.js lazily (dynamic import) so the static
 // import graph stays acyclic: sessionManager -> notify -> sandbox, and the
-// broker/server/tools modules pull in sessionManager (via mcpTools) -- the
+// broker/server modules may import sessionManager -- the
 // broker wiring is only touched at runtime, never at module evaluation.
 
 import { randomUUID } from 'node:crypto';
@@ -33,10 +33,8 @@ import { hostRuntimeDir } from './git-broker.js';
 import { resolvePath, PATH_IDS } from '../paths.js';
 import { readJsonFileIfRegular } from './regularFile.js';
 
-// Persisted subscription registry (same pattern as .saved-groups.json /
-// .saved-sessions.json). Read at each use (like loadSandboxConfig's env
-// override) so tests can point it at a temp file without touching the real
-// repo-root state file.
+// Persisted notification subscription registry. Read at each use so tests
+// can point it at a temporary file.
 export function notifyPath() {
   return resolvePath(PATH_IDS.savedNotifications);
 }
@@ -324,16 +322,10 @@ export function notifyEnabled() {
   return reachableChannels(null).length > 0;
 }
 
-// Pure injection decision for createSession:
-//   - shells (app null) never get it,
-//   - workers (groupRole !== 'orchestrator') never get it -- only the
-//     orchestrator of a combo and standalone agent sessions do,
-//   - copilot/commandcode never get it (no CLI-arg/env MCP injection; the
-//     notify server would be unreachable), even as a standalone agent,
-//   - nothing is injected when the feature is disabled.
-export function shouldInjectNotify({ shell, app, groupId, groupRole, notifyEnabled }) {
-  return !shell && app != null && app !== 'copilot' && app !== 'commandcode' && !!notifyEnabled
-    && (groupId == null || groupRole === 'orchestrator');
+// Pure injection decision for createSession: shells never get the MCP server,
+// and nothing is injected when notifications are disabled.
+export function shouldInjectNotify({ shell, app, notifyEnabled }) {
+  return !shell && app != null && !!notifyEnabled;
 }
 
 // The effective Discord webhook, with the same env-over-config precedence
@@ -482,7 +474,7 @@ function buildContent({ title, body, level }) {
   return `${prefix}${t}${b ? `\n${b}` : ''}`.trim();
 }
 
-// First 8 characters of a connection-scoped id (sessionId / groupId) for the
+// First 8 characters of a connection-scoped session id for the
 // footer -- enough for tracing, short enough to not drown the payload.
 //
 // Code points, not UTF-16 units (attacker review L2r). ccserver's own ids are
@@ -531,18 +523,15 @@ function attributionField(value) {
     : defanged;
 }
 
-// Pure footer builder: "_from: <host> · <project> · group <groupShort> ·
-// session <sessionShort>". host is always present; project appears when a
-// meaningful name exists; group appears only for combo sessions (groupId set);
-// session appears when a sessionId is known. identity is the per-connection
+// Pure footer builder: "_from: <host> · <project> · session <sessionShort>".
+// Host is always present; project and session appear when known. identity is the per-connection
 // attribution (see mcpBroker.js); null/undefined yields host-only.
 //
 // WHAT THIS FOOTER IS AND IS NOT. It is ASSEMBLED by ccserver, on one line,
 // from fields no caller can split or extend (attributionField above). It is
 // NOT an authenticated statement of origin: the notify broker accepts an
 // identity frame from whoever connects to its socket, which every sandboxed
-// session can reach, and unlike the group control/handoff brokers it does not
-// require a token. A process that wanted to could therefore claim another
+// session can reach, and and does not require a token. A process that wanted to could therefore claim another
 // session's project name. Closing that is tracked separately -- it is about
 // the broker, not about notifications -- see the issue linked from
 // docs-site guides/notify.md.
@@ -550,7 +539,6 @@ export function buildAttribution(identity, host) {
   const parts = [attributionField(host)];
   const project = projectLabel(identity);
   if (project) parts.push(attributionField(project));
-  if (identity?.groupId) parts.push(`group ${attributionField(shortId(identity.groupId))}`);
   if (identity?.sessionId) parts.push(`session ${attributionField(shortId(identity.sessionId))}`);
   return `\n\n_from: ${parts.join(' · ')}`;
 }
@@ -641,9 +629,9 @@ function warnUnreachable(channels) {
 // Dispatch to every configured channel (Discord webhook + each subscribed
 // webhook), all non-blocking. Returns the delivery tally for the MCP tool's
 // result payload; never throws. `identity` is the optional per-connection
-// attribution ({ sessionId, groupId, groupRole, cwd, projectName, app }, see
+// attribution ({ sessionId, cwd, projectName, app }, see
 // mcpBroker.js): when present -- and notify.attribution is not disabled -- the
-// payload's content gets an "_from: host · project · group · session" footer
+// payload's content gets an "_from: host · project · session" footer
 // appended. Without identity the payload is delivered as before (host-only
 // footer).
 //
@@ -741,7 +729,7 @@ async function deliverWebpush({ title, body, level, identity, cfg }) {
 
 // The notifyApi facade handed to buildNotifyMcpServer (see mcpServer.js).
 // Deliberately a closed object rather than the module namespace, mirroring
-// groupManager's facade pattern.
+// the session manager facade pattern.
 export const notifyApi = {
   sendNotification,
   subscribe,

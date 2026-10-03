@@ -10,7 +10,7 @@ const usePopupMode = (page) => page.addInitScript(() => {
 
 // Locators / helpers ---------------------------------------------------------
 // Session (terminal) tabs now live in the hamburger menu at the left end of
-// the tab bar, not in .tab-list. Files/Remote/Settings tabs stay horizontal
+// the tab bar, not in .tab-list. Files/Settings tabs stay horizontal
 // (permanent, icon-only -- selected by title/aria-label, not visible text).
 
 const openTerminalBtn = (page) => page.getByRole('button', { name: 'Terminal', exact: true });
@@ -220,125 +220,10 @@ test('terminate button ignores double-click: single DELETE, no error alert', asy
   await page.unroute('**/api/sessions/*');
 });
 
-test('remote tab offers "セッションを終了" and terminates through the federation relay, never a local DELETE', async ({ page }) => {
-  await usePopupMode(page);
-  await gotoApp(page);
-
-  // Fake a single active paired instance with one running session, entirely
-  // client-side: opening a remote terminal tab (App.jsx's
-  // openRemoteTerminalTab) never itself calls a local API -- it only adds a
-  // `remote: {...}` tab to state -- so no real second ccserver instance is
-  // needed to reach the close-confirm dialog for one. The tab's own
-  // WS connection (to this server's /ws/remote-terminal) will fail since
-  // 'fake-remote-1' isn't a real paired peer; that's handled server-side
-  // (see server/ws/remoteTerminal.js) and is irrelevant to this dialog test.
-  const instanceId = 'fake-remote-1';
-  await page.route('**/api/federation/instances', (route) => route.fulfill({
-    json: { instances: [{ id: instanceId, status: 'active', label: 'FakePeer', fingerprint: 'aa:bb:cc:dd:ee', addr: '127.0.0.1:9999' }] },
-  }));
-  let remoteSessions = [{ id: 'remote-sess-1', cwd: '/tmp/remote-project', app: 'claude', shell: false }];
-  await page.route(`**/api/federation/instances/${instanceId}/sessions`, (route) => route.fulfill({
-    json: { sessions: remoteSessions },
-  }));
-  const federationDeletes = [];
-  await page.route(`**/api/federation/instances/${instanceId}/sessions/*`, (route) => {
-    if (route.request().method() !== 'DELETE') return route.continue();
-    const id = route.request().url().split('/').pop();
-    federationDeletes.push(id);
-    remoteSessions = remoteSessions.filter((s) => s.id !== id);
-    return route.fulfill({ json: { ok: true } });
-  });
-  await page.route(`**/api/federation/instances/${instanceId}/groups`, (route) => route.fulfill({ json: { groups: [] } }));
-
-  await page.locator('.tab-list').getByTitle('Remote').click();
-  await page.getByTestId('remote-instance-header').waitFor();
-  await page.locator('.sandbox-body', { hasText: '/tmp/remote-project' }).click();
-
-  await expect(sessionBadge(page)).toHaveText('1');
-  await openMenu(page);
-  await menuCloseButtons(page).first().click();
-  await expect(modal(page)).toBeVisible();
-
-  // Remote tabs get the same terminate action as local ones, plus a
-  // non-destructive "切断" (close the tab, keep the peer's session) -- so no
-  // detach-only "閉じる", and no "次回以降確認しない" (the two actions can't
-  // share one skip preference; see App.jsx's handleCloseTab).
-  await expect(modal(page)).toContainText('「セッションを終了」はピア側のセッションも破棄します。');
-  await expect(modal(page)).toContainText('「切断」はタブを閉じるだけで');
-  await expect(modal(page).locator('.close-confirm-target')).toHaveText('⇄ FakePeer: /tmp/remote-project');
-  await expect(modal(page).getByRole('button', { name: '閉じる', exact: true })).toHaveCount(0);
-  await expect(modal(page).getByRole('button', { name: '切断', exact: true })).toBeVisible();
-  await expect(modal(page).locator('.close-confirm-checkbox')).toHaveCount(0);
-  const terminateBtn = modal(page).getByRole('button', { name: 'セッションを終了', exact: true });
-  await expect(terminateBtn).toBeVisible();
-
-  // A local DELETE with the remote id would 404 or hit an unrelated local
-  // session that happens to share the id -- it must go through the relay.
-  let localDeleteRequested = false;
-  await page.route('**/api/sessions/*', async (route) => {
-    if (route.request().method() === 'DELETE') localDeleteRequested = true;
-    await route.continue();
-  });
-
-  await terminateBtn.click();
-  await expect(modal(page)).toBeHidden();
-  await expect(sessionBadge(page)).toHaveCount(0);
-  expect(federationDeletes).toEqual(['remote-sess-1']);
-  expect(localDeleteRequested).toBe(false);
-
-  await page.unroute('**/api/sessions/*');
-});
-
-test('remote tab "切断" closes the tab without terminating the peer session', async ({ page }) => {
-  await usePopupMode(page);
-  // 「次回以降確認しない」が設定済みでも、リモートタブは終了/切断の2択が
-  // あるため必ず確認する (スキップで黙ってピア側セッションを破棄しない)。
-  await page.addInitScript(() => localStorage.setItem('ccserver-skip-close-confirm', '1'));
-  await gotoApp(page);
-
-  const instanceId = 'fake-remote-detach';
-  await page.route('**/api/federation/instances', (route) => route.fulfill({
-    json: { instances: [{ id: instanceId, status: 'active', label: 'FakePeer', fingerprint: 'aa:bb:cc:dd:ee', addr: '127.0.0.1:9999' }] },
-  }));
-  const remoteSessions = [{ id: 'remote-detach-1', cwd: '/tmp/remote-detach', app: 'claude', shell: false }];
-  await page.route(`**/api/federation/instances/${instanceId}/sessions`, (route) => route.fulfill({
-    json: { sessions: remoteSessions },
-  }));
-  const federationDeletes = [];
-  await page.route(`**/api/federation/instances/${instanceId}/sessions/*`, (route) => {
-    if (route.request().method() === 'DELETE') federationDeletes.push(route.request().url().split('/').pop());
-    return route.fulfill({ json: { ok: true } });
-  });
-  await page.route(`**/api/federation/instances/${instanceId}/groups`, (route) => route.fulfill({ json: { groups: [] } }));
-
-  await page.locator('.tab-list').getByTitle('Remote').click();
-  await page.getByTestId('remote-instance-header').waitFor();
-  await page.locator('.sandbox-body', { hasText: '/tmp/remote-detach' }).click();
-  await expect(sessionBadge(page)).toHaveText('1');
-
-  await openMenu(page);
-  await menuCloseButtons(page).first().click();
-  const dlg = modal(page);
-  await expect(dlg).toBeVisible();
-  await expect(dlg).toContainText('「切断」はタブを閉じるだけで');
-  await expect(dlg.locator('.close-confirm-target')).toHaveText('⇄ FakePeer: /tmp/remote-detach');
-  await expect(dlg.locator('.close-confirm-checkbox')).toHaveCount(0);
-
-  await dlg.getByRole('button', { name: '切断', exact: true }).click();
-  await expect(dlg).toBeHidden();
-  await expect(sessionBadge(page)).toHaveCount(0);
-  // ピア側のセッションは破棄しない (DELETE は一切飛ばない)。
-  expect(federationDeletes).toEqual([]);
-
-  // 残っているセッションは下段「リモートのセッション」に現れ、再接続できる。
-  if (await sessionMenu(page).count() === 0) await openMenu(page);
-  await expect(sessionMenu(page).locator('[data-section="unopened-remote"] .session-menu-item')).toHaveCount(1);
-});
-
 test('closing the last session tab falls back to the Files tab, not Settings', async ({ page }) => {
   // Regression guard: doCloseTab picks "the tab at the closed tab's old
   // index" as the next active tab. Settings became an always-on tab sitting
-  // right after Files/Remote (PR #116), so once it's the only tab left at
+  // right after Files (PR #116), so once it's the only tab left at
   // that index, closing the last terminal tab used to land on Settings
   // instead of Files. See App.jsx's doCloseTab isDynamic guard.
   await usePopupMode(page);
@@ -359,7 +244,7 @@ test('closing the last session tab falls back to the Files tab, not Settings', a
 
 test('closing one of several open session tabs still selects an adjacent session tab, not Files', async ({ page }) => {
   // Regression guard for the same doCloseTab fix above: with more than one
-  // dynamic (terminal/group) tab left, the existing "pick the adjacent one"
+  // terminal tab left, the existing "pick the adjacent one"
   // behavior must be unaffected -- only spilling over into the static tabs
   // should fall back to Files.
   await usePopupMode(page);

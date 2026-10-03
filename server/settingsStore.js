@@ -31,7 +31,7 @@
 // Values round-trip through JSON in every case, including strings and
 // booleans: one decode path, and `null` means "the value is null", never
 // "no row". Validation belongs to the caller -- the same division of labor
-// network-broker.js's normalizeNetworkSettings already has.
+// networkAllowlist.js's normalizeNetworkSettings already has.
 
 import { getDb } from './db.js';
 

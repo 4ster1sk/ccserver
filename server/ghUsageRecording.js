@@ -48,7 +48,7 @@ const HELD_LOCK_STUCK_MS = 60_000;
 // microseconds: two brokers racing on the same aggregate essentially never
 // collide, let alone this often.
 const HELD_LOCK_SKIP_LIMIT = 100;
-const CLIENTS = new Set(['claude', 'codex', 'opencode', 'copilot', 'commandcode', 'shell']);
+const CLIENTS = new Set(['claude', 'codex', 'opencode', 'shell']);
 const TARGETS = new Set(['issue', 'pr', 'repository', 'workflow', 'release']);
 const OPERATIONS = new Set(['read', 'create', 'edit', 'close', 'comment', 'workflow', 'release']);
 const RESULTS = new Set(['success', 'cli-error', 'broker-unavailable', 'auth-error', 'timeout', 'cancelled']);
@@ -569,4 +569,3 @@ export function classifyGhUsage(argv) {
 export function defaultRecordingPath(configPath) {
   return join(dirname(configPath), 'gh-usage-recording.json');
 }
-

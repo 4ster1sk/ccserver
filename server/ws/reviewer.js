@@ -1,12 +1,12 @@
 // ccserver-reviewer (issue #102): on-demand disposable code review jobs.
 //
 // A `run_review` MCP call launches a throwaway headless session against a
-// FRESH git worktree -- never the caller's own cwd or an existing combo
+// FRESH git worktree -- never the caller's own cwd or another reviewer
 // worktree -- and drives it through /code-review. It is entirely independent
-// of orchestration groups: any session (worker, orchestrator, or standalone)
+// of orchestration groups: any agent session
 // may ask for a review of any local ref/branch/PR/uncommitted diff.
 //
-// Process-wide concept (NOT group-scoped, like ccserver-notify/-usage): one
+// Process-wide concept: one
 // Unix socket hosts it for the whole server process
 // (${XDG_RUNTIME_DIR}/ccserver-reviewer.d/sock, see getReviewerSockPath).
 // Each reviewer-enabled session's sandbox binds that socket's directory in
@@ -72,13 +72,14 @@ import { getDb } from '../db.js';
 import { projectHashForCwd } from './projectHash.js';
 import { loadSandboxConfig, persistentHomeDir, deleteSandboxHome } from './sandbox.js';
 import { hostRuntimeDir } from './git-broker.js';
-import { stripAnsi } from './mcpTools.js';
-// A plain in-process call, not the MCP path -- mirrors groupManager.js's
+import { stripAnsi } from './stripAnsi.js';
+// A plain in-process call, not the MCP path -- mirrors the server's
 // notifyWorktreeDataLoss (same "call sendNotification() directly on a
 // server-side completion event" pattern). Safe as a static import: notify.js
 // imports neither this module nor sessionManager.js, so no cycle.
 import { sendNotification } from './notify.js';
 import { resolvePath, PATH_IDS } from '../paths.js';
+import { hardenedGitEnv } from './hostGitEnv.js';
 
 // Issue #143 problem 1: a dedicated directory holding only `sock`, bound into
 // the sandbox as a directory rather than the socket file itself -- see
@@ -102,8 +103,8 @@ const GH_PR_VIEW_TIMEOUT_MS = 15 * 1000;
 const REF_FETCH_TIMEOUT_MS = 15 * 1000;
 
 // Soft cap on jobs accepted (worktree created / session launched) at once,
-// process-wide -- run_review is injected into every non-shell/non-copilot/
-// non-commandcode session once reviewerMcp is on (see shouldInjectReviewer), including
+// process-wide -- run_review is injected into every non-shell session once
+// reviewerMcp is on (see shouldInjectReviewer), including
 // workers, and each job spawns a real sandboxed agent CLI session, so an
 // agent looping on run_review with no cap would be free to exhaust host
 // resources. Overridable for local testing / larger hosts.
@@ -124,11 +125,10 @@ export function reviewerEnabled() {
 
 // Pure injection decision for createSession. Unlike notify (orchestrator
 // only), any session may ask for a review -- workers included (issue #102
-// consensus point 4: callable regardless of whether a group exists). Only
-// shells (no MCP at all) and copilot/commandcode (no CLI-arg/env MCP
-// injection) are excluded.
+// consensus point 4: available to any agent session). Only
+// shells (no MCP at all) are excluded.
 export function shouldInjectReviewer({ shell, app, reviewerEnabled }) {
-  return !shell && app != null && app !== 'copilot' && app !== 'commandcode' && !!reviewerEnabled;
+  return !shell && app != null && !!reviewerEnabled;
 }
 
 export function reviewerBrokerRunning() {
@@ -197,6 +197,7 @@ function git(cwd, args) {
   try {
     return execFileSync('git', ['-C', cwd, ...args], {
       encoding: 'utf-8', stdio: ['ignore', 'pipe', 'pipe'], timeout: GIT_TIMEOUT_MS,
+      env: hardenedGitEnv(),
     });
   } catch (err) {
     // A timeout must not read like an ordinary git failure. Callers below
@@ -286,7 +287,7 @@ function execFileAsync(cmd, args, opts) {
 }
 
 function gitFetchAsync(cwd, args) {
-  return execFileAsync('git', ['-C', cwd, ...args], { encoding: 'utf-8', timeout: REF_FETCH_TIMEOUT_MS });
+  return execFileAsync('git', ['-C', cwd, ...args], { encoding: 'utf-8', timeout: REF_FETCH_TIMEOUT_MS, env: hardenedGitEnv() });
 }
 
 // Resolves `ref` to a commit on the PROJECT repo, fetching it from origin
@@ -364,7 +365,7 @@ export function removeReviewWorktree(projectCwd, jobId) {
 // patch, for mode='dirty' jobs -- see header comment for why this is applied
 // to the disposable worktree instead of pointing the session at the live cwd.
 export function snapshotDirtyChanges(projectCwd) {
-  const tracked = git(projectCwd, ['diff', '--binary', 'HEAD']);
+  const tracked = git(projectCwd, ['diff', '--no-ext-diff', '--no-textconv', '--binary', 'HEAD']);
   let untracked = [];
   try {
     untracked = git(projectCwd, ['ls-files', '--others', '--exclude-standard'])
@@ -379,7 +380,7 @@ export function snapshotDirtyChanges(projectCwd) {
       // /dev/null) would exit 0; a real diff exits 1 -- both land here via
       // the try, but git diff --no-index only ever throws on a genuine
       // error (e.g. a binary/unreadable file), which is caught below.
-      return git(projectCwd, ['diff', '--binary', '--no-index', '/dev/null', file]);
+      return git(projectCwd, ['diff', '--no-ext-diff', '--no-textconv', '--binary', '--no-index', '/dev/null', file]);
     } catch (err) {
       // git diff --no-index follows diff(1)'s convention: exit 1 means "a
       // diff was found", not a failure -- execFileSync throws on any
@@ -409,6 +410,7 @@ export function applyPatchToWorktree(worktreePath, patchText) {
     encoding: 'utf-8',
     stdio: ['pipe', 'pipe', 'pipe'],
     timeout: GIT_TIMEOUT_MS,
+    env: hardenedGitEnv(),
   });
 }
 
@@ -603,7 +605,7 @@ async function loadSessionDeps() {
 async function checkPrCommentPosted(projectCwd, number, sinceMs) {
   try {
     const out = await execFileAsync('gh', ['pr', 'view', String(number), '--json', 'comments'], {
-      cwd: projectCwd, encoding: 'utf-8', timeout: GH_PR_VIEW_TIMEOUT_MS,
+      cwd: projectCwd, encoding: 'utf-8', timeout: GH_PR_VIEW_TIMEOUT_MS, env: hardenedGitEnv(),
     });
     const parsed = JSON.parse(out);
     if (!Array.isArray(parsed?.comments)) return false;
@@ -695,7 +697,7 @@ export function reviewNotificationBody(review, { status, postedToPr }) {
   return lines.join('\n');
 }
 
-// Best-effort, fire-and-forget -- mirrors groupManager.js's
+// Best-effort, fire-and-forget -- mirrors the server's
 // notifyWorktreeDataLoss exactly (never awaited by the caller, a delivery
 // failure must never affect job completion). sendNotification degrades to a
 // no-op with no channel configured, so no new opt-in flag is needed here.
@@ -938,7 +940,7 @@ export async function runReview(args = {}) {
       model,
       sandbox: true,
       requestedBy: `reviewer:${jobId}`,
-    }, { isReviewJob: true, scratchCwd: true });
+    }, { isReviewJob: true });
     if (!launch.ok) {
       markReviewFinished(jobId, { status: 'failed', resultSummary: launch.message, postedToPr: false });
       removeReviewWorktree(cwd, jobId);

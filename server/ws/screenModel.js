@@ -1,4 +1,4 @@
-// Lightweight virtual screen model for read_output (see mcpTools.js). The
+// Lightweight virtual screen model for terminal status (see terminal status reporting). The
 // server previously only buffered raw pty bytes, which cannot show what a
 // member's screen currently looks like: TUI spinners redraw in place via
 // cursor moves, line erases and alternate-screen diffs, so the byte stream

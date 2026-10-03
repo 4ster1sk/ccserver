@@ -13,7 +13,7 @@ import { execFileSync, spawn } from 'node:child_process';
 import { homedir, tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { randomBytes } from 'node:crypto';
-import { buildSandboxSpawn } from './sandbox.js';
+import { buildSandboxSpawn, sandboxAvailable } from './sandbox.js';
 import { getDb, closeDb } from '../db.js';
 import { createConnection } from 'node:net';
 import {
@@ -27,7 +27,7 @@ import {
 import { getRelaySocketPaths, getRelayDir, gnupgRunUserAgentSocket, ensureStarted as ensureGpgVaultRelayStarted, stop as stopGpgVaultRelay } from './gpgVaultRelay.js';
 
 const TOOLS_AVAILABLE = gpgVaultToolsAvailable();
-const IS_LINUX_BWRAP = process.platform !== 'darwin';
+const IS_LINUX_BWRAP = sandboxAvailable();
 
 let tmpRoot;
 let cfgPath;

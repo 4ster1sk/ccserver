@@ -23,7 +23,6 @@ const APPROVAL_TIMEOUT_MS = 5 * 60 * 1000;
 
 const KIND_LABELS = {
   close_session: 'セッション強制終了',
-  destroy_group: 'グループ破棄',
   delete_sandbox: 'サンドボックス削除',
 };
 

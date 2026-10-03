@@ -1,8 +1,8 @@
 // Filesystem-root sandbox builds: a sandbox with "/" as projectDir is
-// fail-open -- seatbelt's subtrees('/') compiles to "^/(/.*)?$" and bwrap
-// would rw-bind "/" itself -- so buildSandboxSpawn must refuse it outright
+// fail-open because bwrap would rw-bind "/" itself, so buildSandboxSpawn
+// must refuse it outright
 // (defense in depth behind sessionManager's cwd='/' launch refusal). See
-// docs/seatbelt-root-read-abort-diagnosis.md.
+// the root-cwd refusal regression tests.
 //
 // No config pinning needed: the guard throws before loadSandboxConfig() so
 // the test is independent of any machine sandbox.config.json.

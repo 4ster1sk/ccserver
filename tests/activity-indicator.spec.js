@@ -17,34 +17,34 @@ const SESSIONS = [
   {
     id: 'sess-idle', cwd: '/srv/idle', connected: false, viewers: 0, shell: false,
     sandbox: true, sandboxOpts: null, gpgVaultActive: false, app: 'claude', model: null,
-    permissionMode: 'standard', groupId: null, groupRole: null, customLabel: 'idle-one',
+    permissionMode: 'standard', customLabel: 'idle-one',
     activity: { level: 'idle', reason: 'quiet', marker: null, markerVerified: true, screenIdleMs: 60000, changeRate: 0 },
   },
   {
     id: 'sess-low', cwd: '/srv/low', connected: false, viewers: 0, shell: false,
     sandbox: true, sandboxOpts: null, gpgVaultActive: false, app: 'claude', model: null,
-    permissionMode: 'standard', groupId: null, groupRole: null, customLabel: 'low-one',
+    permissionMode: 'standard', customLabel: 'low-one',
     activity: { level: 'low', reason: 'marker', marker: 'esc to interrupt', markerVerified: true, screenIdleMs: 120, changeRate: 4.5 },
   },
   {
     id: 'sess-busy', cwd: '/srv/busy', connected: false, viewers: 0, shell: false,
     sandbox: true, sandboxOpts: null, gpgVaultActive: false, app: 'codex', model: null,
-    permissionMode: 'standard', groupId: null, groupRole: null, customLabel: 'busy-one',
+    permissionMode: 'standard', customLabel: 'busy-one',
     activity: { level: 'busy', reason: 'movement', marker: null, markerVerified: false, screenIdleMs: 30, changeRate: 31.5 },
   },
   {
-    // A hostile / broken value, the shape a malicious federation peer could
+    // A hostile / broken value, the shape an untrusted server could
     // return for one of its own sessions (the peer computes the level and we
     // render it). It must not resolve through Object.prototype.
     id: 'sess-hostile', cwd: '/srv/hostile', connected: false, viewers: 0, shell: false,
     sandbox: true, sandboxOpts: null, gpgVaultActive: false, app: 'claude', model: null,
-    permissionMode: 'standard', groupId: null, groupRole: null, customLabel: 'hostile-one',
+    permissionMode: 'standard', customLabel: 'hostile-one',
     activity: { level: '__proto__', reason: 'constructor', marker: null, markerVerified: true, screenIdleMs: 0, changeRate: 0 },
   },
   {
     id: 'sess-shell', cwd: '/srv/shell', connected: false, viewers: 0, shell: true,
     sandbox: false, sandboxOpts: null, gpgVaultActive: false, app: null, model: null,
-    permissionMode: 'standard', groupId: null, groupRole: null, customLabel: 'shell-one',
+    permissionMode: 'standard', customLabel: 'shell-one',
     activity: { level: null, reason: 'shell', marker: null, markerVerified: false, screenIdleMs: null, changeRate: 0 },
   },
 ];
@@ -118,7 +118,7 @@ test('an unverified CLI is marked as a weaker reading, without shouting about it
 });
 
 test('a level that is not one of ours is dropped, not resolved through the prototype', async ({ page }) => {
-  // activity は federation ピアが計算した値をそのまま描く経路があるため、
+  // activity はサーバーから届く値を描くため、
   // 未知のレベルは既定値に落とす。plain object の索引だと
   // LEVELS['__proto__'] が Object.prototype を返して truthy になり、
   // class の付かない点と "undefined — undefined / [object Object]" という

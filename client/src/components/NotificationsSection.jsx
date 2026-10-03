@@ -21,9 +21,7 @@ import { usePushSubscription } from '../hooks/usePushSubscription.js';
 const APP_LABELS = {
   claude: 'Claude Code',
   opencode: 'opencode',
-  copilot: 'GitHub Copilot',
   codex: 'OpenAI Codex',
-  commandcode: 'Command Code',
 };
 
 const CHANNEL_LABELS = {
@@ -48,8 +46,6 @@ const APP_NOTES = {
   claude: '起動時に通知チャネル設定を注入して吐かせます (検証済み)',
   opencode: '既定で OSC 777 を吐きます (検証済み)',
   codex: 'このホストで未検証のため既定オフ。吐けば拾えます',
-  copilot: '設定注入の手段がありません。吐けば拾えるだけです',
-  commandcode: '設定注入の手段がありません。吐けば拾えるだけです',
 };
 
 const NUMBER_FIELDS = [

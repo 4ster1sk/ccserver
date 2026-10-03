@@ -144,7 +144,7 @@ test('a patch preserves every other feature key and the // comment keys', () => 
     '//': 'top comment',
     docker: true,
     '//network': 'network comment',
-    network: { isolate: true, allowedHosts: ['example.com'] },
+    network: { allowedHosts: ['example.com'] },
     notify: {
       '//bridge': 'bridge comment',
       discordWebhook: 'https://discord.example/hook',

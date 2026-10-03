@@ -12,7 +12,6 @@ ccserver/
 ├── docs-site/                      # このドキュメントサイト (Astro + Starlight, 独立 package.json)
 ├── tests/
 │   ├── close-confirm.spec.js       # Playwright E2E
-│   ├── copilot-launch.spec.js      # copilot 起動 + コンボ拒否 (copilot 未インストール環境では skip)
 │   ├── mobile-scroll.spec.js       # opencode TUI: タッチドラッグ→合成ホイールイベント (opencode 未インストール環境では skip)
 │   └── scroll-buttons.spec.js      # opencode TUI: スクロールボタン→メッセージスクロールキー (同上)
 ├── server/
@@ -38,7 +37,6 @@ ccserver/
 │   │   ├── sessions.js             # GET/POST/DELETE /api/sessions (POST は単発セッション新規起動)
 │   │   ├── approvals.js            # GET /api/approvals, POST /api/approvals/:id/decision (破壊的操作の承認フロー)
 │   │   ├── projects.js             # GET /api/projects, PUT /api/projects/:id/label
-│   │   ├── launchPresets.js        # GET/POST/PUT/DELETE /api/launch-presets (コンボ起動プリセット)
 │   │   ├── files.js                # GET/POST /api/files (アップロード/ダウンロード), GET /api/files/content (プレビュー)
 │   │   ├── system.js               # GET /api/system-stats (CPU/メモリ/温度/GPU/IPMI/ストレージ)
 │   │   ├── usage.js                # GET /api/usage (?app=claude|codex)

@@ -39,11 +39,6 @@ test('resolveApp finds opencode via SANDBOX_PATH or its fallback dirs', { skip: 
   assert.ok(resolvesToRealBinary(r.command), `command does not resolve to a real binary: ${r.command}`);
 });
 
-test('resolveApp finds copilot via SANDBOX_PATH or its fallback dirs', { skip: !isInstalled('copilot') }, () => {
-  const r = resolveApp('copilot');
-  assert.ok(resolvesToRealBinary(r.command), `command does not resolve to a real binary: ${r.command}`);
-});
-
 test('resolveApp finds codex via SANDBOX_PATH or its fallback dirs', { skip: !isInstalled('codex') }, () => {
   const r = resolveApp('codex');
   assert.ok(resolvesToRealBinary(r.command), `command does not resolve to a real binary: ${r.command}`);
@@ -114,7 +109,7 @@ test('resolveApp reports found: false for a configured claudeBin that does not e
 // (resolveApp never reads it -- see the header comment above).
 test('resolveApp reports an absolute, existing hostCommand for every installed app', () => {
   let checked = 0;
-  for (const app of ['claude', 'opencode', 'copilot', 'codex', 'commandcode']) {
+  for (const app of ['claude', 'opencode', 'codex']) {
     const r = resolveApp(app);
     if (!r.found) continue;
     checked++;
@@ -142,8 +137,8 @@ test('resolveApp hostCommand is null when the app is genuinely missing', { skip:
 // install-state-independent (it is a pure mirror of the per-app resolution).
 test('installedApps mirrors resolveApp found flags for all supported apps', () => {
   const installed = installedApps();
-  assert.deepEqual(Object.keys(installed).sort(), ['claude', 'codex', 'commandcode', 'copilot', 'opencode']);
-  for (const app of ['claude', 'opencode', 'copilot', 'codex', 'commandcode']) {
+  assert.deepEqual(Object.keys(installed).sort(), ['claude', 'codex', 'opencode']);
+  for (const app of ['claude', 'opencode', 'codex']) {
     assert.equal(installed[app], resolveApp(app).found, `${app} flag must match resolveApp`);
   }
 });

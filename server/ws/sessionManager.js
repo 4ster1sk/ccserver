@@ -5,15 +5,16 @@ import { writeFileSync, unlinkSync, rmSync, statSync } from 'node:fs';
 import { readJsonFileIfRegular } from './regularFile.js';
 // `dirname` / `fileURLToPath` were only here to build __dirname for the
 // repo-root state-file paths; #201 moved those to the registry (see
-// savedSessionsPath/schedulesPath below), so they are gone. master's
+// schedulesPath below), so they are gone. master's
 // opencodeSupportsStandalone (#200) is kept -- it is used by the
 // opencodeStandalone flag further down.
 import { basename, join, resolve } from 'node:path';
-import { buildSandboxSpawn, resolveApp, sandboxAvailable, sandboxBackend, sandboxUnavailableReason, forceSandboxUnavailableReason, loadSandboxConfig, persistentHomeDir, dockerSandboxAvailable, dockerdStatus, dockerdLockHeld, resolveTools, opencodeSupportsStandalone } from './sandbox.js';
+import { homedir } from 'node:os';
+import { qemuVmPool } from './qemuVmPool.js';
+import { LAUNCHER_SCRIPT as QEMU_LAUNCHER } from './sandbox-qemu.js';
+import { buildSandboxSpawn, resolveApp, sandboxAvailable, sandboxUnavailableReason, forceSandboxUnavailableReason, loadSandboxConfig, resolveSandboxBackend, persistentHomeDir, dockerSandboxAvailable, dockerdStatus, dockerdLockHeld, resolveTools, opencodeSupportsStandalone } from './sandbox.js';
 import * as gpgVaultRelay from './gpgVaultRelay.js';
-import { releaseSeatbeltOverlay } from './sandbox-seatbelt.js';
-import { setNetworkBrokerLists } from './network-broker.js';
-import { getGroupFilesDir, ensureGroupFilesDir } from './groupFiles.js';
+import { brokerArmed, setSessionBrokerLists, setSessionBrokerOpMode } from './netbrokerClient.js';
 import { buildMcpConfigArgsAndEnv } from './mcpConfig.js';
 import { shouldInjectNotify, notifyEnabled, getNotifySockPath, notifyBrokerRunning } from './notify.js';
 import { buildAgentNotifyArgsAndEnv, shouldCaptureNotifications } from './agentNotifyConfig.js';
@@ -38,12 +39,11 @@ import { isContained, isCcserverScratchPath } from '../pathPolicy.js';
 import {
   isValidApp,
   appLaunchArgs,
-  normalizePermissionMode,
   appSubmitKey,
   extractResumeSessionId,
   detectPermissionPrompt,
 } from './appLaunch.js';
-import { stripAnsi } from './mcpTools.js';
+import { stripAnsi } from './stripAnsi.js';
 import { findSessionLimitReset } from './sessionLimitDetect.js';
 import { recordSessionLimitReset } from '../sessionLimitState.js';
 import {
@@ -57,9 +57,7 @@ import { resolvePath, PATH_IDS } from '../paths.js';
 // Functions, not module-load constants (issue #201): the registry resolves
 // these against $XDG_STATE_HOME and has to be free to answer differently
 // after the setup wizard moves a file, so nothing may freeze a path at
-// import time. CCSERVER_SAVED_SESSIONS_PATH / CCSERVER_SCHEDULES_PATH still
-// override.
-export function savedSessionsPath() { return resolvePath(PATH_IDS.savedSessions); }
+// import time. CCSERVER_SCHEDULES_PATH still overrides.
 export function schedulesPath() { return resolvePath(PATH_IDS.scheduledPrompts); }
 
 const OUTPUT_BUFFER_MAX_BYTES = 512 * 1024;
@@ -159,115 +157,8 @@ export class SandboxHomeLaunchReservations {
 
 const sandboxHomeLaunchReservations = new SandboxHomeLaunchReservations();
 
-// Observers of session exits (pty terminated, for any reason: normal exit,
-// user teardown, group destroy) and of session creations. Used by
-// groupManager to stop MCP brokers of dying sessions and to re-bind roles
-// when a member session is (re)created outside the explicit launch paths
-// (e.g. a scheduled prompt auto-resuming a group member). Runtime-only -- no
-// module init cycles.
-const sessionExitListeners = new Set();
-const sessionCreateListeners = new Set();
-
 // Set when gracefulShutdown() starts and never cleared: the process is on its
-// way out. Every pty exit after that is the shutdown's own doing, not the
-// session ending on its own, and listeners are told so (second argument) --
-// groupManager must not read "the last member exited" as "the group is over",
-// or a routine stop wipes every group it is supposed to restore.
-let shuttingDown = false;
-
-export function setSessionExitListener(fn) {
-  sessionExitListeners.add(fn);
-}
-
-export function setSessionCreateListener(fn) {
-  sessionCreateListeners.add(fn);
-}
-
-// Resolvers of the MCP socket a group member session should be launched with.
-// groupManager registers one: it (re)creates the member's handoff channel (or
-// the orchestrator's control broker) and returns { sockPath, token }. Used by
-// the scheduled-prompt auto-resume path, where a group member's session is
-// recreated outside the explicit launch flows.
-const mcpSocketResolvers = new Set();
-
-export function setMcpSocketResolver(fn) {
-  mcpSocketResolvers.add(fn);
-}
-
-// Resolve the MCP socket for a group member being recreated: returns
-// { sockPath, token } (token gates the socket -- see mcpBroker.js), or null
-// when no resolver can produce one (group gone, broker failed, or not a group
-// member) -- the caller then launches without MCP injection.
-export async function resolveMcpSocketForSession(groupId, groupRole) {
-  for (const fn of mcpSocketResolvers) {
-    try {
-      const resolved = await fn(groupId, groupRole);
-      // Back-compat: a resolver may still return a bare sockPath string.
-      if (typeof resolved === 'string' && resolved) return { sockPath: resolved, token: null };
-      if (resolved && resolved.sockPath) return { sockPath: resolved.sockPath, token: resolved.token || null };
-    } catch {
-      // try the next resolver
-    }
-  }
-  return null;
-}
-
-// Resolvers of the orchestrator's freshly generated CLAUDE.md/AGENTS.md
-// source path (template + saved per-project instructions, merged host-side
-// on every launch). groupManager registers one (generateOrchestratorClaudeMdSrc)
-// -- same resolver-registration pattern as mcpSocketResolvers above, needed
-// for the same reason: the scheduled-prompt auto-resume path lives here and
-// cannot import groupManager.js (circular import).
-const orchestratorClaudeMdResolvers = new Set();
-
-export function setOrchestratorClaudeMdResolver(fn) {
-  orchestratorClaudeMdResolvers.add(fn);
-}
-
-// Resolve the host path of the orchestrator's generated CLAUDE.md/AGENTS.md
-// overlay. Resolves to null when no resolver can produce one (group gone) --
-// the caller then treats this the same as an unresolvable mcpSocketPath.
-export async function resolveOrchestratorClaudeMdSrc(groupId) {
-  for (const fn of orchestratorClaudeMdResolvers) {
-    try {
-      const src = await fn(groupId);
-      if (src) return src;
-    } catch {
-      // try the next resolver
-    }
-  }
-  return null;
-}
-
-// Resolvers of a group member's launch cwd + git-common-dir sandbox bind:
-// worker roles get their own git worktree (resolved/recreated fresh on
-// every (re)spawn, see worktree.js), the orchestrator gets its stable
-// orchestratorDir. groupManager registers one (resolveMemberLaunchCwd) --
-// same resolver-registration pattern as the two above, and for the same
-// reason: this auto-resume path cannot import groupManager.js (circular
-// import).
-const memberCwdResolvers = new Set();
-
-export function setMemberCwdResolver(fn) {
-  memberCwdResolvers.add(fn);
-}
-
-// Resolve { cwd, gitCommonDir } for a group member being (re)spawned.
-// Resolves to null when no resolver can produce one (group gone, or
-// worktree resolution itself failed) -- the caller must refuse the spawn
-// rather than fall back to a stale/blind cwd.
-export async function resolveMemberCwdForSession(groupId, groupRole) {
-  for (const fn of memberCwdResolvers) {
-    try {
-      const result = await fn(groupId, groupRole);
-      if (result) return result;
-    } catch {
-      // try the next resolver
-    }
-  }
-  return null;
-}
-
+// way out.
 function resolveCommand(cmd) {
   if (process.platform !== 'win32') return cmd;
   try {
@@ -283,7 +174,7 @@ function extractResumeId(session) {
 
 // Prefixes marking a createSession() failure as a server-side infrastructure
 // fault rather than a rejection of the request as given. Exported so HTTP
-// layers (routes/groups.js) classify without re-typing the strings.
+// route layers classify without re-typing the strings.
 // "...sets \"browseRoots\"" covers the mustSandboxShell/mustSandboxAgent
 // refusal above (sandbox mandatory but unbuildable) -- an infra fault like
 // forceSandbox's, not a request-shape rejection like the separate
@@ -320,12 +211,10 @@ function buildSessionRecord(id, ptyProcess, meta) {
     app: meta.app,
     model: meta.model,
     permissionMode: meta.permissionMode,
-    groupId: meta.groupId,
-    groupRole: meta.groupRole,
     // Operator-assigned display name (null = none; the UI falls back to the
     // directory basename). Set post-launch via setSessionLabel (PATCH
     // /api/sessions/:id), never from launch input -- launch bodies are
-    // forwarded nearly as-is across trust boundaries (REST, MCP, federation),
+    // forwarded nearly as-is across trust boundaries (REST and MCP),
     // so a display string must not ride along with them.
     customLabel: normalizeCustomLabel(meta.customLabel),
     sandbox: !!meta.sandbox,
@@ -337,18 +226,19 @@ function buildSessionRecord(id, ptyProcess, meta) {
     sandboxGitBrokerProc: meta.sandboxGitBrokerProc ?? null, // host-side git-broker child process, killed on teardown
     sandboxGitBrokerDir: meta.sandboxGitBrokerDir ?? null, // its runtime dir (socket + allow-list), removed on teardown
     sandboxCommitGuardDir: meta.sandboxCommitGuardDir ?? null, // commit-msg guard's runtime dir (config json only, no process), removed on teardown
-    sandboxSeatbeltDir: meta.sandboxSeatbeltDir ?? null, // seatbelt profile/shim runtime dir (macOS only), removed on teardown
-    sandboxSeatbeltFiles: meta.sandboxSeatbeltFiles ?? null, // orchestrator rule copies in the project dir (macOS only), unlinked on teardown
-    // Network-isolation broker (see network-broker.js): port/token/armed/mode
+    qemuRunDir: meta.qemuRunDir ?? null, // qemu backend: per-session VM run dir (overlay, seed, keys), removed on teardown
+    qemuPoolLease: meta.qemuPoolLease ?? null, // qemu backend, persistent VM: this session's attachment (qemuVmPool.js), released on teardown
+    sandboxBackend: meta.sandboxBackend ?? null, // 'bwrap' | 'qemu' when sandboxed (picked per launch or the default), else null
+    qemuVm: meta.qemuVm ?? null, // qemu backend: { templateId, templateName, memoryMiB, cpus, diskGiB, startedAt } for the Settings VM list
+    // Network-isolation broker (qemu backend, Go broker): adminSock/armed/mode
     // are plain data, needed for the running-session toggle's and
-    // pushAllowlistToArmedSessions's live HTTP calls straight from this
+    // pushNetworkPolicyToArmedSessions's live calls straight from this
     // process. sandboxNetworkBrokerProc/Dir (the process handle/runtime dir
     // to kill/remove on teardown) mirror sandboxGitBrokerProc/Dir.
-    networkBrokerPort: meta.networkBrokerPort ?? null,
-    networkBrokerToken: meta.networkBrokerToken ?? null,
-    networkBrokerAdminToken: meta.networkBrokerAdminToken ?? null,
+    networkBrokerAdminSock: meta.networkBrokerAdminSock ?? null, // Go broker admin socket
     networkIsolateArmed: !!meta.networkIsolateArmed,
     networkIsolateMode: meta.networkIsolateMode ?? null, // 'enforce' | 'open', mutated live by the running-session toggle
+    networkExtraAllowedHosts: meta.networkExtraAllowedHosts ?? [], // hosts the launch allowed on top of the allow-list (VM agent API hosts, qemuAgents.js), kept across live list pushes
     sandboxNetworkBrokerProc: meta.sandboxNetworkBrokerProc ?? null,
     sandboxNetworkBrokerDir: meta.sandboxNetworkBrokerDir ?? null,
     reuseSandboxHome: meta.reuseSandboxHome, // true = keep the previous persistent HOME, false = started fresh (wiped)
@@ -374,13 +264,7 @@ function buildSessionRecord(id, ptyProcess, meta) {
     settled: false, // reached the first idle gap (TUI init burst over) -- the send_input settle gate
     settleWaiters: [], // resolvers waiting on `settled` (see waitUntilSettled)
     lastOutputAt: null, // epoch ms of the most recent output chunk; null until the first one (activity timestamp, Issue #16)
-    // Workers (groupRole in 'workerX' form) always run inside the sandbox, so
-    // start them with Auto-Y enabled. The orchestrator (groupRole ===
-    // 'orchestrator') and standalone sessions (groupRole === null) keep the
-    // historical off default. groupRole is already validated server-side
-    // (WORKER_ROLE_RE in groupManager), so "anything but the fixed
-    // 'orchestrator' string is a worker" is a safe check here.
-    autoYes: !!meta.groupRole && meta.groupRole !== 'orchestrator',
+    autoYes: false,
     autoYesLog: [],
     autoYesPending: null,
     autoYesBuf: '',
@@ -551,7 +435,7 @@ function buildSessionRecord(id, ptyProcess, meta) {
             // Extract a meaningful description from the buffer
             const noSpace = cleanBuf.replace(/\s/g, '');
             let promptLine = 'permission prompt';
-            if (session.app === 'opencode' || session.app === 'copilot' || session.app === 'codex' || session.app === 'commandcode') {
+            if (session.app === 'opencode' || session.app === 'codex') {
               // Neither TUI's byte stream exposes which tool is being approved,
               // so the label stays generic (claude's does carry tool names).
               promptLine = 'Permission prompt (auto-approved)';
@@ -602,13 +486,9 @@ function buildSessionRecord(id, ptyProcess, meta) {
     // resume id and detach it so it auto-resumes the conversation at fire time.
     refreshScheduleOnExit(session);
 
-    for (const fn of sessionExitListeners) {
-      try {
-        fn(session, { shuttingDown });
-      } catch {
-        // a listener must never break the pty exit path
-      }
-    }
+    // A persistent VM's shares are only this session's while it runs; let
+    // the pool unmount them (and idle the VM) now rather than at destroy.
+    if (session.qemuPoolLease) session.qemuPoolLease.release().catch(() => {});
 
     // Until this landed nothing recorded WHY a session went away, so a pty
     // that died while the tab was closed was indistinguishable from a
@@ -634,24 +514,22 @@ function buildSessionRecord(id, ptyProcess, meta) {
 
   sessions.set(id, session);
 
-  for (const fn of sessionCreateListeners) {
-    try {
-      fn(session);
-    } catch {
-      // a listener must never break session creation
-    }
-  }
+
 
   return session;
 }
 
-export async function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox, sandboxOpts, app, model, permissionMode, resumeLast, groupId = null, groupRole = null, mcpSocketPath = null, mcpToken = null, projectName = null, reuseSandboxHome = true, orchestratorClaudeMdSrc = null, gitCommonDir = null, groupFilesDir = null, isReviewJob = false, sandboxHomeCreatedBy = null, customLabel = null, scratchCwd = false }) {
+export async function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox, sandboxOpts, app, model, resumeLast, reuseSandboxHome = true, isReviewJob = false, sandboxHomeCreatedBy = null, customLabel = null }) {
   const id = randomUUID();
   // Read once and thread through: this hot path (every session launch) was
   // otherwise re-reading + re-parsing sandbox.config.json up to four times
   // (defaultApp, hiddenApps, forceSandbox, persistentHome) via separate
   // loadSandboxConfig() calls below.
   const cfg = loadSandboxConfig();
+  // bwrap or the qemu VM: picked per launch (sandboxOpts.backend), else the
+  // configured default. Every availability check and refusal below is about
+  // THIS backend, never a fallback to the other one.
+  const backend = resolveSandboxBackend(sandboxOpts);
 
   // claude (and likely opencode) aborts immediately (SIGABRT, exit 134, no
   // output at all) when launched with the filesystem root as cwd -- refuse
@@ -662,8 +540,8 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
   // unaffected: plain /bin/bash starts fine at /.
   //
   // A SANDBOXED shell at / is refused too: the project subtree rule would
-  // become "^/(/.*)?$" (seatbelt, see subtrees()) or a "/" bind (bwrap),
-  // silently granting the whole filesystem -- a fail-open sandbox. Shell
+  // become a "/" bind, silently granting the whole filesystem -- a fail-open
+  // sandbox. Shell
   // sessions only run sandboxed under forceSandbox or an explicit per-launch
   // sandbox request, so the refusal is gated on those. The "would grant the
   // whole filesystem" wording only fits when a sandbox would actually be
@@ -672,7 +550,7 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
   // (a `/` cwd is invalid regardless of backend) but drops the counterfactual
   // clause from the message.
   if (cwd === '/' && (!shell || sandbox || cfg.forceSandbox)) {
-    const wouldSandbox = process.platform !== 'win32' && sandboxAvailable();
+    const wouldSandbox = process.platform !== 'win32' && sandboxAvailable(backend);
     return {
       sessionId: id,
       session: null,
@@ -690,19 +568,14 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
   // that is refused for lacking a sandbox backend must still be refused for
   // a cwd outside the roots, and the two failures want different messages.
   //
-  // The scratch-tree exemption is gated on the TRUSTED `scratchCwd` flag
-  // (an explicit parameter, never read from a client body -- same pattern as
-  // isReviewJob), NOT on the path alone: `cwd` is client-supplied on every
-  // external launch path (REST/WS/federation), so a path-based exemption let
-  // any client point a session at the scratch tree -- which holds the
-  // sandbox HOME credentials, the GPG vault DB and federation keys -- and
-  // have the whole tree rw-bound into the sandbox by buildBwrapArgs'
-  // `--bind <cwd> <cwd>`. Only the in-process callers that themselves
-  // synthesize the cwd (group worktrees/orchestrator dirs, review worktrees)
-  // pass scratchCwd:true. The path is still checked with
-  // isCcserverScratchPath (symlink-safe realpath) as defense in depth.
+  // The scratch-tree exemption is gated on the trusted `isReviewJob` flag,
+  // never read from a client body. External callers supply cwd themselves,
+  // so a path-only exemption could expose the sandbox HOME credentials and
+  // GPG Vault DB through the sandbox's rw bind. Only reviewer.js synthesizes
+  // a scratch worktree and sets isReviewJob; isCcserverScratchPath still
+  // checks its real path as defense in depth.
   const absCwd = resolve('/', cwd);
-  const scratchExempt = scratchCwd === true && isCcserverScratchPath(absCwd);
+  const reviewJobCwdExempt = isReviewJob === true && isCcserverScratchPath(absCwd);
   // Fail closed on a present-but-unusable browseRoots (or an unparseable
   // config): see loadSandboxConfig's browseRootsInvalid. Silently falling
   // back to host-wide here would turn a config typo into a security
@@ -714,7 +587,7 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
       error: 'Cannot launch: sandbox.config.json\'s "browseRoots" is invalid (must be an array of directory paths), so the allowed working directories cannot be determined. Fix the config and reload.',
     };
   }
-  if (cfg.browseRoots.length > 0 && !scratchExempt && !isContained(absCwd, cfg.browseRoots)) {
+  if (cfg.browseRoots.length > 0 && !reviewJobCwdExempt && !isContained(absCwd, cfg.browseRoots)) {
     return {
       sessionId: id,
       session: null,
@@ -727,8 +600,7 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
 
   // Self-review (issue #105): sandbox.config.json's hiddenApps removes an app
   // from every launch picker client-side, but every picker ultimately funnels
-  // its choice through this same createSession() (single launches, combo
-  // workers/orchestrator, worker/launch-preset expansion). Without
+  // its choice through this same createSession(). Without
   // a check here, hiding an app is purely cosmetic -- any client that sends
   // `app` directly (a hand-crafted WS/API call, a stale MCP preset, a worker
   // preset saved before the app was hidden) would still start a real session
@@ -758,9 +630,7 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
     const searched = {
       claude: "PATH, the server's node bin directory, ~/.local/bin",
       opencode: "PATH, the server's node bin directory, ~/.local/bin, ~/.opencode/bin",
-      copilot: "PATH, the server's node bin directory, ~/.local/bin",
       codex: "PATH, the server's node bin directory, ~/.local/bin",
-      commandcode: "PATH, the server's node bin directory, ~/.local/bin, project .tools/bin",
     }[sessionApp];
     return {
       sessionId: id,
@@ -772,31 +642,19 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
   // the app's persisted-or-default model" (no --model flag is emitted); only a
   // non-empty string becomes a CLI model selection. Shells never carry one.
   const sessionModel = shell ? null : normalizeModel(model);
-  // Permission mode for commandcode launches ('standard' by default -- no
-  // flag; 'auto-accept' / 'yolo' add the corresponding CLI flag, see
-  // appLaunch.js's appPermissionArgs). Unknown values normalize to
-  // 'standard'. Shells and non-commandcode apps are forced to 'standard'
-  // here too, not just left un-flagged by appPermissionArgs -- otherwise a
-  // caller-supplied 'yolo'/'auto-accept' would sit in session.permissionMode
-  // (surfaced via listSessions/savedSessionPublic/federation) and could
-  // mislead a consumer that treats that field as an actual bypass signal.
-  const sessionPermissionMode = (shell || sessionApp !== 'commandcode')
-    ? 'standard'
-    : normalizePermissionMode(permissionMode);
+  const sessionPermissionMode = 'standard';
 
-  // ccserver-notify injection (see notify.js): standalone agent sessions and
-  // combo orchestrators get the process-global notify MCP server when the
+  // ccserver-notify injection (see notify.js): agent sessions get the
+  // process-global notify MCP server when the
   // feature is enabled (Discord webhook configured or subscriptions exist)
   // AND the broker is actually listening (it is started once at boot). The
   // broker-running check prevents injecting a dead socket path when the boot
   // startup failed, or when a config edit enables notify without a restart.
-  // Shells and combo workers never do. The socket path is the process-global
+  // Shells never do. The socket path is the process-global
   // one, created once at boot (ensureNotifyBroker).
   const useNotify = notifyBrokerRunning() && shouldInjectNotify({
     shell: !!shell,
     app: sessionApp,
-    groupId,
-    groupRole,
     notifyEnabled: notifyEnabled(),
   });
   const notifySocketPath = useNotify ? getNotifySockPath() : null;
@@ -804,26 +662,20 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
   // Per-connection identity for ccserver-notify (see notify.js / mcpBroker.js):
   // rides to the bridge as CCSERVER_NOTIFY_IDENTITY and becomes the "_from:"
   // footer on this session's notifications. Attribution only -- never an
-  // authorization input. projectName defaults to basename(cwd) (createSession
-  // already refuses the filesystem root for agent sessions, so a meaningful
-  // name exists); an explicit projectName wins when the session's cwd is not
-  // the real project path (combo orchestrators run in a hashed orchestrator
-  // dir -- see routes/groups.js).
+  // authorization input. createSession refuses the filesystem root for agent
+  // sessions, so basename(cwd) is meaningful.
   const notifyIdentity = useNotify ? {
     sessionId: id,
-    groupId,
-    groupRole,
     cwd,
-    projectName: projectName ?? basename(cwd),
+    projectName: basename(cwd),
     app: sessionApp,
   } : null;
 
-  // ccserver-usage injection (see usageMcp.js): every claude session (shells,
-  // opencode and copilot excluded -- see shouldInjectUsage) gets the
+  // ccserver-usage injection (see usageMcp.js): every claude session (shells
+  // and opencode excluded -- see shouldInjectUsage) gets the
   // process-global get_usage MCP tool when the feature is enabled (claude
   // installed AND usageMcp explicitly enabled) AND the broker is
-  // actually listening. Unlike notify, worker/orchestrator/standalone are not
-  // distinguished -- every member of a combo group that runs claude gets it.
+  // actually listening.
   const useUsage = usageBrokerRunning() && shouldInjectUsage({
     shell: !!shell,
     app: sessionApp,
@@ -832,9 +684,8 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
   const usageSocketPath = useUsage ? getUsageSockPath() : null;
 
   // ccserver-reviewer injection (see reviewer.js): unlike notify, ANY session
-  // -- worker or standalone -- gets it (issue #102 consensus point 4: "callable
-  // regardless of whether a group exists"). Shells, copilot and commandcode
-  // are excluded outright (see shouldInjectReviewer); the feature is off by default
+  // gets it. Shells are excluded outright;
+  // the feature is off by default
   // (sandbox.config.json's reviewerMcp) and requires the broker to actually be
   // listening, same gating as notify/usage.
   //
@@ -849,7 +700,7 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
   // signal (see completeReviewJob) -- breaking the design for every job
   // started after that edit until a restart. shell/app are structurally
   // guaranteed sane for a review job already (VALID_APPS in reviewer.js
-  // excludes copilot/commandcode, and a review job is never a shell), so this never
+  // covers supported CLIs, and a review job is never a shell), so this never
   // actually bypasses those two checks in practice.
   const useReviewer = reviewerBrokerRunning() && (isReviewJob === true || shouldInjectReviewer({
     shell: !!shell,
@@ -883,7 +734,6 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
       resumeId: claudeSessionId,
       resumeLast,
       model: sessionModel,
-      permissionMode: sessionPermissionMode,
       opencodeStandalone: sessionApp === 'opencode' && opencodeSupportsStandalone(resolved.hostCommand),
     });
   }
@@ -909,7 +759,7 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
   // they did, and that was issue #251.
   const forceSandbox = cfg.forceSandbox;
   const sandboxMandatory = forceSandbox;
-  const sandboxRequested = (sandboxMandatory || sandbox) && process.platform !== 'win32' && sandboxAvailable();
+  const sandboxRequested = (sandboxMandatory || sandbox) && process.platform !== 'win32' && sandboxAvailable(backend);
 
   // Non-sandboxed host spawns exec on the host, not in the sandbox: a bare
   // `command` resolved against SANDBOX_PATH may not resolve on the server
@@ -928,7 +778,7 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
   // under the "Failed to spawn" prefix (not "Cannot launch: <app> ...", which
   // INFRA_ERROR_PREFIXES reserves for request-as-given rejections) so this
   // server-side PATH misconfiguration classifies as an infra fault (500),
-  // not a 400 -- see isInfrastructureError / groups.test.js.
+  // not a 400 -- see isInfrastructureError / sessionManager tests.
   if (!shell && !sandboxRequested && !command.includes('/') && process.platform !== 'win32') {
     const onHostPath = (process.env.PATH || '').split(':').some((dir) => {
       if (!dir) return false;
@@ -953,7 +803,7 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
   // (forceSandbox refusals keep their own message in the spawn branches
   // below, so this only covers the non-forced explicit request.)
   if (sandbox && !forceSandbox && !sandboxRequested) {
-    const { reason, hint } = sandboxUnavailableReason();
+    const { reason, hint } = sandboxUnavailableReason(backend);
     return {
       sessionId: id,
       session: null,
@@ -961,12 +811,7 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
     };
   }
 
-  // Seatbelt (macOS) has no fixed in-sandbox paths: the host node/bridge and
-  // sockets are directly visible, so every MCP bridge invocation -- including
-  // the group ccserver bridge -- must use the host form. bwrap keeps the
-  // fixed-path form. Non-sandboxed launches keep their existing behavior.
-  const seatbeltSandbox = sandboxRequested && sandboxBackend() === 'seatbelt';
-  const mcpBridgeMode = seatbeltSandbox ? 'host' : (sandboxRequested ? 'sandbox' : 'host');
+  const mcpBridgeMode = sandboxRequested ? 'sandbox' : 'host';
 
   // Tool provisioning (rtk / code-review-graph): the server config supplies
   // the fallback default and the client's per-session sandboxOpts.tools (which
@@ -977,28 +822,18 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
   // resolveTools must not re-read + re-parse it here on every launch.
   const tools = resolveTools(sandboxOpts, cfg.tools);
 
-  // MCP config injection -- never written to a file (see mcpConfig.js). Combo
-  // sessions (groupId set) get their role's broker (ccserver); notify-enabled
-  // sessions additionally get ccserver-notify, whose bridge command depends on
+  // MCP config injection -- never written to a file (see mcpConfig.js).
+  // notify-enabled sessions get ccserver-notify, whose bridge command depends on
   // whether this session ends up sandboxed (the fixed in-sandbox path vs. the
   // host node+bridge). The args must be in the target command before
   // buildSandboxSpawn runs, so the mode is derived from sandboxRequested.
   let mcpEnv = {};
   // code-review-graph is only provisionable under bwrap (mount-bound
-  // provisioner); seatbelt sandboxes never get the binary, so injecting the
+  // provisioner); the qemu VM never gets the binary, so injecting the
   // MCP server there would fail every session.
-  const crgInjectable = sandboxRequested && !seatbeltSandbox && tools.codeReviewGraph;
-  if (sessionApp && (mcpSocketPath || useNotify || useUsage || useReviewer || crgInjectable)) {
+  const crgInjectable = sandboxRequested && backend !== 'qemu' && tools.codeReviewGraph;
+  if (sessionApp && (useNotify || useUsage || useReviewer || crgInjectable)) {
     const injected = buildMcpConfigArgsAndEnv(sessionApp, {
-      // ccserver (the group broker) only when the session has a group socket:
-      // standalone notify sessions must not get a broken ccserver entry (its
-      // bridge would point at a socket that is never bound for them).
-      groupMcp: !!mcpSocketPath,
-      // Seatbelt sandboxes can't use the fixed in-sandbox bridge path (it is
-      // never bound there), so they take the host invocation. Non-sandboxed
-      // group sessions intentionally keep the fixed-path form (see
-      // groupInvocation in mcpConfig.js).
-      hostBridge: seatbeltSandbox,
       notify: useNotify ? {
         mode: mcpBridgeMode,
         sockPath: notifySocketPath,
@@ -1014,7 +849,7 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
         identity: reviewerIdentity,
       } : undefined,
       // code-review-graph MCP is injected only into sandboxed sessions that
-      // can actually provision it (bwrap; never on the host, never seatbelt).
+      // can actually provision it (sandboxed sessions only).
       tools: crgInjectable ? tools : null,
       cwd,
     });
@@ -1033,9 +868,7 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
   const agentNotify = buildAgentNotifyArgsAndEnv(sessionApp, notifyBridgeCfg);
   args.push(...agentNotify.args);
 
-  // Optionally wrap the target in a filesystem sandbox (bwrap on Linux,
-  // sandbox-exec on macOS) so it can only see the project directory plus
-  // configured paths, with an isolated rootless docker inside on Linux.
+  // Optionally wrap the target in a bwrap filesystem sandbox.
   // See sandbox.js.
   let useSandbox = false;
   let sandboxDocker = false;
@@ -1044,19 +877,19 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
   let sandboxGitBrokerProc = null;
   let sandboxGitBrokerDir = null;
   let sandboxCommitGuardDir = null;
-  let sandboxSeatbeltDir = null;
-  let sandboxSeatbeltFiles = null;
-  // Network-isolation broker (see network-broker.js): port/token/armed/mode
+  let qemuRunDir = null;
+  let qemuPoolLease = null;
+  let qemuVm = null;
+  // Network-isolation broker (qemu backend, Go broker): adminSock/armed/mode
   // are plain data needed here (the running-session toggle and
-  // pushAllowlistToArmedSessions make live HTTP calls to the broker straight
+  // pushNetworkPolicyToArmedSessions make live calls to the broker straight
   // from this process). sandboxNetworkBrokerProc/Dir are the process
   // handle/runtime dir to kill/remove on teardown, same as
   // sandboxGitBrokerProc/Dir.
-  let networkBrokerPort = null;
-  let networkBrokerToken = null;
-  let networkBrokerAdminToken = null;
+  let networkBrokerAdminSock = null;
   let networkIsolateArmed = false;
   let networkIsolateMode = null;
+  let networkExtraAllowedHosts = [];
   let sandboxNetworkBrokerProc = null;
   let sandboxNetworkBrokerDir = null;
   let ptyProcess;
@@ -1086,17 +919,8 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
       }
       reservedSandboxHomePath = targetPath;
     }
-    // Group file exchange: every sandboxed group member gets its group's
-    // blob directory read-only at /ccserver-group-files.
-    let resolvedGroupFilesDir = groupFilesDir;
-    if (!resolvedGroupFilesDir && groupId) {
-      try {
-        resolvedGroupFilesDir = getGroupFilesDir(groupId);
-        ensureGroupFilesDir(groupId);
-      } catch { resolvedGroupFilesDir = null; }
-    }
     try {
-      const spawn = await buildSandboxSpawn({ cwd, targetCommand: [command, ...args], app: sessionApp, sandboxOpts, mcpSocketPath, mcpToken, notifySocketPath, usageSocketPath, reviewerSocketPath, reuseSandboxHome, orchestratorClaudeMdSrc, gitCommonDir, groupFilesDir: resolvedGroupFilesDir, sandboxHomeCreatedBy, scratchCwd: scratchExempt });
+      const spawn = await buildSandboxSpawn({ cwd, targetCommand: [command, ...args], app: sessionApp, sandboxOpts, notifySocketPath, usageSocketPath, reviewerSocketPath, reuseSandboxHome, sandboxHomeCreatedBy, isReviewJob });
       command = spawn.command;
       args = spawn.args;
       sandboxDocker = !!spawn.docker;
@@ -1105,13 +929,13 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
       sandboxGitBrokerProc = spawn.gitBrokerProc || null;
       sandboxGitBrokerDir = spawn.gitBrokerDir || null;
       sandboxCommitGuardDir = spawn.commitGuardDir || null;
-      sandboxSeatbeltDir = spawn.seatbeltDir || null;
-      sandboxSeatbeltFiles = spawn.seatbeltFiles || null;
-      networkBrokerPort = spawn.networkBrokerPort || null;
-      networkBrokerToken = spawn.networkBrokerToken || null;
-      networkBrokerAdminToken = spawn.networkBrokerAdminToken || null;
+      qemuRunDir = spawn.qemuRunDir || null;
+      qemuPoolLease = spawn.qemuPoolLease || null;
+      qemuVm = spawn.qemuVm || null;
+      networkBrokerAdminSock = spawn.networkBrokerAdminSock || null;
       networkIsolateArmed = !!spawn.networkIsolateArmed;
       networkIsolateMode = spawn.networkIsolateMode || null;
+      networkExtraAllowedHosts = spawn.networkExtraAllowedHosts || [];
       sandboxNetworkBrokerProc = spawn.sandboxNetworkBrokerProc || null;
       sandboxNetworkBrokerDir = spawn.sandboxNetworkBrokerDir || null;
       useSandbox = true;
@@ -1125,12 +949,10 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
     }
   } else if (sandboxMandatory) {
     // Two causes, two messages -- wording only (cfg.forceSandbox already
-    // decided the outcome above). groups.test.js pins the "forceSandbox"
-    // one byte-for-byte via isInfrastructureError /
-    // orchestratorRestartFailureStatus, so it keeps its original reason+hint
+    // decided the outcome above). Keep the existing reason+hint
     // shape; the browseRoots one has its own INFRA_ERROR_PREFIXES entry
     // because the bwrap/disable-forceSandbox hint does not fit it.
-    const { reason, hint } = forceSandboxUnavailableReason();
+    const { reason, hint } = forceSandboxUnavailableReason(backend);
     if (cfg.forceSandboxReason === 'config') {
       return {
         sessionId: id,
@@ -1192,7 +1014,7 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
     // needed -- see releaseSandboxArtifacts.)
     releaseSandboxArtifacts({
       sandboxStateDir, sandboxGitBrokerProc, sandboxGitBrokerDir, sandboxCommitGuardDir,
-      sandboxSeatbeltDir, sandboxNetworkBrokerProc, sandboxNetworkBrokerDir, sandboxSeatbeltFiles,
+      sandboxNetworkBrokerProc, sandboxNetworkBrokerDir, qemuRunDir, qemuPoolLease,
     });
     return { sessionId: id, session: null, error: `Failed to spawn "${command}": ${err.message}` };
   }
@@ -1203,8 +1025,6 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
     app: sessionApp,
     model: sessionModel,
     permissionMode: sessionPermissionMode,
-    groupId,
-    groupRole,
     customLabel,
     sandbox: useSandbox,
     sandboxOpts,
@@ -1214,13 +1034,14 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
     sandboxGitBrokerProc,
     sandboxGitBrokerDir,
     sandboxCommitGuardDir,
-    sandboxSeatbeltDir,
-    sandboxSeatbeltFiles,
-    networkBrokerPort,
-    networkBrokerToken,
-    networkBrokerAdminToken,
+    qemuRunDir,
+    qemuPoolLease,
+    qemuVm,
+    sandboxBackend: sandboxRequested ? backend : null,
+    networkBrokerAdminSock,
     networkIsolateArmed,
     networkIsolateMode,
+    networkExtraAllowedHosts,
     sandboxNetworkBrokerProc,
     sandboxNetworkBrokerDir,
     reuseSandboxHome,
@@ -1239,6 +1060,54 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
     attachNotifyDetector(session, notifyBridgeCfg);
   }
 
+  return { sessionId: id, session };
+}
+
+// A VM Terminal (Settings GUI, running VMs): a login shell on the running
+// persistent VM `vmId`, outside the guest bwrap (qemuVmPool attachShell).
+// Only the browser's own WebSocket reaches this (terminal.js init with
+// vmShellId) -- never REST or MCP launches, which would let a sandboxed
+// agent step out of the guest confinement.
+export async function createVmShellSession({ vmId, cols, rows }) {
+  const id = randomUUID();
+  const home = homedir();
+  let lease;
+  try {
+    lease = await qemuVmPool.attachShell(vmId, { home });
+  } catch (err) {
+    return { sessionId: id, session: null, error: `Failed to open the VM terminal: ${err.message}` };
+  }
+  let ptyProcess;
+  try {
+    ptyProcess = pty.spawn(process.execPath, [QEMU_LAUNCHER, lease.planPath], {
+      name: 'xterm-256color',
+      cols,
+      rows,
+      cwd: home,
+      env: { ...buildSessionEnv(), TERM: 'xterm-256color', COLORTERM: 'truecolor', FORCE_COLOR: '1' },
+    });
+  } catch (err) {
+    releaseSandboxArtifacts({ qemuPoolLease: lease });
+    return { sessionId: id, session: null, error: `Failed to spawn the VM terminal: ${err.message}` };
+  }
+  const session = buildSessionRecord(id, ptyProcess, {
+    cwd: home,
+    shell: true,
+    app: null,
+    model: null,
+    sandbox: true,
+    sandboxOpts: { backend: 'qemu', vmShellId: vmId },
+    sandboxBackend: 'qemu',
+    qemuPoolLease: lease,
+    qemuVm: { ...lease.vm.info, pooled: true, vmId: lease.vm.id, startedAt: lease.vm.startedAt, vmShell: true },
+    // The same VM-wide network toggle as the VM's agent sessions
+    // (setPooledVmNetworkMode).
+    networkBrokerAdminSock: lease.vm.network?.adminSock ?? null,
+    networkIsolateArmed: !!lease.vm.network,
+    networkIsolateMode: lease.vm.network?.mode ?? null,
+    cols,
+    rows,
+  });
   return { sessionId: id, session };
 }
 
@@ -1296,7 +1165,7 @@ export function setSessionLabel(id, label) {
 
 // Write text into a live session's pty, optionally submitting with Enter.
 // Shared by the WS 'input' path (terminal.js) and the MCP send_input tool
-// (mcpTools.js). Idle timer reset mirrors the WS input handler.
+// Idle timer reset mirrors the WS input handler.
 export function writeToSession(id, text, { submit = false } = {}) {
   const session = sessions.get(id);
   if (!session?.ptyProcess || session.exited) return false;
@@ -1450,10 +1319,8 @@ function persistSchedules() {
         shell: !!s.shell,
         app: s.app || 'claude',
         model: normalizeModel(s.model) || null,
-        permissionMode: normalizePermissionMode(s.permissionMode),
+        permissionMode: 'standard',
         claudeSessionId: s.claudeSessionId || null,
-        groupId: s.groupId || null,
-        groupRole: s.groupRole || null,
         source: s.source || 'manual',
       });
     }
@@ -1505,9 +1372,7 @@ export function sandboxHomeConflict(targetPath, liveSessions) {
 }
 
 // Whether THIS session can actually use docker right now -- surfaced by
-// get_tab_status/list_group_sessions so the orchestrator can check before
-// handing a worker a docker task, instead of finding out from a failure (see
-// tmp/docker-availability-visibility-plan.md). A live rootless dockerd is
+// the session UI can show availability before a task runs. A live rootless dockerd is
 // only ever able to hold ONE project's data-root at a time (see
 // sandbox-entrypoint.sh's flock); a second sandbox of the same project
 // launches with docker: false internally rather than corrupting that
@@ -1562,17 +1427,47 @@ export function sandboxHomeInUsePath(homePath) {
   return n;
 }
 
-// Pushes a replacement allow/deny-list to every live session that has network
-// isolation enabled (see network-broker.js): the Settings GUI's
-// save path (server/routes/networkAllowlist.js) calls this so a running
-// session's egress policy updates without a restart. Fails soft per session
-// -- one dead/unreachable broker (session exiting mid-push, race with
+// Shared message shape for the network-isolation globe toggle (see
+// TerminalView.jsx): `armed` is fixed for the session's whole life (whether
+// a broker/boundary exists at all -- decided at launch), `enabled` is the
+// live enforce/open policy, flippable anytime via set_network_isolation
+// without a sandbox restart. `scope` is 'vm' for a persistent VM, whose one
+// broker serves every session on it, so a flip applies to all of them.
+export function networkIsolationStateMsg(session) {
+  return {
+    type: 'network_isolation_state',
+    armed: !!session.networkIsolateArmed,
+    enabled: session.networkIsolateMode === 'enforce',
+    scope: session.qemuVm?.pooled ? 'vm' : 'session',
+  };
+}
+
+// The running-session toggle on a persistent VM: sets the VM's broker to
+// `mode` and, on success, updates and notifies every session on that VM.
+export async function setPooledVmNetworkMode(vmId, mode) {
+  if (!(await qemuVmPool.setNetworkMode(vmId, mode))) return false;
+  for (const s of sessions.values()) {
+    if (!s.qemuVm?.pooled || s.qemuVm.vmId !== vmId) continue;
+    s.networkIsolateMode = mode;
+    broadcast(s, networkIsolationStateMsg(s));
+  }
+  return true;
+}
+
+// Pushes a replacement allow/deny-list and operating mode (enforce/audit) to
+// every live session that has network isolation enabled (qemu backend, Go
+// broker): the Settings GUI's save path (server/routes/networkAllowlist.js)
+// calls this so a running session's egress policy updates without a restart.
+// A session counts as applied only when both the lists and the mode landed.
+// Fails soft per session -- one dead/unreachable broker (session exiting mid-push, race with
 // teardown) must not stop the rest, and the file save itself already
-// succeeded regardless. port/token are plain data on the session record
-// (see buildSessionRecord), so the HTTP call is made straight from this
+// succeeded regardless. The admin socket is plain data on the session
+// record (see buildSessionRecord), so the call is made straight from this
 // process.
-export async function pushAllowlistToArmedSessions({ allowedHosts, deniedHosts }) {
-  const armed = [...sessions.values()].filter((s) => s.networkIsolateArmed && s.networkBrokerPort && s.networkBrokerAdminToken);
+export async function pushNetworkPolicyToArmedSessions({ allowedHosts, deniedHosts, mode }) {
+  // Not a persistent VM's sessions: their lists and mode are the VM's
+  // broker's and are set per VM below.
+  const armed = [...sessions.values()].filter((s) => brokerArmed(s) && !s.qemuVm?.pooled);
   // Parallel, not sequential: each session's push is an independent HTTP
   // round-trip to a different broker process, so awaiting them one at a time
   // in a for...of would block the Settings PUT handler (which awaits this)
@@ -1581,10 +1476,12 @@ export async function pushAllowlistToArmedSessions({ allowedHosts, deniedHosts }
   // same fail-soft posture as before, just concurrent.
   const results = await Promise.all(armed.map(async (s) => {
     try {
-      return await setNetworkBrokerLists(
-        { port: s.networkBrokerPort, token: s.networkBrokerAdminToken },
-        { allowedHosts, deniedHosts },
-      );
+      const extra = s.networkExtraAllowedHosts.filter((h) => !allowedHosts.includes(h));
+      const [lists, opMode] = await Promise.all([
+        setSessionBrokerLists(s, { allowedHosts: [...allowedHosts, ...extra], deniedHosts }),
+        mode === undefined ? true : setSessionBrokerOpMode(s, mode),
+      ]);
+      return lists && opMode;
     } catch {
       return false;
     }
@@ -1593,6 +1490,23 @@ export async function pushAllowlistToArmedSessions({ allowedHosts, deniedHosts }
   let failed = 0;
   for (const applied of results) {
     if (applied) ok++; else failed++;
+  }
+  // Counted in sessions like the rest: every session on a VM shares its
+  // broker, so a VM's result applies to each of them. A VM counts as applied
+  // only when both the lists and the mode landed.
+  const vmApplied = new Map();
+  const vmPushes = [
+    qemuVmPool.setListsAll({ allowedHosts, deniedHosts }),
+    mode === undefined ? [] : qemuVmPool.setOpModeAll(mode),
+  ];
+  for (const p of vmPushes) {
+    let vmResults = [];
+    try { vmResults = await p; } catch { /* counted as nothing applied */ }
+    for (const { id, ok: applied } of vmResults) vmApplied.set(id, (vmApplied.get(id) ?? true) && applied);
+  }
+  for (const s of sessions.values()) {
+    if (!s.qemuVm?.pooled || !vmApplied.has(s.qemuVm.vmId)) continue;
+    if (vmApplied.get(s.qemuVm.vmId)) ok++; else failed++;
   }
   return { ok, failed };
 }
@@ -1678,10 +1592,7 @@ function notifyFired(session, info, delivered) {
 }
 
 // Schedule-entry matching for the "same project" live-session substitution
-// (fireSchedule branch 2). Group members match strictly -- only the SAME
-// group AND SAME role -- because combo workers legitimately share cwd+app
-// with each other, so a cwd+app match alone could inject into the wrong
-// worker. A model-annotated schedule must likewise only inject into a
+// (fireSchedule branch 2). A model-annotated schedule must only inject into a
 // session launched with the SAME model; unmodeled entries (both null) keep
 // the original cwd+shell+app semantics. The same rule applies to the
 // permission mode: a yolo/auto-accept schedule must not inject into a
@@ -1693,9 +1604,7 @@ export function matchesScheduleTarget(session, entry) {
     && session.shell === entry.shell
     && session.app === entry.app
     && (session.model ?? null) === (entry.model ?? null)
-    && (session.permissionMode ?? 'standard') === (entry.permissionMode ?? 'standard')
-    && (session.groupId ?? null) === (entry.groupId ?? null)
-    && (session.groupRole ?? null) === (entry.groupRole ?? null);
+    && (session.permissionMode ?? 'standard') === (entry.permissionMode ?? 'standard');
 }
 
 async function fireSchedule(scheduleId) {
@@ -1710,7 +1619,6 @@ async function fireSchedule(scheduleId) {
   if (target && (target.exited || !target.ptyProcess)) target = null;
 
   // 2) Otherwise any live session for the same project (user reopened it).
-  // See matchesScheduleTarget: group members match strictly by group+role.
   if (!target) {
     for (const s of sessions.values()) {
       if (matchesScheduleTarget(s, entry)) {
@@ -1728,75 +1636,9 @@ async function fireSchedule(scheduleId) {
   }
 
   // 3) No live session — auto-resume the conversation, then inject once ready.
-  // opencode, copilot, codex and commandcode expose no session id in their
-  // TUI output, so resume the last session of the project instead of a
-  // specific one.
-  // A group member gets its role's MCP socket re-created (handoff channel or
-  // control broker) so the resumed session can actually reach the group --
-  // otherwise the orchestrator's wait_for_handoff would wait on a worker that
-  // can never hand off. If that socket can't be produced (group already torn
-  // down, broker failed), the prompt is dropped rather than orphaned: a
-  // member session without MCP can never hand off again, and in the
-  // group-gone case nobody is waiting anyway.
-  const mcpResolved = entry.groupId && entry.groupRole
-    ? await resolveMcpSocketForSession(entry.groupId, entry.groupRole)
-    : null;
-  const mcpSocketPath = mcpResolved ? mcpResolved.sockPath : null;
-  const mcpToken = mcpResolved ? mcpResolved.token : null;
-  if (entry.groupId && !mcpSocketPath) {
-    console.warn(`[scheduler] dropping prompt for group member ${entry.groupRole} of ${entry.groupId}: MCP socket unavailable`);
-    return;
-  }
-  // The orchestrator's CLAUDE.md/AGENTS.md overlay must be regenerated on
-  // every respawn (see groupManager.generateOrchestratorClaudeMdSrc) -- this
-  // auto-resume path is the one spawn site that can't call it directly
-  // (would create an import cycle with groupManager.js), so it goes through
-  // the same resolver-registration pattern as mcpSocketPath above. Same
-  // fail-closed policy too: an orchestrator that can't get a fresh overlay
-  // must not fall back to launching without one (that would be a silent
-  // regression back to the writable-CLAUDE.md hole this mechanism closes).
-  const orchestratorClaudeMdSrc = entry.groupId && entry.groupRole === 'orchestrator'
-    ? await resolveOrchestratorClaudeMdSrc(entry.groupId)
-    : null;
-  if (entry.groupId && entry.groupRole === 'orchestrator' && !orchestratorClaudeMdSrc) {
-    console.warn(`[scheduler] dropping prompt for orchestrator of ${entry.groupId}: CLAUDE.md generation unavailable`);
-    return;
-  }
-  // Same "server decides, never trust a persisted value blindly" resolution
-  // as every other group-member (re)spawn site (terminal.js's init
-  // reconnect, groupManager.addMember): entry.cwd may point at a worker's
-  // worktree that's since been lost from disk, so the resolver is always
-  // consulted (it recreates it -- and notifies on genuine data loss --
-  // rather than launching into a dead directory); see
-  // groupManager.resolveMemberLaunchCwd. Same fail-closed policy as
-  // mcpSocketPath/orchestratorClaudeMdSrc above.
-  let cwd = entry.cwd;
-  let gitCommonDir = null;
-  if (entry.groupId && entry.groupRole) {
-    const cwdRes = await resolveMemberCwdForSession(entry.groupId, entry.groupRole);
-    if (!cwdRes) {
-      console.warn(`[scheduler] dropping prompt for group member ${entry.groupRole} of ${entry.groupId}: working directory unavailable`);
-      return;
-    }
-    cwd = cwdRes.cwd;
-    gitCommonDir = cwdRes.gitCommonDir;
-  }
-  // An exited-but-not-yet-reaped predecessor of the same group+role still
-  // owns its seatbelt orchestrator overlay (sandboxSeatbeltFiles). Retire it
-  // now -- after every drop check (a dropped prompt must not destroy an
-  // exited session the user may still have open) but before the successor
-  // launches, or the successor sees the overlay files as pre-existing,
-  // claims no ownership, and the predecessor's later teardown unlinks the
-  // live successor's CLAUDE.md/AGENTS.md mid-session. Same retire-first
-  // ordering as routes/groups.js's orchestrator restart.
-  if (entry.groupId && entry.groupRole) {
-    for (const s of [...sessions.values()]) {
-      if (s.exited && s.groupId === entry.groupId && s.groupRole === entry.groupRole
-          && Array.isArray(s.sandboxSeatbeltFiles)) {
-        retireSessionForReuse(s.id);
-      }
-    }
-  }
+  // opencode and codex expose no session id in their TUI output, so resume the
+  // last session of the project instead of a specific one.
+  const cwd = entry.cwd;
   const res = await createSession({
     cwd,
     cols: 80,
@@ -1808,24 +1650,11 @@ async function fireSchedule(scheduleId) {
     app: entry.app,
     model: entry.model,
     permissionMode: entry.permissionMode,
-    resumeLast: entry.app === 'opencode' || entry.app === 'copilot' || entry.app === 'codex' || entry.app === 'commandcode',
-    // A group member keeps its membership across the resume: groupManager's
-    // session-create listener re-binds the role to the new sessionId.
-    groupId: entry.groupId,
-    groupRole: entry.groupRole,
-    mcpSocketPath,
-    mcpToken,
-    orchestratorClaudeMdSrc,
-    gitCommonDir,
-    // Only the group-member branch above resolves cwd server-side
-    // (resolveMemberCwdForSession -> a worktree/orchestrator scratch dir);
-    // a standalone schedule's entry.cwd is client-originated and must keep
-    // passing the normal browseRoots containment check.
-    scratchCwd: !!(entry.groupId && entry.groupRole),
+    resumeLast: entry.app === 'opencode' || entry.app === 'codex',
   });
   if (!res?.session) {
-    // Same "explain every drop" policy as the mcpSocketPath/
-    // orchestratorClaudeMdSrc/cwd guards above: a hiddenApps rejection (or
+    // Explain auto-resume failures because there is no client request to
+    // receive the error: a hiddenApps rejection (or
     // any other createSession() failure -- not-installed, invalid cwd) must
     // not disappear silently just because this is the auto-resume path
     // rather than a live launch request with a client to report the error to.
@@ -1877,11 +1706,9 @@ export function setScheduledPrompt(id, at, text, { source = 'manual' } = {}) {
     shell: !!session.shell,
     app: session.app || 'claude',
     model: normalizeModel(session.model) || null,
-    permissionMode: normalizePermissionMode(session.permissionMode),
+    permissionMode: 'standard',
     claudeSessionId: resumeIdForSession(session),
     sessionId: id,
-    groupId: session.groupId || null,
-    groupRole: session.groupRole || null,
     source,
     timer: setTimeout(() => fireSchedule(scheduleId), delay),
   };
@@ -1919,6 +1746,7 @@ export function restoreSchedules() {
   let missed = 0;
   for (const e of arr) {
     if (!e || typeof e.text !== 'string' || !Number.isFinite(e.at)) continue;
+    if (e.groupId || e.groupRole) continue; // retired combo-member schedules must not become standalone launches
     if (e.at > now + MAX_SCHEDULE_AHEAD_MS) continue; // implausibly far ahead
 
     const delay = e.at - now;
@@ -1938,12 +1766,8 @@ export function restoreSchedules() {
       model: normalizeModel(e.model) || null,
       // Legacy schedules predate the permissionMode field; 'standard' (no
       // flag) is the safe direction.
-      permissionMode: normalizePermissionMode(e.permissionMode),
+      permissionMode: 'standard',
       claudeSessionId: e.claudeSessionId || null,
-      // Group membership survives a restart: an auto-resume re-binds the
-      // role (see fireSchedule), so a member isn't orphaned by a reboot.
-      groupId: e.groupId || null,
-      groupRole: e.groupRole || null,
       // Legacy entries (no source field) fall back to 'manual' -- the safe
       // direction, since a manual schedule is protected from being clobbered
       // by the auto-detector while an 'auto-session-limit' one is not (see
@@ -1996,7 +1820,7 @@ function sampleScreenActivity(session, now = Date.now()) {
 //
 // The one piece of state kept between reads is the previous level, which the
 // red/yellow hysteresis needs; it is written back here so every reader
-// (browser poll, MCP tool, federation) advances the same history.
+// (browser poll, MCP tool) advances the same history.
 export function activitySnapshot(session) {
   if (!session) return NO_ACTIVITY;
   const now = Date.now();
@@ -2029,18 +1853,56 @@ export function listSessions() {
       shell: session.shell,
       sandbox: session.sandbox,
       sandboxOpts: session.sandboxOpts || null,
+      sandboxBackend: session.sandboxBackend || null,
       gpgVaultActive: !!session.gpgVaultActive,
       app: session.app,
       model: session.model || null,
-      permissionMode: normalizePermissionMode(session.permissionMode),
-      groupId: session.groupId || null,
-      groupRole: session.groupRole || null,
+      permissionMode: 'standard',
       customLabel: session.customLabel || null,
       // How hard this session's agent is working right now (see activity.js):
       // { level: 'idle'|'low'|'busy'|null, reason, marker, markerVerified,
-      // screenIdleMs, changeRate }. Rides along to federation peers too --
+      // screenIdleMs, changeRate }.
       // rpcSessionsList returns this listing verbatim.
       activity: activitySnapshot(session),
+    });
+  }
+  return result;
+}
+
+// The qemu backend's throwaway VMs, one per live session (the Settings
+// GUI's VM list, routes/vms.js). An exited session's VM is already gone with
+// its launcher, so it is not listed. Persistent VMs are listed per VM from
+// the pool instead, with their sessions from listPooledQemuSessions.
+export function listQemuVms() {
+  const result = [];
+  for (const [id, session] of sessions) {
+    if (session.exited || !session.qemuRunDir) continue;
+    result.push({
+      sessionId: id,
+      cwd: session.cwd,
+      app: session.app,
+      shell: session.shell,
+      customLabel: session.customLabel || null,
+      runDir: session.qemuRunDir,
+      ...(session.qemuVm || {}),
+    });
+  }
+  return result;
+}
+
+// Live sessions attached to a persistent VM: [{ sessionId, vmId, cwd, app,
+// shell, customLabel }].
+export function listPooledQemuSessions() {
+  const result = [];
+  for (const [id, session] of sessions) {
+    if (session.exited || !session.qemuPoolLease) continue;
+    result.push({
+      sessionId: id,
+      vmId: session.qemuPoolLease.vm.id,
+      cwd: session.cwd,
+      app: session.app,
+      shell: session.shell,
+      customLabel: session.customLabel || null,
     });
   }
   return result;
@@ -2203,38 +2065,25 @@ export function detachSocket(id, socketToDetach) {
   removeViewer(session, socketToDetach);
 }
 
-// Best-effort teardown of every sandbox artifact a launch may have built --
-// shared by destroySession() (a live session's own teardown) and
-// createSession()'s spawn-failure cleanup (the launch never got far enough
-// to register a session). `excludeFromSiblings` is the session record itself
-// when called from destroySession() (already registered, so it must be
-// excluded from the seatbelt-overlay sibling scan) -- left undefined from
-// createSession(), where the failed launch was never registered in the
-// first place, so nothing needs excluding.
-function releaseSandboxArtifacts(artifacts, excludeFromSiblings) {
+// Best-effort teardown of every sandbox artifact a launch may have built.
+// Shared by destroySession() and createSession() spawn-failure cleanup.
+function releaseSandboxArtifacts(artifacts) {
   const {
     sandboxStateDir, sandboxGitBrokerProc, sandboxGitBrokerDir, sandboxCommitGuardDir,
-    sandboxSeatbeltDir, sandboxNetworkBrokerProc, sandboxNetworkBrokerDir, sandboxSeatbeltFiles,
+    sandboxNetworkBrokerProc, sandboxNetworkBrokerDir, qemuRunDir, qemuPoolLease,
   } = artifacts;
   if (sandboxStateDir) { try { rmSync(sandboxStateDir, { recursive: true, force: true }); } catch { /* nothing to remove / still held — harmless */ } }
   if (sandboxGitBrokerProc) { try { sandboxGitBrokerProc.kill('SIGTERM'); } catch { /* already dead */ } }
   if (sandboxGitBrokerDir) { try { rmSync(sandboxGitBrokerDir, { recursive: true, force: true }); } catch { /* best effort */ } }
   if (sandboxCommitGuardDir) { try { rmSync(sandboxCommitGuardDir, { recursive: true, force: true }); } catch { /* best effort */ } }
-  if (sandboxSeatbeltDir) { try { rmSync(sandboxSeatbeltDir, { recursive: true, force: true }); } catch { /* best effort */ } }
+  // QEMU needs no kill here: it runs in bwrap with --die-with-parent under
+  // the launcher (the pty child), so it cannot outlive the session.
+  if (qemuRunDir) { try { rmSync(qemuRunDir, { recursive: true, force: true }); } catch { /* best effort */ } }
+  // A persistent VM outlives its sessions: only this session's shares are
+  // dropped (the pool unmounts what nobody uses and stops an idle VM).
+  if (qemuPoolLease) { qemuPoolLease.release().catch(() => {}); }
   if (sandboxNetworkBrokerProc) { try { sandboxNetworkBrokerProc.kill('SIGTERM'); } catch { /* already dead */ } }
   if (sandboxNetworkBrokerDir) { try { rmSync(sandboxNetworkBrokerDir, { recursive: true, force: true }); } catch { /* best effort */ } }
-  // Orchestrator rule files materialized into the project dir by the
-  // seatbelt backend (NOT under seatbeltDir -- unlink each best-effort). A
-  // successor launched from the same deterministic orchestratorDir (restart
-  // / scheduled auto-resume) owns the same paths: only unlink files no other
-  // registered session still references, or the successor's overlay is
-  // deleted out from under it mid-session.
-  if (Array.isArray(sandboxSeatbeltFiles)) {
-    releaseSeatbeltOverlay(
-      sandboxSeatbeltFiles,
-      [...sessions.values()].filter((other) => other !== excludeFromSiblings).map((other) => other.sandboxSeatbeltFiles),
-    );
-  }
 }
 
 // `reason` is for the teardown log only -- it has no effect on behavior. It
@@ -2319,31 +2168,9 @@ export function destroyAllSessions() {
   }
 }
 
-// Public (serializable) view of a session for the graceful-shutdown
-// .saved-sessions.json write. Group membership is preserved so a restarted
-// server doesn't surface group members as plain standalone sessions.
-// `claudeId` is the best-known resume id (already-resolved by the caller,
-// falling back to a buffer extraction) -- keeps the on-exit id as the
-// primary source.
-export function savedSessionPublic(session, claudeId) {
-  return {
-    cwd: session.cwd,
-    claudeSessionId: claudeId || null,
-    sandbox: !!session.sandbox,
-    sandboxOpts: session.sandboxOpts || null,
-    app: session.app || 'claude',
-    model: normalizeModel(session.model) || null,
-    permissionMode: normalizePermissionMode(session.permissionMode),
-    groupId: session.groupId || null,
-    groupRole: session.groupRole || null,
-    customLabel: session.customLabel || null,
-  };
-}
-
-// Kills every live pty, waits up to 3s for them to exit, writes resumable
-// sessions to .saved-sessions.json, then tears down all local bookkeeping.
+// Kills every live pty, waits up to 3s for them to exit, then tears down all
+// local bookkeeping.
 export function gracefulShutdown() {
-  shuttingDown = true;
   // The relay isn't tied to any session's ptys, just this process's own
   // listeners.
   gpgVaultRelay.stop();
@@ -2362,28 +2189,11 @@ export function gracefulShutdown() {
     }
 
     const finish = () => {
-      const savedSessions = [];
-      for (const [, session] of sessions) {
-        const claudeId = session.claudeSessionId || extractResumeId(session);
-        // claude sessions are saved when their resume id is known; opencode
-        // / copilot / codex / commandcode sessions are always saved (resume
-        // happens via `opencode -c` / `copilot --continue` /
-        // `codex resume --last` / `commandcode -c`).
-        if (claudeId || session.app === 'opencode' || session.app === 'copilot' || session.app === 'codex' || session.app === 'commandcode') {
-          savedSessions.push(savedSessionPublic(session, claudeId));
-        }
-      }
-
-      if (savedSessions.length > 0) {
-        try {
-          writeFileSync(savedSessionsPath(), JSON.stringify(savedSessions));
-        } catch {
-          // best effort
-        }
-      }
-
       destroyAllSessions();
-      resolve();
+      // Persistent VMs belong to no session. QEMU would die with this
+      // process anyway (bwrap --die-with-parent); stopping them here also
+      // removes their run dirs. Bounded so shutdown never hangs on a VM.
+      Promise.race([qemuVmPool.stopAll(), new Promise((r) => setTimeout(r, 5000))]).finally(resolve);
     };
 
     if (pendingSessions.length === 0) {
@@ -2410,18 +2220,6 @@ export function gracefulShutdown() {
       }
     }, 3000);
   });
-}
-
-// Read .saved-sessions.json WITHOUT unlinking it or touching the cache --
-// used by groupManager.restoreGroups() to match each restored group member's
-// resume info (app/cwd/claudeSessionId/sandbox) while the file is still
-// intact.
-export function peekSavedSessions() {
-  try {
-    return readJsonFileIfRegular(savedSessionsPath());
-  } catch {
-    return null;
-  }
 }
 
 function appendToBuffer(session, data) {

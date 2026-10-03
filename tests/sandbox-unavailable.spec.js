@@ -1,7 +1,7 @@
 import { test, expect } from '@playwright/test';
 
 // No sandbox backend on the server host (/api/dirs/home's sandboxAvailable):
-// the sandbox choice (and combo mode, which always requires it) must be
+// the sandbox choice must be
 // unselectable instead of failing at launch time. Missing field = older
 // server: everything stays enabled (same fallback as availableApps).
 //
@@ -14,7 +14,7 @@ const HOME_RESPONSE = {
   forceSandbox: false,
   hostname: 'e2e-no-sandbox',
   showUsage: true,
-  availableApps: { claude: true, opencode: true, copilot: true, codex: true },
+  availableApps: { claude: true, opencode: true, codex: true },
   hiddenApps: [],
   sandboxAvailable: false,
 };
@@ -55,18 +55,6 @@ test('toolbar quick-launch drops the lock icon when the sandbox is unavailable',
   const main = page.locator('.open-split-main');
   await expect(main).not.toContainText('🔒');
   await expect(main).toHaveAttribute('title', '通常起動');
-});
-
-test('combo mode is disabled when the sandbox is unavailable', async ({ page }) => {
-  await stubDirsHome(page);
-  await page.goto('/');
-  await page.getByRole('button', { name: '起動方法を選択' }).click();
-  const comboBtn = page.locator('.resume-dialog .launch-mode-btn', { hasText: 'コンボ起動' });
-  await expect(comboBtn).toBeDisabled();
-  await comboBtn.click({ force: true });
-  // Still in single mode: the combo-only launch button must not appear.
-  await expect(page.locator('.resume-dialog .btn-primary', { hasText: 'コンボ起動' })).toHaveCount(0);
-  await expect(page.locator('.launch-mode-btn.active')).toHaveText('通常起動');
 });
 
 test('forceSandbox without a backend shows a warning instead of a dead locked toggle', async ({ page }) => {

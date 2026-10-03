@@ -33,7 +33,7 @@ const flows = new Map(); // flowId -> { challenge, kind, expiresAt, data }
 // own 5-minute TTL has passed. Flooding that endpoint faster than flows
 // naturally expire grows this Map without bound -- an unauthenticated memory-
 // exhaustion DoS. A generous cap (FIFO eviction of the oldest flow once full,
-// same pattern as federationPairing.js's enforcePendingCap) closes that
+// same bounded-store pattern) closes that
 // while staying far above any real concurrent-ceremony count this
 // single-operator app would ever see.
 const MAX_FLOWS = 1000;

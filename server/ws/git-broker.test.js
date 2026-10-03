@@ -676,7 +676,7 @@ describe('gh-exec PR-body guard (plan8)', () => {
   });
 });
 
-// hostRuntimeDir (macOS Seatbelt support): XDG_RUNTIME_DIR wins when set;
+// hostRuntimeDir fallback: XDG_RUNTIME_DIR wins when set;
 // otherwise Linux keeps /run/user/<uid> while darwin falls back to the
 // per-user tmpdir (macOS has no /run). Both fallbacks are asserted so the
 // suite stays green (and covered) wherever it runs.

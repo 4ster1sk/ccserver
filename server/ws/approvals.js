@@ -1,11 +1,10 @@
 // Server-initiated destructive-action approvals (DB v4, plan section 3).
 //
-// A caller that wants to close_session / destroy_group / delete_sandbox
+// A caller that wants to close_session / delete_sandbox
 // must never destroy a running agent on its own say-so: it inserts a
 // 'pending' row here and BLOCKS the call on an in-memory waiter until the
 // browser decides via POST /api/approvals/:id/decision. The shape is the
-// groupManager pushHandoff/takeHandoff "make the caller wait, resolve later"
-// pattern simplified to 1:1 -- one approval id has exactly one waiter, so
+// one approval id has exactly one waiter, so
 // there is no queue and no re-queue/supersede machinery.
 //
 // Fail-safe direction: an undecided approval ALWAYS ends as "do nothing".
@@ -23,7 +22,7 @@
 import { randomUUID } from 'node:crypto';
 import { getDb } from '../db.js';
 
-export const APPROVAL_KINDS = ['close_session', 'destroy_group', 'delete_sandbox'];
+export const APPROVAL_KINDS = ['close_session', 'delete_sandbox'];
 export const APPROVAL_DECISIONS = ['approved', 'rejected'];
 
 // Fixed per plan decision 4 [2026-08-24]: not configurable in v1.

@@ -607,6 +607,36 @@ export const MIGRATIONS = [
       `);
     },
   },
+  {
+    // v12: QEMU VM templates (see vmTemplates.js). Resources and the
+    // operator's extra cloud-config (YAML source as typed) for the qemu
+    // backend; the default template's id lives in settings
+    // ('global','','qemu.defaultTemplateId').
+    version: 12,
+    up(db) {
+      db.exec(`
+        CREATE TABLE vm_templates (
+          id               TEXT PRIMARY KEY,
+          name             TEXT NOT NULL UNIQUE,
+          memory_mib       INTEGER NOT NULL,
+          cpus             INTEGER NOT NULL,
+          disk_gib         INTEGER NOT NULL,
+          boot_timeout_sec INTEGER NOT NULL,
+          cloud_config     TEXT NOT NULL DEFAULT '',
+          created_at       INTEGER NOT NULL,
+          updated_at       INTEGER NOT NULL
+        )
+      `);
+    },
+  },
+  {
+    // v13: a template may run its sessions in one persistent VM shared
+    // between them (qemuVmPool.js) instead of a throwaway VM each.
+    version: 13,
+    up(db) {
+      db.exec('ALTER TABLE vm_templates ADD COLUMN persistent INTEGER NOT NULL DEFAULT 0');
+    },
+  },
 ];
 
 // Runs pending migrations in order. Each one executes inside BEGIN IMMEDIATE

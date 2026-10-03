@@ -1,0 +1,21 @@
+{
+  "//": "Shared fixture: identical copies live in ccserver-netbroker (testdata/host-policy.json, read by package policy) and ccserver (server/ws/testdata/host-policy.json, read by networkAllowlist.test.js) so the two host-matching implementations cannot drift. Keep both copies in sync.",
+  "normalize": [
+    { "input": ["API.Example.com", " .example.org ", "api.example.com"], "hosts": ["api.example.com", ".example.org"], "rejected": [] },
+    { "input": ["https://example.com", "example.com:443", "*.example.com", "exa mple.com", "", "-bad.example", "bad-.example", "[::1]", 42, null],
+      "hosts": [], "rejected": ["https://example.com", "example.com:443", "*.example.com", "exa mple.com", "", "-bad.example", "bad-.example", "[::1]", 42, null] },
+    { "input": ["..example.com", "example..com", "."], "hosts": [], "rejected": ["..example.com", "example..com", "."] },
+    { "input": ["10.0.0.1", "xn--bcher-kva.example"], "hosts": ["10.0.0.1", "xn--bcher-kva.example"], "rejected": [] }
+  ],
+  "match": [
+    { "host": "api.example.com", "list": ["api.example.com"], "want": true },
+    { "host": "api.example.com", "list": ["API.EXAMPLE.COM"], "want": true },
+    { "host": "other.example.com", "list": ["api.example.com"], "want": false },
+    { "host": "example.com", "list": [".example.com"], "want": true },
+    { "host": "deep.api.example.com", "list": [".example.com"], "want": true },
+    { "host": "notexample.com", "list": [".example.com"], "want": false },
+    { "host": "example.com.attacker.example", "list": [".example.com"], "want": false },
+    { "host": "api.example.com", "list": [], "want": false },
+    { "host": "", "list": [".example.com"], "want": false }
+  ]
+}

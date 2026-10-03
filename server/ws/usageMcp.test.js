@@ -69,7 +69,7 @@ test('shouldInjectUsage: claude sessions only, gated on usageEnabled', () => {
   assert.equal(shouldInjectUsage(base), true, 'standalone claude session');
   assert.equal(shouldInjectUsage({ ...base, shell: true }), false, 'shell sessions never');
   assert.equal(shouldInjectUsage({ ...base, app: 'opencode' }), false, 'opencode has no /usage equivalent');
-  assert.equal(shouldInjectUsage({ ...base, app: 'copilot' }), false, 'copilot has no CLI-arg/env MCP injection');
+  assert.equal(shouldInjectUsage({ ...base, app: 'codex' }), false, 'only claude has /usage');
   assert.equal(shouldInjectUsage({ ...base, app: null }), false, 'shells (app null) never');
   assert.equal(shouldInjectUsage({ ...base, usageEnabled: false }), false, 'feature disabled -> never');
 });

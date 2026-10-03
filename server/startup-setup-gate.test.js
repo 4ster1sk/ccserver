@@ -153,12 +153,12 @@ test('while gated: writes are refused with 503 SETUP_REQUIRED, reads and re-atta
       assert.equal((await fetch(`${server.baseUrl}/api/auth/mode`)).status, 200);
 
       // Other writes are gated too.
-      const group = await fetch(`${server.baseUrl}/api/groups`, {
-        method: 'POST',
+      const settings = await fetch(`${server.baseUrl}/api/network-settings`, {
+        method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({}),
       });
-      assert.equal(group.status, 503);
+      assert.equal(settings.status, 503);
 
       // A non-/api, non-/ws path is never gated -- the SPA has to load to
       // render the explanation. NODE_ENV is not 'production' here, so this

@@ -4,9 +4,8 @@ import { moveMenuFocus } from './sessionMenuNav.js';
 import { sessionMenuIcon } from './TabIcon.jsx';
 import { useDismissableMenu } from '../hooks/useDismissableMenu.js';
 
-// セッションタブ用ハンバーガーメニュー: 開いている terminal タブと group
-// (コンボ) タブを上段、サーバー上で稼働中だが未オープンのセッションを下段に
-// 縦並びで表示する。
+// セッションタブ用ハンバーガーメニュー: 開いているタブとサーバー上で
+// 稼働中だが未オープンのセッションを縦並びで表示する。
 // 開閉はウィジェット系 (RightSidebar) と同じ方式:
 // ラッパー ref による外側 mousedown で閉じる + Escape で閉じる。
 //
@@ -21,21 +20,12 @@ export default function SessionTabMenu({
   onToggle,
   onClose,
   sessionTabs,
-  groupTabs = [],
   activeTabId,
   unopenedSessions,
-  unopenedGroups,
   onSelectTab,
   onCloseTab,
   onOpenSession,
   onTerminateSession,
-  unopenedRemoteSessions = [],
-  onOpenRemoteSession,
-  onTerminateRemoteSession,
-  unopenedRemoteGroups = [],
-  onOpenRemoteGroup,
-  onDestroyRemoteGroup,
-  onOpenGroup,
   customLabels,
   onRowContextMenu,
 }) {
@@ -52,7 +42,7 @@ export default function SessionTabMenu({
     if (moveMenuFocus(menuRef.current, e.key)) e.preventDefault();
   }, []);
 
-  const openedCount = sessionTabs.length + groupTabs.length;
+  const openedCount = sessionTabs.length;
 
   return (
     <div className="session-menu-wrap" ref={wrapRef}>
@@ -74,22 +64,13 @@ export default function SessionTabMenu({
         <div className="session-menu" role="menu" aria-label="セッション一覧" ref={menuRef} onKeyDown={onMenuKeyDown}>
           <SessionList
             sessionTabs={sessionTabs}
-            groupTabs={groupTabs}
-            activeTabId={activeTabId}
+              activeTabId={activeTabId}
             unopenedSessions={unopenedSessions}
-            unopenedGroups={unopenedGroups}
-            onSelectTab={onSelectTab}
+              onSelectTab={onSelectTab}
             onCloseTab={onCloseTab}
             onOpenSession={onOpenSession}
             onTerminateSession={onTerminateSession}
-            unopenedRemoteSessions={unopenedRemoteSessions}
-            onOpenRemoteSession={onOpenRemoteSession}
-            onTerminateRemoteSession={onTerminateRemoteSession}
-            unopenedRemoteGroups={unopenedRemoteGroups}
-            onOpenRemoteGroup={onOpenRemoteGroup}
-            onDestroyRemoteGroup={onDestroyRemoteGroup}
-            onOpenGroup={onOpenGroup}
-            customLabels={customLabels}
+              customLabels={customLabels}
             onRowContextMenu={onRowContextMenu}
           />
         </div>

@@ -34,9 +34,7 @@ import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { restoreGroups, groupsPath, groupDocsPath } from './groupManager.js';
-import { getGroupFilesManifestPath } from './groupFiles.js';
-import { restoreSchedules, peekSavedSessions, savedSessionsPath, schedulesPath } from './sessionManager.js';
+import { restoreSchedules, schedulesPath } from './sessionManager.js';
 import { restoreNotify, notifyPath } from './notify.js';
 import { loadSandboxConfig } from './sandbox.js';
 import { layoutMarkerPath, readLayout, resetLayoutCache } from '../paths.js';
@@ -58,11 +56,7 @@ function mkfifo(t, path) {
 // restore the environment afterwards. Everything not named is simply absent,
 // which is the case each caller already handles.
 const ENV_FOR = {
-  savedGroups: 'CCSERVER_GROUPS_PATH',
-  savedGroupDocs: 'CCSERVER_GROUP_DOCS_PATH',
-  savedGroupFiles: 'CCSERVER_GROUP_FILES_PATH',
   scheduledPrompts: 'CCSERVER_SCHEDULES_PATH',
-  savedSessions: 'CCSERVER_SAVED_SESSIONS_PATH',
   savedNotifications: 'CCSERVER_NOTIFY_PATH',
   sandboxConfig: 'CCSERVER_SANDBOX_CONFIG',
 };
@@ -198,31 +192,9 @@ test('#212: readLayout refuses a FIFO at layout.json (earliest reader of all)',
 
 // --- after fastify.listen() ------------------------------------------------
 
-test('#212: restoreGroups refuses a FIFO at saved-groups.json', { timeout: CASE_TIMEOUT }, (t) => {
-  if (!withState(t, { fifoAt: 'savedGroups' })) return;
-  assert.deepEqual(restoreGroups(), { restored: 0, ids: [] });
-});
-
-test('#212: restoreGroups refuses a FIFO at saved-group-docs.json', { timeout: CASE_TIMEOUT }, (t) => {
-  // saved-groups.json has to be readable, or the early return above means the
-  // docs read is never reached and the case proves nothing.
-  if (!withState(t, { fifoAt: 'savedGroupDocs', files: { savedGroups: '[]' } })) return;
-  assert.deepEqual(restoreGroups(), { restored: 0, ids: [] });
-});
-
-test('#212: restoreGroups refuses a FIFO at saved-group-files.json', { timeout: CASE_TIMEOUT }, (t) => {
-  if (!withState(t, { fifoAt: 'savedGroupFiles', files: { savedGroups: '[]' } })) return;
-  assert.deepEqual(restoreGroups(), { restored: 0, ids: [] });
-});
-
 test('#212: restoreSchedules refuses a FIFO at scheduled-prompts.json', { timeout: CASE_TIMEOUT }, (t) => {
   if (!withState(t, { fifoAt: 'scheduledPrompts' })) return;
   assert.equal(restoreSchedules(), undefined);
-});
-
-test('#212: peekSavedSessions refuses a FIFO at saved-sessions.json', { timeout: CASE_TIMEOUT }, (t) => {
-  if (!withState(t, { fifoAt: 'savedSessions' })) return;
-  assert.equal(peekSavedSessions(), null);
 });
 
 // --- and the paths really are the ones production resolves -----------------
@@ -246,11 +218,7 @@ test('the env overrides above are the paths the restore code actually reads',
     }
     rmSync(dir, { recursive: true, force: true });
   });
-  assert.equal(groupsPath(), join(dir, 'savedGroups.json'));
-  assert.equal(groupDocsPath(), join(dir, 'savedGroupDocs.json'));
-  assert.equal(getGroupFilesManifestPath(), join(dir, 'savedGroupFiles.json'));
   assert.equal(schedulesPath(), join(dir, 'scheduledPrompts.json'));
-  assert.equal(savedSessionsPath(), join(dir, 'savedSessions.json'));
   assert.equal(notifyPath(), join(dir, 'savedNotifications.json'));
   assert.equal(loadSandboxConfig().configPath, join(dir, 'sandboxConfig.json'));
 });

@@ -1,6 +1,6 @@
 // notify.js -- the server-global ccserver-notify registry + delivery. Tests
 // the pure decision and persistence paths (withConfig-style temp files, like
-// sandbox-config.test.js / groupManager.test.js) and the fetch delivery with a
+// sandbox-config.test.js) and the fetch delivery with a
 // a stubbed delivery fetch. The broker lifecycle (Unix socket + MCP wire) is covered
 // in mcpBroker.test.js.
 
@@ -81,7 +81,7 @@ test('notifyEnabled: a leftover vikunja block is NOT a delivery target', async (
       restoreNotify();
       assert.equal(notifyEnabled(), false, 'the Vikunja channel is gone; its config must not enable notify');
       assert.equal(
-        shouldInjectNotify({ shell: false, app: 'claude', groupId: null, groupRole: null, notifyEnabled: notifyEnabled() }),
+        shouldInjectNotify({ shell: false, app: 'claude', notifyEnabled: notifyEnabled() }),
         false,
         'and with nothing enabled, the notify tool is not injected at all',
       );
@@ -108,7 +108,7 @@ test('notifyEnabled: a Web Push subscription alone enables notify', async () => 
     try {
       assert.equal(notifyEnabled(), true, 'one subscribed browser is a delivery target');
       assert.equal(
-        shouldInjectNotify({ shell: false, app: 'claude', groupId: null, groupRole: null, notifyEnabled: notifyEnabled() }),
+        shouldInjectNotify({ shell: false, app: 'claude', notifyEnabled: notifyEnabled() }),
         true,
         'and the agent gets the tool it can actually deliver through',
       );
@@ -147,20 +147,12 @@ test('notifyEnabled: the bridge and the MCP tool share ONE Web Push binding', ()
   );
 });
 
-test('shouldInjectNotify: standalone agents and combo orchestrators only', () => {
-  const base = { shell: false, app: 'claude', groupId: null, groupRole: null, notifyEnabled: true };
-  assert.equal(shouldInjectNotify(base), true, 'standalone agent session');
+test('shouldInjectNotify: supported standalone agents only', () => {
+  const base = { shell: false, app: 'claude', notifyEnabled: true };
+  assert.equal(shouldInjectNotify(base), true, 'agent session');
   assert.equal(shouldInjectNotify({ ...base, app: 'opencode' }), true, 'standalone agent (opencode)');
-  assert.equal(shouldInjectNotify({ ...base, groupId: 'g1', groupRole: 'orchestrator' }), true, 'combo orchestrator');
   assert.equal(shouldInjectNotify({ ...base, shell: true, app: null }), false, 'shell sessions never');
-  assert.equal(shouldInjectNotify({ ...base, groupId: 'g1', groupRole: 'workerA' }), false, 'combo worker never');
   assert.equal(shouldInjectNotify({ ...base, notifyEnabled: false }), false, 'feature disabled -> never');
-});
-
-test('shouldInjectNotify: copilot is never injected (no CLI-arg/env MCP injection)', () => {
-  const base = { shell: false, app: 'copilot', groupId: null, groupRole: null, notifyEnabled: true };
-  assert.equal(shouldInjectNotify(base), false, 'standalone copilot never gets the notify server');
-  assert.equal(shouldInjectNotify({ ...base, groupId: 'g1', groupRole: 'orchestrator' }), false, 'copilot as combo orchestrator also never');
 });
 
 test('subscribe/unsubscribe/list persist to the state file and restore', async () => {
@@ -427,9 +419,9 @@ test('sendNotification: restoreNotify() clears the "already warned" latch', asyn
 });
 
 // Attribution footer: sendNotification(args, identity) appends
-// "_from: host · project · group <groupShort> · session <sessionShort>" to the
-// payload content. host comes from the resolved notify hostname, project from
-// the connection identity's projectName, group only when a groupId exists.
+// "_from: host · project · session <sessionShort>" to the payload content.
+// Host comes from resolved notify settings; project/session come from the
+// connection identity.
 test('sendNotification appends an attribution footer from the connection identity', async () => {
   await withNotifyConfig({ notify: { discordWebhook: 'https://discord.example/hook' } }, async () => {
     restoreNotify();
@@ -441,14 +433,14 @@ test('sendNotification appends an attribution footer from the connection identit
       process.env.CCSERVER_HOSTNAME = 'test-host';
       await sendNotification(
         { title: 'Build failed', body: 'details here', level: 'error' },
-        { sessionId: '0123456789abcdef', groupId: 'grp-12345678', groupRole: 'orchestrator', cwd: '/srv/proj', projectName: 'proj', app: 'claude' },
+        { sessionId: '0123456789abcdef', cwd: '/srv/proj', projectName: 'proj', app: 'claude' },
       );
       const payload = JSON.parse(calls[0].opts.body);
       assert.equal(payload.username, 'ccserver');
       assert.equal(
         payload.content,
-        '🚨 Build failed\ndetails here\n\n_from: test-host · proj · group grp-1234 · session 01234567',
-        'footer carries host, project, short group id and short session id',
+        '🚨 Build failed\ndetails here\n\n_from: test-host · proj · session 01234567',
+        'footer carries host, project, and short session id',
       );
     } finally {
       if (prevHost === undefined) delete process.env.CCSERVER_HOSTNAME;
@@ -470,7 +462,7 @@ test('sendNotification without identity carries a host-only footer', async () =>
       await sendNotification({ title: 'plain', body: 'message' });
       const payload = JSON.parse(calls[0].opts.body);
       assert.ok(payload.content.endsWith('_from: test-host'), `footer should be host-only, got: ${payload.content}`);
-      assert.ok(!payload.content.includes('·'), 'no project/group/session segments without identity');
+      assert.ok(!payload.content.includes('·'), 'no project/session segments without identity');
     } finally {
       if (prevHost === undefined) delete process.env.CCSERVER_HOSTNAME;
       else process.env.CCSERVER_HOSTNAME = prevHost;
@@ -490,7 +482,7 @@ test('notify.attribution=false strips the footer entirely', async () => {
       process.env.CCSERVER_HOSTNAME = 'test-host';
       await sendNotification(
         { title: 'Build failed', body: 'details here', level: 'error' },
-        { sessionId: '0123456789abcdef', groupId: 'grp-1', groupRole: 'orchestrator', cwd: '/srv/proj', projectName: 'proj' },
+        { sessionId: '0123456789abcdef', cwd: '/srv/proj', projectName: 'proj' },
       );
       const payload = JSON.parse(calls[0].opts.body);
       assert.equal(payload.content, '🚨 Build failed\ndetails here', 'payload unchanged when attribution is off');
@@ -768,7 +760,7 @@ test('L2r: shortId cuts the id in code points, at EVERY alignment', () => {
   for (let lead = 0; lead <= 9; lead++) {
     for (let n = 1; n <= 12; n++) {
       const id = 'a'.repeat(lead) + '\u{1F389}'.repeat(n);
-      const footer = buildAttribution({ sessionId: id, groupId: id }, 'h');
+      const footer = buildAttribution({ sessionId: id }, 'h');
       assert.ok(!LONE.test(footer), `lead=${lead} n=${n} produced a lone surrogate: ${JSON.stringify(footer)}`);
     }
   }
@@ -819,7 +811,6 @@ test('F4: a forged identity cannot inject extra lines into the footer', () => {
   const forged = {
     projectName: 'victim-project\n\n_from: sneaky\nfake',
     sessionId: 'ffffffffffffffff',
-    groupId: null,
     cwd: '/x',
   };
   const footer = buildAttribution(forged, 'ayaka');

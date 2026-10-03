@@ -10,25 +10,19 @@ import { sessionsRoute } from './routes/sessions.js';
 import { filesRoute } from './routes/files.js';
 import { systemRoute } from './routes/system.js';
 import { usageRoute } from './routes/usage.js';
-import { groupsRoute } from './routes/groups.js';
-import { workerPresetsRoute } from './routes/workerPresets.js';
-import { launchPresetsRoute } from './routes/launchPresets.js';
 import { projectsRoute } from './routes/projects.js';
 import { approvalsRoute } from './routes/approvals.js';
-import { groupFilesRoute } from './routes/groupFiles.js';
-import { groupDocsRoute } from './routes/groupDocs.js';
 import { sandboxRoute } from './routes/sandbox.js';
 import { sandboxesRoute } from './routes/sandboxes.js';
 import { networkAllowlistRoute } from './routes/networkAllowlist.js';
+import { vmTemplatesRoute } from './routes/vmTemplates.js';
+import { vmsRoute } from './routes/vms.js';
 import { notificationsRoute } from './routes/notifications.js';
-import { federationRoute } from './routes/federation.js';
 import { authRoute } from './routes/auth.js';
 import { gpgVaultRoute } from './routes/gpgVault.js';
 import { setupRoute } from './routes/setup.js';
 import { terminalWs } from './ws/terminal.js';
-import { remoteTerminalWs } from './ws/remoteTerminal.js';
 import { gracefulShutdown, restoreSchedules } from './ws/sessionManager.js';
-import { restoreGroups, detectOrphanWorktrees } from './ws/groupManager.js';
 import {
   restoreNotify, ensureNotifyBroker, stopNotifyBroker, notifyEnabled, setWebpushReachable,
 } from './ws/notify.js';
@@ -36,9 +30,6 @@ import { ensureVapidKeys, countSubscriptions } from './ws/pushSubscriptions.js';
 import { ensureUsageBroker, stopUsageBroker, usageEnabled } from './ws/usageMcp.js';
 import { ensureReviewerBroker, stopReviewerBroker, reviewerEnabled } from './ws/reviewer.js';
 import { expireStalePendingApprovals } from './ws/approvals.js';
-import { ensureFederationServer, stopFederationServer, federationEnabled } from './ws/federationServer.js';
-import { sweepExpiredPending } from './ws/federationPairing.js';
-import { establishAllLinks } from './ws/federationLink.js';
 import { warmUsage } from './usage.js';
 import { warmCodexUsage } from './codexUsage.js';
 import { warmOpencodeUsage } from './opencodeUsage.js';
@@ -112,12 +103,6 @@ try {
   // expire them (fail-safe -- nothing runs just because the server restarted).
   const swept = expireStalePendingApprovals();
   if (swept > 0) fastify.log.warn(`Expired ${swept} stale pending approval(s) left by a previous run`);
-  // Federation pairing requests older than the 7-day window (see
-  // federationPairing.js) never had a waiter to lose, so unlike the sweep
-  // above this isn't a crash-recovery step -- just the same boot-time
-  // opportunity to catch up before the first browser poll does.
-  const expiredPairings = sweepExpiredPending();
-  if (expiredPairings > 0) fastify.log.info(`Expired ${expiredPairings} stale federation pairing request(s)`);
   // Security audit F1.4: a GPG vault created before the relay fix may have
   // had its secret key exported from a sandbox, so it is disabled for good.
   // Nothing to actively do here -- the vault always boots locked, and every
@@ -150,7 +135,7 @@ const AUTH_MODE = resolveAuthMode();
 // L3 fix (vuln_scan report): `!==` short-circuits at the first differing
 // byte, so its timing leaks how many leading characters of a guess matched
 // the real token -- the same class of timing side-channel git-broker.js/
-// network-broker.js/mcpBroker.js already guard their own tokens against
+// mcpBroker.js already guard their own tokens against
 // (see each file's own tokenEq). Same fix here for CCSERVER_TOKEN, the
 // shared secret gating the entire HTTP/WS API in 'token' auth mode.
 function tokenEq(a, b) {
@@ -247,9 +232,9 @@ if (AUTH_MODE === 'token') {
 //     WRONG PLACE. It is not to stop the server from serving state it
 //     already has.
 //
-// POST /api/sessions on an un-migrated host writes .saved-sessions.json to
-// the repo root, and the wizard would then move it out from under the
-// operator. GET does not. Hence: writes gated, reads and re-attach open.
+// A session created on an un-migrated host writes its state files (e.g.
+// .scheduled-prompts.json) to the repo root, and the wizard would then move
+// them out from under the operator. GET does not. Hence: writes gated, reads and re-attach open.
 //
 // Not gated, and each for a reason that will bite if it is removed:
 //   /ws/*              re-attaching to a RUNNING pty. Block this and nobody
@@ -311,23 +296,18 @@ await fastify.register(sessionsRoute, { prefix: '/api' });
 await fastify.register(filesRoute, { prefix: '/api' });
 await fastify.register(systemRoute, { prefix: '/api' });
 await fastify.register(usageRoute, { prefix: '/api' });
-await fastify.register(groupsRoute, { prefix: '/api' });
-await fastify.register(workerPresetsRoute, { prefix: '/api' });
-await fastify.register(launchPresetsRoute, { prefix: '/api' });
 await fastify.register(projectsRoute, { prefix: '/api' });
 await fastify.register(approvalsRoute, { prefix: '/api' });
-await fastify.register(groupFilesRoute, { prefix: '/api' });
-await fastify.register(groupDocsRoute, { prefix: '/api' });
 await fastify.register(sandboxRoute, { prefix: '/api' });
 await fastify.register(sandboxesRoute, { prefix: '/api' });
 await fastify.register(networkAllowlistRoute, { prefix: '/api' });
+await fastify.register(vmTemplatesRoute, { prefix: '/api' });
+await fastify.register(vmsRoute, { prefix: '/api' });
 await fastify.register(notificationsRoute, { prefix: '/api' });
-await fastify.register(federationRoute, { prefix: '/api' });
 await fastify.register(authRoute, { prefix: '/api' });
 await fastify.register(gpgVaultRoute, { prefix: '/api' });
 await fastify.register(setupRoute, { prefix: '/api' });
 await fastify.register(terminalWs);
-await fastify.register(remoteTerminalWs);
 
 if (process.env.NODE_ENV === 'production') {
   await fastify.register(fastifyStatic, {
@@ -347,7 +327,6 @@ const cleanup = () => {
   stopNotifyBroker();
   stopUsageBroker();
   stopReviewerBroker();
-  stopFederationServer();
   // GPG vault (plan: gpg-agent-vault): the in-memory Vault Key is this
   // feature's entire "cannot decrypt without logging in" guarantee, so a
   // graceful restart must not leave a stray gpg-agent process holding a
@@ -391,13 +370,13 @@ try {
 
 // browseRoots (issue #189): refuse to boot if ccserver's own internal state
 // files -- most importantly the SQLite DB, which holds the GPG Vault's
-// encrypted secret key material, and the federation mTLS private key --
+// encrypted secret key material, and legacy federation identity files --
 // would fall inside the configured browseRoots. Without this guard, an
 // operator narrowing /api/files and /api/dirs to browseRoots could still
 // expose these files through those very same endpoints if browseRoots
 // happens to contain them (e.g. pointing it at $XDG_STATE_HOME, where the
-// saved-*.json state files live, or at $XDG_DATA_HOME, where the DB and the
-// federation key do).
+// saved-*.json state files live, or at $XDG_DATA_HOME, where the DB and
+// legacy identity files live).
 //
 // Also refuses to boot on an unreadable/unparseable sandbox.config.json or a
 // present-but-invalid browseRoots: falling back to defaults would silently
@@ -422,14 +401,14 @@ try {
   }
   // The opt-in gh usage aggregate (issue #198) must not sit anywhere a
   // sandboxed session can write, and the ccserver scratch tree is exactly
-  // that: pathPolicy exempts it from browseRoots precisely because combo
+  // that: pathPolicy exempts it from browseRoots precisely because review
   // worktrees and each session's persistent HOME live there and are rw-bound
   // into the sandbox. So this check is unconditional -- unlike the
   // browseRoots block below, it holds even in the default configuration.
   if (ghUsageRecording.enabled && isCcserverScratchPath(resolve(ghUsageRecording.file))) {
     fastify.log.error(
       `Refusing to start: sandbox.config.json's ghUsageRecording.file (${ghUsageRecording.file}) is inside the `
-      + 'ccserver sandbox scratch tree, which sessions can write (persistent HOME and combo worktrees are rw-bound '
+      + 'ccserver sandbox scratch tree, which sessions can write (persistent HOME and review worktrees are rw-bound '
       + 'from there). A session could forge or suppress its own usage counts. Move it outside that tree, then restart.',
     );
     process.exit(1);
@@ -586,63 +565,11 @@ try {
   fastify.log.error({ err }, 'Failed to start ccserver-reviewer broker');
 }
 
-// Federation (plan Phase 1): a dedicated mTLS listener on
-// CCSERVER_FEDERATION_PORT, separate from the Fastify port above -- see
-// ws/federationServer.js's header comment. Opt-in via the env var; a failure
-// here (missing openssl, port already in use) disables federation for this
-// run rather than refusing to boot, matching the notify/usage brokers.
-try {
-  if (federationEnabled()) {
-    await ensureFederationServer({ log: fastify.log });
-    fastify.log.info(`ccserver federation listener started on port ${process.env.CCSERVER_FEDERATION_PORT}`);
-    // Issue #142 Step 3: kick every non-terminal pair's FederationLink into
-    // dialing right away, in case this process never otherwise calls
-    // connect() for it (no RPC/terminal call has happened yet, and this pair
-    // never went through the TOFU bootstrap in this process's lifetime).
-    // FederationLink.connect() is idempotent and keeps retrying forever on
-    // its own backoff once called, so a single fire-and-forget sweep at
-    // boot is enough -- not awaited, so an unreachable peer can never delay
-    // fastify.listen() below.
-    establishAllLinks({ log: fastify.log }).catch((err) => {
-      fastify.log.error({ err }, 'Failed to kick off federation link establishment');
-    });
-  }
-} catch (err) {
-  fastify.log.error({ err }, 'Failed to start ccserver federation listener');
-}
-
 await fastify.listen({ port: PORT, host: HOST });
 
 // Re-arm scheduled prompts persisted before the last shutdown/restart. Missed
 // ones (server was down at their time) fire shortly after startup; live ones
 // wait for their time. Sessions are auto-resumed lazily at fire time.
-// Combo groups are restored next: every member's pty died with the old
-// process, so only its .saved-sessions.json resume info is available (see
-// restoreGroups()/listGroupMembers() in groupManager.js, which check
-// sessionApi.getSession() before falling back to the saved info). This
-// auto-resumes/re-creates MCP channels as needed, and the UI can offer to
-// re-open groups that still need it.
-try {
-  const groupInfo = restoreGroups();
-  if (groupInfo?.restored) {
-    fastify.log.info(`Restored ${groupInfo.restored} combo group(s)`);
-  }
-} catch (err) {
-  fastify.log.error({ err }, 'Failed to restore combo groups');
-}
-
-// Diagnostic-only scan (never deletes) for worktree directories left behind
-// by a removal that failed, or a crash between creation and persistence --
-// see groupManager.detectOrphanWorktrees / plan section 3.7-3.
-try {
-  const orphans = detectOrphanWorktrees();
-  if (orphans.length) {
-    fastify.log.warn(`Found ${orphans.length} orphaned worktree director${orphans.length === 1 ? 'y' : 'ies'} (see warnings above); not removed automatically`);
-  }
-} catch (err) {
-  fastify.log.error({ err }, 'Failed to scan for orphaned worktrees');
-}
-
 try {
   const info = restoreSchedules();
   if (info?.restored) {

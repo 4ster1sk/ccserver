@@ -140,10 +140,9 @@ export const REFERENCE_COLS = 100;
 //
 // Only apps whose REAL frames were captured are listed. This mirrors the
 // posture appLaunch.js's detectPermissionPrompt already takes: an unverified
-// frame is never guessed at. codex, copilot and commandcode are absent on
-// purpose -- they are not installed on the host this was built against, so
-// they fall back to the screen-movement rule below (still correct, just
-// without the marker's certainty, which is why QUIET_UNVERIFIED_MS makes them
+// frame is never guessed at. codex is absent on purpose -- it is not
+// installed on the host this was built against, so it falls back to the screen-movement rule below (still correct, just
+// without the marker's certainty, which is why QUIET_UNVERIFIED_MS makes it
 // slower to claim green). Adding one is a single row here plus a
 // captured-frame fixture in activity.test.js.
 //
@@ -185,8 +184,8 @@ export function appHasBusyMarker(app) {
 // The marker table entry for an app, or null. Goes through hasOwnProperty so
 // an app id that collides with an Object.prototype member ('constructor',
 // 'toString', ...) reads as "no entry" instead of returning a function and
-// blowing up on entry.re. Group members can carry an app string straight out
-// of .saved-groups.json / .saved-sessions.json, which is a file on disk.
+// blowing up on entry.re. Restored schedules can carry a legacy app string
+// from their state file.
 export function busyMarkerFor(app) {
   return appHasBusyMarker(app) ? APP_BUSY_MARKERS[app] : null;
 }

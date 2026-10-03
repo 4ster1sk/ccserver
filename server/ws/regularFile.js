@@ -20,17 +20,7 @@
 // not a regular file, and anything over the cap, throws instead of blocking,
 // which is the shape callers already handle.
 //
-// This is the single implementation of that pattern. worktree.js's
-// readGitdirFile() is a thin wrapper over it (it was the original copy, and
-// carried the short-read bug fixed here -- issue #229).
-//
-// One reader stays separate: groupManager.js's publishGroupFileFromAgent()
-// streams a caller-supplied file into a blob with a fixed-size read/write
-// loop, so it has no text to return, no size to pre-allocate and a
-// containment check (/proc/self/fd) that has no meaning here. Sharing code
-// between the two would mean a function that copies OR returns text depending
-// on its arguments, which is a worse seam than two honest readers.
-//
+// Callers that read user-writable state share this implementation.
 // What it does NOT get to skip is the flags. It opens with O_NOFOLLOW |
 // O_NONBLOCK for the reasons above, and its own fstat isFile() check rejects
 // what that open lets through. Keeping the function separate is a judgement
@@ -41,10 +31,8 @@
 
 import { closeSync, constants, fstatSync, openSync, readSync } from 'node:fs';
 
-// Generous on purpose: these are JSON files ccserver itself wrote, and a cap
-// that a legitimate file could cross would turn "restore my groups" into
-// "silently start empty". The cap exists to bound a planted file, not to
-// police our own output.
+// Generous on purpose: these are JSON files ccserver itself wrote. The cap
+// bounds a planted file without policing ordinary state size.
 export const STATE_FILE_MAX_BYTES = 64 * 1024 * 1024;
 
 /**

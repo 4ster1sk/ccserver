@@ -84,8 +84,8 @@ test('requestApproval blocks until decideApproval resolves it as approved', asyn
 });
 
 test('a rejected decision resolves the waiter with rejected and nothing runs', async () => {
-  const p = requestApproval({ ...validInput(), kind: 'destroy_group', payload: { groupId: 'g1' } });
-  const id = listApprovals().pending.find((x) => x.kind === 'destroy_group').id;
+  const p = requestApproval({ ...validInput(), kind: 'close_session', payload: { sessionId: 'sess-2' } });
+  const id = listApprovals().pending.find((x) => x.payload.sessionId === 'sess-2').id;
   assert.equal(decideApproval(id, 'rejected').ok, true);
   const result = await p;
   assert.equal(result.status, 'rejected');

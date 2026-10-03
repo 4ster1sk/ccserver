@@ -123,7 +123,7 @@ if (command === 'enable') {
   }
   // Same two refusals index.js applies at boot, so the operator hears about
   // it now instead of as a server that will not start. The scratch tree is
-  // sandbox-writable regardless of browseRoots (persistent HOME and combo
+  // sandbox-writable regardless of browseRoots (persistent HOME and review
   // worktrees are rw-bound from there), so that one is unconditional.
   if (isCcserverScratchPath(file)) {
     die(`Refusing to enable: ${q(file)} is inside the ccserver sandbox scratch tree, which sessions can write. Choose a path outside it.`);

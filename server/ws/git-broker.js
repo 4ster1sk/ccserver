@@ -58,6 +58,7 @@ import { computeGitAllowlist, normalizeGitUrl, resolveOriginUrl } from './gitAll
 import { classifyGhInvocation, extractGhTextFields, findBlockedGhFileArg } from './ghAllowlist.js';
 import { buildGuardConfig, compilePatterns, findBlockedMatch } from './commitGuard.js';
 import { classifyGhUsage, recordGhUsage } from '../ghUsageRecording.js';
+import { hardenedGitEnv } from './hostGitEnv.js';
 
 const GH_EXEC_TIMEOUT_MS = 30_000;
 const GH_EXEC_MAX_BYTES = 10 * 1024 * 1024;
@@ -161,7 +162,9 @@ function execGh(argv, cwd, stdinBuf) {
   return new Promise((resolve) => {
     let child;
     try {
-      child = spawn('gh', argv, { cwd, stdio: ['pipe', 'pipe', 'pipe'] });
+      // gh shells out to git in the (sandbox-writable) repo: pin the
+      // command-running git settings (see hostGitEnv.js).
+      child = spawn('gh', argv, { cwd, stdio: ['pipe', 'pipe', 'pipe'], env: hardenedGitEnv() });
     } catch {
       resolve({ ok: false, reason: 'exec-failed' });
       return;
@@ -187,9 +190,7 @@ function execGh(argv, cwd, stdinBuf) {
     // the handler above does not cover them -- and they are asynchronous, so
     // a try/catch around the write cannot either. Unhandled, they take this
     // whole broker process down, and with it every git and gh call for the
-    // session it serves. network-broker.js guards its own child's stdin for
-    // exactly this reason; gh relay was added later and did not get the same
-    // treatment.
+    // session it serves.
     //
     // `gh` closing stdin early is NORMAL, not a fault: a subcommand that does
     // not read stdin exits as soon as it is done, and whatever is still in
@@ -381,17 +382,11 @@ function handleRequest(line, conn, ctx) {
     conn.end(`${JSON.stringify({ ok: false, reason: 'bad-request' })}\n`);
     return;
   }
-  // Connection auth: on macOS Seatbelt this socket sits in a shared /tmp dir
-  // reachable by every concurrent sandboxed session (bwrap binds it per-session
-  // so this is belt-and-suspenders there). The per-session token (delivered to
-  // the sandbox via CCSANDBOX_GIT_BROKER_TOKEN) keeps an unauthorized connect()
-  // from borrowing another session's repo-scoped credentials -- but on macOS it
-  // is an audit / accident-prevention layer, NOT a hard boundary: a same-UID
-  // peer session can still recover this token by reading the target's env via
-  // the numeric-MIB KERN_PROCARGS2 (unblockable under Seatbelt -- see
-  // sandbox-seatbelt.js's KNOWN LIMITATION). The real boundary there is the
-  // repo-scoped allow-list below. Fail closed: no configured token rejects
-  // everything.
+  // The per-session token (delivered to the sandbox via
+  // CCSANDBOX_GIT_BROKER_TOKEN) authenticates the connection before it can
+  // borrow repo-scoped credentials. The repo-scoped allow-list below remains
+  // the actual authorization boundary. Fail closed: no configured token
+  // rejects everything.
   if (!tokenEq(req && req.token, ctx.token)) {
     conn.end(`${JSON.stringify({ ok: false, reason: 'unauthorized' })}\n`);
     return;
@@ -489,8 +484,7 @@ function runServer({ sock, allowlist, cwd, commitGuard, app }) {
 //
 // The child process was only ever there because startGitBroker was
 // synchronous and could not await a socket. It is async now (see the wait
-// above), so the parent can just speak the protocol itself -- which is what
-// network-broker.js's probeBroker already does. Removing the child removes
+// above), so the parent can just speak the protocol itself. Removing the child removes
 // the cost that was blowing the budget, instead of raising the budget to
 // cover it.
 function probeBrokerReady(sockPath, timeoutMs, token = '') {
@@ -572,7 +566,7 @@ const BROKER_STARTUP_BUDGET_MS = 10_000;
 
 // Read per call rather than captured at module load, so a test can pin a
 // short budget around a deliberately-hung child instead of paying the
-// production value (see network-broker.test.js).
+// production value.
 export function brokerStartupBudgetMs() {
   const raw = Number(process.env.CCSERVER_BROKER_STARTUP_TIMEOUT_MS);
   return Number.isFinite(raw) && raw > 0 ? raw : BROKER_STARTUP_BUDGET_MS;
@@ -620,8 +614,7 @@ export function brokerStartFailureReason({ spawnError, proc, waitedMs, budgetMs,
     + '-- raise CCSERVER_BROKER_STARTUP_TIMEOUT_MS on a loaded host';
 }
 
-// `spawnProcess` is injectable for the same reason network-broker.js makes it
-// injectable: the launch FAILURE paths (a child that dies at once, a child
+// `spawnProcess` is injectable because the launch FAILURE paths (a child that dies at once, a child
 // that never publishes its socket) cannot be produced with the real broker,
 // and they are the paths #248 is about.
 export async function startGitBroker(
@@ -702,8 +695,7 @@ export async function startGitBroker(
   // That is an ORDERING requirement, and `await` satisfies it exactly as well
   // as blocking did. This used to be a synchronous Atomics.wait busy-wait,
   // justified by a comment saying buildSandboxSpawn was synchronous; it is
-  // not, and has not been since network-broker's H1 review made it async --
-  // sandbox.js already awaits startNetworkBroker a few lines away. Holding
+  // not -- sandbox.js already awaits startGitBroker. Holding
   // the main thread here was therefore buying nothing, and #248 raised the
   // budget from 2s to 10s, which would have turned the worst case into a 10s
   // event-loop freeze with the SIGTERM handler wedged behind it -- the same
@@ -766,10 +758,10 @@ function parseServeArgs(argv) {
   return out;
 }
 
-// process.argv[1] === __filename matters because network-broker.js imports
-// helpers from this module and also uses '--serve' as its own argv[2]: without
-// this check, every network-broker child process would inadvertently run this
-// module's runServer() too (see network-broker.js's matching guard).
+// process.argv[1] === __filename matters because this module also uses
+// '--serve' as its own argv[2]: without this check, an unrelated child
+// process spawned with the same flag would inadvertently run this module's
+// runServer() too.
 if (process.argv[2] === '--serve' && process.argv[1] === __filename) {
   runServer(parseServeArgs(process.argv.slice(3)));
 }

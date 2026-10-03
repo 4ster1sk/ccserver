@@ -42,16 +42,16 @@ description: エージェントが自分で呼べる通知用 MCP サーバー�
 🚨 Build failed
 details here
 
-_from: myhost · myproject · group abc12345 · session 01234567
+_from: myhost · myproject · session 01234567
 ```
 
 - `<host>` は常に付与 (複数ホストで同じ webhook を共有する場合は `notify.hostname` で固定できます)。
-- `<project>` はセッションの cwd の basename、`group <…>` はコンボのグループ ID 先頭 8 文字 (スタンドアロンでは付かない)、`session <…>` はセッション ID 先頭 8 文字です。
+- `<project>` はセッションの cwd の basename、`session <…>` はセッション ID 先頭 8 文字です。
 - フッターを出したくない場合は `notify.attribution: false` で丸ごと無効化できます (既定 `true`)。
 
 ## 注入条件
 
-スタンドアロン (グループ外) のエージェントセッションと、コンボ起動の**オーケストレーターのみ**に注入されます。シェル・コンボのワーカーには注入されません。サンドボックス内外どちらでも動作します (サンドボックス内はソケットを bind、外はホストの node でブリッジを実行)。
+エージェントセッションに注入されます。シェルには注入されません。サンドボックス内外どちらでも動作します (サンドボックス内はソケットを bind、外はホストの node でブリッジを実行)。
 
 ## ツール
 
@@ -77,7 +77,6 @@ _from: myhost · myproject · group abc12345 · session 01234567
 サンドボックス内の CLI は**ホストの通知デーモンに到達できません**。
 
 - bwrap はホストの D-Bus セッションソケットを bind しないので `notify-send` は原理的に動きません。
-- macOS の seatbelt プロファイルは Apple Events を許可していないので `osascript` / `terminal-notifier` も動きません。
 
 残る出口は **pty の標準出力**、つまり通知用のエスケープシーケンスだけです。ブリッジはそこを読みます。
 
@@ -121,7 +120,7 @@ _from: myhost · myproject · group abc12345 · session 01234567
 | キー | 既定 | 意味 |
 |---|---|---|
 | `enabled` | `false` | 機能全体。オフの間は捕捉も設定注入も行わず、**CLI の起動コマンドラインは機能追加前と完全に同一**です |
-| `apps` | `["claude","opencode"]` | 捕捉対象。`codex` は検証環境に binary が無く未検証のため既定から外してあります (選択は可能)。`copilot` / `commandcode` は設定注入の手段が無いため「既定で吐けば拾えるだけ」です |
+| `apps` | `["claude","opencode"]` | 捕捉対象。`codex` は検証環境に binary が無く未検証のため既定から外してあります (選択は可能)。Codex は任意設定で捕捉対象にできます |
 | `injectConfig` | `true` | 上記の「吐かせる」設定を注入するか |
 | `channels` | `["discord","webpush"]` | 転送先。空にすると検出器自体が付きません |
 | `captureBell` | `false` | 裸の BEL も通知として扱う。シェルの補完音や `printf '\a'` と区別できないため既定オフ |

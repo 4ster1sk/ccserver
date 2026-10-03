@@ -97,7 +97,7 @@ test('hamburger is always at the left end; shell tabs go to the vertical menu, n
   await page.locator('.tab-list').getByTitle('Files').click();
   const barCountBefore = await barTabs(page).count();
   await openTerminalBtn(page).click();
-  // The horizontal bar must not gain a terminal tab; Files/Remote stay.
+  // The horizontal bar must not gain a terminal tab; Files stays.
   await expect(barTabs(page)).toHaveCount(barCountBefore);
   await expect(page.locator('.session-menu-count')).toHaveText('1');
   await waitForShellPrompt(page);

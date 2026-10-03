@@ -7,7 +7,6 @@ import { authWsUrl, authFetch } from '../auth.js';
 import { createOsc52Handler } from '../osc52.js';
 import { dewrapSelection } from '../dewrap.js';
 import { displayPath } from '../displayPath.js';
-import { isElevatedPermissionMode } from '../permissionMode.js';
 import { useGpgVaultStatusContext } from './GpgVaultStatusProvider.jsx';
 import { gpgVaultBadgeState } from '../gpgVaultBadge.js';
 
@@ -176,9 +175,7 @@ const PING_INTERVAL_MS = 30000;
 
 function appLabel(app) {
   if (app === 'claude') return 'Claude Code';
-  if (app === 'copilot') return 'GitHub Copilot';
   if (app === 'codex') return 'OpenAI Codex';
-  if (app === 'commandcode') return 'Command Code';
   return 'opencode';
 }
 
@@ -237,7 +234,7 @@ function osc52Response(text) {
   return `\x1b]52;c;${btoa(bin)}\x07`;
 }
 
-export default function TerminalView({ cwd, onClose, claudeSessionId, shell, sandbox, sandboxOpts, reuseSandboxHome = true, app = 'claude', model = null, permissionMode = 'standard', resume = false, customLabel = null, notify, notifyEnabled, notifyPermission, onToggleNotify, visible, onSessionId, onSandboxResolved, onExited, attachSessionId, xtermTheme, tabId, onFocusTab, groupId, groupRole, projectCwd = null, remoteInstanceId = null, remoteInstanceLabel = null }) {
+export default function TerminalView({ cwd, onClose, claudeSessionId, shell, sandbox, sandboxOpts, reuseSandboxHome = true, app = 'claude', model = null, resume = false, customLabel = null, notify, notifyEnabled, notifyPermission, onToggleNotify, visible, onSessionId, onSandboxResolved, onExited, attachSessionId, xtermTheme, tabId, onFocusTab }) {
   const isMobile = useMemo(() => 'ontouchstart' in window, []);
   const terminalRef = useRef(null);
   const terminalViewRef = useRef(null);
@@ -259,17 +256,7 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
   const reuseSandboxHomeRef = useRef(reuseSandboxHome);
   const appRef = useRef(app);
   const modelRef = useRef(model);
-  // commandcode permission mode ('standard' | 'auto-accept' | 'yolo'): must
-  // ride along on EVERY init -- dropping it on the SESSION_NOT_FOUND re-init
-  // would resurrect a yolo session as standard.
-  const permissionModeRef = useRef(permissionMode);
   const resumeRef = useRef(resume);
-  // Set once per tab (a terminal tab never switches between local/remote
-  // mid-life -- App.jsx always creates a fresh tab id for that), so a plain
-  // ref (not re-read from the prop on reconnect) is enough; kept as a ref
-  // only for consistency with the other launch-setting refs above.
-  const remoteInstanceIdRef = useRef(remoteInstanceId);
-  const remoteInstanceLabelRef = useRef(remoteInstanceLabel);
   // Size the server confirmed for the (possibly shared) pty. With a second
   // device attached the pty runs at the smallest viewport among the clients,
   // so our own fit() result is only a *request* -- this is what actually
@@ -292,7 +279,7 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
   const [autoYes, setAutoYes] = useState(false);
   const [autoYesLog, setAutoYesLog] = useState([]);
   const [showAutoYesLog, setShowAutoYesLog] = useState(false);
-  // Network isolation (see network-broker.js): `armed` is fixed for this
+  // Network isolation (see ccserver-netbroker): `armed` is fixed for this
   // session's whole life (it was launched with isolation on, so a broker/
   // boundary genuinely exists); `enabled` is the broker's current live
   // enforce/open policy, which the button below flips without any sandbox
@@ -301,6 +288,9 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
   // whether isolation is enabled for it, only in toggling `enabled` once it is.
   const [networkIsolateArmed, setNetworkIsolateArmed] = useState(false);
   const [networkIsolateEnabled, setNetworkIsolateEnabled] = useState(false);
+  // 'vm' on a persistent VM: its one broker serves every session on it, so
+  // the toggle flips them all (the server broadcasts the new state to each).
+  const [networkIsolateScope, setNetworkIsolateScope] = useState('session');
   // Effective gpgVault flag THIS session actually launched with (arrives
   // live over the WS `session` message, server/ws/terminal.js) -- see
   // gpgVaultBadge.js for why "active" here means "will work right now", not
@@ -771,7 +761,7 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
     }
 
     // Shared by the initial connect and the SESSION_NOT_FOUND re-init below
-    // so the two launch paths can't drift on how shell/permission/group state
+    // so the launch paths can't drift on how session state
     // gets translated into the wire message.
     function buildInitMsg(dims) {
       return {
@@ -782,14 +772,11 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
         shell: !!shellRef.current,
         sandbox: !!sandboxRef.current,
         sandboxOpts: sandboxOptsRef.current || null,
+        // Settings > VM's Terminal: the server opens a shell on that VM.
+        ...(sandboxOptsRef.current?.vmShellId ? { vmShellId: sandboxOptsRef.current.vmShellId } : {}),
         reuseSandboxHome: reuseSandboxHomeRef.current !== false,
         app: appRef.current,
         model: shellRef.current ? null : modelRef.current,
-        permissionMode: shellRef.current ? 'standard' : (permissionModeRef.current || 'standard'),
-        // Group membership is carried into a re-launch so the server can
-        // re-create the member's MCP channel and register it to the role.
-        groupId: groupId || null,
-        groupRole: groupRole || null,
       };
     }
 
@@ -833,13 +820,7 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
       }
 
       const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-      // A remote (federated) tab talks to /ws/remote-terminal instead, which
-      // relays the exact same message vocabulary to the paired peer over its
-      // own federation channel (see server/ws/remoteTerminal.js) -- every
-      // message below stays unchanged except for the added instanceId, which
-      // the relay uses only to pick a channel and never forwards.
-      const wsPath = remoteInstanceIdRef.current ? '/ws/remote-terminal' : '/ws/terminal';
-      const wsUrl = `${protocol}//${window.location.host}${wsPath}`;
+      const wsUrl = `${protocol}//${window.location.host}/ws/terminal`;
       const ws = new WebSocket(authWsUrl(wsUrl));
       wsRef.current = ws;
 
@@ -855,16 +836,14 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
               sessionId: sessionIdRef.current,
               cols: dims?.cols || 80,
               rows: dims?.rows || 24,
-              instanceId: remoteInstanceIdRef.current || undefined,
             })
           );
         } else {
           const initMsg = buildInitMsg(dims);
-          initMsg.instanceId = remoteInstanceIdRef.current || undefined;
           if (!shellRef.current && claudeResumeIdRef.current) {
             initMsg.claudeSessionId = claudeResumeIdRef.current;
             claudeResumeIdRef.current = null;
-          } else if (!shellRef.current && (appRef.current === 'opencode' || appRef.current === 'copilot' || appRef.current === 'codex' || appRef.current === 'commandcode') && resumeRef.current) {
+          } else if (!shellRef.current && (appRef.current === 'opencode' || appRef.current === 'codex') && resumeRef.current) {
             initMsg.resume = true;
           }
           ws.send(JSON.stringify(initMsg));
@@ -945,6 +924,7 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
           case 'network_isolation_state':
             setNetworkIsolateArmed(!!msg.armed);
             setNetworkIsolateEnabled(!!msg.enabled);
+            setNetworkIsolateScope(msg.scope === 'vm' ? 'vm' : 'session');
             break;
           case 'schedule_state':
             setSchedule(msg.scheduled || null);
@@ -1016,8 +996,8 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
                 if (savedClaudeId) {
                   initMsg.claudeSessionId = savedClaudeId;
                   claudeResumeIdRef.current = null;
-                } else if ((app === 'opencode' || app === 'copilot' || app === 'codex' || app === 'commandcode') && resumeRef.current) {
-                  // opencode/copilot/codex/commandcode have no conversation id in
+                } else if ((app === 'opencode' || app === 'codex') && resumeRef.current) {
+                  // opencode/codex have no conversation id in
                   // their byte stream, so a re-launch continues via `-c` /
                   // `--continue` / `resume --last` (last session of the
                   // project) like the saved-session flow does.
@@ -1049,11 +1029,9 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
           // this session. This is the default path: session sharing
           // (CCSERVER_SESSION_SHARING) is opt-in and off unless the operator
           // enables it, and it's also what a ccserver older than session
-          // sharing does unconditionally (most realistically reached over
-          // federation, where the peer instance upgrades on its own
-          // schedule). Without this the reconnect logic would fight the
-          // eviction -- reconnect, get evicted, reconnect -- so honor it and
-          // say why instead.
+          // sharing does unconditionally. Without this the reconnect logic
+          // would fight the eviction -- reconnect, get evicted, reconnect --
+          // so honor it and explain why.
           case 'detached':
             term.writeln('\r\n[Session taken over by another client]');
             intentionalCloseRef.current = true;
@@ -1521,11 +1499,10 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
   return (
     <div className={`terminal-view${keyboardOpen ? ' keyboard-open' : ''}${selectionMode ? ' selection-mode' : ''}`} ref={terminalViewRef}>
       <div className={`terminal-header${!sandbox && !shell ? ' no-sandbox' : ''}`}>
-        {remoteInstanceLabel && <span className="terminal-remote-badge" title={`リモート: ${remoteInstanceLabel} (${remoteInstanceId})`}>⇄ {remoteInstanceLabel}</span>}
         <span
           className="terminal-title"
-          title={projectCwd && projectCwd !== cwd ? `Project: ${projectCwd}\nWorktree: ${cwd}` : cwd}
-        >{sandbox ? '🔒 ' : (!shell ? '⚠️ ' : '')}{customLabel ? `${customLabel} — ` : ''}{shell ? 'Terminal' : appLabel(app)}{!shell && model ? ` · ${model}` : ''}{!shell && app === 'commandcode' && isElevatedPermissionMode(permissionMode) ? ` · ${permissionMode}` : ''} &mdash; {displayPath(cwd, homeDir)}</span>
+          title={cwd}
+        >{sandbox ? '🔒 ' : (!shell ? '⚠️ ' : '')}{customLabel ? `${customLabel} — ` : ''}{shell ? 'Terminal' : appLabel(app)}{!shell && model ? ` · ${model}` : ''} &mdash; {displayPath(cwd, homeDir)}</span>
         <div className="header-actions">
           {!shell && (
             <>
@@ -1569,9 +1546,10 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
                   ws.send(JSON.stringify({ type: 'set_network_isolation', enabled: !networkIsolateEnabled }));
                 }
               }}
-              title={networkIsolateEnabled
+              title={(networkIsolateEnabled
                 ? 'ネットワーク隔離: 有効 (許可リストのみ通信可、クリックで一時解除)'
-                : 'ネットワーク隔離: 一時解除中 (全通信許可、クリックで再度有効化)'}
+                : 'ネットワーク隔離: 一時解除中 (全通信許可、クリックで再度有効化)')
+                + (networkIsolateScope === 'vm' ? '\nこの常駐VMの全セッションに効きます' : '')}
             >
               <svg className="header-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" style={{ color: 'var(--text-muted)' }} strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><circle cx="8" cy="8" r="6"/><ellipse cx="8" cy="8" rx="2.8" ry="6"/><path d="M2 8h12"/>{networkIsolateEnabled && <line x1="2" y1="2" x2="14" y2="14" strokeWidth="2"/>}</svg>
             </button>

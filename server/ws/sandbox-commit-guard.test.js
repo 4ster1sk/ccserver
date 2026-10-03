@@ -55,8 +55,8 @@ test('enabled by default: hook/config are bound, core.hooksPath is wired via GIT
     assert.equal(findSetenv(spawn.args, 'CCSANDBOX_COMMIT_GUARD_CONFIG'), '/ccserver-sandbox-commit-guard.json');
 
     // The hook script's shebang needs the sandbox node binary bound too, even
-    // though nothing else in this config (gitBroker off, no MCP sockets,
-    // app !== commandcode) would otherwise trigger that bind.
+    // though nothing else in this config (gitBroker off, no MCP sockets)
+    // would otherwise trigger that bind.
     assert.ok(argsStr.includes('/ccserver-sandbox-node'), 'sandbox node binary is bound so the hook script (a Node script) can run');
   } finally {
     if (spawn.commitGuardDir) { try { rmSync(spawn.commitGuardDir, { recursive: true, force: true }); } catch { /* best effort */ } }

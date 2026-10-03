@@ -1,22 +1,17 @@
 // buildSandboxSpawn -> buildBwrapArgs (Linux): the operator-configured
 // `binds` list must never re-expose ~/.ssh or ~/.config/gh, even when a stale
 // config predates the git broker and even when a `..` in the path collapses
-// onto one of them. The Seatbelt equivalent is covered by
-// sandbox-seatbelt.test.js ("skips blocked extra binds like bwrap does");
-// this pins the bwrap side, which had no test.
-//
-// buildSandboxSpawn's macOS branch needs a real sandbox_apply, so these run on
-// Linux CI only; on macOS they skip.
+// onto one of them. This pins the bwrap bind filter.
 
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir, homedir } from 'node:os';
 import { join } from 'node:path';
-import { buildSandboxSpawn } from './sandbox.js';
+import { buildSandboxSpawn, sandboxAvailable } from './sandbox.js';
 
 const HOME = homedir();
-const SKIP = process.platform === 'darwin' ? { skip: 'buildSandboxSpawn needs bwrap; macOS path needs a real sandbox_apply' } : {};
+const SKIP = !sandboxAvailable() ? { skip: 'buildSandboxSpawn needs bwrap' } : {};
 
 let cfgPath;
 let tmpRoot;
@@ -81,7 +76,7 @@ test('a legitimate configured bind still goes through', SKIP, async () => {
 
 test('buildSandboxSpawn tolerates a missing/null app (normalizes to claude)', SKIP, async () => {
   // buildSandboxSpawn does `app = app || 'claude'` up front so the later
-  // `app === 'claude'` checks (incl. the macOS Keychain seed gate) never see a
+  // app-specific configuration checks never see a
   // raw null. On Linux the observable proof is that it does not throw and
   // still assembles a claude launch.
   const withNull = await buildSandboxSpawn({ cwd: tmpRoot, targetCommand: ['claude'], app: null, sandboxOpts: null });

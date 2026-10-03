@@ -34,6 +34,7 @@ test('POST /sessions rejects invalid bodies with 400 before touching a pty', asy
     { cwd: '/', shell: false, app: 'claude' },            // root refusal (createSession)
     { cwd: tmpRoot, app: 'not-an-app' },
     { cwd: tmpRoot, sandboxOpts: 'gpg please' },
+    { cwd: tmpRoot, shell: true, sandbox: true, sandboxOpts: { backend: 'qemu', vmShellId: 'vm0' } }, // VM Terminal: WebSocket only
   ]) {
     const res = await app.inject({ method: 'POST', url: '/api/sessions', payload: body });
     assert.equal(res.statusCode, 400, JSON.stringify(body));

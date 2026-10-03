@@ -3,7 +3,7 @@ import { join, resolve, basename } from 'node:path';
 import { homedir } from 'node:os';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { loadSandboxConfig, installedApps, sandboxAvailable, sandboxToolsAvailable } from '../ws/sandbox.js';
+import { loadSandboxConfig, installedApps, sandboxBackend, backendStatus, sandboxToolsAvailable } from '../ws/sandbox.js';
 import { opencodeGoAvailable } from '../opencodeUsage.js';
 import { resolvedHostname } from '../ws/notify.js';
 import { resolveWithinRoots, isContained } from '../pathPolicy.js';
@@ -156,17 +156,21 @@ export async function dirsRoute(fastify, opts) {
     // every launch picker removes them entirely, unlike availableApps=false
     // (not installed), which still shows greyed out with a tooltip.
     // sandboxAvailable: whether a sandbox backend is usable on this host
-    // (bwrap on Linux, sandbox-exec on macOS). The
-    // launch modal disables the sandbox choice (and combo mode, which always
+    // (bwrap on Linux). The
+    // launch modal disables the sandbox choice (and former combo mode, which always
     // requires the sandbox) when false. Extra field as well.
+    // sandboxBackend: the default backend ('bwrap' | 'qemu' | 'none').
+    // sandboxBackends: per-backend { ok, reason } plus `default`, for the
+    // launch options' backend picker (bwrap / VM per launch). sandboxAvailable
+    // is true when EITHER backend can run, since the picker can reach both.
     // toolsAvailable: which opt-in tool toggles (rtk / code-review-graph) this
-    // host can actually provision -- false on macOS (seatbelt has no
-    // provisioner wiring). The launch / settings UIs render an unavailable
+    // host can actually provision. The launch / settings UIs render an unavailable
     // toggle disabled with an explanation, like availableApps for CLIs.
     // browseRoots / initialBrowsePath (issue #189): [] means unrestricted
     // (home() is still the right browsing start). When set, the directory
     // browser must start under one of these roots -- home() itself may sit
     // outside them, so initialBrowsePath falls back to the first root.
+    const backends = backendStatus();
     const home = homedir();
     const initialBrowsePath = browseRoots.length === 0 || isContained(resolve(home), browseRoots)
       ? home
@@ -179,7 +183,7 @@ export async function dirsRoute(fastify, opts) {
     //
     // forceSandboxReason is for WORDING ONLY ("forceSandbox で強制" vs
     // "browseRoots により必須"); the UI must never branch policy on it.
-    return { home, browseRoots, browseRootsInvalid, initialBrowsePath, defaultApp, forceSandbox, forceSandboxReason: cfg.forceSandboxReason, hostname: resolvedHostname(), showUsage, availableApps: { ...installedApps(), opencodeGo: opencodeGoAvailable(cfg) }, toolsAvailable: sandboxToolsAvailable(), hiddenApps, sandboxAvailable: sandboxAvailable() };
+    return { home, browseRoots, browseRootsInvalid, initialBrowsePath, defaultApp, forceSandbox, forceSandboxReason: cfg.forceSandboxReason, hostname: resolvedHostname(), showUsage, availableApps: { ...installedApps(), opencodeGo: opencodeGoAvailable(cfg) }, toolsAvailable: sandboxToolsAvailable(), hiddenApps, sandboxAvailable: backends.bwrap.ok || backends.qemu.ok, sandboxBackend: sandboxBackend(), sandboxBackends: backends };
   });
 
   fastify.get('/dirs', async (request, reply) => {

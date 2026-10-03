@@ -36,8 +36,6 @@ function fakeSession(over = {}) {
     app: 'claude',
     cwd: '/home/dev/myproject',
     projectName: 'myproject',
-    groupId: null,
-    groupRole: null,
     ...over,
   };
 }
@@ -63,9 +61,8 @@ test('the title is built from server-side facts, never from the agent', () => {
 });
 
 test('the title falls back to the cwd basename, matching the _from footer', () => {
-  // Only combo members are assigned a projectName; a standalone session has
-  // none, and notify.js's footer falls back to basename(cwd). The title must
-  // use the same rule or the two would name different projects.
+  // When projectName is absent, notify.js's footer falls back to basename(cwd).
+  // The title uses the same rule so both identify the same project.
   assert.equal(buildBridgeTitle(fakeSession({ projectName: null })), 'Claude Code · myproject');
   assert.equal(buildBridgeTitle(fakeSession({ projectName: null, cwd: '/' })), 'Claude Code');
 });
@@ -112,13 +109,11 @@ test('the delivered body is always a single line, so a footer cannot be forged',
 
 test('the identity handed to notify.js is the real session, for the _from footer', async () => {
   const { calls, send } = recorder();
-  await handleAgentNotification(fakeSession({ groupId: 'g1', groupRole: 'orchestrator' }), notif('t', 'b'), {
+  await handleAgentNotification(fakeSession(), notif('t', 'b'), {
     settings: ON, reachableChannels: REACHABLE, sendNotification: send,
   });
   assert.deepEqual(calls[0].identity, {
     sessionId: '01234567-89ab-cdef-0123-456789abcdef',
-    groupId: 'g1',
-    groupRole: 'orchestrator',
     cwd: '/home/dev/myproject',
     projectName: 'myproject',
     app: 'claude',

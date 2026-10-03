@@ -75,11 +75,9 @@ test('codex is opt-in and uses a process-scoped -c override', () => {
   assert.deepEqual(buildAgentNotifyArgsAndEnv('codex', bridge).args, ['-c', 'tui.notifications=true']);
 });
 
-test('opencode, copilot and commandcode are capture-only (nothing injectable)', () => {
-  const bridge = normalizeBridgeSettings({ enabled: true, apps: ['opencode', 'copilot', 'commandcode'] });
-  for (const app of ['opencode', 'copilot', 'commandcode']) {
-    assert.deepEqual(buildAgentNotifyArgsAndEnv(app, bridge), EMPTY);
-  }
+test('opencode is capture-only (nothing injectable)', () => {
+  const bridge = normalizeBridgeSettings({ enabled: true, apps: ['opencode'] });
+  assert.deepEqual(buildAgentNotifyArgsAndEnv('opencode', bridge), EMPTY);
 });
 
 test('shouldCaptureNotifications gates on shell, app and the feature flag', () => {
@@ -87,15 +85,7 @@ test('shouldCaptureNotifications gates on shell, app and the feature flag', () =
   assert.equal(shouldCaptureNotifications({ shell: true, app: null, bridge: ON }), false, 'shells never');
   assert.equal(shouldCaptureNotifications({ shell: false, app: null, bridge: ON }), false);
   assert.equal(shouldCaptureNotifications({ shell: false, app: 'claude', bridge: OFF }), false);
-  assert.equal(shouldCaptureNotifications({ shell: false, app: 'copilot', bridge: ON }), false, 'not a default app');
-});
-
-test('capture is possible for apps that cannot be injected into', () => {
-  // The whole reason copilot/commandcode stay selectable: reading the pty
-  // costs nothing and works if they turn out to emit something on their own.
-  const bridge = normalizeBridgeSettings({ enabled: true, apps: ['copilot'] });
-  assert.equal(shouldCaptureNotifications({ shell: false, app: 'copilot', bridge }), true);
-  assert.deepEqual(buildAgentNotifyArgsAndEnv('copilot', bridge), EMPTY);
+  assert.equal(shouldCaptureNotifications({ shell: false, app: 'codex', bridge: ON }), false, 'not a default app');
 });
 
 test('F7: no channel selected means no detector at all', () => {

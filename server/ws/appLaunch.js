@@ -3,10 +3,10 @@
 // output (resume ids, permission prompts). Everything here is pure — host
 // lookup (which/realpath) lives in sandbox.js, I/O in sessionManager.js.
 
-// The launchable agent CLIs. Any session launcher (WS init, combo groups,
+// The launchable agent CLIs. Any session launcher (WS init,
 // scheduled prompts, orchestrator restarts) keys its behavior off these ids;
 // unknown ids are rejected / fall back to the configured default app.
-export const APPS = ['claude', 'opencode', 'copilot', 'codex', 'commandcode'];
+export const APPS = ['claude', 'opencode', 'codex'];
 
 // Which app new sessions launch when none is requested is configured, not
 // hardcoded here -- see sandbox.js's loadSandboxConfig()
@@ -17,10 +17,8 @@ export function isValidApp(app) {
 }
 
 export function appDisplayName(app) {
-  if (app === 'copilot') return 'GitHub Copilot';
   if (app === 'opencode') return 'opencode';
   if (app === 'codex') return 'OpenAI Codex';
-  if (app === 'commandcode') return 'Command Code';
   return 'Claude Code';
 }
 
@@ -43,8 +41,6 @@ function isSafeCliArgValue(value) {
 // CLI args to start `app` fresh, or to resume a conversation:
 //   claude   -> claude [--resume <id>] | claude --continue (resume last)
 //   opencode -> opencode [--session <id>] | opencode -c (resume last)
-//   copilot  -> copilot (no id-based resume; the TUI keeps its own session
-//               list) | copilot --continue (resume last)
 // resumeLast ("resume the most recent conversation in the cwd") is used when
 // no session id is known, e.g. scheduled prompts / orchestrator restart where
 // the TUI never exposed an id.
@@ -55,20 +51,9 @@ export function appResumeArgs(app, resumeId, { resumeLast = false } = {}) {
     if (resumeLast) return ['-c'];
     return [];
   }
-  if (app === 'copilot') {
-    // copilot exposes no conversation id in its byte stream (extractResumeSessionId
-    // returns null), so an explicit id never reaches this branch in practice.
-    if (resumeLast) return ['--continue'];
-    return [];
-  }
   if (app === 'codex') {
     const args = resumeId ? ['resume', resumeId] : resumeLast ? ['resume', '--last'] : [];
     return args;
-  }
-  if (app === 'commandcode') {
-    if (resumeId) return ['--resume', resumeId];
-    if (resumeLast) return ['-c'];
-    return [];
   }
   if (resumeId) return ['--resume', resumeId];
   if (resumeLast) return ['--continue'];
@@ -107,11 +92,7 @@ export function appStandaloneArgs(app, { opencodeStandalone = false } = {}) {
 }
 
 // Whether the given app's CLI is known to accept `--model <provider/model>`.
-// Verified on this host:
-//   opencode --help -> `-m, --model <provider/model>`
-//   copilot --help  -> `--model <model>` (confirmed on the real binary, Aug
-//                      2026; if real launches ever fail on this flag, flip
-//                      copilot back to false)
+// Verified on this host: opencode --help -> `-m, --model <provider/model>`.
 // The local `claude` wrapper resolves to a missing /opt/claude-code/bin/claude,
 // so Claude's --model support cannot be verified here; the flag is NOT emitted
 // for claude by default (an unsupported argument would make every launch fail).
@@ -119,9 +100,7 @@ export function appStandaloneArgs(app, { opencodeStandalone = false } = {}) {
 // via CCSERVER_CLAUDE_MODEL=1.
 export function appSupportsModelFlag(app) {
   if (app === 'opencode') return true;
-  if (app === 'copilot') return true;
   if (app === 'codex') return true;
-  if (app === 'commandcode') return true;
   if (app === 'claude') return process.env.CCSERVER_CLAUDE_MODEL === '1';
   return false;
 }
@@ -136,47 +115,16 @@ export function appModelArgs(app, model) {
   return ['--model', model];
 }
 
-// Permission mode for commandcode launches: 'standard' (default, no flag),
-// 'auto-accept' (--auto-accept), or 'yolo' (--yolo, alias for
-// --dangerously-skip-permissions). Verified against `command-code --help`
-// (bundled v1.47.0 and latest v1.49.1, Sep 2026): both flags exist in both
-// versions. Only commandcode honors it -- every other app (and shells, which
-// carry no app id) always yields no flag, so a stale or mismatched value can
-// never break another CLI's launch. Unknown/absent values normalize to
-// 'standard' (no flag), mirroring how model normalization coerces invalid
-// values to null instead of emitting a broken flag.
-export const PERMISSION_MODES = ['standard', 'auto-accept', 'yolo'];
-
-export function normalizePermissionMode(mode) {
-  return PERMISSION_MODES.includes(mode) ? mode : 'standard';
-}
-
-// Per-app capability table, mirroring appSupportsModelFlag: a future app
-// gaining its own elevated-permission flag adds a row here instead of
-// appPermissionArgs growing more special cases.
-export function appSupportsPermissionModeFlag(app) {
-  return app === 'commandcode';
-}
-
-export function appPermissionArgs(app, mode) {
-  if (!appSupportsPermissionModeFlag(app)) return [];
-  const normalized = normalizePermissionMode(mode);
-  if (normalized === 'yolo') return ['--yolo'];
-  if (normalized === 'auto-accept') return ['--auto-accept'];
-  return [];
-}
-
 // Combines the launch-arg helpers above in the exact order
 // sessionManager.createSession pushes them (standalone, then resume, then
-// model, then permission). Shared by sessionManager and this file's own
+// model). Shared by sessionManager and this file's own
 // tests so a reordering in the real launch path can't drift away from what's
 // tested -- see PR#108 review.
-export function appLaunchArgs(app, { resumeId, resumeLast, model, permissionMode, opencodeStandalone } = {}) {
+export function appLaunchArgs(app, { resumeId, resumeLast, model, opencodeStandalone } = {}) {
   return [
     ...appStandaloneArgs(app, { opencodeStandalone }),
     ...appResumeArgs(app, resumeId, { resumeLast }),
     ...appModelArgs(app, model),
-    ...appPermissionArgs(app, permissionMode),
   ];
 }
 
@@ -190,9 +138,7 @@ export function appLaunchArgs(app, { resumeId, resumeLast, model, permissionMode
 const APP_SUBMIT_KEYS = {
   claude: '\r',
   opencode: '\r',
-  copilot: '\r',
   codex: '\r',
-  commandcode: '\r',
 };
 
 export function appSubmitKey(app) {
@@ -203,13 +149,11 @@ export function appSubmitKey(app) {
 
 // Try to recover a conversation id from recent (ANSI-stripped) terminal
 // output, so an exiting session can be resumed later. claude prints
-// `claude --resume <id>`; opencode's, copilot's, codex's and commandcode's
-// TUIs never expose their session id in the byte stream, so their resume goes
-// through `opencode -c` / `copilot --continue` / `codex resume --last` /
-// `commandcode -c` instead (null here).
+// `claude --resume <id>`; opencode and codex never expose their session id in
+// the byte stream, so their resume uses the latest session instead (null here).
 export function extractResumeSessionId(app, rawText) {
   const clean = rawText.replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, '');
-  if (app === 'opencode' || app === 'copilot' || app === 'codex' || app === 'commandcode') return null;
+  if (app === 'opencode' || app === 'codex') return null;
 
   const matches = [...clean.matchAll(/claude\s+(?:--resume|-r)\s+([a-zA-Z0-9_-]+)/gi)];
   return matches.length > 0 ? matches[matches.length - 1][1] : null;
@@ -235,17 +179,6 @@ export function detectPermissionPrompt(app, bufNoSpace) {
   if (app === 'opencode') {
     return /Permissionrequired(?![\w.,!?;:\u3001\u3002\uff01\uff1f\u2014-])/i.test(bufNoSpace);
   }
-  if (app === 'copilot') {
-    // copilot renders numbered permission choices (docs.github.com, Aug
-    // 2026): `1. Yes` / `2. Yes, and approve TOOL for the rest of the
-    // running session` / `3. No, and tell Copilot what to do differently`.
-    // In the space-collapsed buffer those are `1.Yes` / `2.Yes,andapprove...
-    // running session`. Enter accepts the default (Yes), matching the Enter
-    // we send. The real renderer frame is unverified (needs a logged-in
-    // session -- see the plan's §6.5); tune against a captured frame if it
-    // ever misdetects.
-    return /1\.Yes/i.test(bufNoSpace) || /runningsession/i.test(bufNoSpace);
-  }
   if (app === 'codex') {
     // Codex presents both local-command and MCP-tool approval menus. Enter
     // accepts the initially highlighted one-time approval in either case.
@@ -255,9 +188,6 @@ export function detectPermissionPrompt(app, bufNoSpace) {
     const mcpToolPrompt = /Allowthe\S+MCPserver(?:torun)?tool["“][^"”]+["”].*1\.Allow/i;
     return commandPrompt.test(bufNoSpace) || mcpToolPrompt.test(bufNoSpace);
   }
-  // commandcode approval rendering is not verified on this host either --
-  // same policy: never auto-approve an unverified frame.
-  if (app === 'commandcode') return false;
   return (
     /Doyouwantto(proceed|makethisedit|use)/i.test(bufNoSpace) ||
     /Yes,allow/i.test(bufNoSpace) ||

@@ -64,7 +64,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 //
 // Reasons, in order:
 //   1. $XDG_* wins if it is set, and a macOS user who sets it means it. This
-//      repo already relies on that: sandbox-seatbelt.js hands opencode
+//      repo already relies on that: sandboxed launches hand opencode
 //      XDG_CONFIG_HOME / XDG_DATA_HOME / XDG_STATE_HOME so its host config
 //      is reachable from inside the sandbox. Honoring ~/Library instead
 //      would ignore an explicit instruction from the operator.
@@ -191,6 +191,9 @@ function keptAt(id) {
 
 // --- the registry -----------------------------------------------------------
 
+// savedSessions and the savedGroup* files are no longer written (their
+// readers went with the combo launch feature); they stay registered so the
+// setup wizard still moves an existing legacy file out of the checkout.
 const STATE_FILES = [
   ['savedSessions', 'saved-sessions.json', 'CCSERVER_SAVED_SESSIONS_PATH'],
   ['scheduledPrompts', 'scheduled-prompts.json', 'CCSERVER_SCHEDULES_PATH'],

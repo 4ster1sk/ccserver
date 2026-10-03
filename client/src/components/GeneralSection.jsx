@@ -38,11 +38,11 @@ export default function GeneralSection({
     resolveAuthMode().then((m) => { if (!cancelled) setAuthMode(m); });
     return () => { cancelled = true; };
   }, []);
-  // rtk / code-review-graph are unavailable on macOS (seatbelt has no
-  // provisioner -- /api/dirs/home's toolsAvailable). null/absent (older
+  // rtk / code-review-graph need the sandbox provisioner
+  // (/api/dirs/home's toolsAvailable). null/absent (older
   // server) leaves both enabled. See issue #22.
   const toolDisabled = (id) => toolsAvailable ? toolsAvailable[id] === false : false;
-  const TOOL_UNAVAILABLE_NOTE = 'この ccserver ホスト (macOS) では非対応です';
+  const TOOL_UNAVAILABLE_NOTE = 'この ccserver ホストでは非対応です';
   return (
     <section className="settings-section">
       <h3>一般</h3>

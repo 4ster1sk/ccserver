@@ -1,8 +1,7 @@
 import { homedir } from 'node:os';
-import { basename } from 'node:path';
-import { getGroup, resolveMemberLaunchCwd } from './groupManager.js';
 import {
   createSession,
+  createVmShellSession,
   getSession,
   attachSocket,
   detachSocket,
@@ -12,34 +11,16 @@ import {
   cancelScheduledPrompt,
   scheduledPromptPublic,
   computeNextLocalTime,
-  resolveMcpSocketForSession,
   buildScheduleStateMsg as scheduleStateMsg,
+  networkIsolationStateMsg,
+  setPooledVmNetworkMode,
 } from './sessionManager.js';
-import { setNetworkBrokerMode } from './network-broker.js';
+import { brokerArmed, setSessionBrokerMode } from './netbrokerClient.js';
 import { setupRequired } from '../paths.js';
 
-// Shared message shape for the network-isolation globe toggle (see
-// TerminalView.jsx): `armed` is fixed for the session's whole life (whether
-// a broker/boundary exists at all -- decided at launch), `enabled` is the
-// live enforce/open policy, flippable anytime via set_network_isolation
-// without a sandbox restart.
-function networkIsolationStateMsg(session) {
-  return {
-    type: 'network_isolation_state',
-    armed: !!session.networkIsolateArmed,
-    enabled: session.networkIsolateMode === 'enforce',
-  };
-}
-
 // The /ws/terminal message dispatcher, factored out of the route registration
-// so it can be driven by something other than a real `ws` socket -- namely
-// server/ws/federationServer.js's terminal relay, which hands it a `chan`
-// adapter object backed by a federation TLS connection instead of a browser
-// WebSocket (see federationServer.js's header comment for why). `chan` only
-// needs to satisfy the same minimal interface sessionManager.js already
-// expects of every entry in `session.sockets`: `.send(jsonString)`,
-// `.close(code, reason)`, and a numeric `.readyState` (1 === open, matching
-// the WebSocket convention the broadcast path relies on).
+// for a narrow channel interface compatible with sessionManager.js: `.send(jsonString)`,
+// `.close(code, reason)`, and a numeric `.readyState` (1 === open).
 //
 // Behavior is unchanged from before this refactor -- every case body below is
 // the same logic that used to close over the route handler's local `socket`
@@ -59,7 +40,7 @@ function networkIsolationStateMsg(session) {
 // HTTP side uses -- stop NEW state being created in the WRONG PLACE, without
 // stopping anyone reaching what is already running:
 //
-//   init             creates a session and persists saved-sessions.json.
+//   init             creates a session (and the state files it writes).
 //                    REFUSED. This is NOT the re-attach path: TerminalView
 //                    sends `attach` whenever it has a sessionId and only
 //                    falls back to `init` for a genuinely new session (or
@@ -93,80 +74,14 @@ export function attachTerminalHandler(chan) {
           detachSocket(currentSessionId, chan);
         }
 
-        // A restored group member (see GroupTabView) re-launches via init
-        // with its groupId/groupRole: the group's MCP resolver recreates
-        // the member's handoff channel / the orchestrator's control broker
-        // so the resumed session can reach the group again. Without a
-        // socket the member would be invisible to the UI and unable to
-        // hand off -- refuse to spawn it, exactly like fireSchedule drops
-        // the prompt in the same situation.
-        const groupId = typeof msg.groupId === 'string' ? msg.groupId : null;
-        const groupRole = typeof msg.groupRole === 'string' ? msg.groupRole : null;
-        let mcpSocketPath = null;
-        let mcpToken = null;
-        let resolvedCwd = null;
-        let gitCommonDir = null;
-        if (groupId && groupRole) {
-          // M1 fix (vuln_scan report / PoC p9): groupRole here is entirely
-          // client-supplied (msg.groupRole), and this re-launch path is only
-          // ever meant for reconnecting an EXISTING member -- a role that
-          // was never actually created has no business reaching the
-          // resolvers below (resolveMcpSocketForSession/
-          // resolveMemberLaunchCwd already reject a malformed role by
-          // format, but format alone would still let a client "reconnect"
-          // to a real-looking role, e.g. "workerZ", that this group never
-          // had, minting a brand-new worktree/handoff channel for it under
-          // the guise of a reconnect).
-          const memberGroup = getGroup(groupId);
-          if (groupRole !== 'orchestrator' && !(memberGroup && memberGroup.members.has(groupRole))) {
-            chan.send(JSON.stringify({
-              type: 'error',
-              message: `Cannot re-launch group member ${groupRole}: not a member of this group`,
-              code: 'SPAWN_FAILED',
-            }));
-            break;
-          }
-          const mcpResolved = await resolveMcpSocketForSession(groupId, groupRole);
-          mcpSocketPath = mcpResolved ? mcpResolved.sockPath : null;
-          mcpToken = mcpResolved ? mcpResolved.token : null;
-          if (!mcpSocketPath) {
-            chan.send(JSON.stringify({
-              type: 'error',
-              message: `Cannot re-launch group member ${groupRole}: the group's MCP channel could not be re-created (group may have been destroyed)`,
-              code: 'SPAWN_FAILED',
-            }));
-            break;
-          }
-          // Never trust the client-echoed msg.cwd for a group member: it's
-          // just a replay of what listGroupMembers told the browser last
-          // time (see GroupTabView), and a worker's worktree may have
-          // disappeared from disk since then. Resolving fresh here -- the
-          // same single resolver every other (re)spawn site uses -- lets a
-          // lost worktree be recreated (and the human notified on genuine
-          // data loss) instead of launching into a dead directory; see
-          // groupManager.resolveMemberLaunchCwd.
-          const cwdRes = resolveMemberLaunchCwd(groupId, groupRole);
-          if (!cwdRes) {
-            chan.send(JSON.stringify({
-              type: 'error',
-              message: `Cannot re-launch group member ${groupRole}: the group's working directory could not be resolved`,
-              code: 'SPAWN_FAILED',
-            }));
-            break;
-          }
-          resolvedCwd = cwdRes.cwd;
-          gitCommonDir = cwdRes.gitCommonDir;
-        }
-        // An orchestrator re-launched through the browser's re-init path
-        // still reaches the group via the re-created control broker above.
-        // Its init cwd is the hashed orchestrator dir, so attribute the
-        // session to the group's real project path (workers' cwd IS the
-        // project dir, so the same override is harmless for them).
-        const group = groupId ? getGroup(groupId) : null;
-        const projectName = group?.cwd ? basename(group.cwd) : undefined;
-
-        const result = await createSession({
-          cwd: resolvedCwd || msg.cwd || homedir(),
+        // A VM Terminal (Settings GUI) is only ever opened from here, by
+        // the browser itself -- see createVmShellSession.
+        const result = typeof msg.vmShellId === 'string' ? await createVmShellSession({
+          vmId: msg.vmShellId,
+          cols: msg.cols || 80,
+          rows: msg.rows || 24,
+        }) : await createSession({
+          cwd: msg.cwd || homedir(),
           cols: msg.cols || 80,
           rows: msg.rows || 24,
           claudeSessionId: msg.claudeSessionId || null,
@@ -175,25 +90,10 @@ export function attachTerminalHandler(chan) {
           sandboxOpts: msg.sandboxOpts || null,
           app: msg.app || null,
           model: typeof msg.model === 'string' ? msg.model : null,
-          // Permission mode for commandcode launches ('standard' when
-          // absent/invalid -- createSession normalizes it; other apps and
-          // shells never emit a flag from it).
-          permissionMode: typeof msg.permissionMode === 'string' ? msg.permissionMode : 'standard',
           resumeLast: !!msg.resume,
-          groupId,
-          groupRole,
-          projectName,
-          mcpSocketPath,
-          mcpToken,
-          gitCommonDir,
           // Default reuse (keep the previous persistent HOME); only an
           // explicit false (client's "新規作成" dialog) wipes it.
           reuseSandboxHome: msg.reuseSandboxHome !== false,
-          // Trusted scratch-cwd exemption ONLY when the group-member branch
-          // above resolved cwd server-side (resolvedCwd); a standalone
-          // reconnect keeps using the client's msg.cwd and must pass the
-          // normal browseRoots containment check.
-          scratchCwd: resolvedCwd != null,
         });
         if (result.error) {
           chan.send(JSON.stringify({
@@ -392,11 +292,18 @@ export function attachTerminalHandler(chan) {
       case 'set_network_isolation': {
         if (currentSessionId) {
           const session = getSession(currentSessionId);
-          if (session && session.networkIsolateArmed && session.networkBrokerPort && session.networkBrokerAdminToken) {
+          if (session && brokerArmed(session)) {
             const mode = msg.enabled ? 'enforce' : 'open';
-            const ok = await setNetworkBrokerMode({ port: session.networkBrokerPort, token: session.networkBrokerAdminToken }, mode);
-            if (ok) {
-              session.networkIsolateMode = mode;
+            let ok;
+            if (session.qemuVm?.pooled) {
+              // One broker serves the whole persistent VM: flip it for every
+              // session on it (they all get the new state broadcast).
+              ok = await setPooledVmNetworkMode(session.qemuVm.vmId, mode);
+            } else {
+              ok = await setSessionBrokerMode(session, mode);
+              if (ok) {
+                session.networkIsolateMode = mode;
+              }
             }
             chan.send(JSON.stringify({ ...networkIsolationStateMsg(session), ok }));
           } else if (session) {
@@ -456,11 +363,8 @@ export function attachTerminalHandler(chan) {
     }
   }
 
-  // Only the real WS route (below) ever calls this: a message that failed
-  // JSON.parse is treated as raw pty input for whatever session is currently
-  // attached. The federation terminal relay (federationServer.js) never
-  // produces non-JSON lines -- every frame it forwards was itself JSON on the
-  // wire -- so this path is unreachable from there.
+  // A message that failed JSON.parse is treated as raw pty input for whatever
+  // session is currently attached.
   function handleRaw(rawString) {
     if (currentSessionId) {
       const session = getSession(currentSessionId);

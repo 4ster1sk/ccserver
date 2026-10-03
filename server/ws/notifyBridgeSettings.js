@@ -38,8 +38,7 @@ import { resolveSandboxConfigPath, writeSandboxConfigAtomic } from './networkAll
 // Which agent CLIs the detector is fed for. Not every app can be made to emit
 // a notification: claude needs `preferredNotifChannel` injected and opencode
 // emits OSC 777 on its own (both verified against the shipped binaries), while
-// copilot/commandcode have no CLI-arg/env config injection at all and codex
-// could not be verified on the development host. The ones that cannot be
+// codex could not be verified on the development host. The ones that cannot be
 // driven are still *selectable* -- capture costs nothing and picks them up
 // automatically if they turn out to emit something -- they are just not on by
 // default.

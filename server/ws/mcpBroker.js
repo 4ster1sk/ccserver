@@ -1,44 +1,11 @@
-// Unix-socket MCP brokers for combo groups, listening in the main Node
-// process. Mirrors the git-broker pattern (fixed-path wrapper + socket bound
-// into the sandbox) but WITHOUT a separate process: the MCP tools need direct
-// access to in-memory sessions/pty/outputBuffers, so the listeners live in
-// this process and hand each connection a fresh MCP server instance (MCP's
-// initialize handshake is per-connection).
-//
-//   startControlBroker  -> orchestrator's socket (control tools)
-//   startHandoffChannel -> one socket per worker (handoff_to_orchestrator only)
-//   stopBroker          -> close listener + remove runtime dir
-//
-// Host socket paths live under XDG_RUNTIME_DIR (ccserver-mcp-<groupId>-<tag>),
-// derived from the full dashless groupId so each group's channels are unique
-// without a fresh UUID per channel -- Unix socket paths are limited to ~104
-// chars, and a per-channel random UUID pushed control/handoff paths over it.
-//
-// Issue #143 problem 1: every socket this module hosts (group control/handoff
-// via sockPathFor(), and the process-global notify/usage/reviewer
-// sockets passed in explicitly by their own modules) lives alone inside its
-// own dedicated directory (`<name>.d/sock`), and listenMcp() below binds a
-// FRESH one into every sandbox as a directory (see sandbox.js's
-// buildBwrapArgs), not the socket file itself. bwrap's --bind-try snapshots
-// whatever it binds by inode; a plain file bind means a server本体 restart
-// (rmSync + re-listen(), right below) leaves already-sandboxed sessions
-// holding a bind to the now-unlinked old inode forever. A directory bind
-// mounts the directory ENTRY instead, so a file recreated inside it is picked
-// up immediately by every sandbox with that directory bound in -- as long as
-// the directory holds exactly that one file, this is exactly as narrow a
-// bind as the old file-level one, just immune to the old file being replaced
-// underneath it.
+// Unix-socket MCP brokers for process-wide notification, usage and reviewer
+// servers. They share a transport and bind a fresh MCP server per connection.
 
 import { createServer } from 'node:net';
-import { rmSync, rmdirSync, existsSync, mkdirSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
-import { randomBytes, timingSafeEqual } from 'node:crypto';
-import { SocketTransport, buildControlMcpServer, buildHandoffMcpServer, buildNotifyMcpServer, buildUsageMcpServer, buildReviewerMcpServer, MAX_TRANSPORT_BUFFER_CHARS } from './mcpServer.js';
-import { hostRuntimeDir, ensureHostRuntimeDir } from './git-broker.js';
-
-// Darwin-aware via git-broker.js (macOS has no /run/user): the same
-// hostRuntimeDir() every other broker socket path uses.
-const RUNTIME_BASE = hostRuntimeDir();
+import { rmSync, existsSync, mkdirSync } from 'node:fs';
+import { dirname } from 'node:path';
+import { SocketTransport, buildNotifyMcpServer, buildUsageMcpServer, buildReviewerMcpServer, MAX_TRANSPORT_BUFFER_CHARS } from './mcpServer.js';
+import { ensureHostRuntimeDir } from './git-broker.js';
 
 // How long to wait (non-blocking) for the socket file after listen() reports
 // success, before giving up.
@@ -50,44 +17,6 @@ const SOCKET_FILE_POLL_MS = 20;
 // sends nothing is handed to the transport within a short grace window, never
 // held hostage on the frame.
 const IDENTITY_FRAME_GRACE_MS = 1000;
-
-// Connection token for the group control / handoff sockets. On macOS Seatbelt
-// these sockets sit in a shared /tmp runtime dir every concurrent sandboxed
-// session can `connect()` to (bwrap binds them per-session, so there this is
-// belt-and-suspenders) -- without a check any prompt-injected worker could
-// drive another group's orchestrator (send_input / read_output / close_tab).
-// The token is minted per broker, delivered to the one session that owns that
-// socket via env (CCSANDBOX_MCP_TOKEN), and sent by the in-sandbox bridge as
-// its first frame. Like the git-broker token: on macOS a same-UID peer can
-// still lift it from the owner's env via KERN_PROCARGS2, so it is an
-// audit / accident-prevention layer there, not a hard boundary -- the hard
-// boundary stays isSessionInGroup() on every tool call.
-export function mintBrokerToken() {
-  return randomBytes(24).toString('base64url');
-}
-function tokenEq(a, b) {
-  if (typeof a !== 'string' || typeof b !== 'string' || a.length === 0 || a.length !== b.length) return false;
-  try { return timingSafeEqual(Buffer.from(a), Buffer.from(b)); } catch { return false; }
-}
-
-// M1 defense-in-depth (vuln_scan report / PoC p9): `tag` for a member's
-// handoff channel is `handoff-${role}` (see listenMcp's caller below), and
-// the primary fix is that groupManager.js validates `role` before ever
-// reaching here -- but this is the one choke point every broker socket path
-// is built through, so it refuses to hand back a path outside RUNTIME_BASE
-// even if a future caller forgets that check. A `role`/`tag` containing '/'
-// (e.g. from "../../../evil") would otherwise let `join()` walk the
-// resulting directory name's embedded ".." segments straight out of
-// RUNTIME_BASE.
-function sockPathFor(groupId, tag) {
-  const id = String(groupId).replace(/-/g, '');
-  const root = resolve(RUNTIME_BASE);
-  const path = resolve(join(root, `ccserver-mcp-${id}-${tag}.d`, 'sock'));
-  if (path !== root && !path.startsWith(`${root}/`)) {
-    throw new Error(`sockPathFor: tag "${tag}" escapes the runtime socket directory`);
-  }
-  return path;
-}
 
 // bwrap's --bind-try snapshots the socket file at mount time, so the file
 // must exist before createSession()/buildSandboxSpawn() run. listen()'s
@@ -112,11 +41,9 @@ function waitForSocketFile(sockPath, timeoutMs) {
 // listening, or rejects with the listen error (or a timeout waiting for the
 // socket file). Callers must propagate the rejection -- a silent failure
 // here would leave sessions sandboxed with a bind to a socket nobody is
-// listening on. Pass an explicit `sockPath` to host a server at a path of
-// your choosing (the process-global ccserver-notify socket, see notify.js);
-// otherwise the path is derived from groupId + tag.
-async function listenMcp({ groupId, tag, buildServer, sockPath, requireToken = null }) {
-  const target = sockPath || sockPathFor(groupId, tag);
+// listening on. Callers pass the process-wide socket path explicitly.
+async function listenMcp({ tag, buildServer, sockPath }) {
+  const target = sockPath;
   // Issue #143 problem 1: the directory this socket lives alone in must exist
   // before bwrap can bind it into a sandbox (buildSandboxSpawn/createSession
   // run after this resolves, same ordering constraint as the socket file
@@ -133,8 +60,8 @@ async function listenMcp({ groupId, tag, buildServer, sockPath, requireToken = n
     // best effort -- listen() below reports real problems
   }
   // A socket file left over from a crash (teardown never ran) would make
-  // listen() fail with EADDRINUSE. The path is group-scoped and derived, so
-  // a stale file can never belong to a live listener -- safe to drop. The
+  // listen() fail with EADDRINUSE. Each path is process-scoped, so a stale
+  // file can never belong to a live listener -- safe to drop. The
   // notify socket is single-instance per server process, so its stale file
   // is equally safe to drop.
   try {
@@ -158,8 +85,6 @@ async function listenMcp({ groupId, tag, buildServer, sockPath, requireToken = n
     //     MCP data.
     //   - anything else (legacy wrapper, direct MCP client) -> replay the
     //     whole buffer as MCP data and carry no identity.
-    // control/handoff buildServer closures ignore the identity argument, so
-    // this only feeds the notify server's attribution.
     let buf = '';
     let settled = false;
     let graceTimer = null;
@@ -175,15 +100,7 @@ async function listenMcp({ groupId, tag, buildServer, sockPath, requireToken = n
       // to the transport's own handler once it starts.
       socket.pause();
       const transport = new SocketTransport(socket, seed);
-      // Per-connection liveness oracle for tools that must not act on behalf
-      // of a connection whose client is gone (e.g. wait_for_handoff must not
-      // dequeue an event for a dead socket -- the event would be lost). The
-      // transport is created before the server so the closure can observe its
-      // close state; buildServer receives it as the second argument (control/
-      // handoff servers thread it into their deps; the notify server ignores
-      // it).
-      const connectionIsAlive = () => !socket.destroyed && !transport._closed;
-      const mcp = buildServer(identity, connectionIsAlive);
+        const mcp = buildServer(identity);
       // mcp.connect() is async (transport.start() + the MCP initialize
       // handshake). A rejected promise here must NOT become an unhandled
       // rejection (Node's default --unhandled-rejections=throw would crash the
@@ -194,17 +111,6 @@ async function listenMcp({ groupId, tag, buildServer, sockPath, requireToken = n
         console.error(`[mcp-broker] ${tag} connection handshake failed: ${err.message}`);
         try { socket.destroy(); } catch { /* already gone */ }
       });
-    };
-
-    // Fail closed when this socket is token-gated: no valid first frame means
-    // the connection never reaches an McpServer.
-    const rejectUnauthed = (why) => {
-      if (settled) return;
-      settled = true;
-      if (graceTimer) clearTimeout(graceTimer);
-      socket.removeListener('data', onFrameData);
-      console.error(`[mcp-broker] ${tag} connection refused: ${why}`);
-      try { socket.destroy(); } catch { /* already gone */ }
     };
 
     const onFrameData = (chunk) => {
@@ -224,22 +130,10 @@ async function listenMcp({ groupId, tag, buildServer, sockPath, requireToken = n
         } catch {
           // not JSON / not an identity frame -- replay the whole buffer
         }
-        if (requireToken) {
-          if (!identity || !tokenEq(identity.token, requireToken)) {
-            rejectUnauthed(identity ? 'bad token' : 'no identity frame');
-            return;
-          }
-          // Never let the token ride on into the McpServer's identity.
-          const { token, ...rest2 } = identity; void token;
-          identity = rest2;
-        }
         settleConnection(seed, identity);
       } else if (buf.length > MAX_TRANSPORT_BUFFER_CHARS) {
-        // No newline but the buffer is at the transport's cap: this can't be
-        // a small identity frame -- replay everything and let the transport's
-        // own overflow handling drop the connection (or reject if token-gated).
-        if (requireToken) rejectUnauthed('no newline-terminated frame within the buffer cap');
-        else settleConnection(buf, null);
+        // No newline by the cap: let the transport's overflow handling drop it.
+        settleConnection(buf, null);
       }
     };
 
@@ -250,12 +144,8 @@ async function listenMcp({ groupId, tag, buildServer, sockPath, requireToken = n
 
     // A client that connects but sends nothing must not hang the broker:
     // after a short grace the (possibly empty) buffer is replayed with no
-    // identity, exactly like the legacy path -- unless this socket is
-    // token-gated, in which case a silent client is refused.
-    graceTimer = setTimeout(() => {
-      if (requireToken) rejectUnauthed('no identity frame within the grace window');
-      else settleConnection(buf, null);
-    }, IDENTITY_FRAME_GRACE_MS);
+    // identity.
+    graceTimer = setTimeout(() => settleConnection(buf, null), IDENTITY_FRAME_GRACE_MS);
   });
   // Permanent error handler: an EventEmitter 'error' with zero listeners
   // throws and crashes the whole process, so this must NEVER be removed once
@@ -288,41 +178,9 @@ async function listenMcp({ groupId, tag, buildServer, sockPath, requireToken = n
   return { server, sockPath: target, dir: null, connections };
 }
 
-// deps: { groupId, groupManager, sessionManager }
-// Returns { server, sockPath, dir, connections, token }: `token` gates every
-// connection (see mintBrokerToken / listenMcp's requireToken) and must be
-// handed to the orchestrator session's sandbox as CCSANDBOX_MCP_TOKEN.
-export async function startControlBroker(deps) {
-  const token = mintBrokerToken();
-  const handle = await listenMcp({
-    groupId: deps.groupId,
-    tag: 'control',
-    requireToken: token,
-    // Per-connection deps: the liveness closure differs per accepted socket,
-    // so the server is built with a connection-specific deps object, not the
-    // shared one (a shared deps could never carry per-connection state).
-    buildServer: (identity, connectionIsAlive) => buildControlMcpServer({ ...deps, connectionIsAlive }),
-  });
-  return { ...handle, token };
-}
-
-// deps: { groupId, role, getSessionId, groupManager, sessionManager }
-// Returns the same shape as startControlBroker, incl. a per-channel `token`
-// for the one worker session that owns this handoff socket.
-export async function startHandoffChannel(deps) {
-  const token = mintBrokerToken();
-  const handle = await listenMcp({
-    groupId: deps.groupId,
-    tag: `handoff-${deps.role}`,
-    requireToken: token,
-    buildServer: (identity, connectionIsAlive) => buildHandoffMcpServer({ ...deps, connectionIsAlive }),
-  });
-  return { ...handle, token };
-}
-
 // The process-global notification broker (ccserver-notify, see notify.js).
 // One per server process at the caller-provided sockPath (getNotifySockPath).
-// NOT group-scoped: the notify tools are process-wide, so the socket is bound
+// The notify tools are process-wide, so the socket is bound
 // into every notify-enabled session's sandbox.
 export async function startNotifyBroker({ notifyApi, sockPath }) {
   return listenMcp({
@@ -333,7 +191,7 @@ export async function startNotifyBroker({ notifyApi, sockPath }) {
 }
 
 // The process-global usage broker (ccserver-usage, see usageMcp.js). One per
-// server process. NOT group-scoped, and NOT session-attributed (unlike
+// server process. NOT session-attributed (unlike
 // notify) -- get_usage always returns the same server-wide snapshot
 // regardless of which session asks.
 export async function startUsageBroker({ usageApi, sockPath }) {
@@ -345,7 +203,7 @@ export async function startUsageBroker({ usageApi, sockPath }) {
 }
 
 // The process-global reviewer broker (ccserver-reviewer, see reviewer.js).
-// One per server process. NOT group-scoped, but DOES carry a per-connection
+// One per server process. It carries a per-connection
 // identity frame (CCSERVER_REVIEWER_IDENTITY, same mechanism as notify)
 // -- unlike run_review/list_reviews/get_review (whose attribution, if any,
 // rides in run_review's own `requestedBy` argument), finish_review needs to
@@ -359,15 +217,7 @@ export async function startReviewerBroker({ reviewerApi, sockPath }) {
   });
 }
 
-// removeDir must stay opt-in (default false), never the default: this
-// directory may still be in use by another live sandbox this same process is
-// managing. Only pass removeDir:true from a call site that can prove no
-// OTHER live sandbox can still be depending on this exact directory (see
-// groupManager.js's call sites for which ones qualify -- notably NOT the
-// role-replacement flow's prevChannel, whose whole point is that the
-// retiring occupant's sandbox is still alive and may need this same
-// directory back if the replacement fails).
-export function stopBroker({ server, sockPath, connections }, { removeDir = false } = {}) {
+export function stopBroker({ server, sockPath, connections }) {
   // Drop established connections too: server.close() only stops accepting
   // new ones, and a lingering connected socket would keep its McpServer
   // (and its queued handoffs/waits) alive for as long as the client holds
@@ -393,25 +243,6 @@ export function stopBroker({ server, sockPath, connections }, { removeDir = fals
       rmSync(sockPath, { force: true });
     } catch {
       // best effort
-    }
-    if (removeDir) {
-      // Issue #143 problem 1: production sockPaths (sockPathFor/
-      // getNotifySockPath and friends) each live alone in a directory
-      // dedicated to that one socket, so it can be bound into a sandbox as a
-      // directory -- once the file above is gone AND the caller has proven
-      // this directory is truly done for good (see the removeDir contract
-      // above), reclaim it too, or a dead role/group's control/handoff
-      // directory would accumulate forever across this server本体 process's
-      // uptime. rmdirSync only removes an EMPTY directory and throws
-      // otherwise -- this module's own tests supply bare sockPaths under a
-      // shared tmp dir with siblings still in it, and this must never touch
-      // those. mkdirSync(recursive) in listenMcp() recreates a reclaimed
-      // directory on demand.
-      try {
-        rmdirSync(dirname(sockPath));
-      } catch {
-        // not empty, doesn't exist, or shared with other files -- leave it
-      }
     }
   }
 }

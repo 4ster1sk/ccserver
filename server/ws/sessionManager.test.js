@@ -1,22 +1,11 @@
-// Integration tests for the combo-group interactions with the scheduler and
-// the graceful-shutdown save path:
-//   - savedSessionPublic keeps groupId/groupRole (restart doesn't surface
-//     group members as standalone sessions).
-//   - resolveMcpSocketForSession + groupManager's resolver recreate a dead
-//     member's handoff channel / the orchestrator's control broker.
-//   - fireSchedule's live-session substitution is group+role aware (two
-//     workers sharing cwd+app in different groups must not cross-inject).
-//   - fireSchedule's auto-resume re-creates the member's MCP channel and
-//     re-binds the role.
-//
-// Real (shell) sessions stand in for agents -- no sandbox or agent CLI
-// required. Each test cleans up after itself.
+// Session and scheduler integration tests. Real shell sessions stand in for
+// agents, so these cases need no sandbox or agent CLI.
 
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, rmSync, readFileSync, writeFileSync, unlinkSync, existsSync, symlinkSync } from 'node:fs';
 import { tmpdir, homedir } from 'node:os';
-import { basename, dirname, join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { spawn as spawnProcess } from 'node:child_process';
 import Fastify from 'fastify';
@@ -26,7 +15,6 @@ import { findSessionLimitReset } from './sessionLimitDetect.js';
 import { getLatestSessionLimitReset } from '../sessionLimitState.js';
 
 let runtimeDir;
-let groupManager;
 let sessionManager;
 
 function sleep(ms) {
@@ -78,27 +66,9 @@ function readOptionalFile(path) {
   }
 }
 
-// A live shell session bound to a group role (the session-create listener
-// registers it), standing in for an agent member.
-async function shellMember(cwd, groupId, groupRole) {
-  const res = await sessionManager.createSession({
-    cwd, cols: 80, rows: 24,
-    shell: true, sandbox: false,
-    groupId, groupRole,
-  });
-  assert.ok(res.session, 'shell session should spawn');
-  return res.session;
-}
-
 before(async () => {
   runtimeDir = mkdtempSync(join(tmpdir(), 'ccserver-sched-test-'));
   process.env.XDG_RUNTIME_DIR = runtimeDir;
-  // Group persistence must never touch the repo-root state file during tests.
-  process.env.CCSERVER_GROUPS_PATH = join(runtimeDir, 'saved-groups.json');
-  // generateOrchestratorClaudeMdSrc's output dir must never land under the
-  // real home directory during tests -- see the env override in groupManager.js.
-  process.env.CCSERVER_ORCHESTRATOR_GENERATED_ROOT = join(runtimeDir, 'orchestrator-generated');
-  groupManager = await import('./groupManager.js');
   sessionManager = await import('./sessionManager.js');
 });
 
@@ -110,26 +80,6 @@ after(() => {
   sessionManager.destroyAllSessions();
 });
 
-test('savedSessionPublic preserves group membership (restart filter keeps working)', async () => {
-  const member = {
-    cwd: '/srv/proj', app: 'opencode', sandbox: true, sandboxOpts: null, model: 'gpt-5',
-    claudeSessionId: null, groupId: 'group-1', groupRole: 'workerA',
-  };
-  const out = sessionManager.savedSessionPublic(member, null);
-  assert.equal(out.groupId, 'group-1');
-  assert.equal(out.groupRole, 'workerA');
-  assert.equal(out.app, 'opencode');
-  assert.equal(out.model, 'gpt-5', 'the launch model is serialized for graceful-shutdown restore');
-
-  const plain = sessionManager.savedSessionPublic({ ...member, groupId: null, groupRole: null }, 'conv-123');
-  assert.equal(plain.groupId, null);
-  assert.equal(plain.groupRole, null);
-  assert.equal(plain.claudeSessionId, 'conv-123');
-});
-
-// Model state on sessions: an explicit non-empty model is stored normalized,
-// invalid/empty/absent values normalize to null (never an empty string or a
-// wrong type leaking into the CLI arg builder or persistence).
 test('createSession stores the effective model (normalized); shells never carry one', async () => {
   const shell = await sessionManager.createSession({ cwd: '/tmp', cols: 80, rows: 24, shell: true, sandbox: false, model: 'gpt-5' });
   assert.ok(shell.session, 'shell session should spawn');
@@ -150,10 +100,10 @@ test('createSession stores the effective model (normalized); shells never carry 
   assert.ok(res.session);
   try {
     res.session.model = '';
-    const pub = sessionManager.savedSessionPublic(res.session, null);
-    assert.equal(pub.model, null, 'empty-string models normalize to null');
+    const listed = () => sessionManager.listSessions().find((s) => s.id === res.sessionId);
+    assert.equal(listed().model, null, 'empty-string models normalize to null');
     res.session.model = 'gpt-5';
-    assert.equal(sessionManager.savedSessionPublic(res.session, null).model, 'gpt-5');
+    assert.equal(listed().model, 'gpt-5');
   } finally {
     sessionManager.destroySession(res.sessionId, { keepSchedule: false });
   }
@@ -171,11 +121,19 @@ test('explicit sandbox request without bwrap is refused, not silently unsandboxe
   assert.match(res.error, /^Failed to build sandbox: /);
 });
 
+// A backend picked in the launch options (sandboxOpts.backend) that cannot
+// run here is refused with THAT backend's reason -- never swapped for the
+// other backend or a direct spawn.
+test('a picked qemu backend that cannot run here is refused, not swapped for bwrap', { skip: sandboxAvailable('qemu') || loadSandboxConfig().forceSandbox }, async () => {
+  const res = await sessionManager.createSession({ cwd: '/tmp', cols: 80, rows: 24, shell: true, sandbox: true, sandboxOpts: { backend: 'qemu' } });
+  assert.equal(res.session, null, 'no session must be created');
+  assert.match(res.error, /^Failed to build sandbox: the qemu sandbox is unavailable/);
+});
+
 // Filesystem-root launches: claude/opencode abort immediately there (opaque
 // SIGABRT, no output), and a SANDBOXED shell at / would get a fail-open
-// sandbox -- the project subtree rule becomes "^/(/.*)?$" (seatbelt's
-// subtrees('/')) or a "/" bind (bwrap), silently granting the whole
-// filesystem. Plain unsandboxed shells are fine at /.
+// sandbox -- a "/" bind would silently grant the whole filesystem. Plain
+// unsandboxed shells are fine at /.
 test('createSession refuses cwd=/ for agents and sandboxed shells, not plain shells', async () => {
   const agent = await sessionManager.createSession({ cwd: '/', cols: 80, rows: 24, shell: false, app: 'claude', sandbox: false });
   assert.equal(agent.session, null, 'agent launch at / is refused');
@@ -192,39 +150,8 @@ test('createSession refuses cwd=/ for agents and sandboxed shells, not plain she
   }
 });
 
-// Permission mode state on sessions: any value normalizes to one of
-// 'standard' | 'auto-accept' | 'yolo' (unknown -> 'standard'); shells always
-// carry 'standard'. The CLI flag itself is commandcode-only (see
-// appLaunch.test.js) -- storage here is app-agnostic, mirroring model.
-test('createSession stores the normalized permissionMode; shells are always standard', async () => {
-  const shell = await sessionManager.createSession({ cwd: '/tmp', cols: 80, rows: 24, shell: true, sandbox: false, permissionMode: 'yolo' });
-  assert.ok(shell.session, 'shell session should spawn');
-  try {
-    assert.equal(shell.session.permissionMode, 'standard', 'shell sessions never carry a permission mode');
-    assert.equal(sessionManager.listSessions().find((s) => s.id === shell.sessionId).permissionMode, 'standard');
-    assert.equal(sessionManager.savedSessionPublic(shell.session, null).permissionMode, 'standard');
-  } finally {
-    sessionManager.destroySession(shell.sessionId, { keepSchedule: false });
-  }
-
-  const res = await sessionManager.createSession({ cwd: '/tmp', cols: 80, rows: 24, shell: true, sandbox: false });
-  assert.ok(res.session);
-  try {
-    res.session.permissionMode = 'bogus';
-    assert.equal(
-      sessionManager.listSessions().find((s) => s.id === res.sessionId).permissionMode,
-      'standard',
-      'invalid permission modes normalize to standard in listSessions',
-    );
-    res.session.permissionMode = 'yolo';
-    assert.equal(sessionManager.savedSessionPublic(res.session, null).permissionMode, 'yolo');
-  } finally {
-    sessionManager.destroySession(res.sessionId, { keepSchedule: false });
-  }
-});
-
 // Operator-assigned display names (client right-click rename): stored on the
-// session, surfaced via listSessions, persisted via savedSessionPublic.
+// session and surfaced via listSessions.
 // Blank clears, overlong/non-string input is rejected without clobbering the
 // stored label, unknown ids report not-found.
 test('setSessionLabel stores, clears, validates, and surfaces customLabel', async () => {
@@ -238,7 +165,6 @@ test('setSessionLabel stores, clears, validates, and surfaces customLabel', asyn
     assert.equal(res.ok, true);
     assert.equal(res.session.customLabel, 'マイ作業', 'trims surrounding whitespace');
     assert.equal(sessionManager.listSessions().find((s) => s.id === shell.sessionId).customLabel, 'マイ作業');
-    assert.equal(sessionManager.savedSessionPublic(shell.session, null).customLabel, 'マイ作業');
 
     res = sessionManager.setSessionLabel(shell.sessionId, 'a\nb\tc');
     assert.equal(res.ok, true);
@@ -282,16 +208,13 @@ test('setSessionLabel stores, clears, validates, and surfaces customLabel', asyn
   }
 });
 
-// PR#108 review: permissionMode is a commandcode-only concept (appLaunch.js's
-// appPermissionArgs is a no-op for every other app), but before this test the
-// stored session.permissionMode itself wasn't forced back to 'standard' for
-// non-commandcode apps -- only shells were. A caller-supplied 'yolo' for
-// app: 'claude' would sit in session.permissionMode and surface via
-// listSessions/savedSessionPublic/federation, which could mislead a consumer
-// that treats that field as an actual bypass signal even though no CLI flag
-// was ever emitted. Pin CCSERVER_CLAUDE_BIN at a real, always-executable file
+// permissionMode was a Command Code-only concept; with that app removed no
+// launchable app takes a permission flag, so every session carries
+// 'standard'. A caller-supplied 'yolo' must not sit in session.permissionMode
+// and surface via listSessions, where a consumer could read it as an actual
+// bypass signal even though no CLI flag was ever emitted. Pin CCSERVER_CLAUDE_BIN at a real, always-executable file
 // (the running node binary) so claude reads as INSTALLED.
-test('createSession forces permissionMode to standard for non-commandcode apps', async () => {
+test('createSession forces permissionMode to standard', async () => {
   const cfgDir = mkdtempSync(join(tmpdir(), 'ccserver-sess-cfg-'));
   const cfgPath = join(cfgDir, 'sandbox.config.json');
   writeFileSync(cfgPath, JSON.stringify({ docker: false, gitBroker: false }));
@@ -305,9 +228,8 @@ test('createSession forces permissionMode to standard for non-commandcode apps',
     });
     assert.ok(res.session, 'claude session should spawn');
     try {
-      assert.equal(res.session.permissionMode, 'standard', 'non-commandcode apps never carry a non-standard permission mode');
+      assert.equal(res.session.permissionMode, 'standard', 'no app carries a non-standard permission mode');
       assert.equal(sessionManager.listSessions().find((s) => s.id === res.sessionId).permissionMode, 'standard');
-      assert.equal(sessionManager.savedSessionPublic(res.session, null).permissionMode, 'standard');
     } finally {
       sessionManager.destroySession(res.sessionId, { keepSchedule: false });
     }
@@ -385,7 +307,7 @@ test('createSession refuses a hidden (but installed) agent with a clear error', 
 
 // The hiddenApps check runs BEFORE resolveApp() (see createSession), so the
 // refusal reason must be "hidden", never "not installed", even for an app
-// this test machine genuinely doesn't have -- unlike claude, opencode/copilot/
+// this test machine genuinely doesn't have -- unlike claude, opencode/
 // codex have no CCSERVER_*_BIN override to fake an install with (see
 // sandbox-resolve.test.js's header comment), so this is the only way to
 // deterministically exercise the hidden check for them without depending on
@@ -456,22 +378,7 @@ test('createSession refuses a cwd outside browseRoots, for both shells and agent
   }
 });
 
-// browseRoots (issue #189) must not break combo/group launches: every
-// worker/orchestrator session's cwd is a server-synthesized scratch dir
-// under ~/.local/share/ccserver-sandbox (never the project directory
-// itself -- see groupManager.js's addMember). That exemption is gated on the
-// TRUSTED scratchCwd parameter (only in-process callers that synthesize the
-// cwd pass it), never on the path alone -- see createSession's comment.
-// Integration-tests the exemption through createSession() itself, against a
-// directory that really is inside a scratch root.
-//
-// It used to build that from homedir() literally -- the comment here said the
-// real root was "not overridable via env var", which was true when it was a
-// baked-in const. Since #201 scratchRoots() is [dataRoot(), legacyDataRoot()]
-// and dataRoot() follows $XDG_DATA_HOME, so a temp root works and `npm test`
-// stops creating and deleting directories in the operator's live
-// ~/.local/share/ccserver-sandbox/worktrees (measured: its mtime moved).
-test('createSession accepts a scratch-tree cwd only via the trusted scratchCwd flag', async () => {
+test('createSession accepts a scratch-tree cwd only via the trusted isReviewJob flag', async () => {
   const cfgDir = mkdtempSync(join(tmpdir(), 'ccserver-sess-cfg-'));
   const cfgPath = join(cfgDir, 'sandbox.config.json');
   const allowed = mkdtempSync(join(tmpdir(), 'ccserver-sess-allowed-'));
@@ -486,15 +393,15 @@ test('createSession accepts a scratch-tree cwd only via the trusted scratchCwd f
   try {
     // Client-style call (no flag): the path alone must NOT be exempt, or any
     // REST/WS caller could point a session at the scratch tree (sandbox
-    // HOME credentials, GPG vault DB, federation keys) and have it rw-bound
+    // HOME credentials and GPG vault DB) and have it rw-bound
     // into the sandbox.
     const client = await sessionManager.createSession({ cwd: scratchDir, cols: 80, rows: 24, shell: true, sandbox: false });
     assert.equal(client.session, null, 'a client-supplied scratch cwd must be refused');
     assert.match(client.error, /outside the allowed browseRoots/);
 
-    // Trusted in-process call (group worktree / orchestrator / reviewer):
+    // Trusted in-process call (review job):
     // not refused by the cwd check, and still forced sandboxed.
-    const res = await sessionManager.createSession({ cwd: scratchDir, cols: 80, rows: 24, shell: true, sandbox: false, scratchCwd: true });
+    const res = await sessionManager.createSession({ cwd: scratchDir, cols: 80, rows: 24, shell: true, sandbox: false, isReviewJob: true });
     assert.doesNotMatch(res.error || '', /outside the allowed browseRoots/,
       'a server-synthesized scratch cwd must not be refused by browseRoots');
     if (sandboxAvailable()) {
@@ -554,7 +461,7 @@ test('createSession refuses a cwd that is a scratch-internal symlink pointing ou
   const allowed = mkdtempSync(join(tmpdir(), 'ccserver-sess-allowed-'));
   const outside = mkdtempSync(join(tmpdir(), 'ccserver-sess-outside-'));
   // A temp scratch root rather than the operator's real one -- see the
-  // scratchCwd test above.
+  // trusted review-job test above.
   const scratchHome = mkdtempSync(join(tmpdir(), 'ccserver-sess-scratchroot-'));
   const prevData = process.env.XDG_DATA_HOME;
   process.env.XDG_DATA_HOME = scratchHome;
@@ -565,9 +472,9 @@ test('createSession refuses a cwd that is a scratch-internal symlink pointing ou
   const prevCfg = process.env.CCSERVER_SANDBOX_CONFIG;
   process.env.CCSERVER_SANDBOX_CONFIG = cfgPath;
   try {
-    // scratchCwd:true simulates the trusted in-process callers: even THEY
+    // isReviewJob:true simulates the trusted in-process callers: even THEY
     // must not follow a scratch-internal symlink out of the tree.
-    const res = await sessionManager.createSession({ cwd: escapeLink, cols: 80, rows: 24, shell: true, sandbox: false, scratchCwd: true });
+    const res = await sessionManager.createSession({ cwd: escapeLink, cols: 80, rows: 24, shell: true, sandbox: false, isReviewJob: true });
     assert.equal(res.session, null, 'a scratch symlink pointing outside must never launch a session');
     assert.match(res.error, /outside the allowed browseRoots/);
   } finally {
@@ -717,25 +624,6 @@ test('setScheduledPrompt persists the session model into the schedule file', asy
   }
 });
 
-// setScheduledPrompt captures the session's permission mode into the persisted
-// schedule entry so the auto-resume path replays it (persistSchedules).
-test('setScheduledPrompt persists the session permissionMode into the schedule file', async () => {
-  const res = await sessionManager.createSession({ cwd: '/tmp', cols: 80, rows: 24, shell: true, sandbox: false });
-  assert.ok(res.session, 'shell session should spawn');
-  try {
-    // Shells always carry 'standard'; fabricate the commandcode mode the way
-    // the model test above fabricates a model.
-    res.session.permissionMode = 'yolo';
-    assert.ok(sessionManager.setScheduledPrompt(res.sessionId, Date.now() + 5000, 'MARKER_PERMMODE'));
-    const saved = JSON.parse(readFileSync(schedulePath(), 'utf-8'));
-    const entry = saved.find((e) => e.text === 'MARKER_PERMMODE');
-    assert.ok(entry, 'schedule persisted');
-    assert.equal(entry.permissionMode, 'yolo', 'the permission mode survives into the persisted schedule');
-  } finally {
-    sessionManager.destroySession(res.sessionId, { keepSchedule: false });
-  }
-});
-
 // restoreSchedules preserves a persisted model (round-trip through the file);
 // the entry is armed with a bad cwd so the fire fails harmlessly and never
 // leaves a live session behind.
@@ -753,8 +641,6 @@ test('restoreSchedules preserves the model for a restored schedule entry', async
     app: 'claude',
     model: 'gpt-5',
     claudeSessionId: null,
-    groupId: null,
-    groupRole: null,
   }]));
   try {
     const info = sessionManager.restoreSchedules();
@@ -801,73 +687,6 @@ test('restoreSchedules: legacy schedules without a model field restore with null
   }
 });
 
-// copilot sessions persist their app in the schedule file and restore as
-// copilot (isValidApp passes), so the auto-resume path replays `--continue`.
-test('schedules round-trip a copilot app', async () => {
-  const res = await sessionManager.createSession({ cwd: '/tmp', cols: 80, rows: 24, shell: true, sandbox: false });
-  assert.ok(res.session, 'shell session should spawn');
-  try {
-    res.session.app = 'copilot';
-    assert.ok(sessionManager.setScheduledPrompt(res.session.id, Date.now() + 5000, 'MARKER_COPILOT'));
-    const saved = JSON.parse(readFileSync(schedulePath(), 'utf-8'));
-    const entry = saved.find((e) => e.text === 'MARKER_COPILOT');
-    assert.equal(entry.app, 'copilot', 'the app survives into the persisted schedule');
-  } finally {
-    sessionManager.destroySession(res.session.id, { keepSchedule: false });
-  }
-
-  // Restore path: a persisted copilot entry keeps its app (isValidApp gate).
-  const savedPath = schedulePath();
-  const before = readOptionalFile(savedPath);
-  const at = Date.now() + 300;
-  writeFileSync(savedPath, JSON.stringify([{
-    at,
-    text: 'MARKER_RESTORE_COPILOT',
-    cwd: '/nonexistent-for-copilot-restore',
-    sandbox: false,
-    shell: true,
-    app: 'copilot',
-    model: null,
-    claudeSessionId: null,
-    groupId: null,
-    groupRole: null,
-  }]));
-  try {
-    const info = sessionManager.restoreSchedules();
-    assert.equal(info.restored, 1);
-    const rewritten = JSON.parse(readFileSync(savedPath, 'utf-8'));
-    assert.equal(rewritten.find((e) => e.text === 'MARKER_RESTORE_COPILOT').app, 'copilot');
-    await sleep(800);
-  } finally {
-    try { unlinkSync(savedPath); } catch { /* already gone */ }
-    if (before != null) writeFileSync(savedPath, before);
-  }
-});
-// Workers always run inside the sandbox, so their sessions start with Auto-Y
-// enabled; the orchestrator and standalone sessions keep it off.
-test('createSession defaults Auto-Y on for workers, off for orchestrator/standalone', async () => {
-  const spawn = (groupRole) => sessionManager.createSession({
-    cwd: '/tmp', cols: 80, rows: 24, shell: true, sandbox: false, groupRole,
-  });
-  const worker = await spawn('workerA');
-  const workerB = await spawn('workerB');
-  const orch = await spawn('orchestrator');
-  const standalone = await spawn(null);
-  try {
-    assert.equal(worker.session.autoYes, true, "workerA (a worker) should start with Auto-Y on");
-    assert.equal(workerB.session.autoYes, true, "workerB (a worker) should start with Auto-Y on");
-    assert.equal(orch.session.autoYes, false, "the orchestrator keeps Auto-Y off");
-    assert.equal(standalone.session.autoYes, false, "standalone sessions keep Auto-Y off");
-  } finally {
-    for (const res of [worker, workerB, orch, standalone]) {
-      sessionManager.destroySession(res.sessionId, { keepSchedule: false });
-    }
-  }
-});
-
-// writeToSession is the shared input path for the WS 'input' handler and the
-// MCP send_input tool: it must write into the live pty, reset the idle
-// watchdog, and (with submit) send Enter after the text. Real shell session.
 test('writeToSession types into a live session; submit appends Enter', async () => {
   const res = await sessionManager.createSession({ cwd: '/tmp', cols: 80, rows: 24, shell: true, sandbox: false });
   const id = res.sessionId;
@@ -1027,9 +846,9 @@ test('waitUntilSettled: times out (and removes its waiter) when no idle gap arri
   }
 });
 
-// Issue #16: lastOutputAt is the activity timestamp exposed to the
-// orchestrator (get_tab_status / list_group_sessions) so a hung member can be
-// distinguished from one that is merely slow. It must be null until the first
+// Issue #16: lastOutputAt is the activity timestamp exposed to the UI so a
+// stalled session can be distinguished from one that is merely slow. It must
+// be null until the first
 // output chunk arrives, then advance with every chunk -- shells included (the
 // plain shell session here stands in for an agent TUI).
 test('lastOutputAt: null at spawn, then advanced by real pty output (shell included)', async () => {
@@ -1040,13 +859,20 @@ test('lastOutputAt: null at spawn, then advanced by real pty output (shell inclu
   try {
     assert.equal(s.lastOutputAt, null, 'no output received yet after spawn');
 
-    await sleep(400); // let the shell reach its prompt
+    // Poll rather than sleep a fixed time: under a loaded full-suite run the
+    // shell can take well over the old 400ms to reach its prompt.
+    const waitUntil = async (cond, ms = 10000) => {
+      const deadline = Date.now() + ms;
+      while (!cond() && Date.now() < deadline) await sleep(50);
+    };
+    await waitUntil(() => s.lastOutputAt != null); // let the shell reach its prompt
     const first = s.lastOutputAt;
     assert.ok(first != null, 'the shell prompt output must be recorded as activity');
     assert.ok(Date.now() - first < 5000, 'the timestamp must be recent');
 
+    await sleep(20); // so later output gets a strictly larger timestamp
     sessionManager.writeToSession(id, 'echo ACTIVITY_MARKER', { submit: true });
-    await sleep(1200); // echo + shell runs the command
+    await waitUntil(() => s.lastOutputAt > first); // echo + shell runs the command
     const second = s.lastOutputAt;
     assert.ok(second != null && second > first, 'later output keeps advancing the timestamp');
     assert.ok(Date.now() - second < 5000, 'the timestamp must track the newest output');
@@ -1055,94 +881,14 @@ test('lastOutputAt: null at spawn, then advanced by real pty output (shell inclu
   }
 });
 
-test('resolveGroupMcpSocket: creates a worker handoff channel, reuses/recreates the control broker', async () => {
-  const gid = randomUUID();
-  await groupManager.createGroup({ groupId: gid, cwd: '/srv/proj', orchestratorDir: '/srv/orch' });
-  const group = groupManager.getGroup(gid);
-
-  // Worker: no channel yet -> created and registered. Returns { sockPath, token }.
-  const worker = await groupManager.resolveGroupMcpSocket(gid, 'workerA');
-  assert.ok(worker && worker.sockPath, 'worker channel socket path returned');
-  assert.ok(worker.token && worker.token.length >= 20, 'worker channel has a connection token');
-  assert.equal(group.handoffChannels.get('workerA').sockPath, worker.sockPath);
-  // Second call reuses the existing channel (same path + token).
-  const worker2 = await groupManager.resolveGroupMcpSocket(gid, 'workerA');
-  assert.deepEqual(worker2, worker);
-
-  // Orchestrator: existing control broker is returned as-is.
-  const orch = await groupManager.resolveGroupMcpSocket(gid, 'orchestrator');
-  assert.equal(orch.sockPath, group.controlBroker.sockPath);
-  assert.equal(orch.token, group.controlBroker.token);
-  assert.notEqual(orch.token, worker.token, 'control and handoff tokens differ');
-  // Simulate the orchestrator's pty exiting (broker stopped) -> resolver
-  // brings the broker back (with a fresh token).
-  groupManager.onOrchestratorExit(gid);
-  assert.equal(group.controlBroker, null);
-  const orch2 = await groupManager.resolveGroupMcpSocket(gid, 'orchestrator');
-  assert.ok(orch2 && orch2.sockPath, 'control broker recreated');
-  assert.equal(group.controlBroker.sockPath, orch2.sockPath);
-  assert.equal(group.controlBroker.token, orch2.token);
-
-  // Unknown group -> null (caller drops the prompt rather than orphan).
-  assert.equal(await groupManager.resolveGroupMcpSocket('no-such-group', 'workerA'), null);
-  groupManager.destroyGroup(gid);
-});
-
-// Fix 6: the "same project" live-session substitution must not inject into a
-// same-cwd/same-app worker belonging to ANOTHER group -- covered by direct
-// unit tests of the exported matcher (fireSchedule uses it verbatim).
-test('matchesScheduleTarget is group+role scoped (no cross-group injection)', async () => {
-  const live = (over = {}) => ({
-    cwd: '/srv/proj', shell: false, app: 'claude',
-    groupId: null, groupRole: null, exited: false, ptyProcess: {},
-    ...over,
-  });
-  const entry = {
-    cwd: '/srv/proj', shell: false, app: 'claude',
-    groupId: null, groupRole: null,
-  };
-  const groupEntry = { ...entry, groupId: 'g1', groupRole: 'workerA' };
-
-  // Legacy (non-group) entries keep the plain cwd+shell+app semantics.
-  assert.equal(sessionManager.matchesScheduleTarget(live(), entry), true);
-  assert.equal(sessionManager.matchesScheduleTarget(live({ cwd: '/other' }), entry), false);
-  assert.equal(sessionManager.matchesScheduleTarget(live({ exited: true }), entry), false);
-
-  // Group entries match only the same group AND same role.
-  assert.equal(
-    sessionManager.matchesScheduleTarget(live({ groupId: 'g1', groupRole: 'workerA' }), groupEntry),
-    true,
-  );
-  assert.equal(
-    sessionManager.matchesScheduleTarget(live({ groupId: 'g2', groupRole: 'workerA' }), groupEntry),
-    false,
-    'same cwd+app but a different group must not match',
-  );
-  assert.equal(
-    sessionManager.matchesScheduleTarget(live({ groupId: 'g1', groupRole: 'orchestrator' }), groupEntry),
-    false,
-    'same group but a different role must not match',
-  );
-  assert.equal(
-    sessionManager.matchesScheduleTarget(live({ groupId: null, groupRole: null }), groupEntry),
-    false,
-    'a standalone session must not match a group entry',
-  );
-});
-
-// Fix 7 (Issue #30): a model-annotated schedule must only inject into a live
-// session launched with the SAME model -- never into an unmodeled or
-// differently-modeled one. Both sides are already normalizeModel()-ed by the
-// time the matcher runs, so ?? null gives a safe strict comparison.
 test('matchesScheduleTarget is model-scoped (no cross-model injection)', async () => {
   const live = (over = {}) => ({
     cwd: '/srv/proj', shell: false, app: 'opencode',
-    model: null, groupId: null, groupRole: null, exited: false, ptyProcess: {},
+    model: null, exited: false, ptyProcess: {},
     ...over,
   });
   const entry = {
     cwd: '/srv/proj', shell: false, app: 'opencode', model: 'anthropic/claude-sonnet-4',
-    groupId: null, groupRole: null,
   };
 
   // Unmodeled / differently-modeled sessions must not take the schedule
@@ -1160,222 +906,7 @@ test('matchesScheduleTarget is model-scoped (no cross-model injection)', async (
   assert.equal(sessionManager.matchesScheduleTarget(live(), plain), true);
   assert.equal(sessionManager.matchesScheduleTarget(live({ model: 'anthropic/claude-sonnet-4' }), plain), false);
 
-  // The model match must not break the group+role scope: same model but a
-  // different group/role still refuses, and same group+role+model matches.
-  const groupEntry = { ...entry, groupId: 'g1', groupRole: 'workerA' };
-  assert.equal(
-    sessionManager.matchesScheduleTarget(
-      live({ model: 'anthropic/claude-sonnet-4', groupId: 'g1', groupRole: 'workerB' }),
-      groupEntry,
-    ),
-    false,
-    'same model but a different role must not match',
-  );
-  assert.equal(
-    sessionManager.matchesScheduleTarget(
-      live({ model: 'anthropic/claude-sonnet-4', groupId: 'g2', groupRole: 'workerA' }),
-      groupEntry,
-    ),
-    false,
-    'same model but a different group must not match',
-  );
-  assert.equal(
-    sessionManager.matchesScheduleTarget(
-      live({ model: 'anthropic/claude-sonnet-4', groupId: 'g1', groupRole: 'workerA' }),
-      groupEntry,
-    ),
-    true,
-    'same model and same group+role matches',
-  );
-});
 
-// A permission-mode-annotated schedule must only inject into a live session
-// launched with the SAME mode -- never into a standard or differently-moded
-// one (a yolo schedule replaying into a standard session would silently
-// escalate its privileges, and vice versa). Legacy entries without the field
-// count as 'standard' on both sides.
-test('matchesScheduleTarget is permission-mode-scoped (no cross-mode injection)', async () => {
-  const live = (over = {}) => ({
-    cwd: '/srv/proj', shell: false, app: 'commandcode',
-    model: null, permissionMode: 'standard', groupId: null, groupRole: null,
-    exited: false, ptyProcess: {},
-    ...over,
-  });
-  const entry = {
-    cwd: '/srv/proj', shell: false, app: 'commandcode', model: null,
-    permissionMode: 'yolo', groupId: null, groupRole: null,
-  };
-
-  assert.equal(sessionManager.matchesScheduleTarget(live(), entry), false);
-  assert.equal(sessionManager.matchesScheduleTarget(live({ permissionMode: 'auto-accept' }), entry), false);
-  assert.equal(sessionManager.matchesScheduleTarget(live({ permissionMode: 'yolo' }), entry), true);
-
-  // Legacy entries (no permissionMode field) keep matching standard sessions only.
-  const legacy = {
-    cwd: '/srv/proj', shell: false, app: 'commandcode', model: null,
-    groupId: null, groupRole: null,
-  };
-  assert.equal(sessionManager.matchesScheduleTarget(live(), legacy), true);
-  assert.equal(sessionManager.matchesScheduleTarget(live({ permissionMode: 'yolo' }), legacy), false);
-});
-
-// Fix 3: auto-resume of a dead group member recreates its handoff channel,
-// binds it to the new session, and re-registers the role.
-test('fireSchedule auto-resume of a group member recreates its MCP channel and rebinds the role', async () => {
-  const gid = randomUUID();
-  await groupManager.createGroup({ groupId: gid, cwd: '/tmp', orchestratorDir: `/srv/orch-${gid}` });
-
-  const dead = await shellMember('/tmp', gid, 'workerA');
-  const orch = await shellMember('/tmp', gid, 'orchestrator'); // keeps the group alive
-
-  assert.ok(sessionManager.setScheduledPrompt(dead.id, Date.now() + 700, 'MARKER_RESUME'));
-  const deadId = dead.id;
-  sessionManager.destroySession(dead.id); // keepSchedule defaults true
-
-  await sleep(2500); // branch 3: resolver + createSession + re-registration
-
-  const group = groupManager.getGroup(gid);
-  assert.ok(group, 'group survives (orchestrator alive)');
-  const member = group.members.get('workerA');
-  assert.ok(member, 'workerA still registered');
-  assert.notEqual(member, deadId, 'role rebound to the resumed session');
-  const channel = group.handoffChannels.get('workerA');
-  assert.ok(channel, 'a fresh handoff channel was created');
-  assert.equal(channel.sessionId, member, 'channel bound to the resumed session');
-  assert.ok(channel.sockPath, 'channel has a socket path');
-
-  sessionManager.destroySession(member, { keepSchedule: false });
-  sessionManager.destroySession(orch.id, { keepSchedule: false });
-  groupManager.destroyGroup(gid);
-});
-
-// Fix 3 fallback: when the group is already gone, the resume is dropped
-// instead of spawning an MCP-less orphan that could never hand off.
-test('fireSchedule drops the prompt when the member group no longer exists', async () => {
-  const gid = randomUUID();
-  await groupManager.createGroup({ groupId: gid, cwd: '/tmp', orchestratorDir: `/srv/orch-${gid}` });
-  const member = await shellMember('/tmp', gid, 'workerA');
-  const orch = await shellMember('/tmp', gid, 'orchestrator');
-
-  assert.ok(sessionManager.setScheduledPrompt(member.id, Date.now() + 500, 'MARKER_ORPHAN_DROP'));
-  // Mark the assembly complete (POST /groups does this after the last member
-  // registers; this test drives the group directly, so it does it here) --
-  // from then on the all-exited cleanup applies.
-  groupManager.markGroupAssembled(gid);
-  // Tear the whole group down before the fire: members die, the all-exited
-  // cleanup removes the group from the registry.
-  sessionManager.destroySession(member.id); // keepSchedule
-  sessionManager.destroySession(orch.id);   // keepSchedule
-  await sleep(1800);
-  assert.equal(groupManager.getGroup(gid), null, 'group cleaned up after all members exited');
-  // Nothing to assert on the session side: no orphan may exist with this
-  // groupId (invisible in the UI + unable to hand off).
-  const leftover = sessionManager.listSessions().filter((s) => s.groupId === gid);
-  assert.equal(leftover.length, 0, 'no MCP-less orphan session was spawned');
-});
-
-// Orchestrator CLAUDE.md/AGENTS.md ro-bind overlay (see groupManager's
-// generateOrchestratorClaudeMdSrc): the auto-resume path must regenerate it
-// on every respawn, same resolver-registration pattern as mcpSocketPath. The
-// dead session here is shell-spawned (sandbox: false, like shellMember uses
-// throughout this file), so the observable proof that the resolver actually
-// ran end-to-end is the role being rebound at all -- had resolution failed,
-// the fail-closed guard below would have dropped the resume entirely and
-// left the role bound to the dead session forever.
-test('fireSchedule auto-resume of a dead orchestrator regenerates its CLAUDE.md overlay and rebinds the role', async () => {
-  const gid = randomUUID();
-  const orchestratorDir = join(runtimeDir, `orch-resume-${gid}`);
-  await groupManager.createGroup({ groupId: gid, cwd: '/tmp', orchestratorDir });
-
-  const workerKeepAlive = await shellMember('/tmp', gid, 'workerA'); // keeps the group alive
-  const deadOrch = await shellMember('/tmp', gid, 'orchestrator');
-  const deadOrchId = deadOrch.id;
-
-  const generatedPath = join(process.env.CCSERVER_ORCHESTRATOR_GENERATED_ROOT, `${basename(orchestratorDir)}.md`);
-  assert.equal(existsSync(generatedPath), false, 'nothing generated yet before the first (re)spawn');
-
-  assert.ok(sessionManager.setScheduledPrompt(deadOrch.id, Date.now() + 700, 'MARKER_ORCH_RESUME'));
-  sessionManager.destroySession(deadOrch.id); // keepSchedule defaults true
-
-  await sleep(2500); // branch 3: resolvers (mcpSocketPath + orchestratorClaudeMdSrc) + createSession
-
-  const group = groupManager.getGroup(gid);
-  assert.ok(group, 'group survives (workerA alive)');
-  const member = group.members.get('orchestrator');
-  assert.ok(member, 'orchestrator still registered');
-  assert.notEqual(member, deadOrchId, 'role rebound to the resumed session -- proves the overlay resolver did not drop the prompt');
-
-  assert.ok(existsSync(generatedPath), 'the CLAUDE.md/AGENTS.md overlay source was (re)generated for the resume');
-  const template = readFileSync(join(import.meta.dirname, 'orchestrator-template.md'), 'utf-8');
-  assert.equal(readFileSync(generatedPath, 'utf-8'), template);
-
-  sessionManager.destroySession(member, { keepSchedule: false });
-  sessionManager.destroySession(workerKeepAlive.id, { keepSchedule: false });
-  groupManager.destroyGroup(gid);
-});
-
-// Retire-first ordering for the seatbelt overlay: an exited-but-not-reaped
-// orchestrator still owns its materialized CLAUDE.md/AGENTS.md
-// (sandboxSeatbeltFiles). fireSchedule must retire it before the successor
-// launches -- otherwise the successor sees the files as pre-existing, claims
-// no ownership, and the predecessor's later teardown unlinks the live
-// successor's overlay mid-session. Here the pty is killed directly so onExit
-// marks it exited while it stays registered (open viewer tab).
-test('fireSchedule retires an exited seatbelt-overlay predecessor before auto-resume', async () => {
-  const gid = randomUUID();
-  const orchestratorDir = join(runtimeDir, `orch-retire-${gid}`);
-  await groupManager.createGroup({ groupId: gid, cwd: '/tmp', orchestratorDir });
-
-  const workerKeepAlive = await shellMember('/tmp', gid, 'workerA');
-  const deadOrch = await shellMember('/tmp', gid, 'orchestrator');
-  const deadOrchId = deadOrch.id;
-
-  mkdirSync(orchestratorDir, { recursive: true });
-  writeFileSync(join(orchestratorDir, 'CLAUDE.md'), '# live rules\n');
-  deadOrch.sandboxSeatbeltFiles = [join(orchestratorDir, 'CLAUDE.md')];
-  deadOrch.ptyProcess.kill();
-  const t0 = Date.now();
-  while (!deadOrch.exited && Date.now() - t0 < 5000) await sleep(100);
-  assert.ok(deadOrch.exited, 'predecessor pty exited but stays registered');
-
-  assert.ok(sessionManager.setScheduledPrompt(deadOrchId, Date.now() + 700, 'MARKER_ORCH_RETIRE'));
-  await sleep(2500); // branch 3: retire-first + resolvers + createSession
-
-  assert.equal(sessionManager.getSession(deadOrchId), undefined, 'exited predecessor retired before resume');
-  const member = groupManager.getGroup(gid).members.get('orchestrator');
-  assert.ok(member && member !== deadOrchId, 'role rebound to the resumed session');
-
-  sessionManager.destroySession(member, { keepSchedule: false });
-  sessionManager.destroySession(workerKeepAlive.id, { keepSchedule: false });
-  groupManager.destroyGroup(gid);
-});
-
-// Fail-closed counterpart of the above: when the overlay can't be generated
-// (here, simulated by a group with no orchestratorDir -- generateOrchestratorClaudeMdSrc
-// returns null in that case, same as a torn-down group), the resume must be
-// dropped rather than launch an orchestrator with no CLAUDE.md overlay at
-// all -- mirrors the existing mcpSocketPath drop policy.
-test('fireSchedule drops the prompt when the orchestrator CLAUDE.md overlay cannot be generated', async () => {
-  const gid = randomUUID();
-  await groupManager.createGroup({ groupId: gid, cwd: '/tmp', orchestratorDir: null });
-
-  const workerKeepAlive = await shellMember('/tmp', gid, 'workerA');
-  const deadOrch = await shellMember('/tmp', gid, 'orchestrator');
-  const deadOrchId = deadOrch.id;
-
-  assert.ok(sessionManager.setScheduledPrompt(deadOrch.id, Date.now() + 500, 'MARKER_ORCH_DROP'));
-  sessionManager.destroySession(deadOrch.id);
-
-  await sleep(1800);
-
-  const group = groupManager.getGroup(gid);
-  assert.ok(group, 'group survives (workerA alive)');
-  assert.equal(group.members.get('orchestrator'), deadOrchId, 'role was never rebound -- the resume was dropped, not launched without an overlay');
-  const leftover = sessionManager.listSessions().filter((s) => s.groupId === gid && s.groupRole === 'orchestrator');
-  assert.equal(leftover.length, 0, 'no orchestrator session (dead or alive) was (re)spawned for this role');
-
-  sessionManager.destroySession(workerKeepAlive.id, { keepSchedule: false });
-  groupManager.destroyGroup(gid);
 });
 
 // The old idle heuristic sent `input_needed` to the client on an idle agent
@@ -1421,14 +952,9 @@ test('idle timer no longer sends input_needed, but still advances the settle gat
   }
 });
 
-// notifyIdentity attribution (see notify.js / mcpConfig.js): the per-session
-// identity rides to the bridge as the CCSERVER_NOTIFY_IDENTITY env. An
-// explicit projectName overrides basename(cwd) -- a combo orchestrator's cwd
-// is a hashed orchestrator dir (routes/groups.js) and must not leak into the
-// notify footer; without one the cwd basename is used (existing behavior). A
-// fake claude binary echoes the env var so the injected identity is
-// observable from the session's output buffer.
-test('createSession notify identity: explicit projectName wins, cwd basename is the fallback', async () => {
+// notifyIdentity attribution rides to the bridge as CCSERVER_NOTIFY_IDENTITY.
+// A fake Claude binary echoes it so the cwd-derived project name is observable.
+test('createSession notify identity uses the cwd basename', async () => {
   const binDir = mkdtempSync(join(tmpdir(), 'ccserver-fake-agent-'));
   const fakeBin = join(binDir, 'fake-claude');
   writeFileSync(fakeBin, '#!/bin/bash\nprintf "%s\\n" "$CCSERVER_NOTIFY_IDENTITY"\n', { mode: 0o755 });
@@ -1451,18 +977,6 @@ test('createSession notify identity: explicit projectName wins, cwd basename is 
     return line ? JSON.parse(line) : null;
   };
   try {
-    const named = await sessionManager.createSession({
-      cwd: '/tmp', cols: 80, rows: 24, shell: false, sandbox: false, app: 'claude',
-      projectName: 'real-proj',
-    });
-    assert.ok(named.session, 'agent session should spawn');
-    ids.push(named.sessionId);
-    await sleep(500);
-    const namedIdentity = identityOf(named.session);
-    assert.ok(namedIdentity, 'notify identity must be injected (CCSERVER_NOTIFY_IDENTITY env)');
-    assert.equal(namedIdentity.projectName, 'real-proj', 'the explicit projectName wins over the cwd basename');
-    assert.equal(namedIdentity.cwd, '/tmp');
-
     const fallback = await sessionManager.createSession({
       cwd: '/tmp', cols: 80, rows: 24, shell: false, sandbox: false, app: 'claude',
     });
@@ -1664,7 +1178,7 @@ test('sandboxHomeInUse counts only live sandboxed sessions', async () => {
   }
 });
 
-// dockerAvailability(session): surfaced by get_tab_status/list_group_sessions
+// dockerAvailability(session): surfaced by the session UI
 // so the orchestrator can check per-session docker usability up front instead
 // of discovering the data-root race (a rootless dockerd can serve only ONE
 // session per project at a time -- see sandbox-entrypoint.sh's flock) from a
@@ -2113,8 +1627,8 @@ test('listSessions: every session carries its activity reading', async () => {
 // The red/yellow hysteresis needs a previous level to hold onto. It lives on
 // the SESSION (server side), not in any viewer, which is what makes these
 // three cases behave: switching browser tabs, two clients watching the same
-// session, and a session watched from another instance over federation (the
-// owning server computes the level; the viewer only renders it).
+// session, and a session observed through multiple readers (the owning session
+// computes the level; every reader only renders it).
 
 test('activitySnapshot: two readers in a row agree -- the history is the session\'s, not the viewer\'s', async () => {
   const { createScreenModel } = await import('./screenModel.js');

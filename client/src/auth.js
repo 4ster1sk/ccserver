@@ -55,7 +55,7 @@ export function getToken() {
   // passkey mode authenticates via the httpOnly session cookie, never a
   // bearer token -- returning null here (rather than whatever's left in
   // localStorage from a prior token-mode run) is what makes the
-  // <a href>-based download links in DirectoryBrowser/GroupTabView work
+  // <a href>-based download links in DirectoryBrowser work
   // unmodified: no token param gets appended, and the browser's normal
   // same-origin navigation sends the session cookie on its own.
   return isPasskeyMode() ? null : cachedToken;
@@ -110,9 +110,8 @@ async function checkSetupGate(res) {
 }
 
 // Both branches below need to collapse concurrent 401s from the several
-// independent pollers that call authFetch (ApprovalBanner,
-// PairingRequestBanner, RemoteInstanceView, useSystemStats, GroupTabView --
-// same set as issue #123 #5) into a single interrupt instead of one per
+// independent pollers that call authFetch (ApprovalBanner, useSystemStats,
+// terminal view) into a single interrupt instead of one per
 // poller, and again suppress re-triggering for a while after that interrupt
 // resolves. promptInFlight/suppressUntil already do this for the `token`
 // path below; authRequiredSuppressUntil applies the same cooldown to the

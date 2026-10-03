@@ -21,6 +21,18 @@
 
 const net = require('net');
 
+// Per-session broker token: from a file when CCSANDBOX_GIT_BROKER_TOKEN_FILE
+// is set (the qemu backend, so the token never appears on a host ssh command
+// line), else from the env var (bwrap). Missing/unreadable -> ''
+// and the broker refuses the request (fail closed).
+function brokerToken() {
+  const file = process.env.CCSANDBOX_GIT_BROKER_TOKEN_FILE;
+  if (file) {
+    try { return require('fs').readFileSync(file, 'utf-8').trim(); } catch { return ''; }
+  }
+  return process.env.CCSANDBOX_GIT_BROKER_TOKEN || '';
+}
+
 // The isTTY check below skips this for a literal interactive terminal, but
 // that alone isn't a hard guarantee: whatever invokes `gh` inside the
 // sandbox may hand this process a non-TTY stdin (a pipe, or an fd shared
@@ -70,7 +82,10 @@ function requestExec(req, sockPath) {
     // trip to GitHub), well above the git-broker's own internal exec timeout.
     const timer = setTimeout(() => { sock.destroy(); finish(null); }, 35000);
     const chunks = [];
-    sock.on('connect', () => sock.end(`${JSON.stringify(req)}\n`));
+    // write, not end: the broker answers after one newline-framed line and
+    // closes, so no half-close is needed -- and the qemu backend's in-guest
+    // relay (systemd-socket-proxyd) tears down both directions on one.
+    sock.on('connect', () => sock.write(`${JSON.stringify(req)}\n`));
     sock.on('data', (c) => chunks.push(c));
     sock.on('end', () => {
       clearTimeout(timer);
@@ -96,7 +111,7 @@ const DENY_MESSAGES = {
   'attach-not-allowed': () => 'sandbox: gh ... --attach is not allowed through the broker (would read a host file as an upload attachment)',
   'checkout-worktree-not-allowed': () => 'sandbox: gh pr checkout --worktree is not allowed (writes outside the session tree)',
   'bad-request': () => 'sandbox: malformed gh-broker request',
-  unauthorized: () => 'sandbox: gh-broker rejected this session\'s token (CCSANDBOX_GIT_BROKER_TOKEN missing or wrong)',
+  unauthorized: () => 'sandbox: gh-broker rejected this session\'s token (CCSANDBOX_GIT_BROKER_TOKEN[_FILE] missing or wrong)',
   'exec-failed': () => 'sandbox: gh-broker failed to run gh on the host',
   timeout: () => 'sandbox: gh-broker timed out running this gh command',
 };
@@ -119,8 +134,8 @@ async function main() {
   const req = {
     op: 'gh-exec',
     // Per-session connection token (git-broker.js): shared-/tmp socket on
-    // macOS Seatbelt, so the broker authenticates the caller first.
-    token: process.env.CCSANDBOX_GIT_BROKER_TOKEN || '',
+    // shared sandbox temporary directory, so the broker authenticates the caller first.
+    token: brokerToken(),
     argv,
     stdin: stdinBuf.length ? stdinBuf.toString('base64') : undefined,
   };

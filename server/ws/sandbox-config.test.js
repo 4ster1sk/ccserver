@@ -105,7 +105,7 @@ test('forceSandbox coexists with the other config keys', () => {
 
 test('defaultApp accepts supported apps and falls back to claude for anything else', () => {
   withConfig({ defaultApp: 'copilot' }, () => {
-    assert.equal(loadSandboxConfig().defaultApp, 'copilot');
+    assert.equal(loadSandboxConfig().defaultApp, 'claude', 'a removed app falls back like any unknown one');
   });
   withConfig({ defaultApp: 'opencode' }, () => {
     assert.equal(loadSandboxConfig().defaultApp, 'opencode');
@@ -272,16 +272,16 @@ test('hiddenApps defaults to [] when the key is absent', () => {
 });
 
 test('hiddenApps keeps only known app ids and dedupes them', () => {
-  withConfig({ hiddenApps: ['copilot', 'codex', 'copilot', 'bogus', 42, null] }, () => {
-    assert.deepEqual(loadSandboxConfig().hiddenApps, ['copilot', 'codex']);
+  withConfig({ hiddenApps: ['opencode', 'codex', 'opencode', 'copilot', 'bogus', 42, null] }, () => {
+    assert.deepEqual(loadSandboxConfig().hiddenApps, ['opencode', 'codex']);
   });
 });
 
 test('hiddenApps falls back to [] for a non-array value', () => {
-  withConfig({ hiddenApps: 'copilot' }, () => {
+  withConfig({ hiddenApps: 'codex' }, () => {
     assert.deepEqual(loadSandboxConfig().hiddenApps, []);
   });
-  withConfig({ hiddenApps: { copilot: true } }, () => {
+  withConfig({ hiddenApps: { codex: true } }, () => {
     assert.deepEqual(loadSandboxConfig().hiddenApps, []);
   });
 });
@@ -327,7 +327,7 @@ test('selectableAppIds keeps claude selectable when only the other apps are hidd
   const prevBin = process.env.CCSERVER_CLAUDE_BIN;
   process.env.CCSERVER_CLAUDE_BIN = process.execPath;
   try {
-    withConfig({ hiddenApps: ['opencode', 'copilot', 'codex'] }, () => {
+    withConfig({ hiddenApps: ['opencode', 'codex'] }, () => {
       assert.deepEqual(selectableAppIds(), ['claude']);
     });
   } finally {
@@ -394,24 +394,15 @@ test('opencodeGoUsage: env override wins over the file both ways, unrecognized e
   });
 });
 
-test('network defaults: isolate=false, initialState=enforce, mode=enforce, empty lists', () => {
+test('network defaults: mode=enforce, empty lists', () => {
   withConfig({}, () => {
-    assert.deepEqual(loadSandboxConfig().network, { isolate: false, initialState: 'enforce', mode: 'enforce', allowedHosts: [], deniedHosts: [] });
+    assert.deepEqual(loadSandboxConfig().network, { mode: 'enforce', allowedHosts: [], deniedHosts: [] });
   });
 });
 
-test('network: isolate/initialState/mode/allowedHosts/deniedHosts are read from the config file', () => {
-  withConfig({ network: { isolate: true, initialState: 'open', mode: 'audit', allowedHosts: ['api.example.com'], deniedHosts: ['evil.example'] } }, () => {
-    assert.deepEqual(loadSandboxConfig().network, { isolate: true, initialState: 'open', mode: 'audit', allowedHosts: ['api.example.com'], deniedHosts: ['evil.example'] });
-  });
-});
-
-test('network: initialState collapses anything but "open" to "enforce"', () => {
-  withConfig({ network: { initialState: 'sometimes' } }, () => {
-    assert.equal(loadSandboxConfig().network.initialState, 'enforce');
-  });
-  withConfig({ network: { initialState: 'open' } }, () => {
-    assert.equal(loadSandboxConfig().network.initialState, 'open');
+test('network: mode/allowedHosts/deniedHosts are read from the config file; retired isolate/initialState are ignored', () => {
+  withConfig({ network: { isolate: true, initialState: 'enforce', mode: 'audit', allowedHosts: ['api.example.com'], deniedHosts: ['evil.example'] } }, () => {
+    assert.deepEqual(loadSandboxConfig().network, { mode: 'audit', allowedHosts: ['api.example.com'], deniedHosts: ['evil.example'] });
   });
 });
 
@@ -434,10 +425,10 @@ test('network: allowedHosts/deniedHosts filter out non-string entries', () => {
 
 test('network: a non-object "network" key collapses to defaults', () => {
   withConfig({ network: 'nope' }, () => {
-    assert.deepEqual(loadSandboxConfig().network, { isolate: false, initialState: 'enforce', mode: 'enforce', allowedHosts: [], deniedHosts: [] });
+    assert.deepEqual(loadSandboxConfig().network, { mode: 'enforce', allowedHosts: [], deniedHosts: [] });
   });
   withConfig({ network: ['nope'] }, () => {
-    assert.deepEqual(loadSandboxConfig().network, { isolate: false, initialState: 'enforce', mode: 'enforce', allowedHosts: [], deniedHosts: [] });
+    assert.deepEqual(loadSandboxConfig().network, { mode: 'enforce', allowedHosts: [], deniedHosts: [] });
   });
 });
 

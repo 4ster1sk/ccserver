@@ -69,7 +69,7 @@ const FOCUSABLE = 'a[href], button:not([disabled]), input:not([disabled]), selec
  * Presentational modal dialog for viewing text/markdown content: dialog
  * chrome, focus trap, Escape/click-outside close, and the Rendered/Source
  * toggle. Fetching and content-type decisions belong to the caller
- * (FilePreview.jsx / DocPreview.jsx).
+ * (FilePreview.jsx).
  * @param {{
  *   title: string,
  *   titleHint?: string,

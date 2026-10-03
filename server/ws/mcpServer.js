@@ -1,24 +1,7 @@
-// MCP servers for combo groups, hosted in the main Node process (same process
-// as the pty sessions, so tools can reach sessions/outputBuffers directly).
-// Runs over a Unix socket via SocketTransport -- MCP's stdio framing is
-// newline-delimited JSON, so no framing conversion is needed.
-//
-// Two distinct servers per group:
-//   control (buildControlMcpServer)  -- reachable only by the orchestrator
-//     socket. Tools can inspect/type into any member and wait for handoffs,
-//     and publish_doc / delete_doc as the orchestrator (delete_doc exists
-//     only here).
-//   handoff (buildHandoffMcpServer)  -- one per worker socket, exposing only
-//     handoffToOrchestrator and the doc/file exchange tools. The worker cannot
-//     read other sessions.
-//
-// groupId / sessionId / role are bound in the per-connection closure; they are
-// never taken from tool arguments (see mcpTools.js -- the authorization
-// boundary depends on this).
+// Process-global MCP servers share a newline-delimited Unix-socket transport.
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
-import * as tools from './mcpTools.js';
 
 // Newline-delimited JSON frames: a well-behaved MCP client sends a newline
 // per message, so a buffer beyond this means the peer is not speaking MCP
@@ -57,8 +40,8 @@ export class SocketTransport {
   }
 
   _drain() {
-    // The socket path is reachable by anything running as the same user,
-    // not just the group's sandbox: a peer that never sends a newline
+    // The socket path is reachable by anything running as the same user;
+    // a peer that never sends a newline
     // must not be able to grow this buffer without bound. Over the cap,
     // drop the connection (the in-flight partial frame is unrecoverable).
     if (this._buf.length > MAX_TRANSPORT_BUFFER_CHARS) {
@@ -90,210 +73,8 @@ export class SocketTransport {
   }
 }
 
-// Shared sandboxOpts shape for open_tab -- mirrors
-// groupManager.normalizeSandboxOpts's tools sub-object (rtk / codeReviewGraph).
-// Without the `tools` field here, the MCP SDK's zod parse (mcp.js's
-// safeParseAsync -> parseResult.data passed to the handler) silently strips
-// any sandboxOpts.tools the caller sent, before capSandboxOpts ever runs.
-export const sandboxOptsSchema = z.object({
-  gpg: z.boolean().optional(),
-  sshAgent: z.boolean().optional(),
-  tools: z.object({
-    rtk: z.boolean().optional(),
-    codeReviewGraph: z.boolean().optional(),
-  }).optional(),
-}).optional();
-
-// deps: { groupId, groupManager, sessionManager }
-export function buildControlMcpServer(deps) {
-  const server = new McpServer({ name: 'ccserver-control', version: '1.0.0' });
-
-  server.tool(
-    'list_group_sessions',
-    'List all sessions in this orchestration group (workers and orchestrator) with role, app, cwd, live status, autoYes (whether automatic permission-approval is enabled; null when the member has no live session, e.g. a restored one), idleForMs (ms since each session last produced output; null when no live session exists), activity (see get_tab_status -- the graded busy/idle reading; prefer it over idleForMs when scanning the group for who is actually working), and dockerAvailable/dockerReason (see get_tab_status -- whether THIS member can currently use docker). A member expected to be working but showing a large idleForMs may be stuck -- that is a concrete anomaly signal on its own: confirm with a single read_output and go back to waiting; absent such signals, keep waiting on wait_for_handoff instead of polling. Before handing a member a docker-dependent task, check its dockerAvailable here rather than finding out from a failure: a rootless dockerd can only serve ONE session per project at a time (the same project opened in two sandboxes only gives docker to whichever session\'s dockerd actually won the startup race, which is NOT necessarily workerA -- check, don\'t assume).',
-    {},
-    async () => ({ content: [{ type: 'text', text: JSON.stringify(tools.listGroupSessions(deps)) }] }),
-  );
-
-  server.tool(
-    'read_output',
-    'Read the recent terminal output of a group member session. Returns raw bytes and ANSI-stripped text plus a screen view: screen (the member\'s current visible screen -- its latest rows, capped at 40 lines of 80 chars; the raw byte stream cannot show this because TUI spinners redraw in place via cursor moves and line erases), screenAlt (whether an alternate screen is active), screenTruncated (when the screen view was cut to its cap) and screenIdleMs (ms since the screen last visibly changed -- a spinner keeps this small, a static prompt makes it grow; prefer screenIdleMs over idleForMs for busy/idle judgments, since bytes can keep flowing while the screen is unchanged). tail is a count of output chunks (default 200; the server buffers up to ~512KB of the most recent output, chunked), not characters. The returned text is capped at 16KB (the buffer tail) with truncated:true when the cap is hit. This is a fallback for inspecting a possibly-stuck member, NOT a progress-check tool -- for normal flow, prefer wait_for_handoff and let pending work come back to you. Justify every call with a concrete anomaly signal (repeated wait_for_handoff timeouts, a stuck-looking idleForMs/screenIdleMs reported by get_tab_status/list_group_sessions, or the worker reporting trouble) and read once; never poll this for reassurance.',
-    { sessionId: z.string(), tail: z.number().optional() },
-    async (args) => ({ content: [{ type: 'text', text: JSON.stringify(tools.readOutput(deps, args)) }] }),
-  );
-
-  server.tool(
-    'send_input',
-    'Type text into a group member session terminal, optionally submitting with Enter (submit defaults true). This sends keystrokes, not a shell command primitive. For a just-launched session the tool first waits for the TUI to settle (up to ~10s) so keystrokes are not dropped; the result includes settled:false when the input was sent without confirmed readiness.',
-    { sessionId: z.string(), text: z.string(), submit: z.boolean().optional() },
-    async (args) => ({ content: [{ type: 'text', text: JSON.stringify(await tools.sendInput(deps, args)) }] }),
-  );
-
-  server.tool(
-    'new_session',
-    'Atomically replace a worker\'s current session with a fresh process of the same role: same git worktree and same persisted launch preferences (app/model/sandboxOpts), but a brand-new CLI conversation with clean context. This is THE way to give a worker a fresh start -- never type `/new` or similar reset commands via send_input (their meaning depends on each app\'s slash commands). It takes no instruction text and accepts only the target worker\'s current sessionId; the orchestrator session itself can never be replaced. The old session stays live until the replacement is up (a failure leaves it untouched), and the result reports previousSessionId plus the NEW sessionId, role, app, model, cwd and sandboxOpts. Send your first instruction to the RETURNED sessionId in a SEPARATE send_input call afterwards -- do not combine a reset and an instruction into one text.',
-    { sessionId: z.string() },
-    async (args) => ({ content: [{ type: 'text', text: JSON.stringify(await tools.newSession(deps, args)) }] }),
-  );
-
-  server.tool(
-    'send_key',
-    'Send ONE whitelisted control key to a group member terminal. Currently the only key is "escape", which dismisses an agent TUI\'s confirmation modal -- e.g. Codex\'s "Create a plan? esc dismiss" prompt that can appear after a long multi-line/bulleted instruction and stalls the worker until dismissed. This is a narrowly-scoped recovery tool, NOT an input channel: no other key, raw byte, or ANSI sequence exists here, and normal text belongs to send_input. Confirm the modal with a single read_output first, then send escape exactly once; never spam it or poll with repeated keys.',
-    { sessionId: z.string(), key: z.enum(['escape']) },
-    async (args) => ({ content: [{ type: 'text', text: JSON.stringify(tools.sendKey(deps, args)) }] }),
-  );
-
-  server.tool(
-    'open_tab',
-    'Open a new worker session inside this group (with its own handoff channel) and return its sessionId. role must be a worker role (workerA, workerB, ...) -- never orchestrator. cwd is no longer read: the server always assigns each role its own dedicated git worktree automatically (or the shared project directory when the project isn\'t a git repo) -- the returned cwd tells you what was actually assigned; the argument is still accepted on the wire but has no effect and any value works. app (claude, opencode, or codex) is optional: omitted values fall back to the role\'s persisted preferences, then to the group defaults. copilot is not supported in groups because its MCP configuration is file-based and cannot be injected per session. For a genuinely new member, sandboxOpts.gpg / sandboxOpts.sshAgent cannot exceed what the calling orchestrator session itself currently has enabled -- a request for a flag the orchestrator does not hold is silently downgraded to false; check the returned sandboxOpts to see what was actually granted. Restarting an already-registered role (role currently has a member) always keeps that member\'s existing sandboxOpts regardless of what this call requests.',
-    {
-      role: z.string().regex(/^worker[A-Za-z0-9_-]+$/),
-      app: z.enum(['claude', 'opencode', 'codex']).optional(),
-      model: z.string().nullable().optional(),
-      cwd: z.string(),
-      sandboxOpts: sandboxOptsSchema,
-    },
-    async (args) => ({ content: [{ type: 'text', text: JSON.stringify(await tools.openTab(deps, args)) }] }),
-  );
-
-  server.tool(
-    'publish_doc',
-    'Publish a document under a key, visible to every member of this group via fetch_doc/list_docs -- use it to hand a worker a long instruction (send only the key through send_input, not the text). It is recorded as published by "orchestrator", which the server sets and no worker can claim. You cannot overwrite a key a worker published, and a worker cannot overwrite a key you published (error key-owned-by-other-side); re-publishing your own key overwrites it. The group holds at most 50 documents in total (workers\' included); list_docs shows count / limit, and a new key past the limit is refused with too-many-docs until you free a slot with delete_doc.',
-    { key: z.string(), content: z.string() },
-    async (args) => ({ content: [{ type: 'text', text: JSON.stringify(tools.publishDocAsOrchestrator(deps, args)) }] }),
-  );
-
-  server.tool(
-    'delete_doc',
-    'Delete the document published under a key, whoever published it (yours or a worker\'s); only you can -- workers have no delete. The key is free again straight away, for either side, and the deletion survives a server restart. An unknown key is an explicit not-found error. This is how you keep the board under its 50-document limit (list_docs shows count / limit): remove documents that have served their purpose, and only once nobody still needs them -- a worker that has not fetched a document yet gets not-found, and a findings document the pre-PR check will read must stay until its PR has merged.',
-    { key: z.string() },
-    async (args) => ({ content: [{ type: 'text', text: JSON.stringify(tools.deleteDocAsOrchestrator(deps, args)) }] }),
-  );
-
-  server.tool(
-    'fetch_doc',
-    'Fetch a document previously published (by any member) under a key via publish_doc.',
-    { key: z.string() },
-    async (args) => ({ content: [{ type: 'text', text: JSON.stringify(tools.fetchDoc(deps, args)) }] }),
-  );
-
-  server.tool(
-    'list_docs',
-    'List documents published in this group (key, publishedBy role, publishedAt, size) without their content -- fetch_doc the ones you need. The result also carries count and limit: how many documents the group holds and the most it can hold.',
-    {},
-    async () => ({ content: [{ type: 'text', text: JSON.stringify(tools.listDocs(deps)) }] }),
-  );
-
-  server.tool(
-    'list_files',
-    'List files shared in this group (id, name, size, mimeType, direction, publishedBy, publishedAt) without their content -- fetch_file the ones you need. Files are isolated by group and removed when the group is destroyed.',
-    {},
-    async () => ({ content: [{ type: 'text', text: JSON.stringify(tools.listFiles(deps)) }] }),
-  );
-
-  server.tool(
-    'fetch_file',
-    'Fetch metadata for a file shared in this group and get its read-only sandbox path. Returns id, name, size, mimeType, direction, publishedBy, publishedAt, and sandboxPath (/ccserver-group-files/<generated>). The file is readable at that path inside your sandbox; no blob bytes are returned in the tool response.',
-    { fileId: z.string() },
-    async (args) => ({ content: [{ type: 'text', text: JSON.stringify(tools.fetchFile(deps, args)) }] }),
-  );
-
-  server.tool(
-    'close_tab',
-    'Terminate a group member session (worker or orchestrator) and clean up its channel.',
-    { sessionId: z.string() },
-    async (args) => ({ content: [{ type: 'text', text: JSON.stringify(tools.closeTab(deps, args)) }] }),
-  );
-
-  server.tool(
-    'get_tab_status',
-    'Return the live status of a group member session (exited, connected, cwd, app) plus autoYes (whether automatic permission-approval is currently enabled), lastOutputAt (epoch ms of its last output; null if none yet), idleForMs (ms since then -- byte-based), screenIdleMs (ms since the screen last visibly changed; null when no live screen exists) and activity. activity is the graded reading built from both plus the app\'s own TUI chrome: { level: "idle" (the member is waiting for input) | "low" (running but barely redrawing -- a spinner, a long tool call) | "busy" (actively painting output) | null (no live session / a plain shell), reason, marker, markerVerified, screenIdleMs, changeRate }. Prefer activity.level over the raw figures: "idle" is only reported when the app\'s "esc to interrupt" footer marker is ABSENT as well as the screen being still, so a thinking member is never mistaken for a finished one. markerVerified:false means this app has no captured-frame marker (codex/copilot/command-code today) and the reading rests on screen movement alone -- treat its "idle" as weaker evidence. screenIdleMs is the better raw stuck/busy signal: a spinner keeps redrawing the screen (small screenIdleMs) even while the model is stalled, while a static screen (large screenIdleMs) means the member is genuinely idle. A large idleForMs on a member that should be working may mean it is stuck -- that is a concrete anomaly signal on its own: confirm with at most a single read_output; neither tool is for routine progress checks. Also returns dockerAvailable (true/false/null) and dockerReason: check these BEFORE assigning a docker-dependent task. A rootless dockerd can serve only ONE session per project at a time (the second sandbox of the same project simply runs without docker); dockerAvailable:false with dockerReason:"data-root-locked-by-another-session" means this member specifically lost that race -- it is not a fixable error, route the task to whichever member has dockerAvailable:true instead. dockerReason:"starting" means the sandbox just launched and docker has not finished starting -- wait a few seconds and check again rather than concluding docker is unavailable.',
-    { sessionId: z.string() },
-    async (args) => ({ content: [{ type: 'text', text: JSON.stringify(tools.getTabStatus(deps, args)) }] }),
-  );
-
-  server.tool(
-    'repo_info',
-    'Return shallow facts about the group\'s repository: top-level layout (directory and file names only, capped at 100 entries), the README preview (first ~8KB), a package.json summary (name/version/description and the keys of scripts/dependencies/devDependencies -- never values, capped at 50 keys each) and git state (current branch, short HEAD, last 5 commit subjects). It takes no path arguments (the project directory is fixed), returns no source-file contents, and is capped in size so it cannot balloon your context. Deeper inspection and any changes belong to the workers: send the work to a worker via send_input instead of trying to read the repo yourself.',
-    {},
-    async () => ({ content: [{ type: 'text', text: JSON.stringify(await tools.repoInfo(deps)) }] }),
-  );
-
-  server.tool(
-    'wait_for_handoff',
-    'Block until a worker calls handoff_to_orchestrator, or the timeout elapses. Returns the structured handoff event (worker, summary, status) -- or {timedOut:true} on timeout, in which case simply call wait_for_handoff again. A handoff that arrives while no one is waiting stays queued (and survives a server restart), and a wait that is cut short gives its event back instead of consuming it: both a connection that dies mid-wait and a request you cancel or abandon are detected, and the next wait_for_handoff receives the event. One narrow gap is NOT covered: cancellation is re-checked at the moment the event is handed to you, but an abort landing after that -- while the SDK is still writing the response -- cannot be seen from the server, so an event can be lost in that one-macrotask window. You cannot avoid it by waiting differently; closing it needs an explicit ack from you, which is a protocol change and is not implemented. What puts an event in that window is the response failing to reach you after the server already counted it as delivered -- so a cancellation landing at that instant, but equally the connection dropping or the server dying at that instant. Cancelling is only the one of the three you cause yourself; a disconnect is re-checked while you wait and when the event is handed over, but not after. Two other limits are real and also not covered: only the newest 100 undelivered handoffs are kept (older ones are dropped once a group exceeds it), and a summary over 32KB is truncated. Delivery is at-least-once: recovering a handoff from an interrupted wait can hand you the SAME one twice, so treat the event `id` as the key -- an id you have already acted on is a repeat, not a second handoff. Call this once per turn instead of polling read_output.',
-    { timeoutMs: z.number().optional() },
-    // `extra` carries this request's AbortSignal. Forwarding it is what keeps
-    // a cancelled or abandoned wait from swallowing the next handoff (#245) --
-    // the connection stays up in that case, so connectionIsAlive cannot tell.
-    async (args, extra) => {
-      const result = await tools.waitForHandoff(deps, args, extra);
-      return { content: [{ type: 'text', text: JSON.stringify(result) }] };
-    },
-  );
-
-  return server;
-}
-
-// deps: { groupId, role, getSessionId, groupManager, sessionManager }
-export function buildHandoffMcpServer(deps) {
-  const server = new McpServer({ name: 'ccserver-handoff', version: '1.0.0' });
-
-  server.tool(
-    'handoff_to_orchestrator',
-    'Notify the orchestrator that your task is complete, blocked, needs input, or hit an error. Call this exactly once when you finish a task or when you need the orchestrator to make a decision. The orchestrator is waiting on wait_for_handoff and will see the summary you provide here. `summary` is truncated at 32KB, and ok:true means the handoff was queued, not that the orchestrator has read it.',
-    { summary: z.string(), status: z.enum(['done', 'blocked', 'needs_input', 'error']).optional(), nextRole: z.string().optional() },
-    async (args) => ({ content: [{ type: 'text', text: JSON.stringify(tools.handoffToOrchestrator(deps, args)) }] }),
-  );
-
-  server.tool(
-    'publish_doc',
-    'Publish a document under a key, visible to every member of this group (including the orchestrator and other workers) via fetch_doc/list_docs -- the direct way to hand off content (e.g. a plan) to another worker WITHOUT going through the orchestrator. Your own ./tmp/ is local to your own git worktree and is NOT visible to other workers; publish only what you want to hand off, not your whole working directory. Re-publishing the same key overwrites it, except a key the orchestrator published, which is refused (error key-owned-by-other-side).',
-    { key: z.string(), content: z.string() },
-    async (args) => ({ content: [{ type: 'text', text: JSON.stringify(tools.publishDoc(deps, args)) }] }),
-  );
-
-  server.tool(
-    'fetch_doc',
-    'Fetch a document previously published (by any member) under a key via publish_doc.',
-    { key: z.string() },
-    async (args) => ({ content: [{ type: 'text', text: JSON.stringify(tools.fetchDoc(deps, args)) }] }),
-  );
-
-  server.tool(
-    'list_docs',
-    'List documents published in this group (key, publishedBy role, publishedAt, size) without their content -- fetch_doc the ones you need. The result also carries count and limit: how many documents the group holds and the most it can hold.',
-    {},
-    async () => ({ content: [{ type: 'text', text: JSON.stringify(tools.listDocs(deps)) }] }),
-  );
-
-  server.tool(
-    'list_files',
-    'List files shared in this group (id, name, size, mimeType, direction, publishedBy, publishedAt) without their content -- fetch_file the ones you need. Files are isolated by group and removed when the group is destroyed.',
-    {},
-    async () => ({ content: [{ type: 'text', text: JSON.stringify(tools.listFiles(deps)) }] }),
-  );
-
-  server.tool(
-    'fetch_file',
-    'Fetch metadata for a file shared in this group and get its read-only sandbox path. Returns id, name, size, mimeType, direction, publishedBy, publishedAt, and sandboxPath (/ccserver-group-files/<generated>). The file is readable at that path inside your sandbox; no blob bytes are returned in the tool response.',
-    { fileId: z.string() },
-    async (args) => ({ content: [{ type: 'text', text: JSON.stringify(tools.fetchFile(deps, args)) }] }),
-  );
-
-  server.tool(
-    'publish_file',
-    'Publish a file from your own worktree to this group so the browser user can download it and other members can fetch it via fetch_file. The path must be relative to your current worktree (never absolute or traversing outside it) and must point to a regular file. The file is copied into group storage; your original is untouched. Returns the generated file id and metadata.',
-    { path: z.string() },
-    async (args) => ({ content: [{ type: 'text', text: JSON.stringify(tools.publishFile(deps, args)) }] }),
-  );
-
-  return server;
-}
-
-// Process-global notification server (ccserver-notify, see notify.js). Unlike
-// the control/handoff servers it is not group-scoped: one socket hosts it for
-// the whole server, and its tools reach the shared subscription registry /
+// Process-global notification server (ccserver-notify, see notify.js): one
+// socket hosts it for the whole server, and its tools reach the shared subscription registry /
 // Discord webhook via the closed `notifyApi` facade. Identity is never taken
 // from the wire -- it arrives per-connection via the broker's identity frame
 // (see mcpBroker.js) and is only an attribution (source display for the
@@ -339,9 +120,8 @@ export function buildNotifyMcpServer({ notifyApi, identity }) {
   return server;
 }
 
-// Process-global usage server (ccserver-usage, see usageMcp.js). Like
-// ccserver-notify it is not group-scoped: one socket hosts it for the whole
-// server. Unlike notify, get_usage carries no per-connection identity -- it
+// Process-global usage server (ccserver-usage, see usageMcp.js). One socket
+// hosts it for the whole server. Unlike notify, get_usage carries no identity -- it
 // always returns the same server-wide snapshot regardless of who asks -- so
 // buildServer's identity argument is simply unused here.
 //
@@ -359,9 +139,8 @@ export function buildUsageMcpServer({ usageApi }) {
   return server;
 }
 
-// Process-global reviewer server (ccserver-reviewer, see reviewer.js): not
-// group-scoped (one socket for the whole server), but -- unlike
-// ccserver-usage -- DOES carry a per-connection identity (CCSERVER_REVIEWER_
+// Process-global reviewer server (ccserver-reviewer, see reviewer.js): one
+// socket for the whole server, with a per-connection identity (CCSERVER_REVIEWER_
 // IDENTITY, `{ sessionId }`), because finish_review needs to verify its
 // caller really is the session the job launched. run_review/list_reviews/
 // get_review ignore it; their attribution (if any) still rides in

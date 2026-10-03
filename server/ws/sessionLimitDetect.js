@@ -1,7 +1,7 @@
 // Pure detection/time-math helpers for the "session limit hit" auto-resume
 // feature. No imports, no app state -- unit-testable directly with
 // node --test (see sessionLimitDetect.test.js). sessionManager.js owns ANSI
-// stripping (mcpTools.js's stripAnsi) and buffering; this module only
+// stripping (stripAnsi) and buffering; this module only
 // consumes the resulting text.
 //
 // Claude's Ink renderer sometimes draws a status line word-by-word using

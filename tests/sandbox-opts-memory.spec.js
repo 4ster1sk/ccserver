@@ -57,3 +57,51 @@ test('明示保存された tools=true はグローバルOFFでも記憶が優�
   await expect(crgCheck(page)).toBeChecked();
   await page.getByRole('button', { name: 'キャンセル' }).click();
 });
+
+// サンドボックス方式 (bwrap / VM) の選択: ディレクトリ別に記憶され、VM を
+// 選ぶと VMテンプレート選択が出て VM 非対応の項目が無効になる。
+// KVM の無い CI でも両方式が使える前提を作るため /api/dirs/home を差し替える。
+test('サンドボックス方式の選択が記憶され、VM ではテンプレート選択が出る', async ({ page }) => {
+  await page.route('**/api/dirs/home', async (route) => {
+    const res = await route.fetch();
+    const body = await res.json();
+    await route.fulfill({
+      response: res,
+      json: {
+        ...body,
+        sandboxAvailable: true,
+        sandboxBackends: { default: 'bwrap', bwrap: { ok: true, reason: null }, qemu: { ok: true, reason: null, hint: null } },
+        toolsAvailable: { rtk: true, codeReviewGraph: true },
+      },
+    });
+  });
+  await page.route('**/api/vm-templates', (route) => route.fulfill({
+    json: { templates: [{ id: 't1', name: 'big', cpus: 4, memoryMiB: 8192, diskGiB: 64, bootTimeoutSec: 120, cloudConfig: '' }] },
+  }));
+  await page.goto('/');
+  await expect(openTerminalBtn(page)).toBeVisible();
+
+  await launchMenuBtn(page).click();
+  const backendSelect = launchDialog(page).getByLabel('方式');
+  await expect(backendSelect).toHaveValue('');
+  await expect(launchDialog(page).getByLabel('VMテンプレート')).toHaveCount(0);
+
+  await backendSelect.selectOption('qemu');
+  const tplSelect = launchDialog(page).getByLabel('VMテンプレート');
+  await expect(tplSelect).toBeVisible();
+  await tplSelect.selectOption('t1');
+  await expect(rtkCheck(page)).toBeDisabled();
+  await expect(launchDialog(page)).toContainText('VMでは使えません');
+  await page.getByRole('button', { name: 'キャンセル' }).click();
+
+  await page.reload();
+  await expect(openTerminalBtn(page)).toBeVisible();
+  await launchMenuBtn(page).click();
+  await expect(launchDialog(page).getByLabel('方式')).toHaveValue('qemu');
+  await expect(launchDialog(page).getByLabel('VMテンプレート')).toHaveValue('t1');
+
+  await launchDialog(page).getByLabel('方式').selectOption('bwrap');
+  await expect(launchDialog(page).getByLabel('VMテンプレート')).toHaveCount(0);
+  await expect(rtkCheck(page)).toBeEnabled();
+  await page.getByRole('button', { name: 'キャンセル' }).click();
+});

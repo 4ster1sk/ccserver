@@ -6,14 +6,14 @@
 // re-captures on demand.
 //
 // The capture runs in a *minimal* filesystem sandbox when one is available
-// (bwrap on Linux, sandbox-exec on macOS; only Claude's own config is exposed
-// — no project, no docker), falling back to launching claude directly
+// (bwrap on Linux; only Claude's own config is exposed — no project, no
+// docker), falling back to launching claude directly
 // otherwise -- unless sandbox.config.json sets "forceSandbox": true, in which
 // case the capture fails rather than run unsandboxed. Viewing /usage makes no
 // API call, so this does not itself consume plan usage.
 import * as pty from 'node-pty';
 import { homedir } from 'node:os';
-import { mkdirSync, rmSync } from 'node:fs';
+import { mkdirSync } from 'node:fs';
 import { buildMinimalSandboxSpawn, resolveClaude, sandboxAvailable, loadSandboxConfig, isAppHidden, forceSandboxUnavailableReason } from './ws/sandbox.js';
 import { recordSessionLimitReset } from './sessionLimitState.js';
 import { buildSessionEnv } from './ws/sessionEnv.js';
@@ -254,7 +254,6 @@ function capture() {
     let args = ['--ax-screen-reader'];
     let spawnCwd = homedir();
     let sandboxed = false;
-    let seatbeltDir = null;
 
     if (process.platform !== 'win32' && sandboxAvailable()) {
       try {
@@ -267,9 +266,6 @@ function capture() {
         args = spawn.args;
         spawnCwd = usageCwd();
         sandboxed = true;
-        // macOS seatbelt launches mint a runtime dir (profile + throwaway
-        // HOME); removed in finish() below. Null on every other backend.
-        seatbeltDir = spawn.seatbeltDir || null;
       } catch {
         // bwrap launch failed; fall through to the forceSandbox / direct path.
       }
@@ -306,9 +302,6 @@ function capture() {
         env: { ...cleanEnv, TERM: 'xterm-256color', COLORTERM: 'truecolor' },
       });
     } catch (err) {
-      if (seatbeltDir) {
-        try { rmSync(seatbeltDir, { recursive: true, force: true }); } catch { /* best effort */ }
-      }
       resolve({ error: `Failed to launch claude: ${err.message}`, sandboxed });
       return;
     }
@@ -329,15 +322,12 @@ function capture() {
       clearTimeout(hardTimer);
       clearTimeout(resendTimer);
       try { ptyProc.kill(); } catch { /* already gone */ }
-      if (seatbeltDir) {
-        try { rmSync(seatbeltDir, { recursive: true, force: true }); } catch { /* best effort */ }
-      }
       resolve({ ...res, sandboxed });
     };
 
     // Type `/usage`, retrying while the dashboard hasn't appeared. A single
-    // send is enough on a warm start, but a cold sandboxed start (seatbelt
-    // profile compile, throwaway-HOME cache miss) can still be booting when
+    // send is enough on a warm start, but a cold sandboxed start can still
+    // be booting when
     // BOOT_DELAY_MS fires, so the first command text lands nowhere. Resends
     // are spaced 10s apart and capped: typing into an idle prompt is harmless
     // (it just re-opens the dashboard), and the leading Ctrl-U clears a stale

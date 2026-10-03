@@ -1,24 +1,11 @@
 // Builds the MCP server registration injected into a session -- never written
-// to a file on the host or in the repo. Which servers are registered:
-//   ccserver        - the group's control/handoff broker (combo sessions only,
-//                     i.e. when `groupMcp` is true and mcpSocketPath was set).
-//                     Under bwrap the CLI runs the bridge script at the fixed
-//                     in-sandbox path; which broker it reaches is decided
-//                     solely by which host socket got bound to
-//                     /ccserver-sandbox-mcp.d/sock in the sandbox (see
-//                     sandbox.js / mcpBroker.js). macOS seatbelt sandboxes
-//                     pass `hostBridge: true` and run the host node + bridge
-//                     script instead (no fixed path is ever bound there);
-//                     non-sandboxed and bwrap launches keep the fixed-path
-//                     form. Absent for standalone sessions -- they have no
-//                     group socket, so registering it would hand the agent a
-//                     broken server.
+// to a file on the host or in the repo. Process-global notify, usage and
+// reviewer servers are added when their descriptors are passed.
 //   ccserver-notify - the process-global notification server (see notify.js),
 //                     registered when the `{ notify }` descriptor is passed.
 //   ccserver-usage  - the process-global usage server (see usageMcp.js),
 //                     registered when the `{ usage }` descriptor is passed.
-//                     claude sessions only (sessionManager never passes it
-//                     for opencode/copilot -- see usageMcp.js's
+//                     claude sessions only (see usageMcp.js's
 //                     shouldInjectUsage).
 //   code-review-graph - the graph MCP (see sandbox.js resolveTools): when the
 //                     session is sandboxed and the opt-in tool is enabled, the
@@ -36,16 +23,6 @@
 //               config, no file written).
 //   codex    -> CLI `-c mcp_servers.<name>={...}` overrides (process-scoped,
 //               does not touch ~/.codex/config.toml).
-//   copilot  -> nothing. copilot has no CLI-arg/env MCP injection (its config
-//               is file-based only), so no injection is assembled for it.
-//   commandcode -> nothing. No CLI-arg/env MCP injection is verified for the
-//               command-code CLI, so assembling one would risk an "unknown
-//               option" launch failure like copilot's.
-//
-// The function is the single assembly point, so refusing here guarantees
-// no copilot/commandcode launch path ever injects (group launches already
-// refuse these at normalizeWorkers / addMember).
-//
 // The optional `{ notify }` descriptor adds the ccserver-notify MCP server:
 //   { mode, sockPath, identity? }
 //     mode     - 'sandbox' (run the in-sandbox bridge, args ['notify']) or
@@ -56,7 +33,7 @@
 //                CCSANDBOX_NOTIFY_MCP_SOCK so the wrapper can reach it (bwrap
 //                --setenv overrides it with the in-sandbox path when sandboxed).
 //     identity - optional per-connection attribution
-//                ({ sessionId, groupId, groupRole, cwd, projectName, app },
+//                ({ sessionId, cwd, projectName, app },
 //                see sessionManager / mcpBroker). Injected as the JSON
 //                CCSERVER_NOTIFY_IDENTITY env the bridge wrapper attaches to
 //                its first socket frame; absent -> no env key, the wrapper
@@ -132,18 +109,7 @@ function crgMcpServer(tools, cwd) {
   return { command: 'code-review-graph', args };
 }
 
-// The { base, args } invocation for the group ccserver bridge: the fixed
-// in-sandbox path under bwrap, else the host node binary running the bridge
-// script directly (macOS seatbelt sandboxes never bind the fixed path -- the
-// host script is directly visible, like a non-sandboxed session).
-function groupInvocation(hostBridge) {
-  if (hostBridge) {
-    return { command: process.execPath, args: [NOTIFY_BRIDGE_SCRIPT] };
-  }
-  return { command: MCP_BRIDGE_COMMAND, args: [] };
-}
-
-export function buildMcpConfigArgsAndEnv(app, { groupMcp = true, notify, usage, reviewer, tools = null, cwd = null, hostBridge = false } = {}) {
+export function buildMcpConfigArgsAndEnv(app, { notify, usage, reviewer, tools = null, cwd = null } = {}) {
   const notifySockEnv = notify ? { CCSANDBOX_NOTIFY_MCP_SOCK: notify.sockPath } : {};
   const notifyIdentityEnv = notify?.identity ? { CCSERVER_NOTIFY_IDENTITY: JSON.stringify(notify.identity) } : {};
   const usageSockEnv = usage ? { CCSANDBOX_USAGE_MCP_SOCK: usage.sockPath } : {};
@@ -151,9 +117,6 @@ export function buildMcpConfigArgsAndEnv(app, { groupMcp = true, notify, usage, 
   const reviewerIdentityEnv = reviewer?.identity ? { CCSERVER_REVIEWER_IDENTITY: JSON.stringify(reviewer.identity) } : {};
   const crg = crgMcpServer(tools, cwd);
 
-  if (app === 'copilot' || app === 'commandcode') {
-    return { args: [], env: {} };
-  }
 
   if (app === 'codex') {
     const servers = {};
@@ -162,14 +125,6 @@ export function buildMcpConfigArgsAndEnv(app, { groupMcp = true, notify, usage, 
     // child-process inheritance. `env_vars` preserves the value set by bwrap
     // in sandboxed sessions (the fixed in-sandbox socket path) and the host
     // socket path in non-sandboxed sessions.
-    if (groupMcp) {
-      const inv = groupInvocation(hostBridge);
-      servers.ccserver = {
-        command: inv.command,
-        args: inv.args,
-        env_vars: ['CCSANDBOX_MCP_SOCK'],
-      };
-    }
     if (notify) {
       const inv = notifyInvocation(notify);
       servers['ccserver-notify'] = {
@@ -224,10 +179,6 @@ export function buildMcpConfigArgsAndEnv(app, { groupMcp = true, notify, usage, 
 
   if (app === 'opencode') {
     const mcp = {};
-    if (groupMcp) {
-      const inv = groupInvocation(hostBridge);
-      mcp.ccserver = { type: 'local', command: [inv.command, ...inv.args] };
-    }
     if (notify) {
       const inv = notifyInvocation(notify);
       mcp['ccserver-notify'] = { type: 'local', command: [inv.command, ...inv.args] };
@@ -258,10 +209,6 @@ export function buildMcpConfigArgsAndEnv(app, { groupMcp = true, notify, usage, 
   }
 
   const mcpServers = {};
-  if (groupMcp) {
-    const inv = groupInvocation(hostBridge);
-    mcpServers.ccserver = { type: 'stdio', command: inv.command, args: inv.args };
-  }
   if (notify) {
     const inv = notifyInvocation(notify);
     mcpServers['ccserver-notify'] = { type: 'stdio', command: inv.command, args: inv.args };

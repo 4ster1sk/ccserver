@@ -34,7 +34,7 @@ export function normalizeBrowseRoots(raw) {
 // Whether absPath (already resolve()d) equals or sits under one of roots.
 // roots=[] means unrestricted (back-compat). Mirrors the
 // `x === root || x.startsWith(root + '/')` containment check in
-// groupManager.js.
+// sessionManager.js.
 function withinRoots(absPath, roots) {
   if (roots.length === 0) return true;
   return roots.some((root) => absPath === root || absPath.startsWith(root + sep));
@@ -57,9 +57,6 @@ function realOrSelf(p) {
 // allowed root that points outside it (an escape attempt) still resolves to
 // its real, out-of-bounds target once it exists.
 //
-// Also exported for worktree.js, which must reconcile git's realpath
-// spelling of worktree paths with the lexical one it builds from
-// worktreeRoot()/HOME -- see its resolveMemberWorktree.
 export function realOrNearest(absPath) {
   try {
     return realpathSync(absPath);
@@ -92,49 +89,15 @@ export function resolveWithinRoots(requestedPath, roots, fallback = '/') {
   return { ok: isContained(path, roots), path };
 }
 
-// browseRoots (issue #189) session-cwd-only exemption: every combo-group
-// session's cwd is a server-synthesized scratch directory under this fixed
-// tree -- workers always run in their own git worktree (worktree.js's
-// worktreeRoot(), default `<this>/worktrees`), the orchestrator always runs
-// in its isolated CLAUDE.md-only scratch dir (routes/groups.js's
-// ORCHESTRATOR_ROOT, default `<this>/orchestrator`) -- NEVER the project
-// directory itself (see groupManager.js's addMember: "options.cwd ... is
-// intentionally never read here"). Bounding them by browseRoots would make
-// every combo/group launch impossible the moment browseRoots is configured,
-// since these dirs sit outside any project-directory-shaped browseRoots
-// entry an operator would realistically set. This mirrors
-// persistentHomeDir() (sandbox.js, the sandboxed $HOME) already living under
-// this same tree, unrestricted by browseRoots for the same reason. Used ONLY
-// for the session-launch cwd check (sessionManager.js / sandbox.js's
-// buildSandboxSpawn) -- it does NOT apply to /api/files or /api/dirs, which
-// stay fully bounded by browseRoots.
+// browseRoots session-cwd exemption for trusted code-review jobs. Reviewer
+// jobs run in disposable worktrees under ccserver's scratch roots, outside
+// the operator's project roots. The caller must be trusted and the resolved
+// path is checked again below to prevent a symlink from escaping the scratch
+// tree. This applies only to launch cwd validation; file and directory APIs
+// remain bounded by browseRoots.
 //
-// Unlike the combo cwds it exists for, `absPath` here IS ultimately
-// client-supplied (the `cwd` of a launch request), so the lexical check
-// alone is not enough: a symlink planted inside the scratch tree would
-// otherwise be exempted while pointing anywhere. That is not just a
-// browseRoots bypass -- buildBwrapArgs binds `--bind <cwd> <cwd>`, and the
-// kernel resolves the bind SOURCE through the symlink, so a link like
-// `<scratch>/worktrees/escape -> /` made the sandbox rw-bind the HOST ROOT
-// at that path (verified live: a shell launched with that cwd could read and
-// write host files through relative paths). Any sandboxed session can plant
-// such a link -- its persistent HOME is rw-bound under this same tree -- so
-// the exemption additionally requires the path's real location to be inside
-// the (real) scratch tree.
-//
-// BOTH scratch roots, always (issue #201): the pre-#201 tree
-// (~/.local/share/ccserver-sandbox) and the XDG one
-// ($XDG_DATA_HOME/ccserver). A session launched before the migration has
-// its cwd under the legacy root and must not lose the exemption in flight;
-// one launched after lives under the new root. Narrowing this to whichever
-// root is "current" would break whichever set of sessions is on the other
-// side -- and losing the exemption means a legitimate combo worktree cwd
-// gets rejected as outside browseRoots, not a security failure but a very
-// confusing outage. scratchRoots() therefore returns both forever.
-//
-// This is also why #201 does NOT leave a compatibility symlink from the old
-// tree to the new one: realOrNearest() would resolve it, so the lexical
-// check would match one root while the realpath check matched the other.
+// Both the legacy and XDG scratch roots remain recognized so worktrees from
+// sessions already running during a data-directory migration continue to work.
 export function isCcserverScratchPath(absPath) {
   const roots = scratchRoots().map((r) => resolve(r));
   if (!withinRoots(absPath, roots)) return false;

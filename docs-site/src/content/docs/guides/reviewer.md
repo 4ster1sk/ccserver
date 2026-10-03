@@ -3,11 +3,11 @@ title: コードレビュー (ccserver-reviewer)
 description: 使い捨てのヘッドレスセッションでローカルの ref/ブランチ/PR/未コミット差分をレビューする MCP サーバー
 ---
 
-任意のセッション (ワーカーでもオーケストレーターでも単発セッションでも) から、ローカルの git ref/ブランチ/PR 番号/未コミット差分に対して `/code-review` を走らせられる MCP サーバーです。GitHub の PR が存在しなくてもレビューできる点が特徴で、未 push のローカルブランチや PR 化前のブランチ、あるいは作業中の未コミット差分もそのままレビュー対象にできます。`ccserver-notify` / `ccserver-usage` と同じくプロセスグローバルな単一ソケット (`ccserver-reviewer.d/sock`) でホストされます。
+任意のエージェントセッションから、ローカルの git ref/ブランチ/PR 番号/未コミット差分に対して `/code-review` を走らせられる MCP サーバーです。GitHub の PR が存在しなくてもレビューできる点が特徴で、未 push のローカルブランチや PR 化前のブランチ、あるいは作業中の未コミット差分もそのままレビュー対象にできます。`ccserver-notify` / `ccserver-usage` と同じくプロセスグローバルな単一ソケット (`ccserver-reviewer.d/sock`) でホストされます。
 
 - **オプトイン**: 既定では無効です。設定ファイルで `reviewerMcp: true` を明示した場合のみ有効化されます ([設定ファイル](/ccserver/sandbox/configuration/) 参照)。
-- **注入対象が広い**: `ccserver-meta` とは異なり、shell と copilot を除く**全セッション**に注入されます。コンボのワーカー/オーケストレーターも対象です (グループの有無を問わず呼び出せる、という設計方針のため)。
-- **使い捨ての専用 worktree**: レビュー対象プロジェクトの worktree (`~/.local/share/ccserver-sandbox/review-worktrees/<projectHash>/<jobId>/` — worktree なので XDG 移行後もここに残ります) をジョブごとに新規作成し、そこでヘッドレスセッションを起動して `/code-review` を実行します。呼び出し元セッションの作業ディレクトリや、コンボの各ロール用 worktree ([コンボ起動](/ccserver/guides/combo-launch/) 参照) とは完全に分離されており、レビュー中に元の作業を変更しても影響しません。ジョブ終了後は worktree ・セッション・(有効なら) 専用の永続 HOME を破棄します。
+- **注入対象**: shell セッションを除くエージェントセッションに注入されます。
+- **使い捨ての専用 worktree**: レビュー対象プロジェクトの worktree (`~/.local/share/ccserver-sandbox/review-worktrees/<projectHash>/<jobId>/` — worktree なので XDG 移行後もここに残ります) をジョブごとに新規作成し、そこでヘッドレスセッションを起動して `/code-review` を実行します。呼び出し元セッションの作業ディレクトリとは分離されており、レビュー中に元の作業を変更しても影響しません。ジョブ終了後は worktree ・セッション・(有効なら) 専用の永続 HOME を破棄します。
 
 ## ツール一覧
 
@@ -53,4 +53,4 @@ description: 使い捨てのヘッドレスセッションでローカルの ref
 
 ## 同時実行数の上限
 
-`run_review` はプロセス全体で同時に受け付けるジョブ数を上限 4 件 (環境変数 `CCSERVER_REVIEWER_MAX_CONCURRENT` で変更可) に制限しています。shell/copilot を除く全セッションから (ワーカー含め) 呼び出せる設計上、ループ的な呼び出しでサンドボックスセッションを際限なく起動されるのを防ぐための安全弁です。上限に達した状態で `run_review` を呼ぶと `{ ok: false, error: "too many review jobs running..." }` を返すので、`list_reviews` で既存ジョブの完了を待ってから再試行してください。
+`run_review` はプロセス全体で同時に受け付けるジョブ数を上限 4 件 (環境変数 `CCSERVER_REVIEWER_MAX_CONCURRENT` で変更可) に制限しています。全エージェントセッションから呼び出せるため、ループ的な呼び出しでサンドボックスセッションを際限なく起動されるのを防ぐ安全弁です。上限に達した状態で `run_review` を呼ぶと `{ ok: false, error: "too many review jobs running..." }` を返すので、`list_reviews` で既存ジョブの完了を待ってから再試行してください。

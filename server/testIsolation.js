@@ -13,7 +13,7 @@
 //      XDG there would fail to name the operator's real files). Isolating the
 //      three XDG variables is therefore NOT enough: a child with the real
 //      $HOME still resolves the operator's live SQLite DB, GPG vault, mTLS
-//      federation key and group-files, and `setup.js --yes` dutifully
+//      group-files, and `setup.js --yes` dutifully
 //      migrates all of it into the test's temp directory, which the test then
 //      deletes in its `finally`.
 //

@@ -63,5 +63,9 @@ export function defaultSandboxOpts(defaults = SANDBOX_DEFAULTS) {
       rtk: !!defaults.rtk,
       codeReviewGraph: !!defaults.codeReviewGraph,
     },
+    // QEMU VM テンプレート (backend "qemu" のみ)。null = サーバー側の既定テンプレート。
+    vmTemplateId: null,
+    // サンドボックス方式 ('bwrap' | 'qemu')。null = サーバー既定 (sandbox.config.json の backend)。
+    backend: null,
   };
 }

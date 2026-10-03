@@ -21,7 +21,7 @@ ccserver の設定は 2 種類あります。どちらに属するかは好み�
 | 置き場所 | SQLite の `settings` テーブル | `~/.config/ccserver/sandbox.config.json` |
 | 変更方法 | Web UI の設定タブ | テキストエディタ |
 | 反映 | 即時 | **ccserver の再起動が必要** |
-| 例 | ワーカープリセット、起動プリセット、ペアリング済みインスタンス、パスキー、GPG Vault | `docker` / `persistentHome` / `gpg` / `sshAgent` / `gpgVault` / `browseRoots` / `hiddenApps` / `reviewerMcp` / `usageMcp` |
+| 例 | パスキー、GPG Vault、通知設定 | `docker` / `persistentHome` / `gpg` / `sshAgent` / `gpgVault` / `browseRoots` / `hiddenApps` / `reviewerMcp` / `usageMcp` |
 
 ### 現時点での既知の例外
 
@@ -52,20 +52,17 @@ ccserver は [XDG Base Directory 仕様](https://specifications.freedesktop.org/
   layout.json                セットアップ完了マーカー (後述)
 ~/.local/share/ccserver/
   ccserver.sqlite3           アプリ全体のDB (+ -wal / -shm)
-  federation/                拠点間接続の mTLS 鍵・証明書
-  group-files/               グループ共有ファイルの実体
   orchestrator-generated/    生成されたオーケストレータ指示ファイル
   usage-cwd/                 使用量取得用の空ディレクトリ
   codex-usage-cwd/           同上 (Codex)
 ~/.local/state/ccserver/
   saved-sessions.json        セッション
   scheduled-prompts.json     予約プロンプト
-  saved-groups.json          グループ
-  saved-group-docs.json      グループ文書
-  saved-group-files.json     グループファイルのマニフェスト
   saved-notifications.json   通知購読
   saved-vikunja-tasks.json   Vikunja タスク対応表
 ```
+
+旧バージョンが作成した連携・グループ機能の状態ファイルや鍵は、セットアップ移行で既存データを保全するため、上記一覧とは別にレガシー項目として扱われます。現在の ccserver はこれらを読み込まず、対応機能も提供しません。
 
 ### サーバーの停止・再起動
 
@@ -95,15 +92,15 @@ kill <PID>
 ```
 ~/.local/share/ccserver-sandbox/
   home/                      プロジェクトごとの永続 HOME
-  worktrees/                 コンボワーカーの git worktree
+  worktrees/                 旧バージョンのコンボ起動が作成した git worktree (レガシー)
   review-worktrees/          コードレビュー用の git worktree
-  orchestrator/              オーケストレータの作業ディレクトリ
+  orchestrator/              旧バージョンのコンボ起動が作成した作業ディレクトリ (レガシー)
   dind/                      サンドボックス内 docker のデータルート
 ```
 
 移動しない理由は、どれか一つで十分です。
 
-1. **`git worktree` の gitdir ポインタは絶対パス**です。各 worktree の `.git` ファイルと、元リポジトリ側の `.git/worktrees/<name>/gitdir` が互いを絶対パスで参照しています。移動すると両方向が壊れ、修復には**リポジトリごとに** `git worktree repair` を走らせる必要があります。壊れた worktree は「ディスクから消えた」と判定されて作り直されるため、**コンボワーカーの未コミット作業が失われます**。
+1. 既存の `worktrees/` にある git worktree の gitdir ポインタは絶対パスです。移動するとポインタが壊れるため、レガシー作業データを保持する場合は各リポジトリで `git worktree repair` が必要です。
 2. `dind/` は稼働中の rootless dockerd が flock を保持している docker データルートです。足元から動かすのは未定義動作で、しかも数 GB あります。
 3. `home/` の永続 HOME には絶対パスが大量に埋まっています (`.mcp.json`、virtualenv、`node_modules/.bin` のシム、pip の RECORD、`~/.gitconfig` の `includeIf`)。
 4. サイズ。`~/.local` が別マウントなら実コピーになります。
@@ -113,6 +110,8 @@ kill <PID>
 ### 環境変数による上書き
 
 すべてのパスは環境変数で個別に上書きできます。**上書きが設定されているパスはセットアップウィザードの移行対象になりません** (設定した意図を尊重します)。
+
+次の federation / group 関連のパスと環境変数は、旧バージョンのデータを安全に移行するために残してあります。現在の ccserver が該当機能を提供したり、その保存データを読み込んだりするものではありません。
 
 | 環境変数 | 対象 |
 |---|---|
@@ -136,7 +135,7 @@ kill <PID>
 | `CCSERVER_ORCHESTRATOR_ROOT` | `orchestrator/` |
 | `CCSERVER_SANDBOX_DIND_ROOT` | `dind/` |
 
-`browseRoots` を設定している場合、これらのパスが `browseRoots` の中に入っていると ccserver は**起動を拒否します** (`/api/files` や `/api/dirs` から DB や federation の秘密鍵がダウンロードできてしまうため)。エラーメッセージが該当するパスと上書き用の環境変数を示します。
+`browseRoots` を設定している場合、これらのパスが `browseRoots` の中に入っていると ccserver は**起動を拒否します** (`/api/files` や `/api/dirs` から DB や秘密情報がダウンロードできてしまうため)。エラーメッセージが該当するパスと上書き用の環境変数を示します。
 
 ## セットアップウィザード
 

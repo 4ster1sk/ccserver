@@ -1,21 +1,20 @@
 // REST boundary for the network-isolation settings in sandbox.config.json
-// (network.isolate / network.initialState / network.mode /
-// network.allowedHosts / network.deniedHosts), backing the Settings GUI tab.
+// (network.mode / network.allowedHosts / network.deniedHosts), backing the
+// Settings GUI tab.
 // Registered under /api (server/index.js), so the optional token auth hook
 // applies automatically.
 //
 // GET returns the effective settings. PUT takes a partial patch, writes it to
 // the file (governing the next launch), then auto-applies the allow/deny
-// lists to every live isolation-enabled session's broker and reports the live counts --
-// running sessions need no restart for the lists themselves.
-// isolate/initialState/mode changes are launch-time policy and intentionally
-// never pushed live (the live enforce/open state belongs to each session's
-// own toggle).
+// lists and the operating mode (enforce/audit) to every live
+// isolation-enabled session's broker and reports the live counts -- running
+// sessions need no restart for them. The live enforce/open state belongs to
+// each session's own toggle (every VM session starts 'open').
 //
 // Status mapping: validation -> 400, internal -> 500.
 
 import { getNetworkSettings, updateNetworkSettings } from '../ws/networkAllowlist.js';
-import { pushAllowlistToArmedSessions } from '../ws/sessionManager.js';
+import { pushNetworkPolicyToArmedSessions } from '../ws/sessionManager.js';
 
 export async function networkAllowlistRoute(fastify) {
   fastify.get('/network-settings', async () => {
@@ -32,9 +31,10 @@ export async function networkAllowlistRoute(fastify) {
     // broker just counts as failed, the file save itself already succeeded).
     let liveApplied = { ok: 0, failed: 0 };
     try {
-      liveApplied = await pushAllowlistToArmedSessions({
+      liveApplied = await pushNetworkPolicyToArmedSessions({
         allowedHosts: res.settings.allowedHosts,
         deniedHosts: res.settings.deniedHosts,
+        mode: res.settings.mode,
       });
     } catch {
       // Total push failure (not per-session): report zero applied rather

@@ -1,0 +1,8 @@
+{
+  "//": "Pinned ccs-netbroker release (git.tomadoi.com/4sterisk/ccserver-netbroker). Fetched by: npm run fetch:netbroker",
+  "version": "v0.2.0",
+  "baseUrl": "https://git.tomadoi.com/api/packages/4sterisk/generic/ccserver-netbroker",
+  "sha256": {
+    "ccs-netbroker-linux-amd64": "f8ca84a5aa9e47134b9cfb03503b81eff3fdb71a744ab83511011dab8e930f19"
+  }
+}

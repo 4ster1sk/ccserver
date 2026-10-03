@@ -7,7 +7,7 @@
 //
 // This spawns the real server entrypoint (not a unit-level call) so the
 // assertion covers the actual boot sequence, not just the pure helper. A temp
-// config/DB/groups/sessions path keeps it independent of -- and harmless to --
+// config/DB/session path keeps it independent of -- and harmless to --
 // whatever sandbox.config.json this host actually has.
 
 import { test } from 'node:test';
@@ -92,7 +92,7 @@ test('server boots normally when hiddenApps leaves at least one app selectable',
     // trick sandbox-config.test.js's selectableAppIds tests use. Without
     // this, the test's pass/fail would depend on whether claude happens to
     // be installed on whatever machine runs it.
-    writeFileSync(cfgPath, JSON.stringify({ hiddenApps: ['opencode', 'copilot', 'codex'] }));
+    writeFileSync(cfgPath, JSON.stringify({ hiddenApps: ['opencode', 'codex'] }));
 
     const child = spawn(process.execPath, [SERVER_ENTRY], {
       cwd: __dirname,

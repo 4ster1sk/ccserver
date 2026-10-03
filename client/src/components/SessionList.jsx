@@ -20,6 +20,13 @@ function ActivityDot({ activity }) {
   );
 }
 
+// サンドボックス起動のバッジ。VM (qemu) で起動したものは "VM" と出す。
+function SandboxBadge({ backend }) {
+  return backend === 'qemu'
+    ? <span className="session-badge vm">VM</span>
+    : <span className="session-badge sandbox">sandbox</span>;
+}
+
 // aria-label 用の接頭辞。状態語を読み上げに載せる (点自体は aria-hidden)。
 function activityAria(activity) {
   const info = activityInfo(activity);
@@ -35,7 +42,6 @@ export function baseName(path) {
 export function appLabel(sessionOrTab) {
   if (sessionOrTab.shell) return 'shell';
   const app = sessionOrTab.app || 'claude';
-  if (app === 'commandcode') return 'command-code';
   return app;
 }
 
@@ -47,23 +53,14 @@ export function appLabel(sessionOrTab) {
 // (サーバー保存の表示名の設定用。サーバーセッション未確立のタブは対象外)。
 export default function SessionList({
   sessionTabs,
-  groupTabs = [],
   activeTabId,
   unopenedSessions,
   onSelectTab,
   onCloseTab,
   onOpenSession,
   onTerminateSession,
-  unopenedRemoteSessions = [],
-  onOpenRemoteSession,
-  onTerminateRemoteSession,
-  unopenedRemoteGroups = [],
-  onOpenRemoteGroup,
-  onDestroyRemoteGroup,
   customLabels,
   onRowContextMenu,
-  unopenedGroups,
-  onOpenGroup,
 }) {
   const vaultStatus = useGpgVaultStatusContext();
   const handleRowContextMenu = (e, id, currentLabel) => {
@@ -71,7 +68,7 @@ export default function SessionList({
     e.preventDefault();
     onRowContextMenu(e, { id, currentLabel: currentLabel || null });
   };
-  const hasOpened = sessionTabs.length > 0 || groupTabs.length > 0;
+  const hasOpened = sessionTabs.length > 0;
   return (
     <>
       <div className="session-menu-section" data-section="opened">
@@ -89,8 +86,7 @@ export default function SessionList({
             // サーバー保存の表示名があれば優先する (未確立タブは sessionId 不在のため対象外)。
             const sessionId = tab.sessionId || tab.attachSessionId || null;
             const customLabel = sessionId ? (customLabels?.get(sessionId) ?? null) : null;
-            // リモートタブのラベル先頭の「⇄ 」は一覧では出さない (ホストは下段バッジで示す)。
-            const displayLabel = customLabel || (tab.remote ? String(tab.label).replace(/^⇄\s*/, '') : tab.label);
+            const displayLabel = customLabel || tab.label;
             return (
               <div
                 key={tab.id}
@@ -117,13 +113,10 @@ export default function SessionList({
                       return <span className={`session-badge gpg-vault-${badge.state}`} title={badge.reason}>🔑</span>;
                     })()}
                     {!tab.shell && !tab.sandbox && <span className="session-badge no-sandbox">no sandbox</span>}
-                    {tab.sandbox && <span className="session-badge sandbox">sandbox</span>}
+                    {tab.sandbox && <SandboxBadge backend={tab.sandboxBackend} />}
                   </span>
                   <span className="session-menu-status">
-                    {tab.remote && (
-                      <span className="tab-remote-badge" title={`接続先: ${tab.remote.label}`}>⇄ {tab.remote.label}</span>
-                    )}
-                    <span className="session-menu-state">{statusText}</span>
+                                        <span className="session-menu-state">{statusText}</span>
                   </span>
                 </button>
                 <button
@@ -131,53 +124,6 @@ export default function SessionList({
                   className="tab-close session-menu-close"
                   title="タブを閉じる"
                   aria-label={`タブを閉じる: ${displayLabel}`}
-                  onClick={() => { onCloseTab(tab.id); }}
-                >
-                  &#10005;
-                </button>
-              </div>
-            );
-          })}
-          {groupTabs.map((tab) => {
-            const isActive = tab.id === activeTabId;
-            const memberCount = Array.isArray(tab.members) ? tab.members.length : 0;
-            const turnText = tab.currentTurn === 'orchestrator' ? 'ORCH' : tab.currentTurn ? String(tab.currentTurn).toUpperCase() : null;
-            const statusText = memberCount > 0 ? `${memberCount} members` : 'グループ';
-            return (
-              <div
-                key={tab.id}
-                role="none"
-                className={`session-menu-item${isActive ? ' active' : ''} is-running`}
-                data-tab-type="group"
-                data-group-id={tab.groupId || ''}
-                title={tab.cwd || tab.label}
-              >
-                <button
-                  type="button"
-                  role="menuitem"
-                  className="session-menu-select"
-                  aria-label={turnText ? `グループ: ${tab.label}, ${statusText}, 現在の手番 ${turnText}` : `グループ: ${tab.label}, ${statusText}`}
-                  onClick={() => { onSelectTab(tab.id); }}
-                >
-                  <span className="session-menu-item-top">
-                    <TabIcon type="group" />
-                    <span className="session-menu-label">{tab.label}</span>
-                    {turnText && (
-                      <span className="tab-turn-badge" title={`現在の手番: ${tab.currentTurn}`}>{turnText}</span>
-                    )}
-                  </span>
-                  <span className="session-menu-status">
-                    {tab.remote && (
-                      <span className="tab-remote-badge" title={`接続先: ${tab.remote.label}`}>⇄ {tab.remote.label}</span>
-                    )}
-                    <span className="session-menu-state">{statusText}</span>
-                  </span>
-                </button>
-                <button
-                  type="button"
-                  className="tab-close session-menu-close"
-                  title="タブを閉じる"
-                  aria-label={`タブを閉じる: ${tab.label}`}
                   onClick={() => { onCloseTab(tab.id); }}
                 >
                   &#10005;
@@ -217,7 +163,7 @@ export default function SessionList({
                     return <span className={`session-badge gpg-vault-${badge.state}`} title={badge.reason}>🔑</span>;
                   })()}
                   {s.sandbox
-                    ? <span className="session-badge sandbox">sandbox</span>
+                    ? <SandboxBadge backend={s.sandboxBackend} />
                     : (!s.shell ? <span className="session-badge no-sandbox">no sandbox</span> : null)}
                 </span>
                 <span className="session-menu-status">
@@ -237,139 +183,8 @@ export default function SessionList({
           ))}
         </div>
       )}
-      {unopenedRemoteSessions.length > 0 && (
-        <div className="session-menu-section" data-section="unopened-remote">
-          <div className="session-menu-sep" />
-          <div className="session-menu-section-label">リモートのセッション</div>
-          {unopenedRemoteSessions.map((entry) => {
-            const { instance, session: s } = entry;
-            const host = instance.label || instance.fingerprint?.slice(0, 8) || instance.id;
-            const label = baseName(s.cwd) || s.id.slice(0, 8);
-            return (
-              <div
-                key={`${instance.id}:${s.id}`}
-                role="none"
-                className={`session-menu-item ${s.connected === false ? 'is-idle' : 'is-running'}`}
-                title={`${host}: ${s.cwd || s.id}`}
-              >
-                <button
-                  type="button"
-                  role="menuitem"
-                  className="session-menu-select"
-                  aria-label={`${activityAria(s.activity)}リモート (${host}): ${s.cwd || s.id}`}
-                  onClick={() => { onOpenRemoteSession(entry); }}
-                >
-                  <span className="session-menu-item-top">
-                    <ActivityDot activity={s.activity} />
-                    <TabIcon type="terminal" app={s.app} shell={!!s.shell} />
-                    <span className="session-menu-label">{label}</span>
-                    {s.sandbox
-                      ? <span className="session-badge sandbox">sandbox</span>
-                      : (!s.shell ? <span className="session-badge no-sandbox">no sandbox</span> : null)}
-                  </span>
-                  <span className="session-menu-status">
-                    <span className="tab-remote-badge" title={`接続先: ${host}`}>⇄ {host}</span>
-                    <span className="session-menu-state">{appLabel(s)}</span>
-                  </span>
-                </button>
-                <button
-                  type="button"
-                  className="tab-close session-menu-close"
-                  title="リモートセッションを終了する"
-                  aria-label={`リモートセッションを終了する: ${host} ${s.cwd || s.id}`}
-                  onClick={() => { onTerminateRemoteSession(entry); }}
-                >
-                  &#10005;
-                </button>
-              </div>
-            );
-          })}
-        </div>
-      )}
-      {(unopenedGroups || []).length > 0 && (
-        <div className="session-menu-section" data-section="unopened-groups">
-          <div className="session-menu-sep" />
-          <div className="session-menu-section-label">グループ</div>
-          {unopenedGroups.map((g) => {
-            const dirName = (g.cwd || '').split(/[/\\]/).filter(Boolean).pop() || g.groupId;
-            const liveText = g.liveCount > 0
-              ? `${g.memberCount} members · ${g.liveCount} live`
-              : `${g.memberCount} members`;
-            return (
-              <div
-                key={g.groupId}
-                role="none"
-                className={`session-menu-item ${g.liveCount > 0 ? 'is-running' : 'is-idle'}`}
-                title={g.cwd || g.groupId}
-              >
-                <button
-                  type="button"
-                  role="menuitem"
-                  className="session-menu-select"
-                  aria-label={`グループ: ${dirName}`}
-                  onClick={() => { onOpenGroup(g.groupId); }}
-                >
-                  <span className="session-menu-item-top">
-                    <TabIcon type="group" />
-                    <span className="session-menu-label">{dirName}</span>
-                  </span>
-                  <span className="session-menu-status">
-                    <span className="session-menu-state">{liveText}</span>
-                  </span>
-                </button>
-              </div>
-            );
-          })}
-        </div>
-      )}
-      {unopenedRemoteGroups.length > 0 && (
-        <div className="session-menu-section" data-section="unopened-remote-groups">
-          <div className="session-menu-sep" />
-          <div className="session-menu-section-label">リモートのグループ</div>
-          {unopenedRemoteGroups.map((entry) => {
-            const { instance, group: g } = entry;
-            const host = instance.label || instance.fingerprint?.slice(0, 8) || instance.id;
-            const dirName = baseName(g.cwd) || g.groupId;
-            const liveText = g.liveCount > 0
-              ? `${g.memberCount} members · ${g.liveCount} live`
-              : `${g.memberCount ?? ''} members`.trim();
-            return (
-              <div
-                key={`${instance.id}:${g.groupId}`}
-                role="none"
-                className={`session-menu-item ${g.liveCount === 0 ? 'is-idle' : 'is-running'}`}
-                title={`${host}: ${g.cwd || g.groupId}`}
-              >
-                <button
-                  type="button"
-                  role="menuitem"
-                  className="session-menu-select"
-                  aria-label={`リモートグループ (${host}): ${dirName}`}
-                  onClick={() => { onOpenRemoteGroup(entry); }}
-                >
-                  <span className="session-menu-item-top">
-                    <TabIcon type="group" />
-                    <span className="session-menu-label">{dirName}</span>
-                  </span>
-                  <span className="session-menu-status">
-                    <span className="tab-remote-badge" title={`接続先: ${host}`}>⇄ {host}</span>
-                    <span className="session-menu-state">{liveText}</span>
-                  </span>
-                </button>
-                <button
-                  type="button"
-                  className="tab-close session-menu-close"
-                  title="リモートグループを破棄する"
-                  aria-label={`リモートグループを破棄する: ${host} ${g.cwd || g.groupId}`}
-                  onClick={() => { onDestroyRemoteGroup(entry); }}
-                >
-                  &#10005;
-                </button>
-              </div>
-            );
-          })}
-        </div>
-      )}
+
+
     </>
   );
 }

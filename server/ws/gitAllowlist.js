@@ -21,6 +21,7 @@
 import { existsSync, realpathSync, statSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { isAbsolute, join } from 'node:path';
+import { hardenedGitEnv } from './hostGitEnv.js';
 
 const MAX_DEPTH = 10;
 
@@ -115,6 +116,7 @@ function gitConfigGetAll(file, pattern) {
       encoding: 'utf-8',
       timeout: 2000,
       stdio: ['ignore', 'pipe', 'ignore'],
+      env: hardenedGitEnv(),
     });
     return out.split('\n').filter(Boolean).map((line) => {
       const idx = line.indexOf(' ');
@@ -128,7 +130,7 @@ function gitConfigGetAll(file, pattern) {
 function resolveGitDir(dir) {
   try {
     let gitDir = execFileSync('git', ['-C', dir, 'rev-parse', '--git-dir'], {
-      encoding: 'utf-8', timeout: 2000, stdio: ['ignore', 'pipe', 'ignore'],
+      encoding: 'utf-8', timeout: 2000, stdio: ['ignore', 'pipe', 'ignore'], env: hardenedGitEnv(),
     }).trim();
     if (!gitDir) return null;
     if (!isAbsolute(gitDir)) gitDir = join(dir, gitDir);
@@ -141,7 +143,7 @@ function resolveGitDir(dir) {
 function resolveGitCommonDir(dir) {
   try {
     let commonDir = execFileSync('git', ['-C', dir, 'rev-parse', '--git-common-dir'], {
-      encoding: 'utf-8', timeout: 2000, stdio: ['ignore', 'pipe', 'ignore'],
+      encoding: 'utf-8', timeout: 2000, stdio: ['ignore', 'pipe', 'ignore'], env: hardenedGitEnv(),
     }).trim();
     if (!commonDir) return null;
     if (!isAbsolute(commonDir)) commonDir = join(dir, commonDir);
@@ -234,7 +236,7 @@ export function computeGitAllowlist(cwd) {
   let repoRoot;
   try {
     repoRoot = execFileSync('git', ['-C', cwd, 'rev-parse', '--show-toplevel'], {
-      encoding: 'utf-8', timeout: 2000, stdio: ['ignore', 'pipe', 'ignore'],
+      encoding: 'utf-8', timeout: 2000, stdio: ['ignore', 'pipe', 'ignore'], env: hardenedGitEnv(),
     }).trim();
   } catch {
     return [];

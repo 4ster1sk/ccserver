@@ -4,9 +4,7 @@ import { test, expect } from '@playwright/test';
 // hasn't contracted for. Unlike an app the server just can't find (still
 // shown greyed out with a "サーバーに未インストール" tooltip), a hidden app
 // must be removed ENTIRELY -- no partial/greyed hide mode -- from all 4
-// launch surfaces: the single-launch modal, the combo role pickers (workerA/
-// workerB/orchestrator), the worker preset management dialog, and the
-// Usage widget's app tabs.
+// launch surfaces: the single-launch modal and Usage widget app tabs.
 //
 // /api/dirs/home is fully stubbed so this suite is independent of what's
 // actually installed/configured on the machine running it: the e2e
@@ -19,8 +17,8 @@ const HOME_RESPONSE = {
   forceSandbox: false,
   hostname: 'e2e-hidden-apps',
   showUsage: true,
-  availableApps: { claude: true, opencode: true, copilot: true, codex: true },
-  hiddenApps: ['copilot', 'codex'],
+  availableApps: { claude: true, opencode: true, codex: true },
+  hiddenApps: ['codex'],
 };
 
 async function stubDirsHome(page, body = HOME_RESPONSE) {
@@ -29,41 +27,13 @@ async function stubDirsHome(page, body = HOME_RESPONSE) {
   });
 }
 
-test('single-launch modal removes copilot and codex entirely, keeps claude/opencode', async ({ page }) => {
+test('single-launch modal hides the configured app and keeps the others', async ({ page }) => {
   await stubDirsHome(page);
   await page.goto('/');
   await page.getByRole('button', { name: '起動方法を選択' }).click();
   await expect(page.locator('.open-menu-item', { hasText: 'Claude Code' })).toHaveCount(1);
   await expect(page.locator('.open-menu-item', { hasText: 'opencode' })).toHaveCount(1);
-  await expect(page.locator('.open-menu-item', { hasText: 'GitHub Copilot' })).toHaveCount(0);
   await expect(page.locator('.open-menu-item', { hasText: 'OpenAI Codex' })).toHaveCount(0);
-});
-
-test('combo role pickers (workerA/workerB/orchestrator) drop codex, keep claude/opencode', async ({ page }) => {
-  await stubDirsHome(page);
-  await page.goto('/');
-  await page.getByRole('button', { name: '起動方法を選択' }).click();
-  await page.locator('.resume-dialog .launch-mode-btn', { hasText: 'コンボ起動' }).click();
-  // 3 roles x (claude, opencode) = 6 buttons total; codex must not appear at all.
-  await expect(page.locator('.open-menu-app-btn', { hasText: 'Claude Code' })).toHaveCount(3);
-  await expect(page.locator('.open-menu-app-btn', { hasText: 'opencode' })).toHaveCount(3);
-  await expect(page.locator('.open-menu-app-btn', { hasText: 'OpenAI Codex' })).toHaveCount(0);
-});
-
-test('combo launch is disabled (not silently sent) when every combo-eligible app is hidden', async ({ page }) => {
-  // Edge case found in self-review: an operator who only contracted GitHub
-  // Copilot (which can't join combos) hides claude/opencode/codex entirely.
-  // The role pickers correctly render zero buttons for each role, but
-  // without a launch-time guard, comboApps state kept its stale default
-  // (claude/opencode/claude) and コンボ起動 would silently launch those
-  // hidden apps -- a picker-vs-launch-value mismatch that defeated the hide.
-  await stubDirsHome(page, { ...HOME_RESPONSE, hiddenApps: ['claude', 'opencode', 'codex'] });
-  await page.goto('/');
-  await page.getByRole('button', { name: '起動方法を選択' }).click();
-  await page.locator('.resume-dialog .launch-mode-btn', { hasText: 'コンボ起動' }).click();
-  await expect(page.locator('.open-menu-app-btn')).toHaveCount(0);
-  const launchBtn = page.locator('.resume-actions button.btn-primary', { hasText: 'コンボ起動' });
-  await expect(launchBtn).toBeDisabled();
 });
 
 test('toolbar quick-launch button is disabled (not silently sent) when the remembered default app is hidden with nothing to fall back to', async ({ page }) => {
@@ -77,39 +47,9 @@ test('toolbar quick-launch button is disabled (not silently sent) when the remem
   await page.addInitScript(() => {
     localStorage.setItem('ccserver-app-default', 'claude');
   });
-  await stubDirsHome(page, { ...HOME_RESPONSE, hiddenApps: ['claude', 'opencode', 'copilot', 'codex', 'commandcode'] });
-  await page.goto('/');
-  await expect(page.locator('.open-split-main')).toBeDisabled();
-});
-
-test('preset-add select is disabled (not a silent no-op) when every combo-eligible app is hidden', async ({ page }) => {
-  // Same edge case as the コンボ起動 button guard above, applied to the
-  // preset picker itself: picking a preset when nothing is combo-eligible
-  // used to just do nothing at all, with no error or tooltip.
   await stubDirsHome(page, { ...HOME_RESPONSE, hiddenApps: ['claude', 'opencode', 'codex'] });
   await page.goto('/');
-  await page.getByRole('button', { name: '起動方法を選択' }).click();
-  await page.locator('.resume-dialog .launch-mode-btn', { hasText: 'コンボ起動' }).click();
-  const select = page.locator('.open-menu-preset-select');
-  await expect(select).toBeVisible();
-  await expect(select).toBeDisabled();
-});
-
-test('worker preset management dialog drops codex from the app picker', async ({ page }) => {
-  await stubDirsHome(page);
-  await page.goto('/');
-  await page.getByRole('button', { name: '起動方法を選択' }).click();
-  await page.locator('.resume-dialog .launch-mode-btn', { hasText: 'コンボ起動' }).click();
-  // Opening combo mode triggers the one-time preset fetch against the real
-  // (live, e2e) worker-presets API -- no stub needed, only the "ready" state
-  // (and therefore the 管理 button) has to show up.
-  await expect(page.locator('.open-menu-label', { hasText: 'Worker プリセット' })).toBeVisible();
-  await page.getByRole('button', { name: 'プリセット管理' }).click();
-  const dialog = page.locator('.preset-manage-dialog');
-  await expect(dialog).toBeVisible();
-  await expect(dialog.locator('.open-menu-app-btn', { hasText: 'Claude Code' })).toHaveCount(1);
-  await expect(dialog.locator('.open-menu-app-btn', { hasText: 'opencode' })).toHaveCount(1);
-  await expect(dialog.locator('.open-menu-app-btn', { hasText: 'OpenAI Codex' })).toHaveCount(0);
+  await expect(page.locator('.open-split-main')).toBeDisabled();
 });
 
 test('Usage widget drops the codex tab entirely when codex is hidden', async ({ page }) => {

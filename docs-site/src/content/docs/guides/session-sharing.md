@@ -87,8 +87,6 @@ journalctl --user -u ccserver | grep '\[session\]'
 | `exited-timeout` | PTY 終了後、`CCSERVER_SESSION_EXITED_TIMEOUT_MS` を超過 |
 | `request` | UI / REST API からの明示的な終了 |
 | `shutdown` | サーバー停止 (`systemctl restart` を含む) |
-| `group-replace` / `group-remove-member` / `group-destroy` | [コンボ起動](/ccserver/guides/combo-launch/)のグループ操作 |
 | `reviewer` | [コードレビュー](/ccserver/guides/reviewer/)ジョブの後片付け |
-| `federation` | [拠点間ペアリング](/ccserver/guides/federation/)経由の終了要求 |
 
 `shutdown` が並んでいる場合はサーバー自身が再起動しています。`systemctl status ccserver` の `NRestarts` と `journalctl -u ccserver | grep Started` で、手動再起動かクラッシュ由来かを切り分けられます。

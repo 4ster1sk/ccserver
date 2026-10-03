@@ -59,8 +59,6 @@ $EDITOR ~/.config/ccserver/sandbox.config.json
   "binds": [],
   "env": {},
   "network": {
-    "isolate": false,
-    "initialState": "enforce",
     "mode": "enforce",
     "allowedHosts": [],
     "deniedHosts": []
@@ -77,20 +75,19 @@ $EDITOR ~/.config/ccserver/sandbox.config.json
 | `gitBroker` | `true` | git/gh の認証情報スコープ制限 (同上)。 |
 | `ghUsageRecording` | 未設定（無効） | Issue #198 の任意・ローカル集計。`{ "enabled": true, "file": "/absolute/path/gh-usage-recording.json" }` を指定した新規サンドボックスセッションだけが、gh ブローカー経由の結果を固定カテゴリのカウンタとして保存する。コマンドライン・リポジトリ名・本文・パス・出力・認証情報・識別子は記録せず、ccserver が送信・アップロードすることもない。`node server/cli/gh-usage-report.js enable --file /absolute/path/gh-usage-recording.json`、`show`、`reset`、`disable` で管理できる。 |
 | `commitMessageGuard` | `{ enabled: true, blockedPatterns: [] }` | サンドボックス内の `git commit` を、メッセージが禁止パターンに一致する場合ブロックする commit-msg フック ([認証情報の受け渡し](/ccserver/sandbox/credentials/) 参照)。組み込みパターン (常時有効、設定不要): `Claude-Session:` 行、`https://claude.ai/code/session_...` の裸URL。`gitBroker` とは独立のフラグで、`gitBroker: false` でも有効なまま。`blockedPatterns` に正規表現の文字列を追加すると (例: `Co-Authored-By: ... noreply@anthropic.com` の行)、組み込みパターンに加えてブロックできる。`gitBroker` も有効な場合は、同じ禁止パターンで `gh pr create`/`edit`/`comment`/`review` の title/body/body-file もチェックされる (gh はローカルの commit-msg フックを通らないため別経路が必要 — 詳細は [認証情報の受け渡し](/ccserver/sandbox/credentials/) の gh CLI 節)。 |
-| `forceSandbox` | `false` | `true` でサンドボックス外の起動を全面禁止。エージェント・シェルを問わず全セッションがサンドボックス強制になり、UI のサンドボックス切替は無効化されます。bwrap が無い環境 (または Windows) では起動をエラーで拒否します (Claude の `/usage` / Codex のレート制限取得の直接起動フォールバックも同様に禁止)。ホストに bwrap (bubblewrap) のインストールが必須です。 **`browseRoots` が非空の場合は、この値に関わらず自動的に有効**になります (上記参照)。 |
-| `defaultApp` | `"claude"` | 新規セッションの既定エージェント (`"claude"`、`"opencode"`、`"copilot"`)。UI で一度明示的に選んだ後はブラウザの記憶が優先され、この値は初回表示時の見た目とサーバー側フォールバック (予約プロンプトの自動再開など、クライアントが `app` を指定しない経路) にのみ使われます。**コンボ起動のメンバーには適用されません** (コンボのロール別選択は別途ブラウザの `localStorage` に記憶され、copilot はそもそも選択不可)。 |
+| `forceSandbox` | `false` | `true` でサンドボックス外の起動を全面禁止。エージェント・シェルを問わず全セッションがサンドボックス強制になり、UI のサンドボックス切替は無効化されます。bwrap が無い環境 では起動をエラーで拒否します (Claude の `/usage` / Codex のレート制限取得の直接起動フォールバックも同様に禁止)。ホストに bwrap (bubblewrap) のインストールが必須です。 **`browseRoots` が非空の場合は、この値に関わらず自動的に有効**になります (上記参照)。 |
+| `defaultApp` | `"claude"` | 新規セッションの既定エージェント (`"claude"`、`"opencode"`、`"codex"`)。UI で一度明示的に選んだ後はブラウザの記憶が優先され、この値は初回表示時の見た目とサーバー側フォールバック (予約プロンプトの自動再開など、クライアントが `app` を指定しない経路) にのみ使われます。 |
 | `showUsage` | `true` | タブバー右端の Usage ボタンを表示するか。`false` で非表示。**claude/codex のどちらもサーバーに無く、Go タブも利用不可の場合は設定に関わらず自動的に非表示**になります (利用可能なソースが 1 つだけならボタンは表示され、ポップオーバーはそのソースのみ表示)。 |
 | `opencodeGoUsage` | `true` | Usage ポップオーバーの OpenCode Go タブを有効化するか。opencode CLI の有無とは独立 (Go 契約にバイナリは不要)。`false` でタブを強制非表示にし、キーの読み取りも外部リクエストもしません。`true` (既定) でも Go キーが無い間は自動で隠れ、キーがあるのに未契約 (403) の場合はタブ内にその旨を表示します。環境変数 `CCSERVER_OPENCODE_GO_USAGE` (`0/false/off/no` か `1/true/on/yes`) がこのファイルより優先されます。 |
-| `hiddenApps` | `[]` | 起動ピッカーから完全に除外するエージェント CLI (`"claude"`・`"opencode"`・`"copilot"`・`"codex"` の配列)。契約していない (=使わせたくない) CLI をサーバーにインストールされているかどうかに関わらず隠すための設定です。単発起動モーダル・コンボ起動のロール別選択・Worker プリセット管理・Usage ボタンのアプリタブ、4画面すべてに適用されます。**未インストールのため grey out されて表示され続けるものとは別の挙動**で、`hiddenApps` に入れたアプリは常に完全に除去されます (grey out のまま残すモードはありません)。不明な値は無視されます。この設定によってこのホストに実際にインストール済みのアプリが1つも選択できなくなる場合、サーバーは起動を拒否します (何も起動できない UI をサイレントに立ち上げないため)。ピッカーからの除外は UI 上の利便性に過ぎず、実際の防御は `createSession()` 側にもあります: WS/REST を直接叩く、あるいは Worker/Launch プリセット経由であっても、隠されたアプリでの新規セッション作成 (予約プロンプトの自動再開を含む) はサーバー側で拒否されます。 |
+| `hiddenApps` | `[]` | 起動ピッカーから完全に除外するエージェント CLI (`"claude"`・`"opencode"`・`"codex"` の配列)。契約していない (=使わせたくない) CLI をサーバーにインストールされているかどうかに関わらず隠すための設定です。起動モーダルと Usage ボタンのアプリタブに適用されます。**未インストールのため grey out されて表示され続けるものとは別の挙動**で、`hiddenApps` に入れたアプリは常に完全に除去されます (grey out のまま残すモードはありません)。不明な値は無視されます。この設定によってこのホストに実際にインストール済みのアプリが1つも選択できなくなる場合、サーバーは起動を拒否します (何も起動できない UI をサイレントに立ち上げないため)。ピッカーからの除外は UI 上の利便性に過ぎず、実際の防御は `createSession()` 側にもあります: WS/REST を直接呼び出しても、隠されたアプリでの新規セッション作成 (予約プロンプトの自動再開を含む) はサーバー側で拒否されます。 |
 | `usageMcp` | `false` | Claude セッションへ `ccserver-usage` MCP (`get_usage` ツール) を注入するか。安全のため既定はオフで、`true` の明示時だけ有効です。`showUsage` とは独立しています。 |
-| `browseRoots` | `[]` | `/api/files`・`/api/dirs`・`/ws/terminal` のアクセス範囲をこれらのディレクトリ (とそのサブツリー) 配下に制限する許可ルートの配列。`[]` (既定) は従来どおりホスト全域アクセス可能。設定すると: ファイルのダウンロード/プレビュー/アップロード先とディレクトリ閲覧/作成がこの配下に制限され、**シェル・エージェントを問わず、すべてのセッションが常時サンドボックス強制 (オプトアウト不可) になります。** `browseRoots` が絞るのは Web UI が閲覧・起動できる範囲だけで、起動したプロセス自体は制限できません。エージェントはシェルコマンドを実行できるため、サンドボックス外で動けば `cd` でルート外に出られます。したがって **`browseRoots` の設定は `forceSandbox` を含意します**。起動時に、ccserver 自身の設定・データ・状態ディレクトリ (`~/.config/ccserver` / `~/.local/share/ccserver` / `~/.local/state/ccserver` — SQLite DB、この設定ファイル、federation の秘密鍵、`saved-*.json`) がこの配下に入っていないか検証し、入っている場合は起動を拒否します。3 つとも browseRoots の外に置いてください。`~` はホームディレクトリに展開されます。**コンボ起動 (グループ) について**: ワーカー/オーケストレーターの実際のセッション cwd は常に `~/.local/share/ccserver-sandbox/{worktrees,orchestrator}/...` というサーバー内部の固定スクラッチ領域になり (プロジェクトディレクトリ自体ではありません)、この領域は browseRoots のチェック対象外です。ただしコンボ起動作成時 (`POST /api/groups`) のプロジェクト cwd 自体は browseRoots 配下でなければ拒否されるため、browseRoots 外のプロジェクトに対してコンボグループを作成すること自体はできません。 |
-| `reviewerMcp` | `false` | コードレビュー用 MCP (`ccserver-reviewer`、`run_review`/`list_reviews`/`get_review`/`finish_review` ツール) を有効化するか。`true` の明示時、shell と copilot を除く全セッション (コンボのワーカーも含む、グループの有無は不問) へ注入されます。ローカルの任意 ref/ブランチ/PR/未コミット差分に対して使い捨ての git worktree 上でヘッドレスセッションを起動し `/code-review` を実行するため、既定はオフです。レビュージョブ自身のセッションには、このフラグの値に関わらず (ライブ編集で無効化された場合の完了検知破綻を防ぐため) `finish_review` を呼ぶための MCP が強制的に注入されます ([コードレビュー](/ccserver/guides/reviewer/) 参照)。 |
+| `browseRoots` | `[]` | `/api/files`・`/api/dirs`・`/ws/terminal` のアクセス範囲をこれらのディレクトリ (とそのサブツリー) 配下に制限する許可ルートの配列。`[]` (既定) は従来どおりホスト全域アクセス可能。設定すると、ファイルのダウンロード/プレビュー/アップロード先とディレクトリ閲覧/作成がこの配下に制限され、**シェル・エージェントを問わず、すべてのセッションが常時サンドボックス強制 (オプトアウト不可) になります。** `browseRoots` が絞るのは Web UI が閲覧・起動できる範囲だけで、起動したプロセス自体は制限できません。エージェントはシェルコマンドを実行できるため、サンドボックス外で動けば `cd` でルート外に出られます。したがって **`browseRoots` の設定は `forceSandbox` を含意します**。起動時に ccserver 自身の設定・データ・状態ディレクトリがこの配下に入っていないか検証し、該当する場合は起動を拒否します。3 つとも browseRoots の外に置いてください。`~` はホームディレクトリに展開されます。信頼されたコードレビュー用ジョブはサーバーが作成した一時 worktree を使うため、その cwd だけ例外になります。ファイル・ディレクトリ API は引き続き browseRoots の制限を受けます。 |
+| `reviewerMcp` | `false` | コードレビュー用 MCP (`ccserver-reviewer`、`run_review`/`list_reviews`/`get_review`/`finish_review` ツール) を有効化するか。`true` の明示時、shell 以外の全エージェントセッション へ注入されます。ローカルの任意 ref/ブランチ/PR/未コミット差分に対して使い捨ての git worktree 上でヘッドレスセッションを起動し `/code-review` を実行するため、既定はオフです。レビュージョブ自身のセッションには、このフラグの値に関わらず (ライブ編集で無効化された場合の完了検知破綻を防ぐため) `finish_review` を呼ぶための MCP が強制的に注入されます ([コードレビュー](/ccserver/guides/reviewer/) 参照)。 |
 | `binds` | `[]` | 追加で見せるホストパス。各要素 `{ src, mode?, dest? }`。`mode` は `ro` (既定) か `rw`。存在しないパスはスキップ。`~/.ssh` と `~/.config/gh` は `gitBroker` の設定に関わらず常にブロックされます。 |
 | `env` | `{}` | サンドボックス内の追加環境変数 (適用順は最後 = 既定値を上書き)。例: `sshAgent: true` のときに `SSH_AUTH_SOCK` を明示指定して自動検出を上書き。 |
-| `claudeBin` | 自動検出 | claude/opencode/copilot の起動方法。`claude` を PATH から解決し、ラッパー (例: `/usr/bin/claude` → `/opt/claude-code/bin/claude`) の場合は実体のインストール先を辿ってサンドボックスへ自動的に公開します。opencode は PATH に加えて `~/.opencode/bin` も自動探索。copilot は PATH (SANDBOX_PATH) で自動解決されます (通常 `~/.local/bin/copilot`)。自動検出で外れる場所にある場合や特定ビルドに固定したい場合のみ絶対パスで指定 (環境変数 `CCSERVER_CLAUDE_BIN` が優先。copilot に個別の bin 設定はありません)。 |
+| `claudeBin` | 自動検出 | Claude Code の起動方法。`claude` を PATH から解決し、ラッパー (例: `/usr/bin/claude` → `/opt/claude-code/bin/claude`) の場合は実体のインストール先を辿ってサンドボックスへ自動的に公開します。opencode は PATH に加えて `~/.opencode/bin` も自動探索。自動検出で外れる場所にある場合や特定ビルドに固定したい場合のみ絶対パスで指定できます (環境変数 `CCSERVER_CLAUDE_BIN` が優先)。 |
 | `notify` | `{}` | 通知用 MCP (ccserver-notify) の設定 ([通知](/ccserver/guides/notify/) 参照)。`discordWebhook` は https のみ (非 https は無視)、`subscriptions` は初期購読 (https のみ)。`CCSERVER_DISCORD_WEBHOOK` 環境変数で discordWebhook を上書き可。`bridge` はエージェント通知ブリッジの設定 ([通知](/ccserver/guides/notify/) 参照、既定 `enabled: false`)。`vikunja` キーは廃止済み (残っていても無視され、起動時に警告が出るだけ)。 |
-| `federation` | `{}` | 拠点間ペアリング ([federation](/ccserver/guides/federation/) 参照) の設定。`requireTokenForPairing: true` でペアリング開始リクエストに `CCSERVER_TOKEN` の提示を必須化 (既定 `false`)。機能自体の有効/無効は `CCSERVER_FEDERATION_PORT` 環境変数で制御し、ここでは切り替えられません。 |
-| `network` | `{ isolate: false, initialState: "enforce", mode: "enforce", allowedHosts: [], deniedHosts: [] }` | ネットワーク隔離 ([下記](#ネットワーク隔離)参照)。`isolate` は機能全体の on/off (`true` で隔離が有効になる)。`initialState` は隔離を有効にして起動したセッションの開始state (`"enforce"`/`"open"`)、`mode` は `"enforce"`/`"audit"`、`allowedHosts`/`deniedHosts` は完全一致か先頭ドット (`.example.com`) のみの許可/拒否リスト (各最大200件)。設定 UI (設定 → ネットワーク隔離) からも編集可能で、`allowedHosts`/`deniedHosts` の保存は稼働中セッションへ自動反映されます。 |
+| `network` | `{ mode: "enforce", allowedHosts: [], deniedHosts: [] }` | ネットワーク隔離 ([下記](#ネットワーク隔離)参照)。VM セッションは常に open で起動し、🌐 トグルで enforce に切り替えます。`mode` は `"enforce"`/`"audit"`、`allowedHosts`/`deniedHosts` は完全一致か先頭ドット (`.example.com`) のみの許可/拒否リスト (各最大200件)。設定 UI (設定 → ネットワーク隔離) からも編集可能で、`mode`/`allowedHosts`/`deniedHosts` の保存は稼働中セッションへ自動反映されます。 |
 
 ## gh 利用記録（任意・ローカルのみ）
 
@@ -124,9 +121,9 @@ node server/cli/gh-usage-report.js enable \
 
 起動時チェックの適用範囲に注意してください。
 
-- **`browseRoots` を設定している場合**: 有効な集計ファイルが browseRoots 配下にあると、ccserver は他の内部状態ファイル (SQLite DB、federation 鍵など) と同様に**起動を拒否します**。`gh-usage-report.js enable` も同じ条件を先に検査して拒否するので、起動不能な設定を書き込んでしまうことはありません。
+- **`browseRoots` を設定している場合**: 有効な集計ファイルが browseRoots 配下にあると、ccserver は他の内部状態ファイル (SQLite DB、内部状態ファイルなど) と同様に**起動を拒否します**。`gh-usage-report.js enable` も同じ条件を先に検査して拒否するので、起動不能な設定を書き込んでしまうことはありません。
 - **`browseRoots` を設定していない場合 (既定)**: この browseRoots 判定は**何もしません**。browseRoots が無ければ任意のディレクトリをセッションの cwd にできるため、「サンドボックスから書き込めない場所」を機械的に判定する方法がないからです。とくに `--file` を省略した既定の保存先 (`sandbox.config.json` と同じディレクトリ = 通常は ccserver のチェックアウト内) は保護されません。**ccserver のチェックアウト外で、セッションを開くことのない絶対パスを明示的に指定してください。**
-- **ccserver のサンドボックス作業ツリー (`~/.local/share/ccserver-sandbox` 配下) は browseRoots の設定に関わらず拒否されます。** ここには各セッションの永続 HOME やコンボ起動の worktree が置かれ、サンドボックスへ rw で bind されるため、browseRoots の例外として扱われる領域です。集計ファイルをここに置くとセッションから書き換えられるので、起動時チェックと `enable` の双方が無条件で拒否します。
+- **ccserver のサンドボックス作業領域 (`~/.local/share/ccserver-sandbox` 配下) は browseRoots の設定に関わらず拒否されます。** ここには各セッションの永続 HOME やレビュー用 worktree が置かれ、サンドボックスへ rw で bind されるため、browseRoots の例外として扱われる領域です。集計ファイルをここに置くとセッションから書き換えられるので、起動時チェックと `enable` の双方が無条件で拒否します。
 
 ### 記録が止まったときの検知
 
@@ -176,14 +173,34 @@ node server/cli/gh-usage-report.js disable
 
 ## ネットワーク隔離
 
-`network.isolate: true` で起動したセッションは、外向き通信がホスト側の CONNECT プロキシ (`network-broker.js`) 経由に限定されます。TLS はそのままパススルーするプレーンな HTTP CONNECT プロキシで、中身を復号しません。`isolate: false` (既定) で起動したセッションはブローカー自体が起動せず、従来通り通信は制限されません。
+ネットワーク隔離は qemu バックエンド専用です (bwrap では利用できません)。qemu セッションのネットワークは VM の NIC に接続されたホスト側の Go ブローカー ([ccserver-netbroker](https://git.tomadoi.com/4sterisk/ccserver-netbroker) の `ccs-netbroker`) がユーザーランドで処理します。セッションは常に `open` (制限なし) で起動し、起動後はそのセッションの 🌐 トグルでいつでも enforce (許可リストのみ) / open を切り替えられます (再起動不要)。
 
-- **bwrap (Linux)**: `isolate: true` かつ rootlesskit/slirp4netns/newuidmap が揃っているホストでは、bwrap 起動が私有ネットワーク名前空間 + in-netns ファイアウォール (iptables 優先、nft フォールバック) でラップされ、ブローカーのポートと DNS 以外への通信を構造的に遮断します。開始stateは `initialState` (`enforce`既定・`open`可) に従います。起動後は、そのセッションのトグルでいつでも enforce (許可リストのみ) / open (一時的に全通信許可) を切り替えられます — ただし切り替えられるのは境界がある間だけで、`isolate: false` で起動したセッションには切り替え自体が現れません。rootlesskit 系ツールが1つでも欠けているホストでは、`isolate: true` を指定していても境界を作らず、従来どおりの非隔離 bwrap 起動にフォールバックします (起動は失敗せず、警告ログのみ)。
-- **seatbelt (macOS)**: `isolate: true` で起動したセッションだけ、プロファイルが `(allow network*)` の代わりにブローカーのループバックポートのみを許可するルールに切り替わります (ツール依存はありません)。開始stateは `initialState` に従い、稼働中の 🌐 トグルで再起動なしにいつでも enforce/open を切り替えられます。ただし open でも直結 TCP/UDP は不可で proxy 経由のみとなるため、proxy を無視するツールは open でも直結できません。bwrap のようなカーネルレベルの境界ではなく、同一UIDのプロセスは `KERN_PROCARGS2` 経由でブローカーのトークンを読み取れてしまうため、あくまで defense-in-depth です。
+ブローカーのバイナリは別リポジトリで配布しており、`npm run fetch:netbroker` で `server/netbroker.version.json` に固定された版を `.netbroker/bin/` に取得します (SHA256 検証付き)。ローカルビルドを使う場合は `CCSERVER_NETBROKER_BIN_DIR` でディレクトリを指定します。
 
-**既知の制限:** enforce 状態のブローカーであっても、CONNECT (HTTP(S) プロキシ) を経由しない生の TCP/UDP 通信 (プロキシ環境変数を見ないツールが直接ソケットを開くケースなど) はそもそも境界の対象外です。bwrap の open 状態でも同様に、境界自体はブローカーのポート宛て以外への通信を落とすため、プロキシ非対応の通信は enforce/open どちらでも届きません。この設定ファイルの `gitBroker` (git/gh の認証情報) はホスト側でネットワーク I/O を行うため、ここには影響されません。
+**既知の制限:** この設定ファイルの `gitBroker` (git/gh の認証情報) はホスト側でネットワーク I/O を行うため、ここには影響されません。
 
-`docker: true` と `network.isolate: true` を併用した bwrap セッションでは、netns 内の in-netns ファイアウォールが `FORWARD` チェーンもデフォルト DROP にし、dockerd は `--iptables=false` で起動します (dockerd 自身に FORWARD/NAT ルールを挿入させず、ファイアウォールの保証を保つため)。そのため `docker run -p` によるコンテナのポート公開は機能しません。
+## サンドボックス方式の選択 (bwrap / VM)
+
+Linux では、サンドボックス起動の方式をセッションごとに選べます。起動メニューのサンドボックスオプションにある「方式」で、`既定` / `bwrap` / `VM (QEMU)` から選びます。選択はディレクトリごとに記憶されます。
+
+- `既定` は `sandbox.config.json` の `backend` (環境変数 `CCSERVER_SANDBOX_BACKEND` が優先) に従います
+- 選んだ方式がこのホストで使えない場合 (例: `/dev/kvm` が無いホストで VM を選んだ場合) は、もう一方の方式やサンドボックスなしに切り替えずに、理由付きのエラーで起動を拒否します
+- VM では、旧方式の GPG 署名 (ホストの gpg-agent 転送)・rtk・code-review-graph を使えません。起動メニューでは無効表示になります。署名には GPG Vault を使ってください
+- 再開・予約実行は、起動時に選んだ方式で起動し直します
+
+## QEMU VM テンプレート
+
+Settings の「QEMU VM」タブで、VM 方式の起動に使う VM テンプレートを管理できます。テンプレートは名前・リソース量 (CPU / メモリ MiB / ディスク GiB / 起動タイムアウト秒) と、ブート時に流し込む追加 cloud-config (YAML) を持ちます。
+
+- セッション起動時のサンドボックスオプションでテンプレートを選びます (ディレクトリごとに記憶)。未選択なら既定テンプレート、既定も無ければ `sandbox.config.json` の `qemu` の値で起動します
+- 削除済みのテンプレートを選んだまま起動すると、別の設定で黙って起動せずにエラーになります
+- テンプレートは起動時にだけ読まれます。編集・削除しても稼働中の VM には影響しません
+- 同じタブに稼働中の VM が一覧表示され、停止 (= セッション終了、overlay ディスク破棄) できます。プロジェクトと永続 HOME は残ります
+
+追加 cloud-config で使えるトップレベルキーは `packages`, `package_update`, `package_upgrade`, `apt`, `locale`, `bootcmd`, `write_files`, `runcmd` のみです。`users`・ssh 鍵・`ca_certs`・`power_state` など ccserver のセッション設定に関わるキーや、`write_files` での `/etc/ssh/`・`/etc/cloud/`・`/etc/systemd/system/ccs-svc-*`・`/ccserver-sandbox*`・`/run/ccserver/` への書き込みは保存時に拒否されます。
+
+- `bootcmd` は ccserver のセットアップ (ユーザー作成・マウント) の後に、`runcmd` は準備完了の直前に root で実行されます。`runcmd` のコマンドが失敗した場合や `packages` の導入に失敗した場合は起動失敗になります
+- `packages` / `apt` はブート時にネットワークを使います。ネットワーク隔離を enforce で開始する場合は `deb.debian.org` などを許可ホストに追加し、導入に時間がかかる場合は起動タイムアウトを延ばしてください
 
 ## 内部の仕組み (docker と gpg の両立)
 

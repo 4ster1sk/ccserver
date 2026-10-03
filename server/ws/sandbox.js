@@ -15,12 +15,8 @@
 // newuidmap (no subuid mapping -> single uid), so rootlesskit must be the
 // outer layer. See memory: sandbox-dind-recipe.
 //
-// Architecture (macOS): sandbox-exec (Seatbelt) -> entrypoint -> target, with
-// no docker (see sandbox-seatbelt.js). A deny-by-default file policy replaces
-// bwrap's bind mounts -- strictly weaker isolation, no mount hiding.
-
 import { homedir } from 'node:os';
-import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, closeSync, constants as fsConstants, existsSync, fchmodSync, fstatSync, ftruncateSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync, writeSync } from 'node:fs';
 import { chmod as chmodP, readdir as readdirP, rm as rmP, stat as statP } from 'node:fs/promises';
 import { execFile, execFileSync } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -31,14 +27,20 @@ import { startGitBroker, hostRuntimeDir, ensureHostRuntimeDir } from './git-brok
 import { buildGuardConfig } from './commitGuard.js';
 import * as gpgVaultAgent from './gpgVaultAgent.js';
 import * as gpgVaultRelay from './gpgVaultRelay.js';
-import { buildSeatbeltLaunch, seatbeltEnvArgs, seedClaudeCredentialsFromHostKeychain, isBlockedCredentialBind, agentConfigDirs } from './sandbox-seatbelt.js';
-import { startNetworkBroker, buildIsolatedProxyEnv, normalizeNetworkSettings } from './network-broker.js';
+import { isBlockedCredentialBind, agentConfigDirs } from './sandbox-paths.js';
+import { normalizeNetworkSettings } from './networkAllowlist.js';
 import { recordSandboxHome as recordSandboxHomeDb, listSandboxRowsBySlug, forgetSandboxHome } from './projects.js';
 import { APPS } from './appLaunch.js';
 import { normalizeBrowseRoots, isContained, isCcserverScratchPath } from '../pathPolicy.js';
 import { resolvePath, PATH_IDS } from '../paths.js';
 import { isRegularFile, readRegularFileText } from './regularFile.js';
 import { normalizeBridgeSettings } from './notifyBridgeSettings.js';
+import { qemuStatus, prepareQemuSession, buildGuestRuntime, currentGolden, LAUNCHER_SCRIPT as QEMU_LAUNCHER, QEMU_RESOURCE_LIMITS } from './sandbox-qemu.js';
+import { qemuVmPool as defaultQemuVmPool, poolKey } from './qemuVmPool.js';
+import { startGoNetworkBroker, netbrokerBin } from './netbrokerClient.js';
+import { resolveVmTemplate } from '../vmTemplates.js';
+import { getVmAgentCredentials } from '../vmAgentCredentials.js';
+import { resolveVmAgentInstall, credentialPaths, guestAgentDir, vmAgentArgv, vmAgentEnv, buildVmAgentAuth, readOpencodeHostProviders, resolveOpencodeProviders, VmAgentError } from './qemuAgents.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -57,24 +59,7 @@ const BWRAP = '/usr/bin/bwrap';
 const ROOTLESSKIT = '/usr/bin/rootlesskit';
 const BASH = '/usr/bin/bash';
 
-// macOS Seatbelt backend (see sandbox-seatbelt.js): sandbox-exec mediates
-// file access by policy instead of bwrap's bind mounts, so there is no mount
-// isolation and no nested dockerd. The bash lived at /bin/bash on macOS
-// (there is no /usr/bin/bash).
-export const IS_MACOS = process.platform === 'darwin';
-
-// network.isolate is the master switch for the network-isolation feature
-// (see buildSandboxSpawn): when off, neither backend starts a broker and the
-// sandbox launches with open egress. When on, isolation is enabled for the
-// launch and
-// network.initialState selects the broker's starting live state -- 'enforce'
-// or 'open' -- which the running-session toggle can flip afterward without
-// a restart.
-export function macOSNetworkBrokerInitialState(initialState) {
-  return initialState === 'open' ? 'open' : 'enforce';
-}
-const SANDBOX_EXEC = '/usr/bin/sandbox-exec';
-const MACOS_BASH = '/bin/bash';
+const IS_MACOS = process.platform === 'darwin';
 
 // Fixed in-sandbox paths for the git-broker machinery (see buildBwrapArgs).
 const SANDBOX_NODE_PATH = '/ccserver-sandbox-node';
@@ -98,10 +83,8 @@ const SANDBOX_COMMIT_GUARD_HOOKS_DIR = '/ccserver-sandbox-git-hooks';
 const SANDBOX_COMMIT_GUARD_HOOK_PATH = `${SANDBOX_COMMIT_GUARD_HOOKS_DIR}/commit-msg`;
 const SANDBOX_COMMIT_GUARD_CONFIG_PATH = '/ccserver-sandbox-commit-guard.json';
 
-// Fixed in-sandbox paths for the MCP bridge (see mcpBroker.js / mcpConfig.js):
-// the group's control or handoff socket is bound at SANDBOX_MCP_SOCK_PATH and
-// the byte-pipe wrapper script at SANDBOX_MCP_BRIDGE_PATH, which the agent
-// CLIs are told to run via --mcp-config / OPENCODE_CONFIG_CONTENT. The
+// Fixed in-sandbox path for the MCP bridge wrapper (see mcpConfig.js),
+// which the agent CLIs run via --mcp-config / OPENCODE_CONFIG_CONTENT. The
 // process-global notify socket (ccserver-notify, see notify.js) is bound at a
 // second fixed path the same wrapper reaches when invoked with the 'notify'
 // argument. The process-global usage socket (ccserver-usage, see
@@ -110,7 +93,7 @@ const SANDBOX_COMMIT_GUARD_CONFIG_PATH = '/ccserver-sandbox-commit-guard.json';
 // reviewer.js) is bound at a fourth fixed path, reached with the 'reviewer'
 // argument.
 //
-// Issue #143 problem 1: each of these four now names a file inside its own
+// Issue #143 problem 1: each socket names a file inside its own
 // dedicated `.d` directory rather than sitting directly under sandbox root.
 // buildBwrapArgs binds dirname(hostSocketPath) onto dirname(this constant) --
 // a DIRECTORY bind, immune to the host socket file being replaced underneath
@@ -119,7 +102,6 @@ const SANDBOX_COMMIT_GUARD_CONFIG_PATH = '/ccserver-sandbox-commit-guard.json';
 // nothing else (sandbox root itself is not an option: binding a directory
 // there would shadow the whole sandbox filesystem built by every earlier
 // bind in this function).
-const SANDBOX_MCP_SOCK_PATH = '/ccserver-sandbox-mcp.d/sock';
 const SANDBOX_NOTIFY_SOCK_PATH = '/ccserver-sandbox-notify.d/sock';
 const SANDBOX_USAGE_SOCK_PATH = '/ccserver-sandbox-usage.d/sock';
 const SANDBOX_REVIEWER_SOCK_PATH = '/ccserver-sandbox-reviewer.d/sock';
@@ -405,7 +387,7 @@ async function removeTreeViaSudoAsync(path) {
 
 // Deterministic per-project path of the persistent HOME. resolve() normalizes
 // spelling variants (trailing slash, "..", ...) so they all map to one dir,
-// mirroring orchestratorDirForCwd in routes/groups.js.
+// for legacy path compatibility.
 export function persistentHomeDir(cwd) {
   return join(sandboxHomeRoot(), slugify(resolve(cwd)));
 }
@@ -630,7 +612,7 @@ let warnedVikunjaConfig = false;
 // Test seam (review finding #4): the latch above is module state with no way
 // back, so a test that runs after anything else has already tripped it can
 // neither observe the warning nor assert it fires only once. Same shape as
-// federationIdentity.js's _resetIdentityCacheForTests().
+// another module-state reset seam.
 export function _resetVikunjaWarningForTests() {
   warnedVikunjaConfig = false;
 }
@@ -824,7 +806,7 @@ export function loadSandboxConfig() {
   // Which agent a new session launches when the client doesn't request one.
   // See appLaunch.js's APPS; anything else (including unset) falls back to
   // claude -- see loadSandboxConfig()'s defaultApp below.
-  const defaultApp = raw.defaultApp === 'opencode' || raw.defaultApp === 'copilot' || raw.defaultApp === 'codex' || raw.defaultApp === 'commandcode' ? raw.defaultApp : 'claude';
+  const defaultApp = raw.defaultApp === 'opencode' || raw.defaultApp === 'codex' ? raw.defaultApp : 'claude';
   // Show the client's top-bar Usage button (Claude Code /usage spend). Off
   // for setups that don't want it; the client also hides the button on its
   // own when claude is not installed (the capture would never succeed).
@@ -932,17 +914,37 @@ export function loadSandboxConfig() {
       + ' Remove the key to silence this.',
     );
   }
-  // Network isolation (see network-broker.js): isolate is the master
-  // switch for the whole feature (false by default: no broker, open egress,
-  // no live toggle on either backend). initialState never decides whether
-  // the structural boundary (bwrap firewall / seatbelt profile) exists at
-  // all, only the broker's starting state (see buildSandboxSpawn). Parse is
+  // Network isolation (qemu backend, Go broker): the broker always starts
+  // 'open' and the running-session toggle flips it to enforce. Parse is
   // shared with getNetworkSettings() (networkAllowlist.js, what the Settings
   // GUI shows/saves) via normalizeNetworkSettings so the two structurally
   // cannot drift apart -- see that function's header comment.
   const network = normalizeNetworkSettings(raw.network);
+  // qemu-only network policy (Go broker, see the ccserver-netbroker README): HTTPS
+  // interception, HTTP rules, DLP, credential injection, request logging.
+  // Passed through verbatim -- the broker validates them and refuses to
+  // start on any error, which fails the launch (fail closed).
+  const rawNet = (raw.network && typeof raw.network === 'object' && !Array.isArray(raw.network)) ? raw.network : {};
+  const networkAdvanced = {};
+  for (const k of ['mitm', 'rules', 'dlp', 'inject', 'log']) {
+    if (rawNet[k] !== undefined) networkAdvanced[k] = rawNet[k];
+  }
+  // Linux isolation backend: 'bwrap' (default, namespaces) or 'qemu' (a KVM
+  // VM per session, see sandbox-qemu.js). Anything else falls back to bwrap.
+  // CCSERVER_SANDBOX_BACKEND wins over the file.
+  const backendRaw = process.env.CCSERVER_SANDBOX_BACKEND || raw.backend;
+  const backend = backendRaw === 'qemu' ? 'qemu' : 'bwrap';
+  const qemuRaw = (raw.qemu && typeof raw.qemu === 'object' && !Array.isArray(raw.qemu)) ? raw.qemu : {};
+  const qemu = {};
+  for (const [k, { min, max, def }] of Object.entries(QEMU_RESOURCE_LIMITS)) {
+    const v = qemuRaw[k];
+    qemu[k] = Number.isInteger(v) && v >= min && v <= max ? v : def;
+  }
+  // Sessions share one persistent VM (qemuVmPool.js) instead of each
+  // booting its own. A VM template's own flag wins over this.
+  qemu.persistent = qemuRaw.persistent === true;
   return {
-    docker, persistentHome, gpg, sshAgent, gpgVault, gitBroker, commitMessageGuard, forceSandbox, forceSandboxReason, binds, env, tools, claudeBin, defaultApp, showUsage, opencodeGoUsage, usageMcp, reviewerMcp, ghUsageRecording, hiddenApps, browseRoots, browseRootsInvalid, configError, network,
+    docker, persistentHome, gpg, sshAgent, gpgVault, gitBroker, commitMessageGuard, forceSandbox, forceSandboxReason, binds, env, tools, claudeBin, defaultApp, showUsage, opencodeGoUsage, usageMcp, reviewerMcp, ghUsageRecording, hiddenApps, browseRoots, browseRootsInvalid, configError, network, networkAdvanced, backend, qemu,
     notify: {
       discordWebhook, subscriptions, hostname: notifyHostname, attribution: notifyAttribution,
       // Agent notification bridge (plan-notify-bridge). Parsed by the same
@@ -998,11 +1000,11 @@ export function resolveTools(sandboxOpts = null, cfgTools = null) {
 // same ids resolveTools() uses. Exposed via GET /dirs/home so the launch /
 // settings UIs can render the toggles disabled-with-an-explanation (mirrors
 // availableApps for agent CLIs) instead of offering a checkbox the server
-// silently ignores. macOS: the seatbelt backend has no provisioner wiring and
-// no darwin rtk asset map (see buildSandboxSpawn's IS_MACOS branch, which
-// force-disables both), so neither is available there.
+// silently ignores. The tools are provisioned by bwrap's mount-bound
+// provisioner only (the qemu VM never gets them), so this is bwrap's answer
+// whatever the default backend is; the launch UI greys them out for a VM.
 export function sandboxToolsAvailable() {
-  const ok = !IS_MACOS;
+  const ok = sandboxAvailable('bwrap');
   return { rtk: ok, codeReviewGraph: ok };
 }
 
@@ -1117,9 +1119,7 @@ function resolveAgentCommand(cmd, extraDirs = []) {
 // opencode: the resolved absolute path. Its install (e.g. an nvm bin dir) is
 //   typically NOT on the sandbox PATH, so the absolute path + installDir bind
 //   is required for it to run inside the sandbox.
-// copilot: like claude, a bare name first (its ~/.local/bin install is on
-//   SANDBOX_PATH); falls back to an absolute path for installs PATH can't see.
-// codex: like copilot, a bare name first (~/.local/bin is searched as a
+// codex: like claude, a bare name first (~/.local/bin is searched as a
 //   fallback); falls back to an absolute path for installs PATH can't see.
 //
 // Why two spellings: `command` is resolved against SANDBOX_PATH, which can
@@ -1139,30 +1139,10 @@ export function resolveApp(app, configuredBin = loadSandboxConfig().claudeBin) {
     }
     return { command: process.platform === 'win32' ? 'opencode.exe' : 'opencode', hostCommand: null, installDir: null, found: false };
   }
-  if (app === 'copilot') {
-    const r = resolveAgentCommand('copilot', [join(HOME, '.local', 'bin')]);
-    if (r) return { command: r.command, hostCommand: r.path, installDir: appInstallDir(r.path), found: true };
-    return { command: process.platform === 'win32' ? 'copilot.exe' : 'copilot', hostCommand: null, installDir: null, found: false };
-  }
   if (app === 'codex') {
     const r = resolveAgentCommand('codex', [join(HOME, '.local', 'bin')]);
     if (r) return { command: r.command, hostCommand: r.path, installDir: appInstallDir(r.path), found: true };
     return { command: process.platform === 'win32' ? 'codex.exe' : 'codex', hostCommand: null, installDir: null, found: false };
-  }
-  if (app === 'commandcode') {
-    const names = ['command-code', 'commandcode', 'cmdc', 'cmd'];
-    for (const name of names) {
-      const r = resolveAgentCommand(name, [join(process.cwd(), '.tools', 'bin')]);
-      if (r) {
-        let real = r.path;
-        try { real = realpathSync(r.path); } catch { /* keep as given */ }
-        // command-code is a Node package; expose its package root so its
-        // bundled node_modules remain available inside the sandbox.
-        const packageRoot = dirname(dirname(real));
-        return { command: real, hostCommand: real, installDir: packageRoot, found: true };
-      }
-    }
-    return { command: 'command-code', hostCommand: null, installDir: null, found: false };
   }
   const command = configuredBin || (process.platform === 'win32' ? 'claude.exe' : 'claude');
   const r = resolveAgentCommand(command);
@@ -1211,9 +1191,7 @@ export function installedApps() {
   return {
     claude: resolveApp('claude').found,
     opencode: resolveApp('opencode').found,
-    copilot: resolveApp('copilot').found,
     codex: resolveApp('codex').found,
-    commandcode: resolveApp('commandcode').found,
   };
 }
 
@@ -1243,18 +1221,14 @@ export function resolveClaude(configuredBin = loadSandboxConfig().claudeBin) {
   return resolveApp('claude', configuredBin);
 }
 
-// Swap a leading bare `claude`/`opencode`/`copilot`/`codex`/`commandcode` in a
+// Swap a leading bare `claude`/`opencode`/`codex` in a
 // target command for the resolved launcher, leaving non-agent targets (e.g. a
 // shell) untouched. Absolute commands (e.g. resolved opencode paths) pass
 // through as-is.
 function withClaude(targetCommand, command) {
   if (targetCommand[0] === 'claude' || targetCommand[0] === 'claude.exe'
     || targetCommand[0] === 'opencode' || targetCommand[0] === 'opencode.exe'
-    || targetCommand[0] === 'copilot' || targetCommand[0] === 'copilot.exe'
     || targetCommand[0] === 'codex' || targetCommand[0] === 'codex.exe') {
-    return [command, ...targetCommand.slice(1)];
-  }
-  if (targetCommand[0] === 'command-code' || targetCommand[0] === 'commandcode' || targetCommand[0] === 'cmdc' || targetCommand[0] === 'cmd') {
     return [command, ...targetCommand.slice(1)];
   }
   return targetCommand;
@@ -1366,36 +1340,58 @@ export function discoverSshAuthSock() {
 }
 
 // Check that the tools needed for the docker-enabled sandbox are present.
-// Never true on macOS: sandbox-exec cannot host a nested rootless dockerd,
-// so the darwin branch of buildSandboxSpawn() always launches docker: false.
 export function dockerSandboxAvailable() {
-  if (IS_MACOS) return false;
+  if (process.platform !== 'linux') return false;
   return [BWRAP, ROOTLESSKIT, '/usr/bin/slirp4netns', '/usr/bin/newuidmap']
     .every((p) => existsSync(p));
 }
 
-export function seatbeltAvailable() {
-  return existsSync(SANDBOX_EXEC);
+// The Linux backend the operator configured (sandbox.config.json backend):
+// the default for launches that do not pick one.
+function linuxBackendChoice() {
+  return loadSandboxConfig().backend;
 }
 
-export function sandboxAvailable() {
-  if (IS_MACOS) return seatbeltAvailable();
+// The Linux backend one launch uses: sandboxOpts.backend ('bwrap' | 'qemu',
+// picked in the launch options) or, absent / anything else, the configured
+// default. A picked backend is never swapped for another one: when it cannot
+// run here, the launch is refused (see sessionManager's sandbox guards).
+export function resolveSandboxBackend(sandboxOpts = null) {
+  const picked = sandboxOpts?.backend;
+  return picked === 'bwrap' || picked === 'qemu' ? picked : linuxBackendChoice();
+}
+
+// Whether `backend` (default: the configured one) can sandbox a launch here.
+export function sandboxAvailable(backend = linuxBackendChoice()) {
+  if (process.platform !== 'linux') return false;
+  if (backend === 'qemu') return qemuStatus().ok;
   return existsSync(BWRAP);
 }
 
-// Which isolation backend a sandboxed launch would use on this host:
-// 'bwrap' (Linux), 'seatbelt' (macOS via sandbox-exec), or 'none'.
-// sessionManager uses this to pick the MCP bridge invocation (fixed
-// in-sandbox paths only exist under bwrap) and platform-aware errors.
+// Which isolation backend a sandboxed launch would use on this host by
+// default: 'bwrap' / 'qemu' (Linux, per sandbox.config.json backend), or 'none'.
 export function sandboxBackend() {
-  if (process.platform === 'win32') return 'none';
-  if (IS_MACOS) return seatbeltAvailable() ? 'seatbelt' : 'none';
-  return sandboxAvailable() ? 'bwrap' : 'none';
+  const backend = linuxBackendChoice();
+  return sandboxAvailable(backend) ? backend : 'none';
+}
+
+// Per-backend availability for the launch options' backend picker
+// (/api/dirs/home's sandboxBackends).
+export function backendStatus() {
+  const linux = process.platform === 'linux';
+  const qemu = linux ? qemuStatus() : { ok: false, reason: 'the qemu sandbox is Linux-only', hint: null };
+  return {
+    default: linuxBackendChoice(),
+    bwrap: linux && existsSync(BWRAP)
+      ? { ok: true, reason: null }
+      : { ok: false, reason: linux ? 'bwrap (bubblewrap) is not installed' : 'the sandbox is Linux-only' },
+    qemu: { ok: qemu.ok, reason: qemu.reason, hint: qemu.hint },
+  };
 }
 
 // Platform-aware refusal text shared by sessionManager's three sandbox
 // guards, so the install hint can't drift between them.
-export function sandboxUnavailableReason() {
+export function sandboxUnavailableReason(backend = linuxBackendChoice()) {
   if (process.platform === 'win32') {
     return {
       reason: 'the sandbox is Linux-only',
@@ -1404,9 +1400,13 @@ export function sandboxUnavailableReason() {
   }
   if (IS_MACOS) {
     return {
-      reason: 'sandbox-exec is not available on this host',
+      reason: 'sandbox support is unavailable on macOS',
       hint: 'Launch without the sandbox.',
     };
+  }
+  if (backend === 'qemu') {
+    const st = qemuStatus();
+    return { reason: `the qemu sandbox is unavailable: ${st.reason}`, hint: `${st.hint} Or pick bwrap, or launch without the sandbox.` };
   }
   return {
     reason: 'bwrap is not available on this host',
@@ -1414,12 +1414,11 @@ export function sandboxUnavailableReason() {
   };
 }
 
-export function forceSandboxUnavailableReason() {
-  // Keeps the historical Linux/Windows suffix byte-identical (asserted by
-  // routes/groups.test.js); only macOS gets its own hint.
+export function forceSandboxUnavailableReason(backend = linuxBackendChoice()) {
+  // Keeps the historical Linux/Windows suffix byte-identical.
   if (IS_MACOS) {
     return {
-      reason: 'sandbox-exec is not available on this host',
+      reason: 'sandbox support is unavailable on macOS',
       hint: 'Disable forceSandbox.',
     };
   }
@@ -1428,6 +1427,10 @@ export function forceSandboxUnavailableReason() {
       reason: 'the sandbox is Linux-only',
       hint: 'Install bwrap (bubblewrap) or disable forceSandbox.',
     };
+  }
+  if (backend === 'qemu') {
+    const st = qemuStatus();
+    return { reason: `the qemu sandbox is unavailable: ${st.reason}`, hint: `${st.hint} Or pick bwrap, or disable forceSandbox.` };
   }
   return {
     reason: 'bwrap is not available on this host',
@@ -1463,146 +1466,19 @@ function startCommitGuard(blockedPatterns) {
   }
 }
 
-// Network isolation for the bwrap backend (see network-broker.js).
-//
-// slirp4netns defaults (rootlesskit --net=slirp4netns): .2 is the host
-// gateway (guest -> 10.0.2.2 reaches the host loopback when host-loopback
-// forwarding is on -- hence an isolated launch must NOT pass
-// --disable-host-loopback), .3 is the virtual DNS resolver. The broker binds
-// 0.0.0.0 host-side, so the guest reaches it at the gateway address.
-export const BWRAP_ISOLATION_GATEWAY = '10.0.2.2';
-export const BWRAP_ISOLATION_DNS = '10.0.2.3';
-
-// In-netns firewall script for an isolated bwrap launch. Runs as the first
-// thing inside the freshly created network namespace (netns root == userns
-// root, so CAP_NET_ADMIN for the OWN netns is held and iptables/nft may
-// program it), BEFORE the sandbox entrypoint. Structural, not
-// proxy-compliance-dependent: even a client that ignores HTTP_PROXY cannot
-// send a single packet anywhere except the broker (and DNS, which only
-// resolves -- every TCP/UDP connection target is still dropped).
-//
-// Fail-closed by construction: `set -eu` plus a nonzero exit when neither
-// iptables nor nft exists in the sandbox (both are expected via the /usr
-// ro-bind; a stripped image refuses the launch instead of running open).
-// IPv6 output is dropped best-effort (slirp provides no v6 route, so there
-// is nothing to allow there -- only to deny).
-//
-// `forward` additionally locks down the FORWARD chain: with `docker: true`,
-// dockerd runs inside this same netns and bridges/NATs container egress
-// through FORWARD (not OUTPUT, which only covers packets locally generated
-// by processes in the netns root itself) -- so without this, a container
-// started inside the sandbox gets full internet egress plus reachability to
-// the host loopback broker address, bypassing the OUTPUT-only policy above.
-// The ESTABLISHED,RELATED accept is required for the broker's/DNS's own
-// response packets flowing back through FORWARD to reach the container.
-export function buildBwrapNetworkFilterScript({ brokerPort, gateway = BWRAP_ISOLATION_GATEWAY, dns = BWRAP_ISOLATION_DNS, forward = false } = {}) {
-  const port = Number(brokerPort);
-  if (!Number.isInteger(port) || port <= 0 || port > 65535) {
-    throw new Error('buildBwrapNetworkFilterScript: brokerPort must be a valid TCP port');
-  }
-  return [
-    'set -eu',
-    `CCSBROKER_PORT=${port}`,
-    `CCSGW=${gateway}`,
-    `CCSDNS=${dns}`,
-    'ccsfw() {',
-    '  if command -v iptables >/dev/null 2>&1; then',
-    '    iptables -P OUTPUT DROP',
-    '    iptables -A OUTPUT -o lo -j ACCEPT',
-    '    iptables -A OUTPUT -d "$CCSGW" -p tcp --dport "$CCSBROKER_PORT" -j ACCEPT',
-    '    iptables -A OUTPUT -d "$CCSDNS" -p udp --dport 53 -j ACCEPT',
-    '    iptables -A OUTPUT -d "$CCSDNS" -p tcp --dport 53 -j ACCEPT',
-    '    if command -v ip6tables >/dev/null 2>&1; then ip6tables -P OUTPUT DROP; fi',
-    ...(forward ? [
-      '    iptables -A FORWARD -m state --state ESTABLISHED,RELATED -j ACCEPT',
-      '    iptables -A FORWARD -d "$CCSGW" -p tcp --dport "$CCSBROKER_PORT" -j ACCEPT',
-      '    iptables -A FORWARD -d "$CCSDNS" -p udp --dport 53 -j ACCEPT',
-      '    iptables -A FORWARD -d "$CCSDNS" -p tcp --dport 53 -j ACCEPT',
-      '    iptables -P FORWARD DROP',
-      '    if command -v ip6tables >/dev/null 2>&1; then ip6tables -P FORWARD DROP; fi',
-    ] : []),
-    '    return 0',
-    '  fi',
-    '  if command -v nft >/dev/null 2>&1; then',
-    '    nft add table ip ccserver-fw',
-    "    nft add chain ip ccserver-fw out '{ type filter hook output priority 0; policy drop; }'",
-    '    nft add rule ip ccserver-fw out oifname lo accept',
-    '    nft add rule ip ccserver-fw out ip daddr "$CCSGW" tcp dport "$CCSBROKER_PORT" accept',
-    '    nft add rule ip ccserver-fw out ip daddr "$CCSDNS" udp dport 53 accept',
-    '    nft add rule ip ccserver-fw out ip daddr "$CCSDNS" tcp dport 53 accept',
-    // slirp4netns provides no IPv6 route, so there is nothing to allow here --
-    // only to deny (mirrors the iptables branch's best-effort `ip6tables -P
-    // OUTPUT DROP`, which nft's separate address-family tables need an
-    // explicit table for).
-    '    nft add table ip6 ccserver-fw6',
-    "    nft add chain ip6 ccserver-fw6 out '{ type filter hook output priority 0; policy drop; }'",
-    ...(forward ? [
-      "    nft add chain ip ccserver-fw fwd '{ type filter hook forward priority 0; policy drop; }'",
-      '    nft add rule ip ccserver-fw fwd ct state established,related accept',
-      '    nft add rule ip ccserver-fw fwd ip daddr "$CCSGW" tcp dport "$CCSBROKER_PORT" accept',
-      '    nft add rule ip ccserver-fw fwd ip daddr "$CCSDNS" udp dport 53 accept',
-      '    nft add rule ip ccserver-fw fwd ip daddr "$CCSDNS" tcp dport 53 accept',
-      "    nft add chain ip6 ccserver-fw6 fwd '{ type filter hook forward priority 0; policy drop; }'",
-    ] : []),
-    '    return 0',
-    '  fi',
-    "  echo '[sandbox] network isolation: neither iptables nor nft is available in the sandbox (fail-closed)' >&2",
-    '  return 11',
-    '}',
-    'ccsfw',
-  ].join('\n');
-}
-
-// Prepends the firewall prelude to a bwrap inner command ([shell, entrypoint,
-// ...args] shape from buildSandboxSpawn). The entrypoint + target argv pass
-// through as "$@" -- nothing is re-quoted, so project paths with spaces or
-// quotes survive intact. A filter failure exits nonzero before the entrypoint
-// ever runs (fail-closed at launch, same posture as a missing broker).
-export function wrapBwrapInnerWithNetworkFilter(innerCmd, filterScript) {
-  if (!Array.isArray(innerCmd) || innerCmd.length < 2) {
-    throw new Error('wrapBwrapInnerWithNetworkFilter: innerCmd must be [shell, entrypoint, ...args]');
-  }
-  if (typeof filterScript !== 'string' || !filterScript) {
-    throw new Error('wrapBwrapInnerWithNetworkFilter: filterScript must be a non-empty string');
-  }
-  const [shell, ...argv] = innerCmd;
-  return [shell, '-c', `${filterScript}\nexec "$@"`, 'ccserver-netfw', ...argv];
-}
-
-// Handle fields for the network-isolation broker (see network-broker.js),
-// null on every branch that doesn't start a broker for this launch. Both the
-// bwrap and seatbelt branches enable isolation on-demand only, when this launch actually
-// requested isolation (network.isolate) -- bwrap additionally needs
-// rootlesskit/slirp4netns/newuidmap present (see needBwrapIsolation in
-// buildSandboxSpawn); a host missing that tooling falls back to a plain,
-// unisolated launch with a warning instead of failing to boot.
-const NO_NETWORK_BROKER_HANDLE = Object.freeze({
-  sandboxNetworkBrokerProc: null,
-  sandboxNetworkBrokerDir: null,
-  networkBrokerPort: null,
-  networkBrokerToken: null,
-  networkBrokerAdminToken: null,
-  networkIsolateArmed: false,
-  networkIsolateMode: null,
-});
-
 // Build the bwrap arguments (everything after the `bwrap` executable, up to
 // but not including the trailing `-- <cmd...>`).
 //   homeDir - host path of the persistent per-project HOME to bind at HOME
 //             (see persistentHomeDir), or null for a fresh tmpfs HOME.
-//   app     - which agent is being launched (used to bind node for command-code's wrapper)
+//   app     - which agent is being launched (used for CLI-specific sandbox setup)
 //   tools   - resolved opt-in tool specs (see resolveTools), or null when no
 //             tool is enabled. Binds the provisioner and hands it the specs
 //             via env (see the tail of this function).
 //   commitGuard - { dir, configPath } from startCommitGuard(), or null when
 //             the commit-message guard is disabled/unavailable for this launch.
-//   usesRootlesskit - true when this launch is wrapped in rootlesskit (either
-//             for a nested dockerd, or for network isolation's private
-//             netns), so bwrap must NOT also create its own user namespace
-//             (rootlesskit's outer userns already provides one).
-//   networkBroker / networkBrokerHost - when set, injects HTTP(S)_PROXY env
-//             pointed at the broker (see buildIsolatedProxyEnv) before the
-//             sandbox's own extraEnv, so an operator override still wins.
+//   usesRootlesskit - true when this launch is wrapped in rootlesskit (for a
+//             nested dockerd), so bwrap must NOT also create its own user
+//             namespace (rootlesskit's outer userns already provides one).
 //   gpgVault - { fingerprint, nameReal, nameEmail } from
 //             gpgVaultAgent.getPublicIdentity(), or null (plan:
 //             gpg-agent-vault). Lock-independent -- no homeDir/sockets, see
@@ -1611,9 +1487,9 @@ const NO_NETWORK_BROKER_HANDLE = Object.freeze({
 //             gpgVaultRelay's fixed relay dir instead of a per-launch
 //             homeDir for the same reason. Resolved once by the caller
 //             (buildSandboxSpawn), not fetched in here -- mirrors
-//             gitBroker/commitGuard/networkBroker, which are also
+//             gitBroker/commitGuard, which are also
 //             caller-resolved objects.
-function buildBwrapArgs({ cwd, docker, usesRootlesskit = docker, gpg, gpgVault = null, extraBinds, extraEnv, authSock, stateDir, claudeDir, gitBroker, commitGuard, mcpSocketPath, mcpToken = null, notifySocketPath, usageSocketPath, reviewerSocketPath, homeDir = null, orchestratorClaudeMdSrc = null, gitCommonDir = null, groupFilesDir = null, app = null, tools = null, networkBroker = null, networkBrokerHost = BWRAP_ISOLATION_GATEWAY }) {
+function buildBwrapArgs({ cwd, docker, usesRootlesskit = docker, gpg, gpgVault = null, extraBinds, extraEnv, authSock, stateDir, claudeDir, gitBroker, commitGuard, notifySocketPath, usageSocketPath, reviewerSocketPath, homeDir = null, app = null, tools = null }) {
   const args = [
     '--die-with-parent',
     // Own PID namespace so the whole sandbox tree is reaped as a unit. Without
@@ -1665,9 +1541,7 @@ function buildBwrapArgs({ cwd, docker, usesRootlesskit = docker, gpg, gpgVault =
   args.push('--tmpfs', '/run', '--dir', XDG_RUNTIME_DIR);
   if (usesRootlesskit) {
     // rootlesskit (outer) provides the user namespace -- for a nested
-    // dockerd its state dir holds the API socket dockerd needs, and for a
-    // network-isolation-only launch (docker:false) it's just rootlesskit's
-    // own runtime dir; either way, expose it.
+    // dockerd its state dir holds the API socket dockerd needs.
     args.push('--bind', stateDir, stateDir);
   } else {
     // No outer rootlesskit: bwrap creates the user namespace itself.
@@ -1677,65 +1551,10 @@ function buildBwrapArgs({ cwd, docker, usesRootlesskit = docker, gpg, gpgVault =
   // The project directory (read-write).
   args.push('--bind', cwd, cwd);
 
-  // git worktree sessions (combo group workers, see worktree.js): a
-  // worktree's own .git is just a file pointing at the main checkout's real
-  // .git dir, where the object store, refs and .git/worktrees/<role>
-  // metadata all actually live. Without also exposing that dir, `git
-  // status` and everything else fails inside the sandbox even though cwd
-  // itself is rw-bound (see plan section 2.4). rw, matching cwd's own bind
-  // mode -- read-only would still block writes (index lock, ORIG_HEAD, ...)
-  // that ordinary git operations from inside the worktree need to make.
-  if (gitCommonDir) {
-    args.push('--bind', gitCommonDir, gitCommonDir);
-  }
-
-  // Orchestrator sessions only: overlay a ro-bind of the freshly generated
-  // (template + saved per-project custom instructions, merged host-side on
-  // every launch -- see groupManager.generateOrchestratorClaudeMdSrc) content
-  // onto CLAUDE.md/AGENTS.md. bwrap's last bind for a path wins, so placing
-  // this after the rw --bind above shadows just these two files; the rest of
-  // cwd (the orchestrator's own directory, still rw) is untouched scratch
-  // space. This is what stops a prompt-injected orchestrator from persisting
-  // an edit to its own operating rules.
-  if (orchestratorClaudeMdSrc) {
-    args.push('--ro-bind', orchestratorClaudeMdSrc, join(cwd, 'CLAUDE.md'));
-    args.push('--ro-bind', orchestratorClaudeMdSrc, join(cwd, 'AGENTS.md'));
-  }
-
-  // Group file exchange: read-only bind of the group's blob directory at a
-  // fixed in-sandbox path. Only for group members; standalone sessions have
-  // groupFilesDir null and get no bind.
-  if (groupFilesDir) {
-    try { mkdirSync(groupFilesDir, { recursive: true }); } catch { /* ignore */ }
-    args.push('--ro-bind-try', groupFilesDir, '/ccserver-group-files');
-  }
-
-  // Combo sessions (worker / orchestrator) get the group's MCP socket bound at
-  // a fixed in-sandbox path, plus the byte-pipe wrapper that relays
-  // stdin/stdout <-> the socket (see sandbox-mcp-wrapper.cjs). The wrapper's
-  // shebang needs the node binary bound at SANDBOX_NODE_PATH -- that bind is
-  // shared with the git-broker branch below, so it's pulled out there.
-  //
-  // Issue #143 problem 1: binds mcpSocketPath's DIRECTORY (which holds only
-  // that one socket file, see mcpBroker.js's sockPathFor) onto
-  // SANDBOX_MCP_SOCK_PATH's directory, not the file itself -- immune to the
-  // host file being unlinked+recreated by a server本体 restart. The env var's
-  // VALUE is unchanged (still the fixed file path); only the bind granularity
-  // changed, so sandbox-mcp-wrapper.cjs needs no changes.
-  if (mcpSocketPath) {
-    args.push('--bind-try', dirname(mcpSocketPath), dirname(SANDBOX_MCP_SOCK_PATH));
-    args.push('--setenv', 'CCSANDBOX_MCP_SOCK', SANDBOX_MCP_SOCK_PATH);
-    // Connection token for the group control / handoff socket (see mcpBroker.js).
-    // bwrap already binds the socket per-session, so this is belt-and-suspenders
-    // here; it is load-bearing on the seatbelt backend.
-    if (mcpToken) args.push('--setenv', 'CCSANDBOX_MCP_TOKEN', mcpToken);
-  }
-
   // ccserver-notify: the same wrapper script, reached with the 'notify' argv
   // so it reads CCSANDBOX_NOTIFY_MCP_SOCK (bound here) instead of
-  // CCSANDBOX_MCP_SOCK. Independent of the group brokers: standalone sandboxes
-  // (no mcpSocketPath) get notify on its own. Directory bind, same reasoning
-  // as the group MCP socket above.
+  // CCSANDBOX_NOTIFY_MCP_SOCK. Directory bind, same reasoning as the
+  // other process-wide sockets.
   if (notifySocketPath) {
     args.push('--bind-try', dirname(notifySocketPath), dirname(SANDBOX_NOTIFY_SOCK_PATH));
     args.push('--setenv', 'CCSANDBOX_NOTIFY_MCP_SOCK', SANDBOX_NOTIFY_SOCK_PATH);
@@ -1743,8 +1562,8 @@ function buildBwrapArgs({ cwd, docker, usesRootlesskit = docker, gpg, gpgVault =
 
   // ccserver-usage: same wrapper script again, reached with the 'usage' argv
   // so it reads CCSANDBOX_USAGE_MCP_SOCK (bound here) instead. Independent of
-  // both the group brokers and notify -- a claude session may have any
-  // combination of the three sockets bound. Directory bind, same reasoning as
+  // notify -- a claude session may have any combination of these sockets
+  // bound. Directory bind, same reasoning as
   // above.
   if (usageSocketPath) {
     args.push('--bind-try', dirname(usageSocketPath), dirname(SANDBOX_USAGE_SOCK_PATH));
@@ -1762,37 +1581,25 @@ function buildBwrapArgs({ cwd, docker, usesRootlesskit = docker, gpg, gpgVault =
     args.push('--setenv', 'CCSANDBOX_REVIEWER_MCP_SOCK', SANDBOX_REVIEWER_SOCK_PATH);
   }
 
-  // The bridge wrapper is shared by the group socket, the notify socket, the
-  // usage socket and the reviewer socket (bound once -- a combo orchestrator
-  // may have several of these at once) and its node shebang lives at
+  // The bridge wrapper is shared by the notify, usage and reviewer sockets
+  // and its node shebang lives at
   // SANDBOX_NODE_PATH (ro-bound with the git-broker branch below).
-  if (mcpSocketPath || notifySocketPath || usageSocketPath || reviewerSocketPath) {
+  if (notifySocketPath || usageSocketPath || reviewerSocketPath) {
     args.push('--ro-bind', MCP_BRIDGE_SCRIPT, SANDBOX_MCP_BRIDGE_PATH);
   }
 
-  // Agent CLI configuration + install dirs (claude + opencode + copilot + codex + commandcode),
+  // Agent CLI configuration + install dirs (claude + opencode + codex),
   // writable so sessions/auth state survive across sandbox launches and
   // conversations can be resumed. ~/.local/bin is exposed so the user's own
   // tools resolve. opencode's XDG state dir (~/.local/state/opencode) holds
   // TUI-selected state (model.json, kv.json, session.json); without it the
-  // chosen model resets to the provider default on every launch. copilot's
-  // auth (~/.config/github-copilot/hosts.json) and config (~/.copilot) are
-  // bound writable so a sandboxed session keeps its login and model/session
-  // state (session history lives under ~/.copilot, so `--continue` works).
-  // commandcode stores its API key auth at ~/.commandcode/auth.json -- without
-  // this bind every sandboxed launch prompts for the key again.
-  // Resolved from the shared agentConfigDirs() list (see sandbox-seatbelt.js)
-  // so bwrap and seatbelt expose the same set -- extend it there, not here.
+  // Resolved from the shared agentConfigDirs() list in sandbox-paths.js.
   const appBindSrcs = agentConfigDirs(HOME);
   // Ensure the state/config homes a sandboxed CLI writes to exist so the rw
   // bind below applies even on a fresh host. Same subset as before: login /
   // cache dirs that may legitimately be absent (~/.claude etc., ~/.codex)
   // stay uncreated when missing.
-  for (const src of appBindSrcs.filter((p) =>
-    p.endsWith(join('.local', 'state', 'opencode'))
-    || p.endsWith(join('.config', 'github-copilot'))
-    || p === join(HOME, '.copilot')
-    || p === join(HOME, '.commandcode'))) {
+  for (const src of appBindSrcs.filter((p) => p.endsWith(join('.local', 'state', 'opencode')))) {
     mkdirSync(src, { recursive: true });
   }
   const appBinds = appBindSrcs.map((src) => [src, 'rw']);
@@ -1882,7 +1689,7 @@ function buildBwrapArgs({ cwd, docker, usesRootlesskit = docker, gpg, gpgVault =
     const targetDir = docker ? join(HOME, '.gnupg-vault') : join(XDG_RUNTIME_DIR, 'gnupg-vault');
     args.push('--dir', targetDir);
     // Public metadata files, bound from gpgVaultRelay's fixed relay dir
-    // (same source macOS Seatbelt already uses -- see sandbox-seatbelt.js)
+    // (same source used by sandbox-paths.js).
     // rather than this launch's own homeDir: gpgVault is now lock-
     // independent (issue #185, getPublicIdentity()) and so no longer carries
     // a homeDir at all. Using --ro-bind-try (not --ro-bind) matters more
@@ -1939,11 +1746,10 @@ function buildBwrapArgs({ cwd, docker, usesRootlesskit = docker, gpg, gpgVault =
   // fixed path); bind the actual node binary here rather than assume
   // /usr/bin/node exists, mirroring how resolveApp follows the real
   // agent binary instead of assuming a host layout. Shared between the
-  // git-broker machinery and the MCP bridge wrapper. command-code's launcher
-  // is also a Node script (#!/usr/bin/env node), so it needs node too. The
-  // commit-msg hook (below) is the same kind of Node script bound at a fixed
+  // git-broker machinery, MCP bridge wrapper, and commit-msg hook. The
+  // commit-msg hook (below) is a Node script bound at a fixed
   // shebang path, so it needs this bind as well.
-  if (gitBroker || commitGuard || mcpSocketPath || notifySocketPath || usageSocketPath || reviewerSocketPath || app === 'commandcode') {
+  if (gitBroker || commitGuard || notifySocketPath || usageSocketPath || reviewerSocketPath) {
     const nodeBin = realpathSync(process.execPath);
     args.push('--ro-bind', nodeBin, SANDBOX_NODE_PATH);
   }
@@ -2079,7 +1885,7 @@ function buildBwrapArgs({ cwd, docker, usesRootlesskit = docker, gpg, gpgVault =
   //
   // Raw ~/.ssh (private keys) and ~/.config/gh (gh token) are always blocked
   // here, unconditionally (even if gitBroker is off) -- see
-  // isBlockedCredentialBind (shared with the seatbelt backend).
+  // isBlockedCredentialBind (shared helper in sandbox-paths.js).
   for (const b of extraBinds) {
     if (!b || !b.src) continue;
     // resolve() collapses `..` first: without it `~/.config/../.ssh` slips
@@ -2115,26 +1921,6 @@ function buildBwrapArgs({ cwd, docker, usesRootlesskit = docker, gpg, gpgVault =
     );
   }
 
-  // Network isolation (see network-broker.js): route the sandbox's HTTP(S)
-  // traffic through the host-side broker. Applied before extraEnv so an
-  // operator override (e.g. a manually configured HTTP_PROXY) still wins.
-  if (networkBroker && Number.isInteger(networkBroker.port) && networkBroker.token) {
-    for (const [k, v] of Object.entries(buildIsolatedProxyEnv({
-      host: networkBrokerHost,
-      port: networkBroker.port,
-      token: networkBroker.token,
-    }))) {
-      args.push('--setenv', k, v);
-    }
-    // docker + isolate: rootless dockerd otherwise installs its own FORWARD/
-    // NAT bridge rules on startup (including a blanket "docker0 -> anything"
-    // ACCEPT), which would sit ahead of the netns firewall's FORWARD
-    // default-DROP (see buildBwrapNetworkFilterScript) and defeat it. Tell
-    // the entrypoint to start dockerd with --iptables=false so it never
-    // touches the firewall the netns already owns.
-    if (docker) args.push('--setenv', 'CCSANDBOX_DOCKER_NO_IPTABLES', '1');
-  }
-
   // User-configured environment (e.g. SSH_AUTH_SOCK, GPG_TTY). Applied last so
   // it can override the defaults above.
   for (const [k, v] of Object.entries(extraEnv || {})) {
@@ -2168,135 +1954,7 @@ function buildBwrapArgs({ cwd, docker, usesRootlesskit = docker, gpg, gpgVault =
   return args;
 }
 
-// Seatbelt remaps $HOME to the sandbox home, so buildSeatbeltLaunch points
-// claude/codex at CLAUDE_CONFIG_DIR / CODEX_HOME = <host ~>/.claude|.codex
-// unconditionally. Create those on the host first (like buildBwrapArgs mkdir's
-// the copilot/codex/commandcode dirs) so the first launch on a host that never
-// ran the CLI outside ccserver still gets a persistent config/credentials dir
-// instead of writing into the throwaway sandbox HOME. `base` is overridable
-// for tests (defaults to the real $HOME).
-export function ensureHostAgentConfigDirs(base = HOME) {
-  for (const d of [join(base, '.claude'), join(base, '.codex')]) {
-    try { mkdirSync(d, { recursive: true }); } catch { /* best effort */ }
-  }
-}
-
-// Shared seatbelt wiring (macOS): the host files this backend executes or
-// reads inside the sandbox. bwrap ro-binds these individually; with no
-// mounts they are allow-listed as exact literals instead of the whole
-// server tree (which would expose the server implementation to the agent).
-function seatbeltScripts() {
-  return {
-    ghWrapper: GH_WRAPPER_SCRIPT,
-    credHelper: CRED_HELPER_SCRIPT,
-    sshWrapper: SSH_WRAPPER_SCRIPT,
-    commitHook: COMMIT_MSG_HOOK_SCRIPT,
-    entrypoint: ENTRYPOINT,
-    mcpBridge: MCP_BRIDGE_SCRIPT,
-  };
-}
-
-function seatbeltSsh() {
-  const userKnownHosts = join(HOME, '.ssh', 'known_hosts');
-  return {
-    realSsh: which('ssh'),
-    configFile: SSH_CONFIG_FILE,
-    knownHostsDefault: DEFAULT_KNOWN_HOSTS,
-    userKnownHosts: existsSync(userKnownHosts) ? userKnownHosts : null,
-  };
-}
-
-function seatbeltGhPaths() {
-  // Same candidate set buildBwrapArgs ro-binds the gh wrapper over: deny the
-  // real binaries for process-exec while the git broker is on, so gh is only
-  // reachable through the PATH shim (the wrapper relays to the git broker on
-  // the host and never execs gh in-sandbox, so the pins cannot break
-  // brokered gh). Seatbelt mediates the symlink-RESOLVED path, so register
-  // both raw and realpath spellings (e.g. Homebrew's /opt/homebrew/bin/gh is
-  // a symlink into the Cellar) -- same rule as every other deny pin in the
-  // profile. NOTE: this pin is best-effort, unlike bwrap's mount (which hides
-  // the real binary entirely): process-exec is globally allowed and /tmp is
-  // writable, so a copied binary still runs. The hard boundary stays "gh
-  // credentials are unreadable in-sandbox" plus the git broker allowlist.
-  return [...new Set(
-    [which('gh'), '/usr/bin/gh', '/usr/local/bin/gh', '/opt/homebrew/bin/gh', join(HOME, '.local', 'bin', 'gh')]
-      .filter(Boolean)
-      .filter((p) => existsSync(p))
-      .flatMap((p) => { try { const r = realpathSync(p); return r === p ? [p] : [p, r]; } catch { return [p]; } }),
-  )];
-}
-
-// Minimal sandbox: just enough to launch an agent CLI in an isolated
-// filesystem, with NO docker, gpg, ssh, or extra binds. bwrap creates its own
-// user namespace (--unshare-user) and network stays shared with the host (so
-// the CLI can still reach its API). Used for the lightweight background usage
-// captures that don't need a real project: Claude's `/usage` TUI scrape (see
-// server/usage.js) and Codex's `account/rateLimits/read` JSON-RPC call (see
-// server/codexUsage.js). `app` selects which CLI's config/install dir gets
-// resolved; defaults to 'claude' for the original caller.
-// On macOS the same shape runs under sandbox-exec with a throwaway HOME
-// (never the persistent per-project one -- this stays a throwaway read).
-// macOS minimal launch assembly, extracted for testability: the IS_MACOS
-// branch of buildMinimalSandboxSpawn() below delegates here, but this helper
-// itself never checks process.platform (like buildSeatbeltLaunch), so Linux CI
-// can exercise the seatbelt opts assembly directly. deps.* are injectable for
-// unit tests (seed call counting / launch opts capture).
-export function buildMinimalSeatbeltSpawn({ cwd, targetCommand, app = 'claude' }, deps = {}) {
-  const {
-    resolveFn = resolveApp,
-    ensureDirsFn = ensureHostAgentConfigDirs,
-    seedFn = seedClaudeCredentialsFromHostKeychain,
-    launchFn = buildSeatbeltLaunch,
-  } = deps;
-  // Normalize like buildSandboxSpawn: a nullish/'' app resolves to 'claude'
-  // everywhere (resolveApp), so the `app === 'claude'` seed gate must see the
-  // same value -- a raw null would skip the Keychain seed for a default launch.
-  app = app || 'claude';
-  // installDir is load-bearing here too (not just the full launch): without
-  // it, CLIs installed outside the default allow trees (~/.opencode/bin,
-  // Volta/mise shims, custom npm prefixes) are exec-denied, and the usage
-  // callers silently fall back to an unsandboxed direct launch.
-  const { command, installDir } = resolveFn(app);
-  ensureDirsFn();
-  // macOS Claude Code keeps its OAuth login in the Keychain, which is
-  // unreachable under the Seatbelt profile (see buildSandboxSpawn's darwin
-  // branch). Seed the plaintext fallback the same way so a sandboxed
-  // /usage capture sees the same credentials as a full session.
-  // Non-fatal; no-op when the file already exists or outside darwin.
-  if (app === 'claude') {
-    try { seedFn(HOME); } catch { /* non-fatal: capture still attempts login fallback */ }
-  }
-  const sb = launchFn({
-    cwd, hostHome: HOME, homeDir: null, sandboxPathBase: SANDBOX_PATH,
-    nodeBin: realpathSync(process.execPath),
-    scripts: seatbeltScripts(), ssh: seatbeltSsh(),
-    gitBroker: null, commitGuard: null,
-    // Deny-write the whole host runtime dir tree so a capture cannot
-    // rename/rmdir it out from under live sessions' control plane.
-    hostRuntimeDir: hostRuntimeDir(),
-    sockets: {}, extraBinds: [], extraEnv: {}, authSock: null,
-    // Pass app through so app-specific env (e.g. opencode's host XDG dirs)
-    // resolves the same way as a full session launch.
-    app,
-    claudeDir: installDir, tools: null,
-  });
-  return {
-    command: SANDBOX_EXEC,
-    args: ['-f', sb.profilePath, '/usr/bin/env', ...seatbeltEnvArgs(sb.env),
-      MACOS_BASH, ENTRYPOINT, ...withClaude(targetCommand, command)],
-    docker: false,
-    stateDir: null,
-    seatbeltDir: sb.dir,
-    seatbeltFiles: null, // minimal launches never request an orchestrator overlay
-    gitBrokerProc: null,
-    gitBrokerDir: null,
-    commitGuardDir: null,
-  };
-}
 export function buildMinimalSandboxSpawn({ cwd, targetCommand, app = 'claude' }) {
-  if (IS_MACOS) {
-    return buildMinimalSeatbeltSpawn({ cwd, targetCommand, app });
-  }
   const { command, installDir } = resolveApp(app);
   const bwrapArgs = buildBwrapArgs({
     cwd,
@@ -2309,7 +1967,6 @@ export function buildMinimalSandboxSpawn({ cwd, targetCommand, app = 'claude' })
     claudeDir: installDir,
     gitBroker: null,
     commitGuard: null,
-    mcpSocketPath: null,
     notifySocketPath: null,
     usageSocketPath: null,
     reviewerSocketPath: null,
@@ -2337,9 +1994,6 @@ export function buildMinimalSandboxSpawn({ cwd, targetCommand, app = 'claude' })
 //                 (the client, via the launch UI) pick these per session/
 //                 directory instead of only through the shared config file;
 //                 an omitted key falls back to loadSandboxConfig()'s value.
-//   mcpSocketPath - host path of the group's control/handoff MCP socket to
-//                 bind into the sandbox at a fixed path (combo sessions
-//                 only). null for regular sessions.
 //   notifySocketPath - host path of the process-global ccserver-notify socket
 //                 to bind into the sandbox at a fixed path. null when the
 //                 session gets no notify MCP injection.
@@ -2356,71 +2010,515 @@ export function buildMinimalSandboxSpawn({ cwd, targetCommand, app = 'claude' })
 //                 persistentHome is enabled in the config; the caller
 //                 (sessionManager) guards against wiping a HOME that another
 //                 live sandboxed session is still using.
-//   orchestratorClaudeMdSrc - host path of the freshly generated (template +
-//                 saved custom instructions) CLAUDE.md/AGENTS.md content to
-//                 ro-bind over cwd's copies (combo orchestrator sessions
-//                 only). null for regular sessions and workers.
-//   gitCommonDir - absolute path of cwd's git-common-dir (see worktree.js's
-//                 resolveMemberWorktree), bound into the sandbox alongside
-//                 cwd when cwd is a git worktree whose real .git lives
-//                 elsewhere. null for regular sessions and non-worktree cwds.
 //   sandboxHomeCreatedBy - optional attribution stored on the sandbox HOME's
 //                 bookkeeping row ('user' | ...). Display only; never an
 //                 authorization input.
-// `deps.startNetworkBroker` lets tests inject a fake broker starter (no real
-// child process/rootlesskit needed), and `deps.dockerSandboxAvailable` lets
-// tests simulate a host with/without the rootlesskit/slirp4netns/newuidmap
-// tooling, to exercise the enablement logic below hermetically -- see
-// sandbox-network-isolation.test.js.
-export async function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, mcpSocketPath = null, mcpToken = null, notifySocketPath = null, usageSocketPath = null, reviewerSocketPath = null, reuseSandboxHome = true, orchestratorClaudeMdSrc = null, gitCommonDir = null, groupFilesDir = null, sandboxHomeCreatedBy = null, scratchCwd = false }, deps = {}) {
-  const { startNetworkBroker: startNetworkBrokerFn = startNetworkBroker, dockerSandboxAvailable: dockerSandboxAvailableFn = dockerSandboxAvailable } = deps || {};
+// `deps.dockerSandboxAvailable` lets tests simulate a host with/without the
+// rootlesskit/slirp4netns/newuidmap tooling.
+
+// The agent install a qemu launch shares read-only into the VM
+// (qemuAgents.js): { hostDir, relBin, guestDir, argv, env }, or null when
+// the target is not an agent (a shell). Throws when the agent is not
+// installed on the host in a way the VM can use.
+function resolveQemuAgent(app, targetCommand) {
+  if (!APP_IDS.includes(app)) return null;
+  const r = resolveApp(app);
+  if (![app, `${app}.exe`, r.command, r.hostCommand].includes(targetCommand[0])) return null;
+  try {
+    const { hostDir, relBin } = resolveVmAgentInstall(r.hostCommand, {
+      home: HOME, protectedPaths: credentialPaths(HOME, agentConfigDirs(HOME)),
+    });
+    return { hostDir, relBin, guestDir: guestAgentDir(app), argv: vmAgentArgv(app, relBin, targetCommand.slice(1)), env: vmAgentEnv(app) };
+  } catch (e) {
+    if (e instanceof VmAgentError) throw new Error(`${app} cannot run in the VM: ${e.message}`);
+    throw e;
+  }
+}
+
+// The VM's claude reads its config from the persistent HOME's own
+// ~/.claude.json: a VM does not get the host's agent config (qemuAgents.js).
+// Prepared here before a VM launch, for two cases:
+//
+//   - A bwrap session binds the host's ~/.claude.json over the persistent
+//     HOME (see buildBwrapArgs); when the HOME had none, bwrap leaves an
+//     empty, read-only (0444) file there as the mount point. claude in the
+//     VM refuses to start on it ("JSON Parse error: Unexpected EOF") and
+//     could not save to it either: it is made 0600 and given content.
+//   - skipOnboarding (claude with the VM token set, see buildVmAgentAuth):
+//     without hasCompletedOnboarding, claude runs its first-run setup and
+//     asks for a login method even though the broker supplies the token.
+//     The flag is added, every other key kept.
+//
+// Never unlinks or renames the file (a live bwrap session of the same project
+// may have it as a mount point): it is rewritten in place. Never follows a
+// symlink and only touches a regular file of ours (the sandbox controls
+// HOME's contents); the write reopen must be the same, unchanged inode.
+// Unparseable JSON is left to claude's own backup/recovery.
+// Returns what it did ('created' | 'repaired' | 'onboarding') or null.
+const CLAUDE_JSON_MAX_BYTES = 16 * 1024 * 1024;
+export function prepareVmClaudeJson(homeDir, { skipOnboarding = false } = {}) {
+  if (!homeDir) return null;
+  const path = join(homeDir, '.claude.json');
+  const flags = fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK;
+  const onboarded = (obj) => ({ ...obj, hasCompletedOnboarding: true });
+  let fd;
+  try {
+    fd = openSync(path, fsConstants.O_RDONLY | flags);
+  } catch (e) {
+    if (e.code !== 'ENOENT' || !skipOnboarding) return null; // a symlink, unreadable, or nothing to do
+    try {
+      const cfd = openSync(path, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | flags, 0o600);
+      try { writeSync(cfd, `${JSON.stringify(onboarded({}), null, 2)}\n`); } finally { closeSync(cfd); }
+      return 'created';
+    } catch {
+      return null; // raced with claude creating it: leave theirs
+    }
+  }
+  let st;
+  let next;
+  try {
+    st = fstatSync(fd);
+    if (!st.isFile() || st.uid !== process.getuid() || st.size > CLAUDE_JSON_MAX_BYTES) return null;
+    if (st.size === 0) {
+      next = skipOnboarding ? onboarded({}) : {};
+    } else {
+      if (!skipOnboarding) return null;
+      let obj;
+      try { obj = JSON.parse(readFileSync(fd, 'utf-8')); } catch { return null; }
+      if (!obj || typeof obj !== 'object' || Array.isArray(obj) || obj.hasCompletedOnboarding === true) return null;
+      next = onboarded(obj);
+    }
+    if ((st.mode & 0o200) === 0) fchmodSync(fd, 0o600);
+  } catch {
+    return null;
+  } finally {
+    closeSync(fd);
+  }
+  let wfd;
+  try {
+    wfd = openSync(path, fsConstants.O_WRONLY | flags);
+  } catch {
+    return null;
+  }
+  try {
+    const wst = fstatSync(wfd);
+    if (wst.ino !== st.ino || wst.dev !== st.dev || !wst.isFile() || wst.size !== st.size || wst.mtimeMs !== st.mtimeMs) return null;
+    ftruncateSync(wfd, 0);
+    writeSync(wfd, st.size === 0 && !skipOnboarding ? '{}\n' : `${JSON.stringify(next, null, 2)}\n`, 0);
+    return st.size === 0 ? 'repaired' : 'onboarding';
+  } catch {
+    return null;
+  } finally {
+    closeSync(wfd);
+  }
+}
+
+function opencodeHostConfigDir() {
+  return join(process.env.XDG_CONFIG_HOME || join(HOME, '.config'), 'opencode');
+}
+
+// The network side of the VM agent credentials (independent of the app):
+// the broker's credential inject (merged into `advanced`), its env, the
+// credentials' digest, and the inject hosts the allow-list lacks.
+//
+// The opencode keys' API hosts come from the host's opencode config (its
+// provider section, read at each launch) or qemuAgents.js's built-in table.
+// A provider that resolves to neither is left out (`skipped`, the launch
+// warns): a stale opencode key must not stop every VM launch.
+function vmAgentNetwork({ networkAdvanced, netCfg }, deps) {
+  const {
+    getVmAgentCredentials: getVmAgentCredentialsFn = getVmAgentCredentials,
+    readOpencodeHostProviders: readOpencodeHostProvidersFn = () => readOpencodeHostProviders(opencodeHostConfigDir()),
+  } = deps;
+  const credentials = getVmAgentCredentialsFn();
+  const providerIds = Object.keys(credentials.opencodeApiKeys || {});
+  const { providers: opencodeProviders, skipped } = providerIds.length
+    ? resolveOpencodeProviders({ hostProviders: readOpencodeHostProvidersFn(), providerIds })
+    : { providers: [], skipped: [] };
+  const auth = buildVmAgentAuth({ credentials, opencodeProviders, advanced: networkAdvanced });
+  return {
+    auth,
+    skipped,
+    advanced: { ...networkAdvanced, inject: auth.inject },
+    brokerEnv: auth.brokerEnv,
+    authDigest: auth.digest,
+    extraAllowedHosts: auth.hosts.filter((h) => !netCfg.allowedHosts.includes(h)),
+    injectHosts: auth.hosts,
+  };
+}
+
+// OPENCODE_CONFIG_CONTENT (mcpConfig.js's MCP section, or none) with
+// ccserver's provider entries added over any of the same id.
+function withOpencodeProviders(content, provider) {
+  let cfg = {};
+  if (content) {
+    try { cfg = JSON.parse(content); } catch { cfg = {}; }
+    if (!cfg || typeof cfg !== 'object' || Array.isArray(cfg)) cfg = {};
+  }
+  const prior = cfg.provider && typeof cfg.provider === 'object' && !Array.isArray(cfg.provider) ? cfg.provider : {};
+  return JSON.stringify({ $schema: 'https://opencode.ai/config.json', ...cfg, provider: { ...prior, ...provider } });
+}
+
+// What a qemu launch adds for the agent, shared by both VM kinds: the
+// agent install, the broker's credential inject (merged into `advanced`),
+// the guest env, and the allow-list with the inject hosts added.
+function qemuAgentLaunch({ app, targetCommand, extraEnv, networkAdvanced, netCfg }, deps) {
+  const { resolveQemuAgent: resolveQemuAgentFn = resolveQemuAgent } = deps;
+  const agent = resolveQemuAgentFn(app, targetCommand);
+  const { auth, skipped, ...agentNet } = vmAgentNetwork({ networkAdvanced, netCfg }, deps);
+  for (const { id, reason } of skipped) {
+    console.warn(`[sandbox] qemu backend: the opencode key for ${id} is not injected: ${reason}.`);
+  }
+  // The host ssh-agent path means nothing in the guest: buildGuestRuntime
+  // sets the guest's own SSH_AUTH_SOCK. ccserver's own values over the
+  // operator's env: a placeholder must not be replaced by a real secret.
+  const guestEnv = { ...extraEnv, ...(agent ? agent.env : {}), ...auth.guestEnv };
+  delete guestEnv.SSH_AUTH_SOCK;
+  if (app === 'opencode' && auth.opencodeConfig) {
+    guestEnv.OPENCODE_CONFIG_CONTENT = withOpencodeProviders(guestEnv.OPENCODE_CONFIG_CONTENT, auth.opencodeConfig.provider);
+  }
+  return {
+    agent,
+    argv: agent ? agent.argv : targetCommand,
+    guestEnv,
+    // The broker injects claude's token (the guest has the placeholder).
+    claudeToken: !!auth.guestEnv.CLAUDE_CODE_OAUTH_TOKEN,
+    ...agentNet,
+  };
+}
+
+// A persistent VM's broker policy, resources and pool key. The key is the
+// template alone: one persistent VM per template, so a settings edit never
+// boots a second VM next to a running one. What a running VM can take live
+// is applied to it when a launch joins (qemuVmPool.js attach): the operating
+// mode (opMode) and the allow/deny lists (lists; the inject hosts,
+// extraAllowedHosts, are added to the allow list per VM). Everything else
+// -- resources, cloud-config, golden image, the broker's advanced policy and
+// injected credentials -- is fixed at boot; configDigest hashes it, and a
+// launch whose digest differs still joins but marks the VM stale (applied
+// once the VM is stopped and booted again). Shared by the launch
+// (buildPooledQemuSpawn) and the launch dialog's "would this join a running
+// VM" check (qemuLaunchPoolKey), so the two can never disagree.
+function pooledVmKey({ vmTemplate, qemuCfg, netCfg, agentNet }) {
+  const net = {
+    mode: netCfg.mode,
+    state: 'open',
+    allowedHosts: [...netCfg.allowedHosts, ...agentNet.extraAllowedHosts],
+    deniedHosts: netCfg.deniedHosts,
+    advanced: agentNet.advanced,
+  };
+  const vm = {
+    memoryMiB: qemuCfg.memoryMiB,
+    cpus: qemuCfg.cpus,
+    diskGiB: qemuCfg.diskGiB,
+    bootTimeoutSec: qemuCfg.bootTimeoutSec,
+    templateCloudConfig: vmTemplate ? vmTemplate.cloudConfig : null,
+  };
+  const templateId = vmTemplate ? vmTemplate.template.id : null;
+  const { mode: opMode, allowedHosts, deniedHosts, ...netFixed } = net;
+  const { bootTimeoutSec, ...vmFixed } = vm;
+  const key = poolKey({ template: templateId });
+  const configDigest = poolKey({
+    template: templateId,
+    vm: vmFixed,
+    net: netFixed,
+    auth: agentNet.authDigest,
+    golden: currentGolden()?.version || null,
+  });
+  return {
+    key,
+    configDigest,
+    net,
+    vm,
+    opMode,
+    lists: { allowedHosts: netCfg.allowedHosts, deniedHosts: netCfg.deniedHosts },
+    // All of them, not just the ones the allow list lacks now: a later
+    // list without one must still get it added (qemuVmPool.js withExtra).
+    extraAllowedHosts: agentNet.injectHosts,
+  };
+}
+
+// The pool key a qemu launch with these sandboxOpts would join, or null
+// when it boots a VM of its own (a non-persistent template) or cannot be
+// determined (deleted template, bad credentials config -- the launch itself
+// fails then). Side-effect free: nothing is started.
+export function qemuLaunchPoolKey(sandboxOpts = null, deps = {}) {
+  const { resolveVmTemplate: resolveVmTemplateFn = resolveVmTemplate } = deps;
+  try {
+    const vmTemplate = resolveVmTemplateFn(sandboxOpts?.vmTemplateId ?? null);
+    const { qemu: qemuConfigDefaults, networkAdvanced, network: netCfg } = loadSandboxConfig();
+    const qemuCfg = vmTemplate ? vmTemplate.template : qemuConfigDefaults;
+    if (!qemuCfg.persistent) return null;
+    const agentNet = vmAgentNetwork({ networkAdvanced, netCfg }, deps);
+    return pooledVmKey({ vmTemplate, qemuCfg, netCfg, agentNet }).key;
+  } catch {
+    return null;
+  }
+}
+
+// The qemu branch of buildSandboxSpawn. Returns the same handle shape as the
+// bwrap branch plus qemuRunDir for sessionManager's teardown.
+//
+// Host services reach the VM the way bwrap binds them, only over the
+// broker's service addresses (see buildGuestRuntime in sandbox-qemu.js):
+// the git broker, commit-msg guard, GPG vault relay, ssh-agent (opt-in) and
+// the MCP bridge sockets. Start order and cleanup mirror the bwrap branch:
+// anything started before a later step throws is stopped and removed.
+//
+// Not available in the VM (warned, launched without): the legacy `gpg`
+// host-agent forwarding (it would hand the VM the host's whole keyring --
+// gpgVault replaces it), docker, tools.
+//
+// vmTemplateId (sandboxOpts.vmTemplateId) picks the VM template (see
+// vmTemplates.js): its resources and cloud-config. null means the default
+// template, or sandbox.config.json's qemu values when there is none.
+async function buildQemuSpawn({ cwd, targetCommand, app, homeDir, netCfg, extraEnv, gpg, sshAgent, gpgVault, gpgVaultInfo, tools, gitBrokerEnabled, commitMessageGuard, ghUsageRecording, notifySocketPath, usageSocketPath, reviewerSocketPath, vmTemplateId = null }, deps = {}) {
+  const {
+    startGitBroker: startGitBrokerFn = startGitBroker,
+    startCommitGuard: startCommitGuardFn = startCommitGuard,
+    startGoNetworkBroker: startGoNetworkBrokerFn = startGoNetworkBroker,
+    prepareQemuSession: prepareQemuSessionFn = prepareQemuSession,
+    resolveVmTemplate: resolveVmTemplateFn = resolveVmTemplate,
+  } = deps;
+  // Before any broker starts: a deleted or broken template refuses the launch.
+  const vmTemplate = resolveVmTemplateFn(vmTemplateId);
+  const unsupported = [
+    gpg && 'gpg', tools?.rtk && 'tools.rtk', tools?.codeReviewGraph && 'tools.code-review-graph',
+  ].filter(Boolean);
+  if (unsupported.length) {
+    console.warn(`[sandbox] qemu backend: ${unsupported.join(', ')} not available inside the VM; launching without them.`);
+  }
+  const { qemu: qemuConfigDefaults, networkAdvanced } = loadSandboxConfig();
+  const qemuCfg = vmTemplate ? vmTemplate.template : qemuConfigDefaults;
+  // Before any broker starts: an agent the VM cannot run, or credentials
+  // that cannot be injected, refuse the launch.
+  const agentLaunch = qemuAgentLaunch({ app, targetCommand, extraEnv, networkAdvanced, netCfg }, deps);
+  const claudeJson = prepareVmClaudeJson(homeDir, { skipOnboarding: app === 'claude' && agentLaunch.claudeToken });
+  if (claudeJson) {
+    const what = { created: 'created it with hasCompletedOnboarding', repaired: 'replaced the empty bwrap mount-point stub', onboarding: 'added hasCompletedOnboarding' }[claudeJson];
+    console.warn(`[sandbox] qemu backend: ${join(homeDir, '.claude.json')}: ${what}`);
+  }
+  if (qemuCfg.persistent) {
+    return await buildPooledQemuSpawn({
+      cwd, targetCommand, homeDir, netCfg, gpgVault, sshAgent,
+      gitBrokerEnabled, notifySocketPath, usageSocketPath, reviewerSocketPath, vmTemplate, qemuCfg, agentLaunch,
+    }, deps);
+  }
+  const sshAgentSock = sshAgent && !gpgVault ? (extraEnv.SSH_AUTH_SOCK || discoverSshAuthSock()) : null;
+  if (sshAgent && !gpgVault && !sshAgentSock) {
+    console.warn('[sandbox] qemu backend: sshAgent is enabled but no host ssh-agent socket was found; launching without it.');
+  }
+  const { agent, guestEnv } = agentLaunch;
+
+  let gitBroker = null;
+  let commitGuard = null;
+  let broker = null;
+  const cleanup = () => {
+    if (broker) {
+      try { broker.proc.kill('SIGTERM'); } catch { /* already dead */ }
+      try { rmSync(broker.dir, { recursive: true, force: true }); } catch { /* best effort */ }
+    }
+    if (gitBroker) {
+      try { gitBroker.proc.kill('SIGTERM'); } catch { /* already dead */ }
+      try { rmSync(gitBroker.dir, { recursive: true, force: true }); } catch { /* best effort */ }
+    }
+    if (commitGuard) { try { rmSync(commitGuard.dir, { recursive: true, force: true }); } catch { /* best effort */ } }
+  };
+  let plan;
+  try {
+    // Same broker inputs as the bwrap branch (see there).
+    gitBroker = gitBrokerEnabled
+      ? await startGitBrokerFn({ cwd, app, blockedPatterns: commitMessageGuard.enabled ? commitMessageGuard.blockedPatterns : null, ghUsageRecording })
+      : null;
+    commitGuard = commitMessageGuard.enabled ? startCommitGuardFn(commitMessageGuard.blockedPatterns) : null;
+    const userKnownHosts = join(HOME, '.ssh', 'known_hosts');
+    const runtime = buildGuestRuntime({
+      scripts: {
+        credHelper: CRED_HELPER_SCRIPT,
+        ghWrapper: GH_WRAPPER_SCRIPT,
+        sshWrapper: SSH_WRAPPER_SCRIPT,
+        mcpBridge: MCP_BRIDGE_SCRIPT,
+        commitMsgHook: COMMIT_MSG_HOOK_SCRIPT,
+        gitconfig: GENERATED_GITCONFIG,
+        knownHostsDefault: DEFAULT_KNOWN_HOSTS,
+        sshConfig: SSH_CONFIG_FILE,
+        knownHostsUser: existsSync(userKnownHosts) ? userKnownHosts : null,
+      },
+      gitBroker,
+      commitGuard,
+      // The relay's FIXED socket paths, as bwrap binds (see gpgVaultRelay.js).
+      gpgVault: gpgVaultInfo ? { ...gpgVaultInfo, sockets: gpgVaultRelay.getRelaySocketPaths() } : null,
+      sshAgentSock,
+      mcp: { notify: notifySocketPath, usage: usageSocketPath, reviewer: reviewerSocketPath },
+    });
+    // The per-session Go broker (ccserver-netbroker) runs the VM's entire network
+    // (QEMU's NIC is attached to it). It always starts 'open'; the
+    // running-session toggle flips it to enforce. A policy error refuses the
+    // launch before anything boots.
+    broker = startGoNetworkBrokerFn({
+      session: randomUUID(),
+      mode: netCfg.mode,
+      state: 'open',
+      allowedHosts: [...netCfg.allowedHosts, ...agentLaunch.extraAllowedHosts],
+      deniedHosts: netCfg.deniedHosts,
+      advanced: agentLaunch.advanced,
+      services: runtime.services.map(({ name, addr, unix }) => ({ name, addr, unix })),
+      env: agentLaunch.brokerEnv,
+    });
+    plan = prepareQemuSessionFn({
+      cwd,
+      // An agent runs from its read-only share (qemuAgents.js). A shell
+      // session whose host $SHELL the image lacks falls back to bash rather
+      // than failing.
+      argv: agentLaunch.argv,
+      fallbackArgv: agent || APP_IDS.includes(targetCommand[0]) ? null : ['bash', '-l', '-i'],
+      env: guestEnv,
+      homeHostPath: homeDir,
+      extraShares: agent ? [{ tag: 'agent', hostPath: agent.hostDir, guestPath: agent.guestDir, readonly: true }] : [],
+      runtime,
+      network: {
+        vnetSock: broker.vnetSock,
+        guestSshSock: broker.guestSshSock,
+        pipeBin: netbrokerBin(),
+        caPem: broker.caPem,
+      },
+      memoryMiB: qemuCfg.memoryMiB,
+      cpus: qemuCfg.cpus,
+      diskGiB: qemuCfg.diskGiB,
+      bootTimeoutSec: qemuCfg.bootTimeoutSec,
+      templateCloudConfig: vmTemplate ? vmTemplate.cloudConfig : null,
+    });
+  } catch (e) {
+    cleanup();
+    throw e;
+  }
+  return {
+    command: process.execPath,
+    args: [QEMU_LAUNCHER, plan.planPath],
+    docker: false,
+    gpgVaultActive: !!gpgVaultInfo,
+    stateDir: null,
+    gitBrokerProc: gitBroker ? gitBroker.proc : null,
+    gitBrokerDir: gitBroker ? gitBroker.dir : null,
+    commitGuardDir: commitGuard ? commitGuard.dir : null,
+    sandboxNetworkBrokerProc: broker.proc,
+    sandboxNetworkBrokerDir: broker.dir,
+    networkBrokerAdminSock: broker.adminSock,
+    networkIsolateArmed: true,
+    networkIsolateMode: broker.state,
+    networkExtraAllowedHosts: agentLaunch.extraAllowedHosts,
+    qemuRunDir: plan.runDir,
+    // What the Settings GUI's running-VM list shows (routes/vms.js).
+    qemuVm: {
+      templateId: vmTemplate ? vmTemplate.template.id : null,
+      templateName: vmTemplate ? vmTemplate.template.name : null,
+      memoryMiB: qemuCfg.memoryMiB,
+      cpus: qemuCfg.cpus,
+      diskGiB: qemuCfg.diskGiB,
+      startedAt: Date.now(),
+    },
+  };
+}
+
+// A session of a persistent VM (qemuVmPool.js). The VM's network broker is
+// started by the pool with this launch's policy, which is part of the pool
+// key: a launch only ever joins a VM booted with exactly its own policy.
+async function buildPooledQemuSpawn({ cwd, targetCommand, homeDir, netCfg, gpgVault, sshAgent, gitBrokerEnabled, notifySocketPath, usageSocketPath, reviewerSocketPath, vmTemplate, qemuCfg, agentLaunch }, deps = {}) {
+  const {
+    startGoNetworkBroker: startGoNetworkBrokerFn = startGoNetworkBroker,
+    qemuVmPool = defaultQemuVmPool,
+  } = deps;
+  // An explicitly requested signing key must never silently disappear.
+  if (gpgVault) {
+    throw new Error('gpgVault is not available in a persistent (shared) VM yet -- turn it off for this launch or use a template without "persistent".');
+  }
+  const missing = [
+    gitBrokerEnabled && 'gitBroker', sshAgent && 'sshAgent',
+    (notifySocketPath || usageSocketPath || reviewerSocketPath) && 'MCP sockets',
+  ].filter(Boolean);
+  if (missing.length) {
+    console.warn(`[sandbox] persistent VM: ${missing.join(', ')} not available yet; launching without them.`);
+  }
+  const { key, configDigest, net, vm, opMode, lists, extraAllowedHosts } = pooledVmKey({ vmTemplate, qemuCfg, netCfg, agentNet: agentLaunch });
+  const { agent, guestEnv } = agentLaunch;
+  const lease = await qemuVmPool.attach({
+    key,
+    opMode,
+    lists,
+    configDigest,
+    extraAllowedHosts,
+    spec: {
+      startBroker: () => ({
+        ...startGoNetworkBrokerFn({ session: randomUUID(), ...net, services: [], env: agentLaunch.brokerEnv }),
+        pipeBin: netbrokerBin(),
+      }),
+      vm,
+    },
+    info: {
+      templateId: vmTemplate ? vmTemplate.template.id : null,
+      templateName: vmTemplate ? vmTemplate.template.name : null,
+      memoryMiB: qemuCfg.memoryMiB,
+      cpus: qemuCfg.cpus,
+      diskGiB: qemuCfg.diskGiB,
+    },
+    session: {
+      cwd,
+      home: HOME,
+      homeHostPath: homeDir,
+      argv: agentLaunch.argv,
+      fallbackArgv: agent || APP_IDS.includes(targetCommand[0]) ? null : ['bash', '-l', '-i'],
+      env: guestEnv,
+      agent: agent ? { hostDir: agent.hostDir, guestDir: agent.guestDir } : null,
+    },
+  });
+  return {
+    command: process.execPath,
+    args: [QEMU_LAUNCHER, lease.planPath],
+    docker: false,
+    gpgVaultActive: false,
+    stateDir: null,
+    // The running-session toggle flips the whole VM's broker
+    // (setPooledVmNetworkMode in sessionManager.js); a joining session shows
+    // whatever mode the VM is in now. No networkExtraAllowedHosts: the
+    // Settings GUI pushes the lists and the operating mode per VM instead
+    // (qemuVmPool.setListsAll / setOpModeAll), adding each VM's own.
+    networkBrokerAdminSock: lease.vm.network?.adminSock ?? null,
+    networkIsolateArmed: !!lease.vm.network,
+    networkIsolateMode: lease.vm.network?.mode ?? null,
+    qemuPoolLease: lease,
+    qemuVm: { ...lease.vm.info, pooled: true, vmId: lease.vm.id, startedAt: lease.vm.startedAt },
+  };
+}
+
+export async function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, notifySocketPath = null, usageSocketPath = null, reviewerSocketPath = null, reuseSandboxHome = true, sandboxHomeCreatedBy = null, isReviewJob = false }, deps = {}) {
+  const { dockerSandboxAvailable: dockerSandboxAvailableFn = dockerSandboxAvailable } = deps || {};
   // Normalize the app id up front: a nullish `app` resolves to 'claude' in
   // resolveApp(), so every later `app === 'claude'` / `app === 'opencode'`
-  // check (and the Keychain seed gate) must see the same value.
+  // check must see the same value.
   app = app || 'claude';
   // Defense in depth behind sessionManager's cwd='/' refusal: a sandbox
-  // with the filesystem root as projectDir is fail-open -- seatbelt's
-  // subtrees('/') becomes "^/(/.*)?$" and bwrap would bind "/" itself, both
-  // silently granting the whole filesystem. (The message deliberately avoids
-  // the 'Failed to build sandbox' prefix: this is a request rejection, not
-  // an infra fault.) See docs/seatbelt-root-read-abort-diagnosis.md.
+  // with the filesystem root as projectDir grants the whole filesystem.
+  // Refuse it here so the launch stays fail-closed.
   if (resolve(cwd) === '/') {
     throw new Error('Cannot build a sandbox for the filesystem root (/) -- the project rule would grant the whole filesystem. Choose a working directory first.');
   }
   const { docker: cfgDocker, persistentHome, gpg: cfgGpg, sshAgent: cfgSshAgent, gpgVault: cfgGpgVault, gitBroker: gitBrokerEnabled, commitMessageGuard, ghUsageRecording, network: netCfg, binds, env, tools: cfgTools, claudeBin, browseRoots, browseRootsInvalid } = loadSandboxConfig();
   // Defense in depth behind sessionManager's browseRoots cwd check (issue
   // #189): same reasoning as the '/' guard just above. The scratch-tree
-  // exemption is gated on the trusted `scratchCwd` flag (set only by
+  // exemption is gated on the trusted `isReviewJob` flag (set only by
   // in-process callers that synthesize the cwd themselves -- see
-  // sessionManager.createSession's comment), never on the path alone, and is
-  // still realpath-checked via isCcserverScratchPath.
+  // the trusted reviewer job launcher), never on the path alone, and is still
+  // realpath-checked via isCcserverScratchPath.
   if (browseRootsInvalid) {
     throw new Error('Cannot build a sandbox: sandbox.config.json\'s "browseRoots" is invalid, so the allowed working directories cannot be determined.');
   }
-  if (browseRoots.length > 0 && !(scratchCwd === true && isCcserverScratchPath(resolve(cwd))) && !isContained(resolve(cwd), browseRoots)) {
+  if (browseRoots.length > 0 && !(isReviewJob === true && isCcserverScratchPath(resolve(cwd))) && !isContained(resolve(cwd), browseRoots)) {
     throw new Error('Cannot build a sandbox: working directory is outside the allowed browseRoots.');
   }
   const docker = cfgDocker && dockerSandboxAvailableFn();
-  // Network isolation (see network-broker.js): server-config-only, no
-  // per-launch client override -- the client has no isolation toggle, so
-  // sandbox.config.json's network.isolate always governs. Structural
-  // isolation for bwrap needs rootlesskit/slirp4netns/newuidmap (the same
-  // tooling dockerSandboxAvailable() already checks for nested dockerd); a
-  // host missing any of them falls back to a plain, unisolated bwrap launch
-  // (today's default behavior) instead of failing to boot.
-  const netIsolate = netCfg.isolate;
-  const rootlesskitToolingAvailable = !IS_MACOS && dockerSandboxAvailableFn();
-  // Structural isolation for bwrap: wrapped in rootlesskit for a private
-  // netns + in-netns firewall only when this launch actually asked for it
-  // (network.isolate) AND the tooling exists -- on-demand, not tied to the
-  // unrelated `docker` (nested dockerd) flag. A `docker:true` launch keeps its existing unrestricted
-  // slirp4netns NAT networking unless network.isolate is ALSO on; nested
-  // dockerd's own rootlesskit wrapping predates this feature and has nothing
-  // to do with it. Never true on macOS (seatbelt instead).
-  const needBwrapIsolation = rootlesskitToolingAvailable && netIsolate;
-  if (!IS_MACOS && !rootlesskitToolingAvailable && netIsolate) {
-    console.warn('[sandbox] network.isolate is enabled but rootlesskit/slirp4netns/newuidmap are not all installed on this host -- launching without network isolation.');
-  }
+  // Network isolation is qemu-only (see buildQemuSpawn below): the Go broker
+  // always starts 'open'. The bwrap backend launches with open egress and
+  // starts no broker.
   const gpg = sandboxOpts?.gpg ?? cfgGpg;
   const sshAgent = sandboxOpts?.sshAgent ?? cfgSshAgent;
   const gpgVault = sandboxOpts?.gpgVault ?? cfgGpgVault;
@@ -2430,12 +2528,11 @@ export async function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, 
   const tools = resolveTools(sandboxOpts, cfgTools);
 
   // GPG vault (plan: gpg-agent-vault): fail loudly and early, before any
-  // broker starts (gitBroker/commitGuard/networkBroker below all leak a live
+  // broker starts (gitBroker/commitGuard below all leak a live
   // child process + runtime dir if a LATER step throws -- see their own
   // cleanup blocks -- so refusing here, first, needs none of that dance).
-  // A missing/legacy vault must never silently degrade to "no GPG" the way a
-  // missing rootlesskit tooling degrades network isolation -- this session
-  // explicitly asked to sign/push with a specific key, and launching without
+  // A missing/legacy vault must never silently degrade to "no GPG" -- this
+  // session explicitly asked to sign/push with a specific key, and launching without
   // it would be a silent downgrade of what the caller requested. These two
   // are recoverable only by operator action (set up / recreate the vault),
   // so they still hard-fail the launch.
@@ -2478,16 +2575,16 @@ export async function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, 
       + 'launch -- gpgVault wins for SSH_AUTH_SOCK. Turn off gpg/sshAgent for this launch if that is not intended.',
     );
   }
-  // Resolved once here (like gitBroker/commitGuard/networkBroker below) and
+  // Resolved once here (like gitBroker/commitGuard below) and
   // passed down as a plain object -- null when not requested -- rather than
-  // having buildBwrapArgs/buildSeatbeltLaunch each independently reach into
+  // having buildBwrapArgs each independently reach into
   // gpgVaultAgent.js. Lock-independent (issue #185): getPublicIdentity()
   // only ever returns fingerprint/nameReal/nameEmail (never homeDir/
   // sockets), which is why it is safe to call even while the vault above is
   // locked -- the vaultExists() check above guarantees it returns non-null
   // when gpgVault is true.
   const gpgVaultInfo = gpgVault ? gpgVaultAgent.getPublicIdentity() : null;
-  // Must exist before buildBwrapArgs/buildSeatbeltLaunch bind its FIXED
+  // Must exist before buildBwrapArgs bind its FIXED
   // socket paths below (see gpgVaultRelay.js's header for why sandboxes bind
   // those instead of gpgVaultInfo.sockets directly). Idempotent/lazy: a
   // no-op on every launch after the first gpgVault:true one this server run.
@@ -2497,10 +2594,9 @@ export async function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, 
   // explicit env.SSH_AUTH_SOCK in the config wins; otherwise auto-discover.
   const authSock = sshAgent ? (env.SSH_AUTH_SOCK || discoverSshAuthSock()) : null;
 
-  // Unique per launch (docker, and every isolated bwrap launch, need
-  // rootlesskit's own state dir); returned so the caller can remove it on
-  // teardown. See newStateDir().
-  const stateDir = (docker || needBwrapIsolation) ? newStateDir() : null;
+  // Unique per launch (docker needs rootlesskit's own state dir); returned
+  // so the caller can remove it on teardown. See newStateDir().
+  const stateDir = docker ? newStateDir() : null;
 
   // Persistent per-project HOME. reuseSandboxHome=false wipes the previous
   // one first so the launch starts from a clean environment; the caller
@@ -2533,6 +2629,18 @@ export async function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, 
     recordSandboxHome(cwd, sandboxHomeCreatedBy);
   }
 
+  // QEMU backend (sandbox.config.json backend: "qemu"): the session runs in a
+  // KVM VM (see sandbox-qemu.js). Branches off before any bwrap broker
+  // starts; buildQemuSpawn starts (and on failure cleans up) its own.
+  // sandboxOpts.backend picks it per launch; the config sets the default.
+  if (resolveSandboxBackend(sandboxOpts) === 'qemu') {
+    return await buildQemuSpawn({
+      cwd, targetCommand, app, homeDir, netCfg, extraEnv: env, gpg, sshAgent, gpgVault, gpgVaultInfo, tools,
+      gitBrokerEnabled, commitMessageGuard, ghUsageRecording, notifySocketPath, usageSocketPath, reviewerSocketPath,
+      vmTemplateId: sandboxOpts?.vmTemplateId ?? null,
+    }, deps);
+  }
+
   // Computes the repo/submodule allow-list once and spawns the host-side
   // broker for this launch; see git-broker.js. The caller (sessionManager)
   // holds onto gitBrokerProc/gitBrokerDir to tear them down alongside the
@@ -2550,45 +2658,6 @@ export async function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, 
   // network credential scope, so it's toggled by its own config flag and
   // wired into buildBwrapArgs separately below.
   const commitGuard = commitMessageGuard.enabled ? startCommitGuard(commitMessageGuard.blockedPatterns) : null;
-
-  // Network-isolation broker (see network-broker.js): started on-demand,
-  // only when this launch actually asked for it (network.isolate) -- bwrap
-  // needs the rootlesskit tooling too (needBwrapIsolation already folds that
-  // check in; on a host missing it, no broker starts and a plain unisolated
-  // bwrap launch runs instead, see the warning above). Seatbelt has no such
-  // tooling dependency, so IS_MACOS alone gates it there -- but only when
-  // network.isolate is on: an isolate:false launch keeps the historical open
-  // egress profile and starts no broker at all. When isolation is enabled, the
-  // running-session toggle can flip enforce/open freely without a restart --
-  // `state` here is this launch's STARTING policy from network.initialState
-  // (see macOSNetworkBrokerInitialState); `mode` is the operator-only
-  // enforce/audit from sandbox.config.json. A start failure is a real launch
-  // failure (fail-closed at the infra level, same posture as startGitBroker
-  // for an actual git repo) -- clean up gitBroker/commitGuard first since
-  // they were already started and would otherwise leak.
-  // NOTE (open-state proxy compliance): even in `open` the isolated Seatbelt
-  // profile denies direct TCP/UDP except the broker port, so traffic must
-  // flow via the injected HTTP(S)_PROXY. A proxy-ignoring tool stays blocked
-  // even while "open".
-  let networkBroker = null;
-  if (needBwrapIsolation || (IS_MACOS && netIsolate)) {
-    try {
-      networkBroker = await startNetworkBrokerFn({
-        allowedHosts: netCfg.allowedHosts,
-        deniedHosts: netCfg.deniedHosts,
-        mode: netCfg.mode, // operator-only enforce/audit (sandbox.config.json)
-        // Starting live state from network.initialState (see
-        // macOSNetworkBrokerInitialState -- the on-demand toggle flips it
-        // later).
-        state: macOSNetworkBrokerInitialState(netCfg.initialState),
-      });
-    } catch (err) {
-      if (gitBroker) { try { gitBroker.proc.kill('SIGTERM'); } catch { /* already dead */ } }
-      if (gitBroker) { try { rmSync(gitBroker.dir, { recursive: true, force: true }); } catch { /* best effort */ } }
-      if (commitGuard) { try { rmSync(commitGuard.dir, { recursive: true, force: true }); } catch { /* best effort */ } }
-      throw err;
-    }
-  }
 
   // The git broker only gates /usr/bin/ssh and gh as seen by bwrap's own
   // filesystem. When docker is also on, code inside the sandbox can run its
@@ -2611,199 +2680,43 @@ export async function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, 
 
   const { command, installDir } = resolveApp(app, claudeBin);
 
-  // macOS: sandbox-exec (Seatbelt) instead of bwrap/rootlesskit. No mount
-  // isolation (deny-by-default file policy instead), no nested dockerd, and
-  // the host node/scripts/sockets are directly visible, so fixed in-sandbox
-  // paths become host paths (see buildSeatbeltLaunch). The persistent-HOME /
-  // git-broker / commit-guard setup above is shared with the Linux path.
-  if (IS_MACOS) {
-    if (cfgDocker) {
-      console.warn('[sandbox] docker is disabled on macOS (sandbox-exec cannot host a nested dockerd); launching without docker.');
-    }
-    let sbTools = tools;
-    if (tools.rtk) {
-      console.warn('[sandbox] rtk provisioning is disabled on macOS (no macOS binary pinned); launching without rtk.');
-      sbTools = { ...tools, rtk: false, rtkSpec: null };
-    }
-    if (sbTools.codeReviewGraph) {
-      console.warn('[sandbox] code-review-graph provisioning is disabled on macOS (sandbox-exec has no mounts, so /ccserver-sandbox-provision.sh is never present); launching without it.');
-      sbTools = { ...sbTools, codeReviewGraph: false, crgSpec: null };
-    }
-    ensureHostAgentConfigDirs();
-    // macOS Claude Code keeps its OAuth login in the Keychain, which is
-    // unreachable under the Seatbelt profile; buildSeatbeltLaunch points it at
-    // the plaintext ~/.claude/.credentials.json fallback instead. Seed that
-    // file from the host Keychain once so an existing host login carries over
-    // without a fresh in-sandbox login (no-op if the file already exists).
-    if (app === 'claude') {
-      try { seedClaudeCredentialsFromHostKeychain(HOME); } catch { /* non-fatal: in-sandbox login still works */ }
-    }
-    let sb;
-    try {
-      sb = buildSeatbeltLaunch({
-        cwd, hostHome: HOME, homeDir, sandboxPathBase: SANDBOX_PATH,
-        nodeBin: realpathSync(process.execPath),
-        scripts: seatbeltScripts(), ssh: seatbeltSsh(),
-        ghPaths: seatbeltGhPaths(),
-        // opencode sessions resolve host auth/state via XDG (see
-        // buildSeatbeltLaunch); other apps keep the sandbox HOME.
-        app,
-        // The runtime dir (short /tmp base on darwin) holds every session's
-        // control-plane sockets; deny-write the whole tree so this sandbox
-        // cannot rename/rmdir it and break other sessions (only its own
-        // sockets are re-allowed inside buildSeatbeltLaunch).
-        hostRuntimeDir: hostRuntimeDir(),
-        gitBroker,
-        commitGuard: commitGuard ? { configPath: commitGuard.configPath } : null,
-        sockets: {
-          mcp: mcpSocketPath, notify: notifySocketPath, usage: usageSocketPath,
-          reviewer: reviewerSocketPath,
-        },
-        mcpToken,
-        extraBinds: binds, extraEnv: env, authSock, gnupg: gpg, gpgVault: gpgVaultInfo, claudeDir: installDir,
-        orchestratorClaudeMdSrc, gitCommonDir, groupFilesDir, tools: sbTools,
-        // Network isolation (see seatbeltIsolatedNetworkRules): isolation-enabled
-        // only
-        // when this launch requested it (network.isolate) -- the broker
-        // started above is passed so the profile pins broker-only egress
-        // from the start, with network.initialState as its starting state.
-        // An isolate:false launch passes null and keeps the historical open
-        // egress. The live toggle (terminal.js) flips an isolation-enabled broker
-        // afterward without a restart.
-        networkBroker,
-      });
-    } catch (err) {
-      // buildSeatbeltLaunch threw AFTER startGitBroker/startCommitGuard (and
-      // possibly startNetworkBroker) above: their handles never reach the
-      // caller, so kill/remove them here or the live broker processes and
-      // their runtime dirs leak.
-      if (gitBroker) { try { gitBroker.proc.kill('SIGTERM'); } catch { /* already dead */ } }
-      if (gitBroker) { try { rmSync(gitBroker.dir, { recursive: true, force: true }); } catch { /* best effort */ } }
-      if (commitGuard) { try { rmSync(commitGuard.dir, { recursive: true, force: true }); } catch { /* best effort */ } }
-      if (networkBroker) { try { networkBroker.proc.kill('SIGTERM'); } catch { /* already dead */ } }
-      if (networkBroker) { try { rmSync(networkBroker.dir, { recursive: true, force: true }); } catch { /* best effort */ } }
-      throw err;
-    }
-    // gpg needs no socket bind here (no mounts): the keyring is allow-listed
-    // in the profile with GNUPGHOME pointed at it (see buildSeatbeltLaunch).
-    // gpg-agent sockets are reached via gpgconf's socketdir like on Linux.
-    const seatbeltCmd = app === 'commandcode'
-      ? [MACOS_BASH, ENTRYPOINT, sb.nodeBin, ...withClaude(targetCommand, command)]
-      : [MACOS_BASH, ENTRYPOINT, ...withClaude(targetCommand, command)];
-    return {
-      command: SANDBOX_EXEC,
-      args: ['-f', sb.profilePath, '/usr/bin/env', ...seatbeltEnvArgs(sb.env), ...seatbeltCmd],
-      docker: false,
-      stateDir: null,
-      // Effective gpgVault flag for this launch (already resolved from
-      // sandboxOpts + the config default above) -- sessionManager.js threads
-      // this into the session record so clients can show whether GPG Vault
-      // is actually active for this specific session (server/ws/terminal.js's
-      // `session` message / GET /api/sessions), not just requested.
-      gpgVaultActive: gpgVault,
-      // Network-isolation broker: isolation-enabled only when this launch requested
-      // isolation (the broker was started above iff network.isolate). The
-      // live toggle (terminal.js) flips this broker's enforce/open policy
-      // without a restart.
-      ...NO_NETWORK_BROKER_HANDLE,
-      ...(networkBroker ? {
-        sandboxNetworkBrokerProc: networkBroker.proc,
-        sandboxNetworkBrokerDir: networkBroker.dir,
-        networkBrokerPort: networkBroker.port,
-        networkBrokerToken: networkBroker.token,
-        networkBrokerAdminToken: networkBroker.adminToken,
-        networkIsolateArmed: true,
-        networkIsolateMode: networkBroker.state,
-      } : {}),
-      seatbeltDir: sb.dir,
-      // Orchestrator rule files materialized into the project dir (NOT under
-      // seatbeltDir) -- the caller removes them on teardown. overlayFiles
-      // covers pre-existing siblings' files too so the stillReferenced guard
-      // sees the successor (ruleCopies is ownership-only, for build-failure
-      // cleanup inside buildSeatbeltLaunch).
-      seatbeltFiles: sb.overlayFiles || sb.ruleCopies,
-      gitBrokerProc: gitBroker ? gitBroker.proc : null,
-      gitBrokerDir: gitBroker ? gitBroker.dir : null,
-      commitGuardDir: commitGuard ? commitGuard.dir : null,
-    };
-  }
-
-  // buildBwrapArgs/buildBwrapNetworkFilterScript/wrapBwrapInnerWithNetworkFilter
-  // can throw (invalid bind/env input, or -- for the latter two -- an invalid
-  // broker port). gitBroker/commitGuard/networkBroker were already started
-  // above and their handles never reach the caller if we throw here, so clean
-  // them up first or the live broker processes and their runtime dirs leak
-  // (same posture as the seatbelt try/catch above).
+  // buildBwrapArgs can throw (invalid bind/env input). gitBroker/commitGuard
+  // were already started above and their handles never reach the caller if we
+  // throw here, so clean them up first or the live broker processes and their
+  // runtime dirs leak.
   let bwrapArgs;
   let innerCmd;
   try {
-    bwrapArgs = buildBwrapArgs({ cwd, docker, usesRootlesskit: docker || needBwrapIsolation, gpg, gpgVault: gpgVaultInfo, extraBinds: binds, extraEnv: env, authSock, stateDir, claudeDir: installDir, gitBroker, commitGuard, mcpSocketPath, mcpToken, notifySocketPath, usageSocketPath, reviewerSocketPath, homeDir, orchestratorClaudeMdSrc, gitCommonDir, groupFilesDir, app, tools, networkBroker });
-    // command-code's launcher is a Node script. Run it explicitly via the
-    // sandbox's node binary, bypassing the #!/usr/bin/env shebang which would
-    // otherwise require /usr/bin/node to be present inside the sandbox's PATH.
-    // targetCommand is already resolved to an absolute path (e.g.
-    // /.../command-code/dist/index.mjs), so withClaude returns that path + args;
-    // we prepend the in-sandbox node.
-    innerCmd = app === 'commandcode'
-      ? [BASH, '/ccserver-sandbox-entrypoint.sh', SANDBOX_NODE_PATH, ...withClaude(targetCommand, command)]
-      : [BASH, '/ccserver-sandbox-entrypoint.sh', ...withClaude(targetCommand, command)];
-    if (needBwrapIsolation) {
-      // Structural boundary, part 2 of 2 (part 1 is the private netns below):
-      // an in-netns firewall that drops everything except the broker's port.
-      // A prelude failure exits nonzero before the entrypoint runs, so a
-      // sandbox without its firewall never boots (fail-closed).
-      innerCmd = wrapBwrapInnerWithNetworkFilter(
-        innerCmd,
-        buildBwrapNetworkFilterScript({ brokerPort: networkBroker.port, forward: !!docker }),
-      );
-    }
+    bwrapArgs = buildBwrapArgs({ cwd, docker, usesRootlesskit: docker, gpg, gpgVault: gpgVaultInfo, extraBinds: binds, extraEnv: env, authSock, stateDir, claudeDir: installDir, gitBroker, commitGuard, notifySocketPath, usageSocketPath, reviewerSocketPath, homeDir, app, tools });
+    innerCmd = [BASH, '/ccserver-sandbox-entrypoint.sh', ...withClaude(targetCommand, command)];
   } catch (err) {
     if (gitBroker) { try { gitBroker.proc.kill('SIGTERM'); } catch { /* already dead */ } }
     if (gitBroker) { try { rmSync(gitBroker.dir, { recursive: true, force: true }); } catch { /* best effort */ } }
     if (commitGuard) { try { rmSync(commitGuard.dir, { recursive: true, force: true }); } catch { /* best effort */ } }
-    if (networkBroker) { try { networkBroker.proc.kill('SIGTERM'); } catch { /* already dead */ } }
-    if (networkBroker) { try { rmSync(networkBroker.dir, { recursive: true, force: true }); } catch { /* best effort */ } }
     throw err;
   }
 
   const gitBrokerFields = {
-    // Effective gpgVault flag for this launch -- see the seatbelt branch's
-    // identical field above for why.
+    // Effective gpgVault flag for this launch.
     gpgVaultActive: gpgVault,
     gitBrokerProc: gitBroker ? gitBroker.proc : null,
     gitBrokerDir: gitBroker ? gitBroker.dir : null,
     // No proc for the commit guard (see startCommitGuard) -- just a runtime
     // dir to remove on teardown, same as gitBrokerDir but with no process to kill.
     commitGuardDir: commitGuard ? commitGuard.dir : null,
-    // macOS-only teardown handles (always null on the bwrap path).
-    seatbeltDir: null,
-    seatbeltFiles: null,
-    // Network-isolation broker: isolation-enabled only when this launch requested
-    // isolation (needBwrapIsolation, see above -- also null on a host
-    // missing the rootlesskit tooling, same as a plain unisolated launch).
-    ...NO_NETWORK_BROKER_HANDLE,
-    ...(needBwrapIsolation && networkBroker ? {
-      sandboxNetworkBrokerProc: networkBroker.proc,
-      sandboxNetworkBrokerDir: networkBroker.dir,
-      networkBrokerPort: networkBroker.port,
-      networkBrokerToken: networkBroker.token,
-      networkBrokerAdminToken: networkBroker.adminToken,
-      networkIsolateArmed: true,
-      networkIsolateMode: networkBroker.state,
-    } : {}),
+    // Network isolation is qemu-only: the bwrap backend never arms it.
+    sandboxNetworkBrokerProc: null,
+    sandboxNetworkBrokerDir: null,
+    networkBrokerAdminSock: null,
+    networkIsolateArmed: false,
+    networkIsolateMode: null,
   };
 
-  if (docker || needBwrapIsolation) {
-    // Both a nested-dockerd launch (docker:true) and an isolated launch
-    // (needBwrapIsolation) take the same rootlesskit wrapping for a private
-    // netns (stateDir was minted above for exactly this) -- but only an
-    // isolated launch skips --disable-host-loopback: that flag would cut the
-    // guest off the host-loopback broker reachable at the slirp gateway.
-    // Reachability then stays scoped by the in-netns firewall above (only
-    // the broker's port is reachable). A plain docker:true launch (isolation
-    // off) keeps --disable-host-loopback exactly as before this feature --
-    // there is no broker for it to reach, and no reason to widen its access
-    // to the host loopback.
+  if (docker) {
+    // A nested-dockerd launch (docker:true) takes rootlesskit wrapping for a
+    // private netns (stateDir was minted above for exactly this).
+    // --disable-host-loopback stays: there is no broker for it to reach, and
+    // no reason to widen its access to the host loopback.
     return {
       command: ROOTLESSKIT,
       args: [
@@ -2812,7 +2725,7 @@ export async function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, 
         '--mtu=65520',
         '--slirp4netns-sandbox=auto',
         '--slirp4netns-seccomp=auto',
-        ...(needBwrapIsolation ? [] : ['--disable-host-loopback']),
+        '--disable-host-loopback',
         '--port-driver=builtin',
         // Only /etc is copied-up (for resolv.conf). We intentionally do NOT
         // copy-up /run so live host sockets there remain usable as bind

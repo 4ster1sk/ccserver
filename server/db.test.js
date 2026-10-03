@@ -48,7 +48,7 @@ test('fresh open runs migrations to the latest version', () => {
     .run('srv_proj', 'p1', '/srv/proj', 1, 1);
   assert.equal(db.prepare('SELECT COUNT(*) AS c FROM sandboxes').get().c, 1);
   // v5 table exists, usable, and enforces the UNIQUE(remote_fingerprint)
-  // constraint the whole trust model rests on (see federationPairing.js).
+  // constraint used by the historical paired-instance migration.
   db.prepare(`INSERT INTO paired_instances
       (id, label, remote_fingerprint, remote_cert_pem, remote_hostname_claimed, remote_addr, direction, status, created_at)
       VALUES (?,?,?,?,?,?,?,?,?)`)
@@ -344,7 +344,7 @@ test('v11 migration: a populated v9 DB gains the settings table and loses no row
   db.prepare('INSERT INTO worker_presets (id, name, role, app, model, created_at, updated_at) VALUES (?,?,?,?,?,?,?)')
     .run('keep-me', 'n', 'workerX', 'claude', null, 1, 1);
 
-  migrate(db, MIGRATIONS);
+  migrate(db, MIGRATIONS.filter((m) => m.version <= 11));
 
   assert.equal(db.prepare('PRAGMA user_version').get().user_version, 11);
   assert.equal(db.prepare('SELECT COUNT(*) AS c FROM worker_presets').get().c, 1, 'existing rows survive');
@@ -352,5 +352,34 @@ test('v11 migration: a populated v9 DB gains the settings table and loses no row
   db.prepare('INSERT INTO settings (scope, scope_id, key, value, updated_at) VALUES (?,?,?,?,?)')
     .run('global', '', 'k', '"v"', 1);
   assert.equal(db.prepare('SELECT value FROM settings').get().value, '"v"');
+  db.close();
+});
+
+test('v12 migration: vm_templates is created empty on top of v11', () => {
+  const path = join(tmpRoot, 'v11-to-v12.sqlite3');
+  const db = new DatabaseSync(path);
+  migrate(db, MIGRATIONS.filter((m) => m.version <= 11));
+  db.prepare('INSERT INTO settings (scope, scope_id, key, value, updated_at) VALUES (?,?,?,?,?)')
+    .run('global', '', 'k', '"v"', 1);
+
+  migrate(db, MIGRATIONS);
+
+  assert.equal(db.prepare('PRAGMA user_version').get().user_version, MIGRATIONS.at(-1).version);
+  assert.equal(db.prepare('SELECT COUNT(*) AS c FROM settings').get().c, 1, 'existing rows survive');
+  assert.equal(db.prepare('SELECT COUNT(*) AS c FROM vm_templates').get().c, 0);
+  db.close();
+});
+
+test('v13 migration: existing VM templates stay throwaway (persistent = 0)', () => {
+  const path = join(tmpRoot, 'v12-to-v13.sqlite3');
+  const db = new DatabaseSync(path);
+  migrate(db, MIGRATIONS.filter((m) => m.version <= 12));
+  db.prepare('INSERT INTO vm_templates (id, name, memory_mib, cpus, disk_gib, boot_timeout_sec, cloud_config, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?)')
+    .run('t1', 'dev', 4096, 2, 32, 120, '', 1, 1);
+
+  migrate(db, MIGRATIONS);
+
+  assert.equal(db.prepare('PRAGMA user_version').get().user_version, 13);
+  assert.equal(db.prepare('SELECT persistent FROM vm_templates WHERE id = ?').get('t1').persistent, 0);
   db.close();
 });

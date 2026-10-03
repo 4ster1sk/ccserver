@@ -14,21 +14,12 @@ export default function SessionSidebar({
   overlay,
   onOverlayChange,
   sessionTabs,
-  groupTabs = [],
   activeTabId,
   unopenedSessions,
-  unopenedGroups,
   onSelectTab,
   onCloseTab,
   onOpenSession,
   onTerminateSession,
-  unopenedRemoteSessions = [],
-  onOpenRemoteSession,
-  onTerminateRemoteSession,
-  unopenedRemoteGroups = [],
-  onOpenRemoteGroup,
-  onDestroyRemoteGroup,
-  onOpenGroup,
   customLabels,
   onRowContextMenu,
 }) {
@@ -40,7 +31,7 @@ export default function SessionSidebar({
 
   if (!open) return null;
 
-  const openedCount = sessionTabs.length + groupTabs.length;
+  const openedCount = sessionTabs.length;
 
   return (
     <aside className="left-sidebar" aria-label="セッションサイドバー">
@@ -70,21 +61,12 @@ export default function SessionSidebar({
       <div className="sidebar-widgets session-sidebar-list" ref={listRef} onKeyDown={onListKeyDown} role="menu" aria-label="セッション一覧">
         <SessionList
           sessionTabs={sessionTabs}
-          groupTabs={groupTabs}
           activeTabId={activeTabId}
           unopenedSessions={unopenedSessions}
-          unopenedGroups={unopenedGroups}
           onSelectTab={onSelectTab}
           onCloseTab={onCloseTab}
           onOpenSession={onOpenSession}
           onTerminateSession={onTerminateSession}
-          unopenedRemoteSessions={unopenedRemoteSessions}
-          onOpenRemoteSession={onOpenRemoteSession}
-          onTerminateRemoteSession={onTerminateRemoteSession}
-          unopenedRemoteGroups={unopenedRemoteGroups}
-          onOpenRemoteGroup={onOpenRemoteGroup}
-          onDestroyRemoteGroup={onDestroyRemoteGroup}
-          onOpenGroup={onOpenGroup}
           customLabels={customLabels}
           onRowContextMenu={onRowContextMenu}
         />

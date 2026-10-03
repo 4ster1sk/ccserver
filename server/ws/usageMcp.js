@@ -3,8 +3,7 @@
 // percentage used, reset times, plan) without shelling out to `/usage`
 // itself.
 //
-// Process-wide concept (NOT group-scoped like the control/handoff brokers,
-// and unlike ccserver-notify carries no per-connection identity): one Unix
+// Like ccserver-notify, one Unix
 // socket hosts it for the whole server process
 // (${XDG_RUNTIME_DIR}/ccserver-usage.d/sock, see getUsageSockPath). Each
 // usage-enabled session's sandbox binds that socket's directory in (Issue
@@ -45,12 +44,8 @@ export function usageEnabled() {
   return resolveClaude().found !== false && loadSandboxConfig().usageMcp === true;
 }
 
-// Pure injection decision for createSession: claude sessions only (opencode
-// has no equivalent capture, copilot has no CLI-arg/env MCP injection at
-// all -- both are excluded by the `app === 'claude'` equality, no explicit
-// exclusion needed). Shells never get it. Unlike notify, worker/orchestrator/
-// standalone are not distinguished -- every claude session in a group gets
-// it, same as a standalone one.
+// Pure injection decision for createSession: Claude agent sessions only.
+// Shells and other agent CLIs never get this tool.
 export function shouldInjectUsage({ shell, app, usageEnabled }) {
   return !shell && app === 'claude' && !!usageEnabled;
 }
