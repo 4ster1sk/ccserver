@@ -8,13 +8,10 @@ test.describe('Settings general section', () => {
     await page.goto('/');
     await expect(page.getByRole('button', { name: 'Terminal', exact: true })).toBeVisible();
     // localStorage を初期化してデフォルト状態から始める。
-    // popup前提: セッション表示の既定はサイドバーのため、従来popup挙動に
-    // 依存する本ファイルの検証では明示する (アサーション自体は不変)。
     await page.evaluate(() => {
       localStorage.removeItem('ccserver-theme');
       localStorage.removeItem('ccserver-skip-close-confirm');
       localStorage.removeItem('ccserver-sidebar-overlay');
-      localStorage.setItem('ccserver-session-mode', 'popup');
       localStorage.removeItem('ccserver-session-sidebar-open');
       localStorage.removeItem('ccserver-session-sidebar-overlay');
       localStorage.removeItem('ccserver-default-sandbox-gpg');
@@ -49,14 +46,12 @@ test.describe('Settings general section', () => {
 
   test('no theme picker in terminal header', async ({ page }) => {
     // shellタブを開いても、CLI上部のテーマ切り替えは存在しない
-    // (一般設定に移植済み)。セッションタブはハンバーガーメニュー内に
+    // (一般設定に移植済み)。セッションタブは左サイドバーに
     // 縦表示されるため、件数バッジで開 tab 数を検証する。
     await page.locator('.tab-list').getByTitle('Files').click();
     await page.getByRole('button', { name: 'Terminal', exact: true }).click();
-    await expect(page.locator('.session-menu-count')).toHaveText('1');
-    await page.getByRole('button', { name: 'セッション一覧メニュー' }).click();
-    await expect(page.locator('.session-menu [data-section="opened"] .session-menu-item')).toHaveCount(1);
-    await page.keyboard.press('Escape');
+    await expect(page.locator('.tab-bar .session-menu-count')).toHaveText('1');
+    await expect(page.locator('.left-sidebar [data-section="opened"] .session-menu-item')).toHaveCount(1);
     await expect(page.locator('.terminal-header')).toBeVisible();
     await expect(page.locator('.terminal-header .theme-picker')).toHaveCount(0);
   });

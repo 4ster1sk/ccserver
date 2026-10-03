@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react';
 import { getThemeIds, getTheme } from '../themes.js';
 import { resolveAuthMode } from '../auth.js';
 
-// "一般" メニュー: テーマ・終了確認・戻る/進むガード・セッション表示・
+// "一般" メニュー: テーマ・終了確認・戻る/進むガード・
 // デスクトップ通知・サンドボックス既定値。
 // いずれも即時反映し、localStorage に永続化される (保存先の詳細は
 // 各 setter 側 = App.jsx / useSessionSidebarPrefs.js / themes.js / sandboxDefaults.js を参照)。
@@ -14,8 +14,6 @@ export default function GeneralSection({
   onThemeChange,
   confirmBeforeClose,
   onConfirmBeforeCloseChange,
-  sessionMode,
-  onSessionModeChange,
   sandboxDefaults,
   onSandboxDefaultsChange,
   toolsAvailable,
@@ -88,21 +86,6 @@ export default function GeneralSection({
         キー入力中の表示を残すため、ブラウザの履歴操作による離脱を抑止します。
         入力欄・ターミナルにフォーカスがある間のショートカットは常に抑止され、
         ターミナル操作として扱われます。
-      </p>
-      <div className="general-setting-row">
-        <label htmlFor="general-session-mode-select">セッション表示</label>
-        <select
-          id="general-session-mode-select"
-          value={sessionMode ?? 'sidebar'}
-          onChange={(e) => onSessionModeChange(e.target.value)}
-        >
-          <option value="sidebar">サイドバー</option>
-          <option value="popup">ポップアップ</option>
-        </select>
-      </div>
-      <p className="settings-hint">
-        サイドバーは右ウィジェットと同じ常時表示パネルです。
-        ポップアップはタブバー左端の☰ボタンから開く従来表示です。
       </p>
       <label className="general-setting-check">
         <input

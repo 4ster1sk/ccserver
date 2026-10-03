@@ -2,22 +2,16 @@ import { test, expect } from '@playwright/test';
 
 const SKIP_KEY = 'ccserver-skip-close-confirm';
 
-// popup前提: 既定はサイドバーのため、従来popup挙動の検証では明示する
-// (アサーション自体は不変)。
-const usePopupMode = (page) => page.addInitScript(() => {
-  localStorage.setItem('ccserver-session-mode', 'popup');
-});
-
 // Locators / helpers ---------------------------------------------------------
-// Session (terminal) tabs now live in the hamburger menu at the left end of
-// the tab bar, not in .tab-list. Files/Settings tabs stay horizontal
-// (permanent, icon-only -- selected by title/aria-label, not visible text).
+// Session (terminal) tabs live in the left session sidebar, while
+// Files/Settings tabs stay horizontal (permanent, icon-only -- selected by
+// title/aria-label, not visible text).
 
 const openTerminalBtn = (page) => page.getByRole('button', { name: 'Terminal', exact: true });
-const hamburger = (page) => page.getByRole('button', { name: 'セッション一覧メニュー' });
-const sessionMenu = (page) => page.locator('.session-menu');
-const sessionBadge = (page) => page.locator('.session-menu-count');
-const menuCloseButtons = (page) => sessionMenu(page).locator('[data-section="opened"] .session-menu-item .session-menu-close');
+const sessionToggle = (page) => page.getByRole('button', { name: /セッションサイドバー/ });
+const sessionPanel = (page) => page.locator('.left-sidebar');
+const sessionBadge = (page) => page.locator('.tab-bar .session-menu-count');
+const panelCloseButtons = (page) => sessionPanel(page).locator('[data-section="opened"] .session-menu-item .session-menu-close');
 const modal = (page) => page.locator('.resume-overlay', { hasText: 'タブを閉じますか?' });
 
 // 下段 (未オープン/リモート) の ✕ はアプリ内の確認モーダルを出す。
@@ -46,9 +40,13 @@ async function openShellTab(page) {
   }
 }
 
-async function openMenu(page) {
-  await hamburger(page).click();
-  await expect(sessionMenu(page)).toBeVisible();
+// サイドバーは常時表示パネルなので「開く」操作は不要。閉じていた場合に
+// 備えて可視化だけ保証する。
+async function ensurePanel(page) {
+  if (!(await sessionPanel(page).isVisible())) {
+    await sessionToggle(page).click();
+  }
+  await expect(sessionPanel(page)).toBeVisible();
 }
 
 async function gotoApp(page) {
@@ -59,13 +57,12 @@ async function gotoApp(page) {
 // Tests ----------------------------------------------------------------------
 
 test('running tab: modal shows, cancel keeps the tab, confirm terminates it', async ({ page }) => {
-  await usePopupMode(page);
   await gotoApp(page);
   await openShellTab(page);
 
-  // X on a running tab (in the hamburger menu) opens the custom modal.
-  await openMenu(page);
-  await menuCloseButtons(page).first().click();
+  // X on a running tab (in the session sidebar) opens the custom modal.
+  await ensurePanel(page);
+  await panelCloseButtons(page).first().click();
   await expect(modal(page)).toBeVisible();
 
   // Cancel keeps the tab.
@@ -77,9 +74,7 @@ test('running tab: modal shows, cancel keeps the tab, confirm terminates it', as
   // the tab, and does NOT persist skip. ("The session is actually gone
   // server-side" is verified in detail by 'terminate button ends the
   // session completely' below -- this test only covers cancel-vs-confirm.)
-  await openMenu(page).catch(() => {});
-  if (await sessionMenu(page).count() === 0) await openMenu(page);
-  await menuCloseButtons(page).first().click();
+  await panelCloseButtons(page).first().click();
   await expect(modal(page)).toBeVisible();
   await modal(page).getByRole('button', { name: 'セッションを終了', exact: true }).click();
   await expect(modal(page)).toBeHidden();
@@ -90,13 +85,12 @@ test('running tab: modal shows, cancel keeps the tab, confirm terminates it', as
 });
 
 test('"don\'t ask again" persists to localStorage and skips future confirms (incl. after reload)', async ({ page }) => {
-  await usePopupMode(page);
   await gotoApp(page);
   await openShellTab(page);
 
   // Close with the checkbox ticked.
-  await openMenu(page);
-  await menuCloseButtons(page).first().click();
+  await ensurePanel(page);
+  await panelCloseButtons(page).first().click();
   await expect(modal(page)).toBeVisible();
   await page.locator('.close-confirm-checkbox input[type="checkbox"]').check();
   await modal(page).getByRole('button', { name: 'セッションを終了', exact: true }).click();
@@ -111,26 +105,23 @@ test('"don\'t ask again" persists to localStorage and skips future confirms (inc
   // actually gone server-side too: it must not linger in the lower
   // ("unopened") section.
   await openShellTab(page);
-  await openMenu(page);
-  await menuCloseButtons(page).first().click();
+  await panelCloseButtons(page).first().click();
   await expect(sessionBadge(page)).toHaveCount(0);
   await expect(modal(page)).toBeHidden();
-  await expect(sessionMenu(page).locator('[data-section="unopened"] .session-menu-item')).toHaveCount(0, { timeout: 10_000 });
+  await expect(sessionPanel(page).locator('[data-section="unopened"] .session-menu-item')).toHaveCount(0, { timeout: 10_000 });
 
   // Survives a reload.
   await page.reload();
   await expect(openTerminalBtn(page)).toBeVisible();
   expect(await page.evaluate((k) => localStorage.getItem(k), SKIP_KEY)).toBe('1');
   await openShellTab(page);
-  await openMenu(page);
-  await menuCloseButtons(page).first().click();
+  await panelCloseButtons(page).first().click();
   await expect(sessionBadge(page)).toHaveCount(0);
   await expect(modal(page)).toBeHidden();
-  await expect(sessionMenu(page).locator('[data-section="unopened"] .session-menu-item')).toHaveCount(0, { timeout: 10_000 });
+  await expect(sessionPanel(page).locator('[data-section="unopened"] .session-menu-item')).toHaveCount(0, { timeout: 10_000 });
 });
 
 test('exited tab closes without a confirm (skip not enabled)', async ({ page }) => {
-  await usePopupMode(page);
   await gotoApp(page);
   await openShellTab(page);
 
@@ -147,37 +138,31 @@ test('exited tab closes without a confirm (skip not enabled)', async ({ page }) 
   // Closing an exited tab skips the modal — and this is the exited path,
   // not the "don't ask again" path.
   expect(await page.evaluate((k) => localStorage.getItem(k), SKIP_KEY)).toBeNull();
-  await openMenu(page);
-  await menuCloseButtons(page).first().click();
+  await ensurePanel(page);
+  await panelCloseButtons(page).first().click();
   await expect(sessionBadge(page)).toHaveCount(0);
   await expect(modal(page)).toBeHidden();
 });
 
 test('terminate button ends the session completely: tab closes and session is gone', async ({ page }) => {
-  await usePopupMode(page);
   await gotoApp(page);
 
   // Earlier tests in this file leave lingered sessions in the shared e2e
   // server; drain them so the "nothing left behind" assertions are exact.
-  await openMenu(page);
+  await ensurePanel(page);
   for (let i = 0; i < 15; i++) {
-    const lowers = sessionMenu(page).locator('[data-section="unopened"] .session-menu-item');
+    const lowers = sessionPanel(page).locator('[data-section="unopened"] .session-menu-item');
     const before = await lowers.count();
     if (before === 0) break;
     await lowers.first().locator('.session-menu-close').click();
     await confirmTerminateIfPrompted(page, () => lowers.count(), before);
-    // モーダルのクリックでポップアップが閉じるので開き直す。
-    if ((await sessionMenu(page).count()) === 0) await openMenu(page);
-    await expect.poll(async () => sessionMenu(page).locator('[data-section="unopened"] .session-menu-item').count(), { timeout: 10_000 }).toBeLessThan(before);
+    await expect.poll(async () => sessionPanel(page).locator('[data-section="unopened"] .session-menu-item').count(), { timeout: 10_000 }).toBeLessThan(before);
   }
-  await page.keyboard.press('Escape').catch(() => {});
-  await expect(sessionMenu(page)).toBeHidden();
 
   await openShellTab(page);
 
   // The dialog offers session termination at the left end.
-  await openMenu(page);
-  await menuCloseButtons(page).first().click();
+  await panelCloseButtons(page).first().click();
   await expect(modal(page)).toBeVisible();
   const terminateBtn = modal(page).getByRole('button', { name: 'セッションを終了', exact: true });
   await expect(terminateBtn).toBeVisible();
@@ -187,18 +172,15 @@ test('terminate button ends the session completely: tab closes and session is go
   await expect(sessionBadge(page)).toHaveCount(0);
 
   // The session is gone server-side: nothing lingers in the lower section.
-  await openMenu(page);
-  await expect(sessionMenu(page).locator('[data-section="unopened"] .session-menu-item')).toHaveCount(0);
-  await page.keyboard.press('Escape').catch(() => {});
+  await expect(sessionPanel(page).locator('[data-section="unopened"] .session-menu-item')).toHaveCount(0);
 });
 
 test('terminate button ignores double-click: single DELETE, no error alert', async ({ page }) => {
-  await usePopupMode(page);
   await gotoApp(page);
   await openShellTab(page);
 
-  await openMenu(page);
-  await menuCloseButtons(page).first().click();
+  await ensurePanel(page);
+  await panelCloseButtons(page).first().click();
   await expect(modal(page)).toBeVisible();
 
   // A duplicate DELETE would 404 and surface a bogus failure alert, so count
@@ -226,12 +208,11 @@ test('closing the last session tab falls back to the Files tab, not Settings', a
   // right after Files (PR #116), so once it's the only tab left at
   // that index, closing the last terminal tab used to land on Settings
   // instead of Files. See App.jsx's doCloseTab isDynamic guard.
-  await usePopupMode(page);
   await gotoApp(page);
   await openShellTab(page);
 
-  await openMenu(page);
-  await menuCloseButtons(page).first().click();
+  await ensurePanel(page);
+  await panelCloseButtons(page).first().click();
   await expect(modal(page)).toBeVisible();
   await modal(page).getByRole('button', { name: 'セッションを終了', exact: true }).click();
   await expect(modal(page)).toBeHidden();
@@ -247,7 +228,6 @@ test('closing one of several open session tabs still selects an adjacent session
   // terminal tab left, the existing "pick the adjacent one"
   // behavior must be unaffected -- only spilling over into the static tabs
   // should fall back to Files.
-  await usePopupMode(page);
   await gotoApp(page);
 
   await openShellTab(page); // tab 1
@@ -255,8 +235,8 @@ test('closing one of several open session tabs still selects an adjacent session
   await expect(sessionBadge(page)).toHaveText('2');
 
   // Close the active (2nd, last-opened) tab via its own close button.
-  await openMenu(page);
-  await menuCloseButtons(page).last().click();
+  await ensurePanel(page);
+  await panelCloseButtons(page).last().click();
   await expect(modal(page)).toBeVisible();
   await modal(page).getByRole('button', { name: 'セッションを終了', exact: true }).click();
   await expect(modal(page)).toBeHidden();
@@ -267,8 +247,7 @@ test('closing one of several open session tabs still selects an adjacent session
   await expect(page.locator('.tab-list').getByTitle('Files')).not.toHaveClass(/active/);
 
   // Clean up so the session doesn't linger for later tests.
-  await openMenu(page);
-  await menuCloseButtons(page).first().click();
+  await panelCloseButtons(page).first().click();
   await expect(modal(page)).toBeVisible();
   await modal(page).getByRole('button', { name: 'セッションを終了', exact: true }).click();
   await expect(sessionBadge(page)).toHaveCount(0);

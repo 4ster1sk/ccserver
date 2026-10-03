@@ -45,8 +45,8 @@ export function appLabel(sessionOrTab) {
   return app;
 }
 
-// セッション一覧の実体 (ポップアップ / 左サイドバーで共用するプレゼンテーショナル部品)。
-// 外側ラッパー (.session-menu / .session-sidebar-list) や開閉ロジックは持たない。
+// セッション一覧の実体 (左サイドバーに表示するプレゼンテーショナル部品)。
+// 外側ラッパー (.session-sidebar-list) や開閉ロジックは持たない。
 // a11y: 行コンテナは role="none" の非対話要素とし、「選択」と「閉じる/終了」
 // を独立した button で提供する (menuitem 内に button を入れ子にしない)。
 // 各行の右クリックは onRowContextMenu(e, { id, currentLabel }) に委譲する

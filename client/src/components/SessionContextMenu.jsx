@@ -1,8 +1,8 @@
 import { useRef } from 'react';
 import { useDismissableMenu } from '../hooks/useDismissableMenu.js';
 
-// セッション行の右クリックメニュー (ポップアップ / 左サイドバー共用)。
-// 開閉は SessionTabMenu と同じ方式: 外側 mousedown で閉じる + Escape で閉じる。
+// セッション行の右クリックメニュー。
+// 開閉は外側 mousedown で閉じる + Escape で閉じる (useDismissableMenu)。
 // 位置はクリック座標 (position: fixed)。画面端ではメニューがはみ出さないよう
 // 簡易クランプする (メニュー概形 200x80 を想定)。
 export default function SessionContextMenu({

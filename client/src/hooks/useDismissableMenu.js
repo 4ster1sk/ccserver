@@ -9,7 +9,6 @@ import { useEffect } from 'react';
 // - menuRef: メニュー要素の ref
 // - onClose: メニュー外操作・Escape で呼ぶコールバック
 // - opts.enabled: false の間はリスナを張らない
-//   (マウントされっ放しで開閉だけ切り替える SessionTabMenu 用)
 export function useDismissableMenu(menuRef, onClose, { enabled = true } = {}) {
   useEffect(() => {
     if (!enabled) return;

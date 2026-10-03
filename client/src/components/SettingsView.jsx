@@ -25,8 +25,6 @@ export default function SettingsView({
   onThemeChange,
   confirmBeforeClose,
   onConfirmBeforeCloseChange,
-  sessionMode,
-  onSessionModeChange,
   sandboxDefaults,
   onSandboxDefaultsChange,
   toolsAvailable,
@@ -76,8 +74,6 @@ export default function SettingsView({
               onThemeChange={onThemeChange}
               confirmBeforeClose={confirmBeforeClose}
               onConfirmBeforeCloseChange={onConfirmBeforeCloseChange}
-              sessionMode={sessionMode}
-              onSessionModeChange={onSessionModeChange}
               sandboxDefaults={sandboxDefaults}
               onSandboxDefaultsChange={onSandboxDefaultsChange}
               toolsAvailable={toolsAvailable}

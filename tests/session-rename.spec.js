@@ -2,7 +2,7 @@ import { test, expect } from '@playwright/test';
 
 // セッション行の右クリック改名: コンテキストメニュー → 改名ダイアログ →
 // 一覧・ターミナルヘッダー反映 → クリア → リロード後の下段表示まで検証する。
-// 既定のサイドバーモードで検証する (popup とは SessionList を共用のため)。
+// 左サイドバーで検証する。
 
 const SKIP_KEY = 'ccserver-skip-close-confirm';
 const openTerminalBtn = (page) => page.getByRole('button', { name: 'Terminal', exact: true });

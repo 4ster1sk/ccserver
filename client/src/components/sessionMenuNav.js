@@ -1,5 +1,4 @@
-// ポップアップ / サイドバー共用のメニュー内キーボード移動
-// (SessionTabMenu / SessionSidebar)。
+// サイドバー用メニュー内キーボード移動 (SessionSidebar)。
 // container 内の .session-menu-select / .session-menu-close 間を
 // ArrowDown/Up・Home/End で循環フォーカス移動する。処理したら true を返す。
 export function moveMenuFocus(container, key) {

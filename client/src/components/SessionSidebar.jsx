@@ -4,11 +4,11 @@ import { moveMenuFocus } from './sessionMenuNav.js';
 
 // 左セッションサイドバー: 右ウィジェット (RightSidebar) と同じ挙動の常時表示パネル。
 // - open でゲートし、閉じている間は null (RightSidebarInner と同一方針)
-// - popup のような外側クリック / Escape では閉じない。閉じるのはタブバーの
+// - 外側クリック / Escape では閉じない。閉じるのはタブバーの
 //   トグルボタンのみ (デスクトップ overlay 時にトグルが埋もれないよう
 //   .main-row 内 absolute に留める設計も右と同一)
-// - 選択しても閉じない (popup は選択で閉じる)
-// - キーボードの矢印/Home/End 移動は popup と同一パターン
+// - 選択しても閉じない
+// - キーボードの矢印/Home/End 移動は moveMenuFocus (sessionMenuNav.js)
 export default function SessionSidebar({
   open,
   overlay,

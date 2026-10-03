@@ -1,19 +1,12 @@
 import { useState, useCallback } from 'react';
 import { NARROW_DRAWER_QUERY } from './viewportQuery.js';
-import { loadEnumPref } from './enumPref.js';
 
 // 左セッション表示の設定 (右ウィジェットとは独立したフラグ群)。
-// - mode: 'sidebar' (既定・常時表示の左サイドバー) | 'popup' (従来のポップアップ)
-// - open: サイドバーモード時の開閉 (永続化。狭幅初回は閉じておく)
+// 常時表示の左サイドバーで一本化 (ポップアップ表示は廃止)。
+// - open: サイドバーの開閉 (永続化。狭幅初回は閉じておく)
 // - overlay: デスクトップ幅でもCLIをリサイズせず前面に重ねる (右とは別キー)
-const MODE_KEY = 'ccserver-session-mode';
 const OPEN_KEY = 'ccserver-session-sidebar-open';
 const OVERLAY_KEY = 'ccserver-session-sidebar-overlay';
-
-function loadMode() {
-  // 許可値検証つき読み取りは enumPref に一本化 (useWidgetPrefs と共有)。
-  return loadEnumPref(MODE_KEY, ['popup', 'sidebar'], 'sidebar');
-}
 
 function loadOpen() {
   try {
@@ -40,19 +33,8 @@ function loadOverlay() {
 }
 
 export function useSessionSidebarPrefs() {
-  const [mode, setModeState] = useState(loadMode);
   const [open, setOpenState] = useState(loadOpen);
   const [overlay, setOverlayState] = useState(loadOverlay);
-
-  const setMode = useCallback((v) => {
-    const next = v === 'popup' ? 'popup' : 'sidebar';
-    setModeState(next);
-    try {
-      localStorage.setItem(MODE_KEY, next);
-    } catch {
-      // ignore
-    }
-  }, []);
 
   const setOpen = useCallback((v) => {
     setOpenState(v);
@@ -72,5 +54,5 @@ export function useSessionSidebarPrefs() {
     }
   }, []);
 
-  return { mode, setMode, open, setOpen, overlay, setOverlay };
+  return { open, setOpen, overlay, setOverlay };
 }

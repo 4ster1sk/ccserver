@@ -1,8 +1,8 @@
 import { test, expect } from '@playwright/test';
 
-// 左セッションサイドバー (既定・サイドバーモード) の検証。
-// 既存 popup 挙動は session-menu.spec.js / close-confirm.spec.js で
-// popup を明示した上で検証しているため、ここでは新規挙動のみ扱う。
+// 左セッションサイドバー (常時表示パネル) の検証。
+// タブの選択・終了確認モーダル系は close-confirm.spec.js 側で検証している
+// ため、ここではサイドバー自体の開閉・表示・重ね表示のみ扱う。
 
 const SKIP_KEY = 'ccserver-skip-close-confirm';
 const openTerminalBtn = (page) => page.getByRole('button', { name: 'Terminal', exact: true });
@@ -55,12 +55,11 @@ async function terminateAllLowerSidebar(page) {
   }
 }
 
-test('default is sidebar: left panel visible, popup absent, toggle persists', async ({ page }) => {
+test('left panel visible by default, toggle persists', async ({ page }) => {
   await gotoApp(page);
 
-  // 既定 (キーなし) はサイドバー。popup の .session-menu は存在しない。
+  // サイドバーが常時表示パネルとして存在する。
   await expect(leftSidebar(page)).toBeVisible();
-  await expect(page.locator('.session-menu')).toHaveCount(0);
   await expect(sessionToggle(page)).toHaveAccessibleName('セッションサイドバーを閉じる');
 
   // トグルで閉じる → 永続化 → 開く → リロード後も復元。
@@ -85,7 +84,7 @@ test('selecting a tab keeps the sidebar open', async ({ page }) => {
   await expect(openedItems(page)).toHaveCount(1);
   await expect(sidebarBadge(page)).toHaveText('1');
 
-  // 選択してもサイドバーは閉じない (popup は選択で閉じる)。
+  // 選択してもサイドバーは閉じない。
   await openedItems(page).first().locator('.session-menu-select').click();
   await expect(page.locator('.terminal-container')).toBeVisible();
   await expect(leftSidebar(page)).toBeVisible();
@@ -93,35 +92,6 @@ test('selecting a tab keeps the sidebar open', async ({ page }) => {
   // Cleanup: タブを閉じ、残った稼働セッションを終了する。
   await closeAllUpperSidebar(page);
   await terminateAllLowerSidebar(page);
-});
-
-test('settings select switches mode and persists', async ({ page }) => {
-  await gotoApp(page);
-  await expect(leftSidebar(page)).toBeVisible();
-
-  await page.locator('.tab-list').getByTitle('Settings').click();
-  await expect(page.locator('.settings-view')).toBeVisible();
-  const panel = page.locator('[role="tabpanel"]');
-  const select = panel.getByLabel('セッション表示');
-  await expect(select).toHaveValue('sidebar');
-
-  // popup に切替: 左パネルが消え、ハンバーガー + popup が出る。
-  await select.selectOption('popup');
-  await expect.poll(() => page.evaluate(() => localStorage.getItem('ccserver-session-mode'))).toBe('popup');
-  await expect(leftSidebar(page)).toBeHidden();
-  const hamburger = page.getByRole('button', { name: 'セッション一覧メニュー' });
-  await expect(hamburger).toBeVisible();
-  await hamburger.click();
-  await expect(page.locator('.session-menu')).toBeVisible();
-  await page.keyboard.press('Escape');
-
-  // sidebar に戻す → リロード後も復元。
-  await select.selectOption('sidebar');
-  await expect(leftSidebar(page)).toBeVisible();
-  await page.reload();
-  await expect(openTerminalBtn(page)).toBeVisible();
-  await expect(leftSidebar(page)).toBeVisible();
-  expect(await page.evaluate(() => localStorage.getItem('ccserver-session-mode'))).toBe('sidebar');
 });
 
 test('session overlay is independent from widget overlay', async ({ page }) => {

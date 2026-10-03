@@ -114,7 +114,7 @@ function optionKey(id, key) {
 }
 
 function loadWidgetOption(id, key, choices, fallback) {
-  // 許可値検証つき読み取りは enumPref に一本化 (useSessionSidebarPrefs と共有)。
+  // 許可値検証つき読み取りは enumPref に一本化。
   return loadEnumPref(optionKey(id, key), choices, fallback);
 }
 

@@ -215,19 +215,10 @@ body {
   color: var(--bg-primary);
 }
 
-/* Session hamburger menu (left end of the tab bar): terminal tabs are
-   listed vertically here, while browser/settings tabs stay
-   in the horizontal .tab-list. Open/close follows the widget pattern
-   (.sidebar-add-menu / .usage-menu): absolute dropdown, outside-click and
-   Escape to close. Status is a left border line: running -> --success
+/* Session sidebar toggle (left end of the tab bar) and the session list
+   rows (SessionList.jsx, rendered inside .left-sidebar). Status is a left
+   border line: running -> --success
    (green), idle -> #fab387 (peach/orange), exited -> --text-muted. */
-.session-menu-wrap {
-  position: relative;
-  display: flex;
-  align-items: stretch;
-  flex-shrink: 0;
-}
-
 .session-menu-btn {
   align-self: center;
   margin: 0 4px 0 8px;
@@ -263,26 +254,6 @@ body {
   font-size: 11px;
   font-weight: 600;
   line-height: 1;
-}
-
-.session-menu {
-  position: absolute;
-  top: 100%;
-  left: 8px;
-  margin-top: 6px;
-  width: 320px;
-  max-width: calc(100vw - 24px);
-  max-height: 60vh;
-  overflow-y: auto;
-  background: var(--bg-secondary);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
-  padding: 8px;
-  z-index: 50;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
 }
 
 .session-menu-section-label {
@@ -431,8 +402,8 @@ body {
   50% { opacity: 0.5; }
 }
 
-/* Session right-click menu: fixed-position small menu shared by the popup
-   and sidebar lists. Same look as .sidebar-add-menu.
+/* Session right-click menu: fixed-position small menu for the sidebar
+   list. Same look as .sidebar-add-menu.
    Widget right-click menu (.widget-context-menu) shares frame and item rules. */
 .session-context-menu,
 .widget-context-menu {

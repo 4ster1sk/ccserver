@@ -6,11 +6,8 @@ const claudeIcon = <svg className="tab-icon" viewBox="0 0 16 16" fill="none" str
 const chatIcon = <svg className="tab-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"><path d="M2.5 4A1.5 1.5 0 014 2.5h8A1.5 1.5 0 0113.5 4v5A1.5 1.5 0 0112 10.5H7l-3 2.5v-2.5A1.5 1.5 0 012.5 9z"/></svg>;
 const codexIcon = <svg className="tab-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"><path d="M3 4.5 8 2l5 2.5v7L8 14l-5-2.5z"/><path d="m3 4.5 5 2.7 5-2.7M8 7.2V14"/></svg>;
 
-// Session hamburger menu (SessionTabMenu.jsx / App.jsx's sidebar-mode toggle):
-// a terminal-prompt glyph ([>_]-ish), same "rect frame + chevron" family as
-// shellIcon above, so the two open/close buttons that share
-// one job (toggle the session list) also share one icon instead of each
-// hardcoding its own "☰" string.
+// Session sidebar toggle (App.jsx): a terminal-prompt glyph ([>_]-ish),
+// same "rect frame + chevron" family as shellIcon above.
 export const sessionMenuIcon = <svg className="tab-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"><rect x="1.5" y="2.5" width="13" height="11" rx="1.5"/><path d="M4 6.3l2.4 1.7-2.4 1.7"/><path d="M9 9.7h2.5"/></svg>;
 
 export default function TabIcon({ type, app, shell, ui }) {
