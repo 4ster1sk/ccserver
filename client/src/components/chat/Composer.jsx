@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { DEFAULT_VARIANT, findModel, modelVariants } from './useOpencodeChat.js';
+import { ACCEPT, addAttachments, formatBytes } from './attachments.js';
 
 const DRAFT_PREFIX = 'ccserver-chat-draft:';
 const MAX_HEIGHT_PX = 220;
@@ -19,8 +20,9 @@ function modelKey(ref) {
   return ref ? `${ref.providerID}/${ref.id}` : '';
 }
 
-// The input area: a growing textarea, send / stop, `/command` completion
-// and the agent / model / effort pickers. Enter sends on a desktop keyboard
+// The input area: a growing textarea, send / stop, `/command` completion,
+// attachments (the 📎 button, pasting, dropping files) and the agent /
+// model / effort pickers. Enter sends on a desktop keyboard
 // (Shift+Enter for a newline); on touch devices Enter is a newline and the
 // button sends, since a soft keyboard has no Shift+Enter.
 export default function Composer({ draftKey, disabled, busy, onSend, onCommand, onInterrupt, commands, agents, models, agent, model, onAgent, onModel, onEffort }) {
@@ -29,8 +31,26 @@ export default function Composer({ draftKey, disabled, busy, onSend, onCommand, 
     try { return sessionStorage.getItem(DRAFT_PREFIX + draftKey) || ''; } catch { return ''; }
   });
   const [cmdIndex, setCmdIndex] = useState(0);
+  // Not kept with the draft: sessionStorage is far too small for them.
+  const [attachments, setAttachments] = useState([]);
+  const [attachError, setAttachError] = useState(null);
+  const [dragging, setDragging] = useState(false);
   const ref = useRef(null);
   const listRef = useRef(null);
+  const fileRef = useRef(null);
+  const attachmentsRef = useRef(attachments);
+  attachmentsRef.current = attachments;
+
+  const attach = async (files) => {
+    if (!files || files.length === 0) return;
+    const { list, errors } = await addAttachments(attachmentsRef.current, [...files]);
+    setAttachments(list);
+    setAttachError(errors.length ? errors.join('\n') : null);
+  };
+  const removeAttachment = (id) => {
+    setAttachments((prev) => prev.filter((a) => a.id !== id));
+    setAttachError(null);
+  };
 
   useEffect(() => {
     try {
@@ -57,13 +77,42 @@ export default function Composer({ draftKey, disabled, busy, onSend, onCommand, 
     listRef.current?.querySelector('li.active')?.scrollIntoView({ block: 'nearest' });
   }, [cmdIndex, suggestions.length]);
 
+  const canSend = !disabled && (text.trim() !== '' || attachments.length > 0);
+
   const submit = () => {
     const value = text.trim();
-    if (!value || disabled) return;
-    const cmd = /^\/(\S+)(?:\s+([\s\S]*))?$/.exec(value);
+    if (!canSend) return;
+    // A command takes no files: with attachments it is sent as a prompt.
+    const cmd = attachments.length === 0 && /^\/(\S+)(?:\s+([\s\S]*))?$/.exec(value);
     if (cmd && commands.some((c) => c.name === cmd[1])) onCommand(cmd[1], cmd[2] || '');
-    else onSend(value);
+    else onSend(value, attachments);
     setText('');
+    setAttachments([]);
+    setAttachError(null);
+  };
+
+  const onPaste = (e) => {
+    const files = e.clipboardData?.files;
+    if (files && files.length > 0) {
+      e.preventDefault();
+      attach(files);
+    }
+  };
+
+  const hasFiles = (e) => [...(e.dataTransfer?.types || [])].includes('Files');
+  const onDragOver = (e) => {
+    if (disabled || !hasFiles(e)) return;
+    e.preventDefault();
+    setDragging(true);
+  };
+  const onDragLeave = (e) => {
+    if (!e.currentTarget.contains(e.relatedTarget)) setDragging(false);
+  };
+  const onDrop = (e) => {
+    if (!hasFiles(e)) return;
+    e.preventDefault();
+    setDragging(false);
+    if (!disabled) attach(e.dataTransfer.files);
   };
 
   const onKeyDown = (e) => {
@@ -93,7 +142,7 @@ export default function Composer({ draftKey, disabled, busy, onSend, onCommand, 
   const effort = model?.variant && variants.includes(model.variant) ? model.variant : DEFAULT_VARIANT;
 
   return (
-    <div className="chat-composer">
+    <div className={`chat-composer${dragging ? ' dragging' : ''}`} onDragOver={onDragOver} onDragLeave={onDragLeave} onDrop={onDrop}>
       {suggestions.length > 0 && (
         <ul ref={listRef} className="chat-cmd-list" role="listbox">
           {suggestions.map((c, i) => (
@@ -106,7 +155,31 @@ export default function Composer({ draftKey, disabled, busy, onSend, onCommand, 
           ))}
         </ul>
       )}
+      {attachments.length > 0 && (
+        <ul className="chat-attachments" aria-label="添付ファイル">
+          {attachments.map((a) => (
+            <li key={a.id} className="chat-attachment">
+              {a.kind === 'image'
+                ? <img src={a.dataUrl} alt="" className="chat-attachment-thumb" />
+                : <span className="chat-attachment-icon" aria-hidden="true">{a.kind === 'pdf' ? 'PDF' : 'TXT'}</span>}
+              <span className="chat-attachment-name" title={a.name}>{a.name}</span>
+              <span className="chat-attachment-size">{formatBytes(a.size)}</span>
+              <button type="button" className="chat-attachment-remove" onClick={() => removeAttachment(a.id)} aria-label={`${a.name} を外す`}>×</button>
+            </li>
+          ))}
+        </ul>
+      )}
+      {attachError && <div className="chat-attach-error" role="alert">{attachError}</div>}
       <div className="chat-composer-row">
+        <input
+          ref={fileRef}
+          type="file"
+          multiple
+          accept={ACCEPT}
+          hidden
+          onChange={(e) => { attach(e.target.files); e.target.value = ''; }}
+        />
+        <button type="button" className="btn chat-attach-btn" onClick={() => fileRef.current?.click()} disabled={disabled} title="ファイルを添付" aria-label="ファイルを添付">📎</button>
         <textarea
           ref={ref}
           className="chat-input"
@@ -115,13 +188,14 @@ export default function Composer({ draftKey, disabled, busy, onSend, onCommand, 
           placeholder={disabled ? '準備中…' : (isTouch ? 'メッセージを入力' : 'メッセージを入力（Enter で送信 / Shift+Enter で改行 / / でコマンド）')}
           onChange={(e) => { setText(e.target.value); setCmdIndex(0); }}
           onKeyDown={onKeyDown}
+          onPaste={onPaste}
           disabled={disabled}
           aria-label="メッセージ"
         />
         {busy && (
           <button type="button" className="btn chat-stop-btn" onClick={onInterrupt} title="停止 (Esc)" aria-label="停止">■</button>
         )}
-        <button type="button" className="btn btn-primary chat-send-btn" onClick={submit} disabled={disabled || !text.trim()} aria-label="送信">
+        <button type="button" className="btn btn-primary chat-send-btn" onClick={submit} disabled={!canSend} aria-label="送信">
           {busy ? 'キュー' : '送信'}
         </button>
       </div>

@@ -1,6 +1,7 @@
 import { memo, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import Markdown from './Markdown.jsx';
 import ToolCard from './ToolCard.jsx';
+import { displayFiles, isImageMime } from './attachments.js';
 
 function Reasoning({ part }) {
   const [open, setOpen] = useState(false);
@@ -31,10 +32,38 @@ const AssistantMessage = memo(function AssistantMessage({ message, streaming }) 
   );
 });
 
-function UserBubble({ text, pending, failed, onDismiss }) {
+// A prompt's attachments: images as thumbnails (tap to enlarge), the rest
+// as name chips.
+function UserFiles({ files }) {
+  const [open, setOpen] = useState(null);
+  const items = displayFiles(files);
+  if (items.length === 0) return null;
+  return (
+    <div className="chat-user-files">
+      {items.map((f) => (isImageMime(f.mime) && f.src ? (
+        <button key={f.key} type="button" className="chat-user-image" onClick={() => setOpen(f)} title={f.name || '画像'}>
+          <img src={f.src} alt={f.name || '添付画像'} />
+        </button>
+      ) : (
+        <span key={f.key} className="chat-user-file" title={f.name || f.mime}>
+          <span className="chat-attachment-icon" aria-hidden="true">{f.mime === 'application/pdf' ? 'PDF' : 'TXT'}</span>
+          {f.name || f.mime}
+        </span>
+      )))}
+      {open && (
+        <div className="chat-image-overlay" role="dialog" aria-label={open.name || '添付画像'} onClick={() => setOpen(null)}>
+          <img src={open.src} alt={open.name || '添付画像'} />
+        </div>
+      )}
+    </div>
+  );
+}
+
+function UserBubble({ text, files, pending, failed, onDismiss }) {
   return (
     <div className={`chat-msg user${pending ? ' pending' : ''}${failed ? ' failed' : ''}`}>
-      <div className="chat-bubble">{text}</div>
+      <UserFiles files={files} />
+      {text && <div className="chat-bubble">{text}</div>}
       {failed && (
         <div className="chat-msg-error">
           送信できませんでした: {failed}
@@ -52,7 +81,7 @@ function NoteMessage({ text }) {
 function renderMessage(m, streamingId) {
   switch (m.type) {
     case 'user':
-      return <UserBubble key={m.id} text={m.text} />;
+      return <UserBubble key={m.id} text={m.text} files={m.files} />;
     case 'assistant':
       return <AssistantMessage key={m.id} message={m} streaming={m.id === streamingId} />;
     case 'shell':
@@ -132,7 +161,7 @@ export default function MessageList({ messages, pending, busy, onDismissPending,
         )}
         {messages.map((m) => renderMessage(m, streamingId))}
         {pending.map((p) => (
-          <UserBubble key={p.localId} text={p.text} pending failed={p.failed} onDismiss={() => onDismissPending(p.localId)} />
+          <UserBubble key={p.localId} text={p.text} files={p.files} pending failed={p.failed} onDismiss={() => onDismissPending(p.localId)} />
         ))}
         {busy && !streamingId && <div className="chat-thinking"><span className="chat-spinner small" /> 考え中…</div>}
         {footer}

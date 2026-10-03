@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { ocRequest, subscribeChatEvents } from './chatApi.js';
 import { applyMessageEvent, lastAssistantRunning, sortMessages, upsertMessage } from './chatReducer.js';
+import { promptFiles } from './attachments.js';
 
 const HISTORY_LIMIT = 200;
 
@@ -27,7 +28,7 @@ const CATALOG_RETRIES = 5;
 // appears.
 export function useOpencodeChat({ sessionId, ocSessionId, enabled }) {
   const [messages, setMessages] = useState([]);
-  const [pending, setPending] = useState([]); // optimistic user prompts: { localId, inboxId, text, time, failed }
+  const [pending, setPending] = useState([]); // optimistic user prompts: { localId, inboxId, text, files, time, failed }
   const [busy, setBusy] = useState(false);
   const [permissions, setPermissions] = useState([]);
   const [forms, setForms] = useState([]);
@@ -183,14 +184,19 @@ export function useOpencodeChat({ sessionId, ocSessionId, enabled }) {
     return () => ac.abort();
   }, [enabled, sid, ses, ocSessionId, reload, loadCatalogs]);
 
-  const send = useCallback(async (text) => {
-    if (!sid || !ses || !text.trim()) return;
+  // attachments: Composer's list (attachments.js), sent inline.
+  const send = useCallback(async (text, attachments = []) => {
+    if (!sid || !ses || (!text.trim() && attachments.length === 0)) return;
     const localId = `local-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-    setPending((prev) => [...prev, { localId, inboxId: null, text, time: { created: Date.now() } }]);
+    setPending((prev) => [...prev, { localId, inboxId: null, text, files: attachments, time: { created: Date.now() } }]);
     try {
       // Sent while a turn runs: queue it behind the turn, like typing into
       // a busy TUI, rather than steering the running one.
-      const res = await ocRequest(sid, 'POST', `session/${ses}/prompt`, { text, ...(busyRef.current ? { delivery: 'queue' } : {}) });
+      const res = await ocRequest(sid, 'POST', `session/${ses}/prompt`, {
+        text,
+        ...(attachments.length ? { files: promptFiles(attachments) } : {}),
+        ...(busyRef.current ? { delivery: 'queue' } : {}),
+      });
       const inboxId = res?.data?.id || null;
       setPending((prev) => prev.map((p) => (p.localId === localId ? { ...p, inboxId } : p)));
     } catch (err) {

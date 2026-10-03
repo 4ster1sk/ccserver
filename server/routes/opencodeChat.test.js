@@ -291,6 +291,14 @@ test('claude chat: the bundled bridge serves the conversation through the same p
   assert.deepEqual(first.map((m) => m.type), ['user', 'assistant']);
   assert.equal(first[1].content[0].text, 'echo: hello claude');
 
+  // Attachments ride inline in the prompt body: a few MB pass the proxy and
+  // come back on the user message.
+  const image = Buffer.alloc(3 * 1024 * 1024, 7).toString('base64');
+  assert.equal((await post('prompt', { text: 'see', files: [{ uri: `data:image/png;base64,${image}`, name: 'big.png' }] })).status, 200);
+  const withFile = await messagesWhen((d) => d.some((m) => m.type === 'assistant' && m.content?.[0]?.text === 'echo: [image,text] see'));
+  const sent = withFile.find((m) => m.type === 'user' && m.text === 'see');
+  assert.deepEqual(sent.files.map((f) => [f.name, f.mime, f.data.length]), [['big.png', 'image/png', image.length]]);
+
   // A permission is "waiting" for the session list, like opencode's.
   assert.equal((await post('prompt', { text: 'tool' })).status, 200);
   await waitFor(() => session.chat.waiting === 1);
