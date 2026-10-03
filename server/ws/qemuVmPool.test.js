@@ -5,7 +5,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { QemuVmPool, guestSharePath, poolKey, GUEST_SHARE_ROOT } from './qemuVmPool.js';
@@ -128,6 +128,33 @@ test('pool: the agent install is shared read-only and bound ro at its fixed path
   f.cleanup();
 });
 
+test('pool: a chat session gets its bridge files ro at the rt dir, a socket dir outside bwrap and an ssh -L to the host', async () => {
+  const f = fakeBooter();
+  const pool = new QemuVmPool({ bootVm: f.bootVm, idleStopMs: 60000, log: () => {} });
+  const chat = { filesHostDir: '/run/ccs-chat-1/vm', hostSock: '/run/ccs-chat-1/oc.sock' };
+  const a = await pool.attach({ key: 'k', spec: {}, session: session('/p/a', { chat }) });
+  const plan = JSON.parse(readFileSync(a.planPath, 'utf-8'));
+  const share = pool.list()[0].shares.find((s) => s.hostPath === chat.filesHostDir);
+  assert.equal(share.readonly, true);
+  const args = plan.remote.bwrapArgs;
+  const binds = (flag) => args.flatMap((x, i) => (x === flag ? [[args[i + 1], args[i + 2]]] : []));
+  assert.ok(binds('--ro-bind').some(([src, dst]) => src === share.guestPath && dst === '/ccserver-sandbox'));
+  const [sockDir] = plan.remote.preDirs;
+  assert.match(sockDir, /^\/tmp\/ccs-chat\/[0-9a-f-]{36}$/);
+  assert.ok(binds('--bind').some(([src, dst]) => src === sockDir && dst === '/tmp/ccserver-chat'));
+  assert.ok(args.indexOf(sockDir) > args.indexOf('/tmp'), 'bound after the /tmp tmpfs');
+  assert.deepEqual(plan.ssh.args.slice(0, 2), ['-L', `${chat.hostSock}:${sockDir}/oc.sock`]);
+  assert.deepEqual(plan.ssh.args.slice(-2), ['-tt', 'u@ccs-vm'], "the VM's own login args follow");
+  const b = await pool.attach({ key: 'k', spec: {}, session: session('/p/b') });
+  const planB = JSON.parse(readFileSync(b.planPath, 'utf-8'));
+  assert.deepEqual(planB.ssh.args, ['-tt', 'u@ccs-vm'], 'a non-chat session has no forward');
+  assert.deepEqual(planB.remote.preDirs, []);
+  await a.release();
+  await b.release();
+  await pool.stopAll();
+  f.cleanup();
+});
+
 test('pool: an idle VM stops after the timeout unless a session comes back', async () => {
   const f = fakeBooter();
   const pool = new QemuVmPool({ bootVm: f.bootVm, idleStopMs: 40, log: () => {} });
@@ -183,6 +210,19 @@ test('buildConfinedRemoteCommand: bwrap wraps the usual cd/env/exec, quoting sur
   assert.deepEqual(out.slice(out.indexOf('--bind'), out.indexOf('--bind') + 3), ['--bind', '/ccs/s/abc', cwd]);
   assert.deepEqual(out.slice(-4, -1), ['--', '/bin/sh', '-c']);
   assert.equal(out.at(-1), remote.buildRemoteCommand({ cwd, argv: ['claude', '--x'], env: { A: 'b c' } }));
+});
+
+test('buildConfinedRemoteCommand: preDirs are created private to the guest user before bwrap', () => {
+  const root = mkdtempSync(join(tmpdir(), 'qemu-predirs-'));
+  try {
+    const d = join(root, 'ccs chat', 'tok');
+    const cmd = remote.buildConfinedRemoteCommand({ bwrapArgs: ['--x'], cwd: '/p', argv: ['a'], preDirs: [d] });
+    assert.ok(cmd.startsWith('umask 077 && mkdir -p '));
+    execFileSync('/bin/sh', ['-c', cmd.replace('exec bwrap ', 'true ')]);
+    assert.equal(statSync(d).mode & 0o777, 0o700);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test('pool: the idle time is read when a VM goes idle, and a change re-arms idle VMs from when they went idle', async () => {

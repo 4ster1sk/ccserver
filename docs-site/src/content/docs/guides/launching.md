@@ -42,7 +42,6 @@ opencode 2.0 以降がサーバーに入っていると、起動モーダルの�
 制限:
 
 - opencode 1.x では選べません (チャット表示が使う `opencode serve` の v2 API が無いため)。
-- 永続 VM (persistent テンプレート) ではまだ使えません。ターミナル表示で起動するか、persistent でないテンプレートを選んでください。
 - Auto-Y (自動承認) はチャット表示にはありません。
 
 ## OpenAI Codex について

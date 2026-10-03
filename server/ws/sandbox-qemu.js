@@ -528,8 +528,8 @@ export const GUEST_RT_DIR = '/ccserver-sandbox';
 // which the session's ssh forwards to a host socket (-L, see
 // buildGuestSshArgs). The socket dir is the guest user's own: the bridge
 // creates it, sshd (as that user) connects to it.
-const GUEST_CHAT_BRIDGE_NAME = 'chat-bridge.cjs';
-const GUEST_CHAT_PASSWORD_NAME = 'chat-password';
+export const GUEST_CHAT_BRIDGE_NAME = 'chat-bridge.cjs';
+export const GUEST_CHAT_PASSWORD_NAME = 'chat-password';
 export const GUEST_CHAT_BRIDGE = `${GUEST_RT_DIR}/${GUEST_CHAT_BRIDGE_NAME}`;
 export const GUEST_CHAT_PASSWORD = `${GUEST_RT_DIR}/${GUEST_CHAT_PASSWORD_NAME}`;
 export const GUEST_CHAT_SOCK = '/tmp/ccserver-chat/oc.sock';
@@ -941,8 +941,7 @@ export const DEFAULT_HOTPLUG_SLOTS = 8;
 export function buildGuestSshArgs({ keyPath, knownHosts, network, user, tty, forwards = [] }) {
   return [
     ...(tty ? ['-tt'] : ['-T']), '-q',
-    ...forwards.flatMap(([host, guest]) => ['-L', `${host}:${guest}`]),
-    ...(forwards.length ? ['-o', 'StreamLocalBindUnlink=yes', '-o', 'StreamLocalBindMask=0177', '-o', 'ExitOnForwardFailure=yes'] : []),
+    ...sshForwardArgs(forwards),
     '-i', keyPath,
     '-o', `ProxyCommand=${shellQuote(network.pipeBin)} pipe ${shellQuote(network.guestSshSock)}`,
     '-o', 'IdentitiesOnly=yes',
@@ -958,6 +957,16 @@ export function buildGuestSshArgs({ keyPath, knownHosts, network, user, tty, for
     ...(tty ? [] : ['-o', 'BatchMode=yes']),
     '-F', '/dev/null',
     `${user}@ccs-vm`,
+  ];
+}
+
+// The ssh options for unix-socket forwards (see buildGuestSshArgs). A
+// pooled session prepends them to the VM's login args (qemuVmPool.js).
+export function sshForwardArgs(forwards = []) {
+  if (!forwards.length) return [];
+  return [
+    ...forwards.flatMap(([host, guest]) => ['-L', `${host}:${guest}`]),
+    '-o', 'StreamLocalBindUnlink=yes', '-o', 'StreamLocalBindMask=0177', '-o', 'ExitOnForwardFailure=yes',
   ];
 }
 

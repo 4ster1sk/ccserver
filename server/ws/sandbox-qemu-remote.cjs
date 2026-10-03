@@ -59,7 +59,10 @@ function forwardedEnv(source) {
 //   agent:      { source, target } -- the hot-plugged read-only agent
 //               install (qemuAgents.js) and where it goes, or null. The
 //               target dir must already exist in the guest (/opt is ro).
-function buildGuestBwrapArgs({ cwd, cwdSource = cwd, home, homeSource = null, agent = null }) {
+//   extraBinds: [{ source, target, readonly }] bound after everything else
+//               (opencode chat mode's bridge files and relay socket dir).
+//               A target must be creatable: under /tmp or at the top level.
+function buildGuestBwrapArgs({ cwd, cwdSource = cwd, home, homeSource = null, agent = null, extraBinds = [] }) {
   return [
     '--die-with-parent',
     '--unshare-pid', '--unshare-ipc', '--unshare-uts', '--unshare-cgroup-try',
@@ -81,16 +84,20 @@ function buildGuestBwrapArgs({ cwd, cwdSource = cwd, home, homeSource = null, ag
     ...(homeSource ? ['--bind', homeSource, home] : ['--tmpfs', home]),
     // After HOME: the project usually lives under it.
     '--bind', cwdSource, cwd,
+    ...extraBinds.flatMap((b) => [b.readonly ? '--ro-bind' : '--bind', b.source, b.target]),
     '--setenv', 'HOME', home,
     '--chdir', cwd,
   ];
 }
 
 // The ssh remote command for a pooled session: bwrap, then inside it the
-// usual cd/env/exec of buildRemoteCommand.
-function buildConfinedRemoteCommand({ bwrapArgs, cwd, argv, env = {}, fallbackArgv = null }) {
+// usual cd/env/exec of buildRemoteCommand. preDirs: guest dirs created
+// (private to the guest user) before bwrap starts, for extraBinds sources
+// that live outside it.
+function buildConfinedRemoteCommand({ bwrapArgs, cwd, argv, env = {}, fallbackArgv = null, preDirs = [] }) {
   const inner = buildRemoteCommand({ cwd, argv, env, fallbackArgv });
-  return `exec bwrap ${bwrapArgs.map(shellQuote).join(' ')} -- /bin/sh -c ${shellQuote(inner)}`;
+  const pre = preDirs.length ? `umask 077 && mkdir -p ${preDirs.map(shellQuote).join(' ')} && ` : '';
+  return `${pre}exec bwrap ${bwrapArgs.map(shellQuote).join(' ')} -- /bin/sh -c ${shellQuote(inner)}`;
 }
 
 module.exports = { shellQuote, buildRemoteCommand, forwardedEnv, buildGuestBwrapArgs, buildConfinedRemoteCommand };

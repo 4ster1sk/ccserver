@@ -16,7 +16,7 @@
 // outer layer. See memory: sandbox-dind-recipe.
 //
 import { homedir } from 'node:os';
-import { chmodSync, closeSync, constants as fsConstants, existsSync, fchmodSync, fstatSync, ftruncateSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync, writeSync } from 'node:fs';
+import { chmodSync, closeSync, copyFileSync, constants as fsConstants, existsSync, fchmodSync, fstatSync, ftruncateSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync, writeSync } from 'node:fs';
 import { chmod as chmodP, readdir as readdirP, rm as rmP, stat as statP } from 'node:fs/promises';
 import { execFile, execFileSync } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -35,7 +35,7 @@ import { normalizeBrowseRoots, isContained, isCcserverScratchPath } from '../pat
 import { resolvePath, PATH_IDS } from '../paths.js';
 import { isRegularFile, readRegularFileText } from './regularFile.js';
 import { normalizeBridgeSettings } from './notifyBridgeSettings.js';
-import { qemuStatus, prepareQemuSession, buildGuestRuntime, currentGolden, LAUNCHER_SCRIPT as QEMU_LAUNCHER, QEMU_RESOURCE_LIMITS, GUEST_CHAT_BRIDGE, GUEST_CHAT_PASSWORD, GUEST_CHAT_SOCK } from './sandbox-qemu.js';
+import { qemuStatus, prepareQemuSession, buildGuestRuntime, currentGolden, LAUNCHER_SCRIPT as QEMU_LAUNCHER, QEMU_RESOURCE_LIMITS, GUEST_CHAT_BRIDGE, GUEST_CHAT_PASSWORD, GUEST_CHAT_SOCK, GUEST_CHAT_BRIDGE_NAME, GUEST_CHAT_PASSWORD_NAME } from './sandbox-qemu.js';
 import { qemuVmPool as defaultQemuVmPool, poolKey } from './qemuVmPool.js';
 import { startGoNetworkBroker, netbrokerBin } from './netbrokerClient.js';
 import { resolveVmTemplate } from '../vmTemplates.js';
@@ -2331,14 +2331,9 @@ async function buildQemuSpawn({ cwd, targetCommand, app, homeDir, netCfg, extraE
     console.warn(`[sandbox] qemu backend: ${join(homeDir, '.claude.json')}: ${what}`);
   }
   if (qemuCfg.persistent) {
-    // The relay socket would have to cross the guest-side bwrap of a shared
-    // VM; not wired up yet.
-    if (chat) {
-      throw new Error('チャットモードは永続 VM（persistent テンプレート）ではまだ使えません。ターミナルモードで起動するか、persistent でないテンプレートを選んでください。');
-    }
     return await buildPooledQemuSpawn({
       cwd, targetCommand, homeDir, netCfg, gpgVault, sshAgent,
-      gitBrokerEnabled, notifySocketPath, usageSocketPath, reviewerSocketPath, vmTemplate, qemuCfg, agentLaunch,
+      gitBrokerEnabled, notifySocketPath, usageSocketPath, reviewerSocketPath, vmTemplate, qemuCfg, agentLaunch, chat,
     }, deps);
   }
   const sshAgentSock = sshAgent && !gpgVault ? (extraEnv.SSH_AUTH_SOCK || discoverSshAuthSock()) : null;
@@ -2467,7 +2462,12 @@ async function buildQemuSpawn({ cwd, targetCommand, app, homeDir, netCfg, extraE
 // A session of a persistent VM (qemuVmPool.js). The VM's network broker is
 // started by the pool with this launch's policy, which is part of the pool
 // key: a launch only ever joins a VM booted with exactly its own policy.
-async function buildPooledQemuSpawn({ cwd, targetCommand, homeDir, netCfg, gpgVault, sshAgent, gitBrokerEnabled, notifySocketPath, usageSocketPath, reviewerSocketPath, vmTemplate, qemuCfg, agentLaunch }, deps = {}) {
+//
+// chat (opencode chat mode): the bridge and password go to the VM in a
+// read-only share of their own (chat.hostDir/vm, removed with the chat dir)
+// that the session's guest bwrap binds at GUEST_RT_DIR, where a per-session
+// VM has them; the pool forwards the relay socket (qemuVmPool.js attach).
+async function buildPooledQemuSpawn({ cwd, targetCommand, homeDir, netCfg, gpgVault, sshAgent, gitBrokerEnabled, notifySocketPath, usageSocketPath, reviewerSocketPath, vmTemplate, qemuCfg, agentLaunch, chat = null }, deps = {}) {
   const {
     startGoNetworkBroker: startGoNetworkBrokerFn = startGoNetworkBroker,
     qemuVmPool = defaultQemuVmPool,
@@ -2485,6 +2485,15 @@ async function buildPooledQemuSpawn({ cwd, targetCommand, homeDir, netCfg, gpgVa
   }
   const { key, configDigest, net, vm, opMode, lists, extraAllowedHosts } = pooledVmKey({ vmTemplate, qemuCfg, netCfg, agentNet: agentLaunch });
   const { agent, guestEnv } = agentLaunch;
+  let chatFilesDir = null;
+  if (chat) {
+    chatFilesDir = join(chat.hostDir, 'vm');
+    mkdirSync(chatFilesDir, { recursive: true, mode: 0o700 });
+    copyFileSync(CHAT_BRIDGE_SCRIPT, join(chatFilesDir, GUEST_CHAT_BRIDGE_NAME));
+    chmodSync(join(chatFilesDir, GUEST_CHAT_BRIDGE_NAME), 0o755);
+    copyFileSync(join(chat.hostDir, CHAT_PASSWORD_NAME), join(chatFilesDir, GUEST_CHAT_PASSWORD_NAME));
+    chmodSync(join(chatFilesDir, GUEST_CHAT_PASSWORD_NAME), 0o600);
+  }
   const lease = await qemuVmPool.attach({
     key,
     opMode,
@@ -2509,10 +2518,16 @@ async function buildPooledQemuSpawn({ cwd, targetCommand, homeDir, netCfg, gpgVa
       cwd,
       home: HOME,
       homeHostPath: homeDir,
-      argv: agentLaunch.argv,
+      argv: chat ? chatBridgeArgv({
+        node: '/usr/bin/node',
+        script: GUEST_CHAT_BRIDGE,
+        sock: GUEST_CHAT_SOCK,
+        passwordFile: GUEST_CHAT_PASSWORD,
+      }, agentLaunch.argv) : agentLaunch.argv,
       fallbackArgv: agent || APP_IDS.includes(targetCommand[0]) ? null : ['bash', '-l', '-i'],
       env: guestEnv,
       agent: agent ? { hostDir: agent.hostDir, guestDir: agent.guestDir } : null,
+      chat: chat ? { filesHostDir: chatFilesDir, hostSock: join(chat.hostDir, CHAT_SOCK_NAME) } : null,
     },
   });
   return {

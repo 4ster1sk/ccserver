@@ -490,17 +490,25 @@ test('qemu spawn: a chat launch runs the agent under the bridge and forwards its
   assert.equal(files['chat-password'].mode, 0o600);
 });
 
-test('qemu spawn: chat mode is refused in a persistent VM', { skip: process.platform !== 'linux' }, async () => {
-  const cfg = JSON.parse(readFileSync(process.env.CCSERVER_SANDBOX_CONFIG, 'utf-8'));
-  writeFileSync(process.env.CCSERVER_SANDBOX_CONFIG, JSON.stringify({ ...cfg, qemu: { persistent: true } }));
-  try {
-    const { deps } = fakes();
-    deps.resolveQemuAgent = () => null;
-    await assert.rejects(
-      launch(deps, { targetCommand: ['opencode', 'serve', '--stdio'], app: 'opencode', chat: { hostDir: dir } }),
-      /永続 VM/,
-    );
-  } finally {
-    writeFileSync(process.env.CCSERVER_SANDBOX_CONFIG, JSON.stringify(cfg));
-  }
-});
+test('qemu spawn, persistent: a chat launch runs the bridge from its own ro share and forwards its socket', { skip: process.platform !== 'linux' }, withConfig({ qemu: { persistent: true } }, async () => {
+  const { deps } = fakes();
+  const pool = fakePool();
+  deps.resolveQemuAgent = (app, targetCommand) => ({
+    hostDir: dir, relBin: 'opencode', guestDir: '/opt/ccserver-agents/opencode',
+    argv: ['/opt/ccserver-agents/opencode/opencode', ...targetCommand.slice(1)], env: {},
+  });
+  const chatDir = join(dir, 'chat-pooled');
+  mkdirSync(chatDir);
+  writeFileSync(join(chatDir, 'password'), 'pw\n', { mode: 0o600 });
+  await launch({ ...deps, ...pool }, { targetCommand: ['opencode', 'serve', '--stdio'], app: 'opencode', chat: { hostDir: chatDir } });
+  const { session } = pool.attaches[0];
+  assert.deepEqual(session.argv, [
+    '/usr/bin/node', '/ccserver-sandbox/chat-bridge.cjs',
+    '--sock', '/tmp/ccserver-chat/oc.sock', '--password-file', '/ccserver-sandbox/chat-password', '--',
+    '/opt/ccserver-agents/opencode/opencode', 'serve', '--stdio',
+  ]);
+  assert.deepEqual(session.chat, { filesHostDir: join(chatDir, 'vm'), hostSock: join(chatDir, 'oc.sock') });
+  assert.equal(readFileSync(join(chatDir, 'vm', 'chat-password'), 'utf-8'), 'pw\n');
+  assert.equal(statSync(join(chatDir, 'vm', 'chat-password')).mode & 0o777, 0o600);
+  assert.ok(existsSync(join(chatDir, 'vm', 'chat-bridge.cjs')));
+}));

@@ -40,7 +40,7 @@ import { spawn } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { closeSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { buildVirtiofsdArgs, prepareQemuPoolVm } from './sandbox-qemu.js';
+import { buildVirtiofsdArgs, prepareQemuPoolVm, sshForwardArgs, GUEST_RT_DIR, GUEST_CHAT_SOCK } from './sandbox-qemu.js';
 import { setGoBrokerLists, setGoBrokerMode, setGoBrokerOpMode } from './netbrokerClient.js';
 import { openHotplugShares } from './qemuShares.js';
 import { getPoolIdleStopMinutes } from '../vmTemplates.js';
@@ -48,6 +48,11 @@ import boot from './sandbox-qemu-boot.cjs';
 import remote from './sandbox-qemu-remote.cjs';
 
 export const GUEST_SHARE_ROOT = '/ccs/s';
+// opencode chat mode: each session's relay socket dir, outside its bwrap
+// (sshd forwards from there) and bound at the dir of GUEST_CHAT_SOCK inside.
+export const GUEST_CHAT_ROOT = '/tmp/ccs-chat';
+const GUEST_CHAT_SOCK_DIR = GUEST_CHAT_SOCK.slice(0, GUEST_CHAT_SOCK.lastIndexOf('/'));
+const GUEST_CHAT_SOCK_NAME = GUEST_CHAT_SOCK.slice(GUEST_CHAT_SOCK.lastIndexOf('/') + 1);
 
 // The Settings GUI's idle time (vmTemplates.js), read whenever a VM goes
 // idle so a change applies without a restart. CCSERVER_QEMU_POOL_IDLE_SEC
@@ -196,7 +201,11 @@ export class QemuVmPool {
   //
   //   session: { cwd, home, homeHostPath (null = tmpfs HOME), argv,
   //              fallbackArgv, env, agent ({ hostDir, guestDir }: the
-  //              agent install, shared read-only; null for none) }
+  //              agent install, shared read-only; null for none),
+  //              chat ({ filesHostDir, hostSock }: opencode chat mode -- the
+  //              dir holding the bridge and password, shared read-only at
+  //              GUEST_RT_DIR, and the host socket the session's ssh forwards
+  //              the bridge's relay socket to; null for none) }
   //   opMode:  the launch's operating mode ('enforce' | 'audit'); a VM in
   //            another one is switched to it first (see the file comment).
   //   lists:   the launch's { allowedHosts, deniedHosts } (without the inject
@@ -235,21 +244,30 @@ export class QemuVmPool {
         leases.push(lease);
         return lease.guestPath;
       };
-      const [cwdSource, homeSource, agentSource] = await Promise.all([
+      const [cwdSource, homeSource, agentSource, chatSource] = await Promise.all([
         share(session.cwd),
         session.homeHostPath ? share(session.homeHostPath) : null,
         session.agent ? share(session.agent.hostDir, true) : null,
+        session.chat ? share(session.chat.filesHostDir, true) : null,
       ]);
+      const chatSockDir = session.chat ? `${GUEST_CHAT_ROOT}/${token}` : null;
       const bwrapArgs = remote.buildGuestBwrapArgs({
         cwd: session.cwd, cwdSource, home: session.home, homeSource,
         agent: agentSource ? { source: agentSource, target: session.agent.guestDir } : null,
+        extraBinds: session.chat ? [
+          { source: chatSource, target: GUEST_RT_DIR, readonly: true },
+          { source: chatSockDir, target: GUEST_CHAT_SOCK_DIR },
+        ] : [],
       });
       planPath = join(rt.plan.runDir, 'sessions', `${token}.json`);
       writeFileSync(planPath, JSON.stringify({
         attach: true,
-        ssh: rt.plan.ssh,
+        ssh: session.chat
+          ? { ...rt.plan.ssh, args: [...sshForwardArgs([[session.chat.hostSock, `${chatSockDir}/${GUEST_CHAT_SOCK_NAME}`]]), ...rt.plan.ssh.args] }
+          : rt.plan.ssh,
         remote: {
           bwrapArgs,
+          preDirs: chatSockDir ? [chatSockDir] : [],
           cwd: session.cwd,
           argv: session.argv,
           fallbackArgv: session.fallbackArgv || null,

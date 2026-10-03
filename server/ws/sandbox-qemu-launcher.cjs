@@ -105,7 +105,7 @@ function attach() {
     fallbackArgv: plan.remote.fallbackArgv || null,
   };
   const remoteCmd = plan.remote.bwrapArgs
-    ? buildConfinedRemoteCommand({ bwrapArgs: plan.remote.bwrapArgs, ...cmd })
+    ? buildConfinedRemoteCommand({ bwrapArgs: plan.remote.bwrapArgs, preDirs: plan.remote.preDirs || [], ...cmd })
     : buildRemoteCommand(cmd);
   ssh = spawn(plan.ssh.bin, [...plan.ssh.args, remoteCmd], { stdio: 'inherit' });
   ssh.on('exit', (code, sig) => { stop(code ?? (sig ? 128 : 1)); });
