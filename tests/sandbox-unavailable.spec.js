@@ -45,7 +45,7 @@ test('sandbox choice is disabled and a remembered sandbox default is corrected',
 
   // The explanatory note names the cause (scoped to the modal: the same
   // message also shows in the browser header box).
-  await expect(page.locator('.resume-dialog .open-menu-note', { hasText: 'サンドボックス機能が利用できないため' })).toBeVisible();
+  await expect(page.locator('.resume-dialog .open-menu-note', { hasText: 'サンドボックス機能が利用できません。通常起動をご利用ください' })).toBeVisible();
 });
 
 test('toolbar quick-launch drops the lock icon when the sandbox is unavailable', async ({ page }) => {
@@ -73,7 +73,7 @@ test('browser header shows a warning box under the subtitle when the sandbox is 
   const banner = page.locator('.directory-warning-banner');
   await expect(banner).toBeVisible();
   await expect(banner).toHaveAttribute('role', 'alert');
-  await expect(banner).toContainText('サンドボックス起動・コンボ起動はできません');
+  await expect(banner).toContainText('このサーバーではサンドボックス機能が利用できません');
   await expect(banner).not.toHaveClass(/is-error/);
 });
 

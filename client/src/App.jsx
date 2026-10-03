@@ -40,10 +40,9 @@ export default function App() {
   ]);
   const [activeTabId, setActiveTabId] = useState('browser');
   const [lastDir, setLastDir] = useState(() => localStorage.getItem('ccserver-last-dir'));
-  const [resumePrompt, setResumePrompt] = useState(null);
   // Reuse dialog for a sandboxed launch when a previous persistent sandbox
   // exists for the project: { cwd, sandbox, sandboxOpts, app, model,
-  // permissionMode, resume, skipResumePrompt, reuseSandboxHome, inUse }.
+  // permissionMode, resume, reuseSandboxHome, inUse }.
   const [sandboxPrompt, setSandboxPrompt] = useState(null);
   // VM (qemu) launch while other VMs already run: a warning instead of the
   // reuse dialog. { cwd, ...launch opts, runningVms } (see proceedOpen).
@@ -163,20 +162,9 @@ export default function App() {
     if (!sandboxOpts?.vmShellId) setLastDir(dirPath);
   }, []);
 
-  // The post-sandbox-dialog open flow: claude's resume prompt (if a saved
-  // conversation exists), else a plain tab open. Carries the chosen
-  // reuseSandboxHome through so a resumed conversation keeps the same HOME.
-  const continueOpen = useCallback((dirPath, { sandbox = false, sandboxOpts = null, app = 'claude', model = null, resume = false, skipResumePrompt = false, reuseSandboxHome = true, ui = 'terminal' } = {}) => {
-    // Only claude sessions carry a resumable conversation id (opencode resumes
-    // the last session of the project itself via -c).
-    if (!skipResumePrompt && app === 'claude') {
-      const savedSessionId = localStorage.getItem(`ccserver-resume:claude:${dirPath}`);
-      if (savedSessionId) {
-        pendingOpenRef.current = dirPath;
-        setResumePrompt({ cwd: dirPath, sessionId: savedSessionId, sandbox, sandboxOpts, app, model, reuseSandboxHome });
-        return;
-      }
-    }
+  // The post-sandbox-dialog open flow: a plain tab open. Carries the chosen
+  // reuseSandboxHome through to the new tab.
+  const continueOpen = useCallback((dirPath, { sandbox = false, sandboxOpts = null, app = 'claude', model = null, resume = false, reuseSandboxHome = true, ui = 'terminal' } = {}) => {
     openTerminalTab(dirPath, { sandbox, sandboxOpts, app, model, resume, reuseSandboxHome, ui });
   }, [openTerminalTab]);
 
@@ -339,23 +327,6 @@ export default function App() {
     setDuplicateSessionPrompt(null);
     pendingOpenRef.current = null;
   }, []);
-
-  const handleResume = useCallback(() => {
-    if (resumePrompt) {
-      openTerminalTab(resumePrompt.cwd, { claudeSessionId: resumePrompt.sessionId, sandbox: resumePrompt.sandbox, sandboxOpts: resumePrompt.sandboxOpts, app: resumePrompt.app || 'claude', model: resumePrompt.model || null, reuseSandboxHome: resumePrompt.reuseSandboxHome !== false });
-      setResumePrompt(null);
-      pendingOpenRef.current = null;
-    }
-  }, [resumePrompt, openTerminalTab]);
-
-  const handleNewSession = useCallback(() => {
-    if (resumePrompt) {
-      localStorage.removeItem(`ccserver-resume:claude:${resumePrompt.cwd}`);
-      openTerminalTab(resumePrompt.cwd, { sandbox: resumePrompt.sandbox, sandboxOpts: resumePrompt.sandboxOpts, app: resumePrompt.app || 'claude', model: resumePrompt.model || null, reuseSandboxHome: resumePrompt.reuseSandboxHome !== false });
-      setResumePrompt(null);
-      pendingOpenRef.current = null;
-    }
-  }, [resumePrompt, openTerminalTab]);
 
   const doCloseTab = useCallback((tabId) => {
     setTabs((prev) => {
@@ -1001,22 +972,6 @@ export default function App() {
               </button>
               <button className="btn btn-secondary" onClick={cancelVmRunningPrompt}>
                 キャンセル
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-      {resumePrompt && (
-        <div className="resume-overlay" onClick={handleNewSession}>
-          <div className="resume-dialog" onClick={(e) => e.stopPropagation()}>
-            <h3>Resume previous session?</h3>
-            <p className="resume-session-id">{resumePrompt.sessionId}</p>
-            <div className="resume-actions">
-              <button className="btn btn-primary" onClick={handleResume}>
-                Resume
-              </button>
-              <button className="btn btn-secondary" onClick={handleNewSession}>
-                New Session
               </button>
             </div>
           </div>

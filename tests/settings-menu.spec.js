@@ -1,7 +1,7 @@
 import { test, expect } from '@playwright/test';
 
 // Settings 左メニュー: 7項目の表示と切り替えを検証する。
-// サンドボックス/ネットワーク隔離/通知/ペアリング/パスキー/GPG連携の実データには
+// サンドボックス/ネットワーク隔離/通知/パスキー/GPG連携の実データには
 // 依存しない (見出しと空表示のいずれかが現れればよい) ため、bwrap 等の環境条件は不要。
 test.describe('Settings left menu', () => {
   test('menus switch sections', async ({ page }) => {
@@ -16,7 +16,7 @@ test.describe('Settings left menu', () => {
     // 左メニューの7項目がタブとして表示される (一般が先頭)。
     const sidebar = settings.locator('.settings-sidebar');
     const tabs = sidebar.getByRole('tab');
-    await expect(tabs).toHaveText(['一般', '作成済みサンドボックス', 'QEMU VM', 'ネットワーク隔離', '通知', 'ペアリング済みインスタンス', 'パスキー', 'GPG連携']);
+    await expect(tabs).toHaveText(['一般', '作成済みサンドボックス', 'QEMU VM', 'ネットワーク隔離', '通知', 'パスキー', 'GPG連携']);
     const panel = settings.locator('[role="tabpanel"]');
     await expect(panel).toBeVisible();
 
@@ -38,11 +38,6 @@ test.describe('Settings left menu', () => {
     await sidebar.getByRole('tab', { name: '通知' }).click();
     await expect(sidebar.getByRole('tab', { name: '通知' })).toHaveAttribute('aria-selected', 'true');
     await expect(panel).toContainText('エージェント通知の転送');
-
-    // ペアリングに切り替え。
-    await sidebar.getByRole('tab', { name: 'ペアリング済みインスタンス' }).click();
-    await expect(sidebar.getByRole('tab', { name: 'ペアリング済みインスタンス' })).toHaveAttribute('aria-selected', 'true');
-    await expect(panel).toContainText('ペアリング済みインスタンス');
 
     // パスキーに切り替え (Issue #141 Step4)。
     await sidebar.getByRole('tab', { name: 'パスキー' }).click();
