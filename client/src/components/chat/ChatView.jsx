@@ -142,6 +142,7 @@ export default function ChatView({ cwd, sandbox, sandboxOpts, reuseSandboxHome =
             model={chat.info?.model}
             onAgent={guard(chat.switchAgent)}
             onModel={guard(chat.switchModel)}
+            onEffort={guard(chat.switchEffort)}
           />
         </div>
       )}

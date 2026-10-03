@@ -1,10 +1,18 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { DEFAULT_VARIANT, findModel, modelVariants } from './useOpencodeChat.js';
 
 const DRAFT_PREFIX = 'ccserver-chat-draft:';
 const MAX_HEIGHT_PX = 220;
 
+// A session's model ref names the catalog entry by its id (opencode's ACP
+// switch does the same); modelID is the provider's own name for it.
 function modelRef(m) {
-  return { id: m.modelID || m.id, providerID: m.providerID };
+  return { id: m.id || m.modelID, providerID: m.providerID };
+}
+
+// "high" -> "High", "extra_high" -> "Extra High" (opencode's ACP labels).
+function variantLabel(variant) {
+  return variant.split(/[_-]/).map((p) => (p ? p.charAt(0).toUpperCase() + p.slice(1) : p)).join(' ');
 }
 
 function modelKey(ref) {
@@ -12,10 +20,10 @@ function modelKey(ref) {
 }
 
 // The input area: a growing textarea, send / stop, `/command` completion
-// and the agent / model pickers. Enter sends on a desktop keyboard
+// and the agent / model / effort pickers. Enter sends on a desktop keyboard
 // (Shift+Enter for a newline); on touch devices Enter is a newline and the
 // button sends, since a soft keyboard has no Shift+Enter.
-export default function Composer({ draftKey, disabled, busy, onSend, onCommand, onInterrupt, commands, agents, models, agent, model, onAgent, onModel }) {
+export default function Composer({ draftKey, disabled, busy, onSend, onCommand, onInterrupt, commands, agents, models, agent, model, onAgent, onModel, onEffort }) {
   const isTouch = useMemo(() => 'ontouchstart' in window, []);
   const [text, setText] = useState(() => {
     try { return sessionStorage.getItem(DRAFT_PREFIX + draftKey) || ''; } catch { return ''; }
@@ -74,6 +82,9 @@ export default function Composer({ draftKey, disabled, busy, onSend, onCommand, 
   if (currentModelKey && !modelOptions.some((o) => o.key === currentModelKey)) {
     modelOptions.unshift({ key: currentModelKey, label: currentModelKey, ref: model });
   }
+  // Effort: the current model's variants, plus opencode's default.
+  const variants = modelVariants(findModel(models, model));
+  const effort = model?.variant && variants.includes(model.variant) ? model.variant : DEFAULT_VARIANT;
 
   return (
     <div className="chat-composer">
@@ -125,6 +136,12 @@ export default function Composer({ draftKey, disabled, busy, onSend, onCommand, 
           >
             {!currentModelKey && <option value="">既定のモデル</option>}
             {modelOptions.map((o) => <option key={o.key} value={o.key}>{o.label}</option>)}
+          </select>
+        )}
+        {variants.length > 0 && (
+          <select className="chat-select" value={effort} onChange={(e) => onEffort(e.target.value)} disabled={disabled} aria-label="effort">
+            <option value={DEFAULT_VARIANT}>既定の effort</option>
+            {variants.filter((v) => v !== DEFAULT_VARIANT).map((v) => <option key={v} value={v}>{variantLabel(v)}</option>)}
           </select>
         )}
         {busy && <span className="chat-busy-hint">実行中 — 送信するとキューに入ります</span>}

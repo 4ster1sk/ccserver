@@ -4,6 +4,21 @@ import { applyMessageEvent, lastAssistantRunning, sortMessages, upsertMessage } 
 
 const HISTORY_LIMIT = 200;
 
+// opencode's "use the model's default effort" variant.
+export const DEFAULT_VARIANT = 'default';
+
+// The catalog entry (GET model) of a session's model ref.
+export function findModel(models, ref) {
+  if (!ref) return null;
+  return models.find((m) => m.providerID === ref.providerID && (m.id === ref.id || m.modelID === ref.id)) || null;
+}
+
+// The effort levels a catalog model offers (its variant ids).
+export function modelVariants(model) {
+  return Array.isArray(model?.variants) ? model.variants.map((v) => v.id).filter((id) => typeof id === 'string' && id) : [];
+}
+const CATALOG_RETRIES = 5;
+
 // The conversation of one opencode session: history from the REST API,
 // then live updates from the event stream (applied by chatReducer). The
 // list is re-read from the server whenever it can safely be -- on every
@@ -25,6 +40,10 @@ export function useOpencodeChat({ sessionId, ocSessionId, enabled }) {
   const [error, setError] = useState(null);
   const busyRef = useRef(false);
   busyRef.current = busy;
+  const infoRef = useRef(null);
+  infoRef.current = info;
+  const modelsRef = useRef([]);
+  modelsRef.current = models;
 
   const sid = sessionId;
   const ses = ocSessionId ? encodeURIComponent(ocSessionId) : null;
@@ -52,22 +71,51 @@ export function useOpencodeChat({ sessionId, ocSessionId, enabled }) {
     }
   }, [sid, ses]);
 
-  // Catalogs for the composer (model / agent pickers, slash commands).
-  useEffect(() => {
-    if (!enabled || !sid) return;
-    let cancelled = false;
-    Promise.all([
-      ocRequest(sid, 'GET', 'model').catch(() => null),
-      ocRequest(sid, 'GET', 'agent').catch(() => null),
-      ocRequest(sid, 'GET', 'command').catch(() => null),
-    ]).then(([m, a, c]) => {
-      if (cancelled) return;
-      if (Array.isArray(m?.data)) setModels(m.data);
-      if (Array.isArray(a?.data)) setAgents(a.data.filter((x) => !x.hidden && x.mode !== 'subagent'));
-      if (Array.isArray(c?.data)) setCommands(c.data);
+  // Catalogs for the composer (model / agent / effort pickers, slash
+  // commands). Fetched once the chat is ready, but serve may still be
+  // settling then (the launching browser asks the moment it flips ready), so
+  // whatever did not come back -- a failed request, or no models / agents
+  // yet -- is asked again with a backoff and on every stream (re)connect.
+  // Kept in a ref so a reload never refetches what is already there.
+  const catalogsRef = useRef({ sid: null, model: false, agent: false, command: false });
+  const loadCatalogs = useCallback(async () => {
+    if (!sid) return true;
+    const have = catalogsRef.current;
+    if (have.sid !== sid) catalogsRef.current = { sid, model: false, agent: false, command: false };
+    const want = ['model', 'agent', 'command'].filter((k) => !catalogsRef.current[k]);
+    if (want.length === 0) return true;
+    const results = await Promise.all(want.map((k) => ocRequest(sid, 'GET', k).catch(() => null)));
+    if (catalogsRef.current.sid !== sid) return true;
+    want.forEach((k, i) => {
+      const data = results[i]?.data;
+      if (!Array.isArray(data)) return;
+      if (k === 'model') {
+        if (data.length === 0) return;
+        setModels(data);
+      } else if (k === 'agent') {
+        const visible = data.filter((x) => !x.hidden && x.mode !== 'subagent');
+        if (visible.length === 0) return;
+        setAgents(visible);
+      } else {
+        setCommands(data);
+      }
+      catalogsRef.current[k] = true;
     });
-    return () => { cancelled = true; };
-  }, [enabled, sid]);
+    return want.every((k) => catalogsRef.current[k]);
+  }, [sid]);
+
+  useEffect(() => {
+    if (!enabled || !sid) return undefined;
+    let cancelled = false;
+    let timer = null;
+    const attempt = async (n) => {
+      const done = await loadCatalogs();
+      if (cancelled || done || n >= CATALOG_RETRIES) return;
+      timer = setTimeout(() => attempt(n + 1), 1000 * 2 ** (n - 1));
+    };
+    attempt(1);
+    return () => { cancelled = true; clearTimeout(timer); };
+  }, [enabled, sid, loadCatalogs]);
 
   useEffect(() => {
     if (!enabled || !sid || !ses) return undefined;
@@ -75,7 +123,7 @@ export function useOpencodeChat({ sessionId, ocSessionId, enabled }) {
     const mine = (d) => d && (d.sessionID === ocSessionId || d.form?.sessionID === ocSessionId);
     subscribeChatEvents(sid, {
       signal: ac.signal,
-      onOpen: () => { setStreamConnected(true); reload(); },
+      onOpen: () => { setStreamConnected(true); reload(); loadCatalogs(); },
       onDisconnect: () => setStreamConnected(false),
       onEvent: (event) => {
         const d = event.data;
@@ -131,7 +179,7 @@ export function useOpencodeChat({ sessionId, ocSessionId, enabled }) {
       },
     });
     return () => ac.abort();
-  }, [enabled, sid, ses, ocSessionId, reload]);
+  }, [enabled, sid, ses, ocSessionId, reload, loadCatalogs]);
 
   const send = useCallback(async (text) => {
     if (!sid || !ses || !text.trim()) return;
@@ -173,9 +221,22 @@ export function useOpencodeChat({ sessionId, ocSessionId, enabled }) {
     setForms((prev) => prev.filter((f) => f.id !== formId));
   }, [sid, ses]);
 
+  // The effort (opencode's model variant) carries over to the new model
+  // when it has the same one, as opencode's own ACP model switch does.
   const switchModel = useCallback(async (model) => {
-    await ocRequest(sid, 'POST', `session/${ses}/model`, { model });
-    setInfo((prev) => (prev ? { ...prev, model } : prev));
+    const { variant } = infoRef.current?.model || {};
+    const next = { providerID: model.providerID, id: model.id };
+    if (variant && (variant === DEFAULT_VARIANT || modelVariants(findModel(modelsRef.current, next)).includes(variant))) next.variant = variant;
+    await ocRequest(sid, 'POST', `session/${ses}/model`, { model: next });
+    setInfo((prev) => (prev ? { ...prev, model: next } : prev));
+  }, [sid, ses]);
+
+  const switchEffort = useCallback(async (variant) => {
+    const current = infoRef.current?.model;
+    if (!current) return;
+    const next = { providerID: current.providerID, id: current.id, variant };
+    await ocRequest(sid, 'POST', `session/${ses}/model`, { model: next });
+    setInfo((prev) => (prev ? { ...prev, model: next } : prev));
   }, [sid, ses]);
 
   const switchAgent = useCallback(async (agent) => {
@@ -189,6 +250,6 @@ export function useOpencodeChat({ sessionId, ocSessionId, enabled }) {
 
   return {
     messages, pending, busy, permissions, forms, info, models, agents, commands, loaded, streamConnected, error,
-    send, runCommand, interrupt, replyPermission, replyForm, cancelForm, switchModel, switchAgent, dismissPending, reload,
+    send, runCommand, interrupt, replyPermission, replyForm, cancelForm, switchModel, switchEffort, switchAgent, dismissPending, reload,
   };
 }
