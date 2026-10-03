@@ -1,6 +1,6 @@
 // Presentation for a session's activity level (server/ws/activity.js decides
 // the level; this only says how to draw it). Shared by the session list and
-// terminal tabs, following the same pattern as gpgVaultBadge.js and
+// terminal tabs, following the same pattern as commitSigningBadge.js and
 // SessionList's appLabel.
 
 // Colour never carries the state on its own:

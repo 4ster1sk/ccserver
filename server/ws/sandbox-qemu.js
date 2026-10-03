@@ -29,6 +29,7 @@ import { fileURLToPath } from 'node:url';
 import remote from './sandbox-qemu-remote.cjs';
 import { hotplugPortIds, HOTPLUG_TAG_PREFIX } from './qemuShares.js';
 import { guestAgentDir, VM_AGENT_APPS } from './qemuAgents.js';
+import { signingGitConfig, SANDBOX_GPG_SIGN_PATH, SANDBOX_SIGNING_PUBKEY_PATH } from './commitSignSandbox.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -51,7 +52,8 @@ export const BASE_IMAGE = Object.freeze({
 export const GOLDEN_PACKAGES = Object.freeze([
   'git', 'nodejs', 'nftables', 'ca-certificates', 'curl', 'jq', 'ripgrep',
   'python3', 'python3-venv', 'unzip', 'less', 'bash-completion', 'procps', 'zsh',
-  // gpg for commits signed through the GPG vault relay (no keys in the VM).
+  // gpg for verifying commits the host signed (sandbox-gpg-sign-wrapper.cjs;
+  // no keys in the VM).
   'gnupg',
   // Sessions sharing a persistent VM are confined from each other by bwrap
   // inside the guest (see qemuVmPool.js).
@@ -506,8 +508,8 @@ function templateUserDataParts(template) {
 
 // ---- Host services and helper files inside the VM ------------------------
 //
-// The bwrap backend binds ccserver's host sockets (git broker, GPG vault
-// relay, ssh-agent, MCP bridges) and helper scripts at fixed in-sandbox
+// The bwrap backend binds ccserver's host sockets (git broker, ssh-agent,
+// MCP bridges) and helper scripts at fixed in-sandbox
 // paths. In the VM the same paths are recreated so the helpers
 // (sandbox-*.cjs) run unchanged:
 //
@@ -533,12 +535,9 @@ export const GUEST_CHAT_PASSWORD_NAME = 'chat-password';
 export const GUEST_CHAT_BRIDGE = `${GUEST_RT_DIR}/${GUEST_CHAT_BRIDGE_NAME}`;
 export const GUEST_CHAT_PASSWORD = `${GUEST_RT_DIR}/${GUEST_CHAT_PASSWORD_NAME}`;
 export const GUEST_CHAT_SOCK = '/tmp/ccserver-chat/oc.sock';
-export const GUEST_GNUPG_DIR = '/run/ccserver/gnupg-vault';
 export const GUEST_SSH_AGENT_SOCK = '/run/ccserver/ssh-agent.sock';
 export const SERVICE_PORTS = Object.freeze({
   'git-broker': 7001,
-  'gpg-agent': 7010,
-  'gpg-agent-ssh': 7011,
   'ssh-agent': 7012,
   'mcp-notify': 7020,
   'mcp-usage': 7021,
@@ -558,24 +557,24 @@ const MCP_SOCKETS = [
 //                 knownHostsDefault, sshConfig, knownHostsUser|null })
 //   gitBroker:    startGitBroker()'s { sockPath, allowlistPath, token } or null
 //   commitGuard:  startCommitGuard()'s { configPath } or null
-//   gpgVault:     { homeDir, fingerprint, nameReal, nameEmail, sockets:
-//                 { agent, agentSsh } (the relay's fixed paths) } or null
-//   sshAgentSock: host ssh-agent socket or null (ignored with gpgVault)
+//   signing:      { key, pubkeyPath } for a commit-signing launch, or null:
+//                 gpg.program is the sign wrapper, which reaches the host
+//                 over the git broker service (so it needs gitBroker)
+//   sshAgentSock: host ssh-agent socket or null
 //   mcp:          { notify, usage } host socket paths
 //
 // Returns { files: [{ src | data, dest, mode }] (dest relative to rt/),
 // links: [[guestPath, target]], services: [{ name, addr, unix, guestPath }],
-// gnupgFiles: [names], env, gitConfig: [[key, value]] }.
+// env, gitConfig: [[key, value]] }.
 //   chat:         { bridge, passwordFile } host paths for an opencode chat
 //                 launch (opencode-chat-bridge.cjs), or null
-export function buildGuestRuntime({ scripts, gitBroker = null, commitGuard = null, gpgVault = null, sshAgentSock = null, mcp = {}, chat = null }) {
+export function buildGuestRuntime({ scripts, gitBroker = null, commitGuard = null, signing = null, sshAgentSock = null, mcp = {}, chat = null }) {
   const rt = (name) => `${GUEST_RT_DIR}/${name}`;
   const files = [];
   const links = [];
   const services = [];
   const env = {};
   const gitConfig = [];
-  const gnupgFiles = [];
   const service = (name, unix, guestPath) => {
     services.push({ name, addr: `${SERVICE_IP}:${SERVICE_PORTS[name]}`, unix, guestPath });
   };
@@ -640,27 +639,20 @@ export function buildGuestRuntime({ scripts, gitBroker = null, commitGuard = nul
     gitConfig.push(['core.hooksPath', '/ccserver-sandbox-git-hooks']);
   }
 
-  if (gpgVault) {
-    // Public metadata only (never the vault's homeDir): copied into the
-    // guest's tmpfs GNUPGHOME at boot so gpg can keep its lock files there.
-    for (const name of ['pubring.kbx', 'trustdb.gpg', 'gpg.conf']) {
-      const src = join(gpgVault.homeDir, name);
-      if (!existsSync(src)) continue;
-      files.push({ src, dest: `gnupg/${name}`, mode: 0o644 });
-      gnupgFiles.push(name);
-    }
-    service('gpg-agent', gpgVault.sockets.agent, `${GUEST_GNUPG_DIR}/S.gpg-agent`);
-    service('gpg-agent-ssh', gpgVault.sockets.agentSsh, `${GUEST_GNUPG_DIR}/S.gpg-agent.ssh`);
-    env.GNUPGHOME = GUEST_GNUPG_DIR;
-    env.SSH_AUTH_SOCK = `${GUEST_GNUPG_DIR}/S.gpg-agent.ssh`;
-    gitConfig.push(
-      ['user.signingkey', gpgVault.fingerprint],
-      ['commit.gpgsign', 'true'],
-      ['gpg.program', 'gpg'],
-      ['user.name', gpgVault.nameReal],
-      ['user.email', gpgVault.nameEmail],
+  if (signing && gitBroker) {
+    files.push(
+      { src: scripts.gpgSignWrapper, dest: 'gpg-sign.cjs', mode: 0o755 },
+      { src: signing.pubkeyPath, dest: 'signing-pubkey.asc', mode: 0o644 },
     );
-  } else if (sshAgentSock) {
+    links.push(
+      [SANDBOX_GPG_SIGN_PATH, rt('gpg-sign.cjs')],
+      [SANDBOX_SIGNING_PUBKEY_PATH, rt('signing-pubkey.asc')],
+    );
+    env.CCSANDBOX_SIGNING_PUBKEY = SANDBOX_SIGNING_PUBKEY_PATH;
+    gitConfig.push(...signingGitConfig(signing.key));
+  }
+
+  if (sshAgentSock) {
     service('ssh-agent', sshAgentSock, GUEST_SSH_AGENT_SOCK);
     env.SSH_AUTH_SOCK = GUEST_SSH_AGENT_SOCK;
   }
@@ -686,7 +678,7 @@ export function buildGuestRuntime({ scripts, gitBroker = null, commitGuard = nul
       { src: chat.passwordFile, dest: GUEST_CHAT_PASSWORD_NAME, mode: 0o600 },
     );
   }
-  return { files, links, services, gnupgFiles, env, gitConfig };
+  return { files, links, services, env, gitConfig };
 }
 
 // GIT_CONFIG_COUNT/KEY_n/VALUE_n for ccserver's own entries plus any the
@@ -737,12 +729,6 @@ export function buildGuestRuntimeUserData(runtime, { uid, gid }) {
   for (const [link, target] of runtime.links) {
     bootLines.push({ what: `link:${link}`, cmd: `mkdir -p ${q(dirname(link))} && ln -sfn ${q(target)} ${q(link)}` });
   }
-  if (runtime.services.some((s) => s.guestPath.startsWith(`${GUEST_GNUPG_DIR}/`)) || runtime.gnupgFiles.length) {
-    bootLines.push({ what: 'gnupg', cmd: `install -d -o ${uid} -g ${gid} -m 0700 ${q(GUEST_GNUPG_DIR)}` });
-    for (const name of runtime.gnupgFiles) {
-      bootLines.push({ what: `gnupg:${name}`, cmd: `install -o ${uid} -g ${gid} -m 0600 ${q(`${GUEST_RT_DIR}/gnupg/${name}`)} ${q(`${GUEST_GNUPG_DIR}/${name}`)}` });
-    }
-  }
   const writeFiles = [];
   const units = [];
   for (const s of runtime.services) {
@@ -786,8 +772,9 @@ export function buildGuestRuntimeUserData(runtime, { uid, gid }) {
   return { bootLines, writeFiles, runLines };
 }
 
-// Host-side half: copies the runtime files into runDir/rt (0700 dir).
-function materializeGuestRuntime(runtime, rtDir) {
+// Host-side half: copies the runtime files into rtDir (runDir/rt for a
+// per-session VM, a per-session dir for a pooled one -- qemuVmPool.js).
+export function materializeGuestRuntime(runtime, rtDir) {
   mkdirSync(rtDir, { recursive: true, mode: 0o700 });
   for (const f of runtime.files) {
     const dest = join(rtDir, f.dest);
@@ -968,6 +955,29 @@ export function sshForwardArgs(forwards = []) {
   ];
 }
 
+// Remote (-R) unix-socket forwards: a host socket appears at a guest path
+// for the life of the session's ssh (a pooled session's host services, see
+// qemuVmPool.js). sshd creates each with its StreamLocalBindMask (0177 by
+// default: owner-only); the guest paths are unique per session, so no
+// stale socket has to be unlinked first.
+export function sshRemoteForwardArgs(forwards = []) {
+  if (!forwards.length) return [];
+  return [
+    ...forwards.flatMap(([guest, host]) => ['-R', `${guest}:${host}`]),
+    '-o', 'ExitOnForwardFailure=yes',
+  ];
+}
+
+// Where a pooled VM's fixed helper links point. /usr is read-only inside a
+// session's guest bwrap, so these are made once at boot, aimed at the
+// session's runtime share (GUEST_RT_DIR). In a session without the git
+// broker -- and in the VM terminal, outside any bwrap -- they dangle, and
+// PATH lookup falls through to the real binaries (/usr/bin/ssh).
+export const POOL_FIXED_LINKS = Object.freeze([
+  ['/usr/local/bin/gh', `${GUEST_RT_DIR}/gh-wrapper.cjs`],
+  ['/usr/local/bin/ssh', `${GUEST_RT_DIR}/ssh-wrapper.cjs`],
+]);
+
 function generateSshKeyPair(dir, name, comment) {
   const path = join(dir, name);
   execFileSync('/usr/bin/ssh-keygen', ['-q', '-t', 'ed25519', '-N', '', '-C', comment, '-f', path], { stdio: 'ignore' });
@@ -1029,6 +1039,9 @@ function prepareVm({ cwd, argv, fallbackArgv = null, env = {}, homeHostPath = nu
     // Mount points for the sessions' agent installs (qemuAgents.js): the
     // guest bwrap binds over them, and cannot create them under a ro /opt.
     runtimeUserData.bootLines.push({ what: 'agent-dirs', cmd: `mkdir -p ${VM_AGENT_APPS.map((a) => shellQuote(guestAgentDir(a))).join(' ')}` });
+    for (const [link, target] of POOL_FIXED_LINKS) {
+      runtimeUserData.bootLines.push({ what: `link:${link}`, cmd: `mkdir -p ${shellQuote(dirname(link))} && ln -sfn ${shellQuote(target)} ${shellQuote(link)}` });
+    }
   } else {
     let homeDir = homeHostPath;
     if (!homeDir) {

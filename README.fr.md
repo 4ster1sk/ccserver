@@ -106,8 +106,7 @@ $EDITOR ~/.config/ccserver/sandbox.config.json
 ```
 
 Le fichier généré est volontairement minimal. Copier `server/sandbox.config.example.json` tel quel
-activerait `"gpg": true`, transférant silencieusement le gpg-agent de l'hôte et `~/.gnupg` dans
-chaque bac à sable ; utilisez `npm run setup -- --yes --seed-example` si vous voulez malgré tout
+ferait des choix d'un fichier de référence votre politique sans que personne ne l'ait décidé ; utilisez `npm run setup -- --yes --seed-example` si vous voulez malgré tout
 l'exemple complet. `server/sandbox.config.example.json` documente chaque clé et sa valeur par
 défaut.
 
@@ -117,8 +116,8 @@ Exemple :
 {
   "docker": true,
   "persistentHome": true,
-  "gpg": false,
   "sshAgent": false,
+  "commitSigning": false,
   "gitBroker": true,
   "forceSandbox": false,
   "defaultApp": "claude",
@@ -130,7 +129,7 @@ Exemple :
 }
 ```
 
-Les principales options sont `docker`, `persistentHome`, `gpg`, `sshAgent`, `gitBroker`, `forceSandbox`, `defaultApp`, `showUsage`, `usageMcp`, `binds` et `env`. Consultez le README japonais pour la référence complète et les limites de sécurité.
+Les principales options sont `docker`, `persistentHome`, `sshAgent`, `commitSigning` (commits signés par l'hôte ; le bac à sable ne reçoit jamais de clé), `gitBroker`, `forceSandbox`, `defaultApp`, `showUsage`, `usageMcp`, `binds` et `env`. Consultez le README japonais pour la référence complète et les limites de sécurité.
 
 Tous les chemins utilisés par ccserver peuvent être remplacés par une variable d'environnement
 (`CCSERVER_DB_PATH`, `CCSERVER_SCHEDULES_PATH`, ...) ; un chemin ainsi

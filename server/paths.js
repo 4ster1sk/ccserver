@@ -269,6 +269,19 @@ const REGISTRY = [
     guard: true,
   },
   {
+    // The host-side commit signing key (commitSigning.js): a dedicated
+    // GNUPGHOME holding a signing subkey. Never bound into a sandbox.
+    id: 'commitSigningHome',
+    label: 'signing-gnupg/ (コミット署名鍵)',
+    envVar: 'CCSERVER_COMMIT_SIGNING_GNUPGHOME',
+    kind: 'data',
+    type: 'dir',
+    mode: 0o700,
+    target: () => join(dataRoot(), 'signing-gnupg'),
+    legacy: () => [join(legacyDataRoot(), 'signing-gnupg')],
+    guard: true,
+  },
+  {
     id: 'groupFiles',
     label: 'group-files/ (グループ共有ファイル)',
     envVar: 'CCSERVER_GROUP_FILES_ROOT',

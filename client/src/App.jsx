@@ -8,8 +8,8 @@ import SessionContextMenu from './components/SessionContextMenu.jsx';
 import SessionRenameDialog from './components/SessionRenameDialog.jsx';
 import RightSidebar, { WIDGET_DEFS, MONITOR_WIDGET_IDS } from './components/RightSidebar.jsx';
 import { SystemStatsProvider } from './components/widgets/SystemStatsProvider.jsx';
-import { GpgVaultStatusProvider } from './components/GpgVaultStatusProvider.jsx';
-import GpgVaultQuickUnlockButton from './components/GpgVaultQuickUnlockButton.jsx';
+import { CommitSigningStatusProvider } from './components/CommitSigningStatusProvider.jsx';
+import CommitSigningUnlockButton from './components/CommitSigningUnlockButton.jsx';
 import { useWidgetPrefs } from './hooks/useWidgetPrefs.js';
 import { useSessionSidebarPrefs } from './hooks/useSessionSidebarPrefs.js';
 import { NARROW_DRAWER_QUERY } from './hooks/viewportQuery.js';
@@ -615,11 +615,11 @@ export default function App() {
   }, [contextMenu]);
 
   const sessionTabs = tabs.filter((t) => t.type === 'terminal');
-  // gpgVaultActive comes from the server (GET /api/sessions, via
+  // commitSigningActive comes from the server (GET /api/sessions, via
   // listSessions()), not from this tab's own launch-time sandboxOpts prop --
   // a tab attached to a session started elsewhere (another device/tab)
   // wouldn't otherwise know it. Only used by SessionList.jsx's badge
-  // (gpgVaultBadge.js); TerminalView.jsx gets its own copy live over the WS
+  // (commitSigningBadge.js); TerminalView.jsx gets its own copy live over the WS
   // `session` message instead, so its open header badge doesn't depend on
   // serverSessions' event-driven (not continuously polled) refresh cadence.
   const serverSessionsById = new Map(serverSessions.map((s) => [s.id, s]));
@@ -629,7 +629,7 @@ export default function App() {
     // sandboxBackend: the server's effective backend ('bwrap' | 'qemu'); until
     // the session list arrives, fall back to what this tab asked for.
     const requestedBackend = t.sandboxOpts?.backend === 'qemu' || t.sandboxOpts?.vmShellId ? 'qemu' : null;
-    return { ...t, gpgVaultActive: srv?.gpgVaultActive ?? false, activity: srv?.activity ?? null, sandboxBackend: srv?.sandboxBackend ?? requestedBackend };
+    return { ...t, commitSigningActive: srv?.commitSigningActive ?? false, activity: srv?.activity ?? null, sandboxBackend: srv?.sandboxBackend ?? requestedBackend };
   });
   const openedTabCount = sessionTabs.length;
   const barTabs = tabs.filter((t) => t.type === 'browser' || t.type === 'settings');
@@ -703,7 +703,7 @@ export default function App() {
   const usageWidgetProps = { hidden: usageHidden, emptyReason: usageEmptyNoCli ? 'no-cli' : null, defaultApp: usageDefaultApp, availableApps, hiddenApps: usagePrefs.hiddenApps };
 
   return (
-    <GpgVaultStatusProvider>
+    <CommitSigningStatusProvider>
     <div className="app">
       {/* Pending destructive-operation approval requests: global banner above
           the tab bar so it is visible no matter which tab is active. */}
@@ -750,7 +750,7 @@ export default function App() {
         ))}
         <div className="tab-bar-spacer" />
         </div>
-        <GpgVaultQuickUnlockButton />
+        <CommitSigningUnlockButton />
         <button
           type="button"
           className="btn sidebar-toggle-btn"
@@ -1017,6 +1017,6 @@ export default function App() {
         </div>
       )}
     </div>
-    </GpgVaultStatusProvider>
+    </CommitSigningStatusProvider>
   );
 }

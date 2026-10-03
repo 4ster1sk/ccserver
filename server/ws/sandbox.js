@@ -16,7 +16,7 @@
 // outer layer. See memory: sandbox-dind-recipe.
 //
 import { homedir } from 'node:os';
-import { chmodSync, closeSync, copyFileSync, constants as fsConstants, existsSync, fchmodSync, fstatSync, ftruncateSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync, writeSync } from 'node:fs';
+import { chmodSync, closeSync, constants as fsConstants, existsSync, fchmodSync, fstatSync, ftruncateSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync, writeSync } from 'node:fs';
 import { chmod as chmodP, readdir as readdirP, rm as rmP, stat as statP } from 'node:fs/promises';
 import { execFile, execFileSync } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -25,8 +25,9 @@ import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { startGitBroker, hostRuntimeDir, ensureHostRuntimeDir } from './git-broker.js';
 import { buildGuardConfig } from './commitGuard.js';
-import * as gpgVaultAgent from './gpgVaultAgent.js';
-import * as gpgVaultRelay from './gpgVaultRelay.js';
+import { exportPublicKey } from '../commitSigning.js';
+import { createSignHandler, resolveLaunchSigningKey, requestLaunchApproval } from './commitSignService.js';
+import { signingGitConfig, SANDBOX_GPG_SIGN_PATH, SANDBOX_SIGNING_PUBKEY_PATH } from './commitSignSandbox.js';
 import { isBlockedCredentialBind, agentConfigDirs } from './sandbox-paths.js';
 import { normalizeNetworkSettings } from './networkAllowlist.js';
 import { recordSandboxHome as recordSandboxHomeDb, listSandboxRowsBySlug, forgetSandboxHome } from './projects.js';
@@ -35,7 +36,7 @@ import { normalizeBrowseRoots, isContained } from '../pathPolicy.js';
 import { resolvePath, PATH_IDS } from '../paths.js';
 import { isRegularFile, readRegularFileText } from './regularFile.js';
 import { normalizeBridgeSettings } from './notifyBridgeSettings.js';
-import { qemuStatus, prepareQemuSession, buildGuestRuntime, currentGolden, LAUNCHER_SCRIPT as QEMU_LAUNCHER, QEMU_RESOURCE_LIMITS, GUEST_CHAT_BRIDGE, GUEST_CHAT_PASSWORD, GUEST_CHAT_SOCK, GUEST_CHAT_BRIDGE_NAME, GUEST_CHAT_PASSWORD_NAME } from './sandbox-qemu.js';
+import { qemuStatus, prepareQemuSession, buildGuestRuntime, materializeGuestRuntime, currentGolden, LAUNCHER_SCRIPT as QEMU_LAUNCHER, QEMU_RESOURCE_LIMITS, GUEST_CHAT_BRIDGE, GUEST_CHAT_PASSWORD, GUEST_CHAT_SOCK } from './sandbox-qemu.js';
 import { qemuVmPool as defaultQemuVmPool, poolKey } from './qemuVmPool.js';
 import { startGoNetworkBroker, netbrokerBin } from './netbrokerClient.js';
 import { resolveVmTemplate } from '../vmTemplates.js';
@@ -51,6 +52,7 @@ const GH_WRAPPER_SCRIPT = join(__dirname, 'sandbox-gh-wrapper.cjs');
 const CRED_HELPER_SCRIPT = join(__dirname, 'sandbox-git-credential-helper.cjs');
 const SSH_WRAPPER_SCRIPT = join(__dirname, 'sandbox-ssh-wrapper.cjs');
 const COMMIT_MSG_HOOK_SCRIPT = join(__dirname, 'sandbox-commit-msg-hook.cjs');
+const GPG_SIGN_WRAPPER_SCRIPT = join(__dirname, 'sandbox-gpg-sign-wrapper.cjs');
 const GENERATED_GITCONFIG = join(__dirname, 'sandbox-gitconfig');
 const DEFAULT_KNOWN_HOSTS = join(__dirname, 'sandbox-known-hosts');
 const SSH_CONFIG_FILE = join(__dirname, 'sandbox-ssh-config');
@@ -645,6 +647,12 @@ export function _resetAllowUnsandboxedAgentsWarningForTests() {
   warnedAllowUnsandboxedAgents = false;
 }
 
+// Same latch + seam for the retired gpg / gpgVault keys.
+let warnedRetiredGpgKeys = false;
+export function _resetRetiredGpgWarningForTests() {
+  warnedRetiredGpgKeys = false;
+}
+
 // Load the optional sandbox config. Path from the registry (issue #201):
 // CCSERVER_SANDBOX_CONFIG, else $XDG_CONFIG_HOME/ccserver/sandbox.config.json,
 // falling back to the pre-#201 in-tree server/sandbox.config.json while that
@@ -699,26 +707,33 @@ export function loadSandboxConfig() {
   // inside the sandbox survive a session relaunch; the client offers a reuse
   // dialog and "new" wipes it. false restores the legacy fresh-tmpfs-HOME.
   const persistentHome = raw.persistentHome !== false; // default on
-  const gpg = raw.gpg === true;        // forward gpg-agent + ~/.gnupg (opt-in)
-  // Forward the host's ssh-agent socket (opt-in, like gpg). Not needed for
-  // HTTPS git (gitBroker handles that entirely host-side, see below) or for
-  // commit signing (that's the gpg flag above); this only matters for SSH git
+  // Forward the host's ssh-agent socket (opt-in). Not needed for HTTPS git
+  // (gitBroker handles that entirely host-side, see below) or for commit
+  // signing (commitSigning below); this only matters for SSH git
   // remotes or running `ssh` directly inside the sandbox. Off by default
   // because a forwarded agent is real standing access to the host's keys for
   // the whole sandboxed process, not just git -- see the docker+gitBroker
   // bypass warning below for how much a live agent socket widens the hole.
   const sshAgent = raw.sshAgent === true;
-  // GPG vault (plan: gpg-agent-vault): forward the MANAGED vault agent's
-  // sockets (server/ws/gpgVaultAgent.js) instead of the host's own
-  // already-unlocked gpg-agent/ssh-agent. Off by default like gpg/sshAgent
-  // above -- buildSandboxSpawn refuses this launch loudly (not silently) if
-  // the vault is locked or was never set up (passkey-mode-only feature).
-  const gpgVault = raw.gpgVault === true;
-  // Lock-policy hardening knob for the vault's auto-lock sweep (see
-  // gpgVaultAgent.js's startAutoLockSweep) -- deliberately read there, not
-  // returned from here: it's read independently of a per-launch spawn, at
-  // lock-policy-decision time, so folding it into this per-launch config
-  // object would be misleading about when it's actually consulted.
+  // Host-side commit signing (plan: sandbox-no-secrets, see
+  // ws/commitSignService.js): the session's commits are signed by the host
+  // with the key in Settings > コミット署名; the sandbox itself gets no key
+  // and no agent socket. Server-wide default for the per-launch
+  // sandboxOpts.commitSigning; off unless enabled. A launch with it on asks
+  // for approval every time and is refused without a key.
+  const commitSigning = raw.commitSigning === true;
+  // Retired: `gpg` (forwarded the host's own gpg-agent -- an unrestricted
+  // signing oracle) and `gpgVault` / `gpgVaultLockPolicy` (the managed
+  // vault, also a socket into the sandbox). Ignored, said once.
+  const retiredGpgKeys = ['gpg', 'gpgVault', 'gpgVaultLockPolicy'].filter((k) => raw[k] !== undefined);
+  if (retiredGpgKeys.length && !warnedRetiredGpgKeys) {
+    warnedRetiredGpgKeys = true;
+    console.warn(
+      `[config] ${retiredGpgKeys.map((k) => `"${k}"`).join(', ')} ${retiredGpgKeys.length > 1 ? 'are' : 'is'} retired and ignored: `
+      + 'sandboxes no longer get any GPG agent socket. Commits are signed by the host instead -- set up a key in '
+      + 'Settings > コミット署名 and launch with commit signing on ("commitSigning": true sets the default). Remove the key(s) to silence this.',
+    );
+  }
   // Repo-scoped git credential broker: HTTPS credential helper + SSH gate,
   // both checked against the session cwd's own repo + submodules, and gh
   // CLI disabled (its API calls can't be repo-scoped without TLS
@@ -961,7 +976,7 @@ export function loadSandboxConfig() {
   // booting its own. A VM template's own flag wins over this.
   qemu.persistent = qemuRaw.persistent === true;
   return {
-    docker, persistentHome, gpg, sshAgent, gpgVault, gitBroker, commitMessageGuard, forceSandbox, forceSandboxReason, binds, env, tools, claudeBin, defaultApp, showUsage, opencodeGoUsage, usageMcp, ghUsageRecording, hiddenApps, browseRoots, browseRootsInvalid, configError, network, networkAdvanced, backend, qemu,
+    docker, persistentHome, sshAgent, commitSigning, gitBroker, commitMessageGuard, forceSandbox, forceSandboxReason, binds, env, tools, claudeBin, defaultApp, showUsage, opencodeGoUsage, usageMcp, ghUsageRecording, hiddenApps, browseRoots, browseRootsInvalid, configError, network, networkAdvanced, backend, qemu,
     notify: {
       discordWebhook, subscriptions, hostname: notifyHostname, attribution: notifyAttribution,
       // Agent notification bridge (plan-notify-bridge). Parsed by the same
@@ -1258,18 +1273,6 @@ function withClaude(targetCommand, command) {
   return targetCommand;
 }
 
-// The host's gpg socket directory (e.g. /run/user/UID/gnupg), where the live
-// gpg-agent / keyboxd sockets live.
-function hostGpgSocketDir() {
-  try {
-    return execFileSync('gpgconf', ['--list-dirs', 'socketdir'], {
-      timeout: 2000, encoding: 'utf-8',
-    }).trim() || null;
-  } catch {
-    return null;
-  }
-}
-
 function sshAddStatus(sock) {
   // ssh-add -l exit codes: 0 = identities listed, 1 = agent reachable but
   // empty, 2 = cannot connect.
@@ -1503,17 +1506,12 @@ function startCommitGuard(blockedPatterns) {
 //   usesRootlesskit - true when this launch is wrapped in rootlesskit (for a
 //             nested dockerd), so bwrap must NOT also create its own user
 //             namespace (rootlesskit's outer userns already provides one).
-//   gpgVault - { fingerprint, nameReal, nameEmail } from
-//             gpgVaultAgent.getPublicIdentity(), or null (plan:
-//             gpg-agent-vault). Lock-independent -- no homeDir/sockets, see
-//             getPublicIdentity()'s own comment (issue #185); the public
-//             pubring/trustdb/gpg.conf files below are bound from
-//             gpgVaultRelay's fixed relay dir instead of a per-launch
-//             homeDir for the same reason. Resolved once by the caller
-//             (buildSandboxSpawn), not fetched in here -- mirrors
-//             gitBroker/commitGuard, which are also
-//             caller-resolved objects.
-function buildBwrapArgs({ cwd, docker, usesRootlesskit = docker, gpg, gpgVault = null, extraBinds, extraEnv, authSock, stateDir, claudeDir, gitBroker, commitGuard, notifySocketPath, usageSocketPath, homeDir = null, app = null, tools = null, chat = null }) {
+//   signing  - { key, pubkeyPath } for a commit-signing launch, or null.
+//             key is the host signing key (commitSigning.js getSigningKey);
+//             pubkeyPath its public part, written next to the git broker.
+//             Signing itself goes over the git broker socket, so this
+//             requires gitBroker.
+function buildBwrapArgs({ cwd, docker, usesRootlesskit = docker, signing = null, extraBinds, extraEnv, authSock, stateDir, claudeDir, gitBroker, commitGuard, notifySocketPath, usageSocketPath, homeDir = null, app = null, tools = null, chat = null }) {
   const args = [
     '--die-with-parent',
     // Own PID namespace so the whole sandbox tree is reaped as a unit. Without
@@ -1559,9 +1557,9 @@ function buildBwrapArgs({ cwd, docker, usesRootlesskit = docker, gpg, gpgVault =
 
   // Always give the sandbox its own private, writable /run (a fresh tmpfs).
   // We deliberately do NOT reuse the host's /run: rootlesskit's older approach
-  // of copying-up /run replaced live agent sockets (gpg) with dead copies. By
+  // of copying-up /run replaced live agent sockets with dead copies. By
   // keeping /run private here and binding only what's needed, live host
-  // sockets under /run stay reachable as bind sources (see gpg forwarding).
+  // sockets under /run stay reachable as bind sources.
   args.push('--tmpfs', '/run', '--dir', XDG_RUNTIME_DIR);
   if (usesRootlesskit) {
     // rootlesskit (outer) provides the user namespace -- for a nested
@@ -1671,84 +1669,6 @@ function buildBwrapArgs({ cwd, docker, usesRootlesskit = docker, gpg, gpgVault =
     args.push('--setenv', 'SSH_AUTH_SOCK', authSock);
   }
 
-  // gpg-agent forwarding: bind ~/.gnupg (keys/keybox) plus the live host
-  // agent/keyboxd sockets so signing uses the host agent (which holds the
-  // token). Inside rootlesskit we run as uid 0, so gpg looks for its sockets
-  // in ~/.gnupg; without rootlesskit (uid unchanged) it uses the runtime dir.
-  if (gpg) {
-    const gnupgHome = join(HOME, '.gnupg');
-    if (existsSync(gnupgHome)) args.push('--bind', gnupgHome, gnupgHome);
-    const hostSockDir = hostGpgSocketDir();
-    if (hostSockDir) {
-      const targetDir = docker ? gnupgHome : join(XDG_RUNTIME_DIR, 'gnupg');
-      for (const name of ['S.gpg-agent', 'S.gpg-agent.extra', 'S.keyboxd', 'S.dirmngr']) {
-        const src = join(hostSockDir, name);
-        if (existsSync(src)) args.push('--bind-try', src, join(targetDir, name));
-      }
-    }
-  }
-
-  // GPG vault (plan: gpg-agent-vault): forward the MANAGED vault agent's
-  // sockets instead -- a different, newer mechanism from the `gpg` block
-  // above (which forwards the HOST's own already-unlocked gpg-agent). Its
-  // own target dir (~/.gnupg-vault under docker, XDG_RUNTIME_DIR/gnupg-vault
-  // otherwise) is deliberately distinct from `gnupgHome`/`gnupg` above so the
-  // two mechanisms cannot collide on-path even if both are enabled at once
-  // (buildSandboxSpawn warns when that happens). Security-critical: only
-  // individual PUBLIC files (pubring.kbx/trustdb.gpg/gpg.conf) and the
-  // relay's sockets are ever bound here -- never the whole homeDir -- so
-  // private-keys-v1.d/, openpgp-revocs.d/, and sshcontrol stay unreachable
-  // from the sandbox by construction. That alone is NOT sufficient (audit
-  // F1): a socket onto the agent's main socket would still hand out the
-  // secret key via KEYWRAP_KEY/EXPORT_KEY. The relay sockets bound here
-  // reach only the agent's restricted extra socket, through a protocol
-  // allowlist (gpgVaultRelay.js / gpgVaultRelayFilter.js).
-  // gpgVault is the caller-resolved object (see this function's own header
-  // comment) -- reused as-is by the git-identity injection further down.
-  if (gpgVault) {
-    const vault = gpgVault;
-    const targetDir = docker ? join(HOME, '.gnupg-vault') : join(XDG_RUNTIME_DIR, 'gnupg-vault');
-    args.push('--dir', targetDir);
-    // Public metadata files, bound from gpgVaultRelay's fixed relay dir
-    // (same source used by sandbox-paths.js).
-    // rather than this launch's own homeDir: gpgVault is now lock-
-    // independent (issue #185, getPublicIdentity()) and so no longer carries
-    // a homeDir at all. Using --ro-bind-try (not --ro-bind) matters more
-    // than before: a vault that has never been unlocked yet has nothing in
-    // the relay dir, and the bind is simply skipped -- gpg then runs against
-    // an empty GNUPGHOME, which is harmless (no secret key material is ever
-    // placed there either way).
-    for (const file of ['pubring.kbx', 'trustdb.gpg', 'gpg.conf']) {
-      const src = join(gpgVaultRelay.getRelayDir(), file);
-      args.push('--ro-bind-try', src, join(targetDir, file));
-    }
-    // Sockets bind from gpgVaultRelay.js's FIXED, generation-independent
-    // paths -- never vault.sockets (this launch's own ephemeral generation)
-    // directly. See gpgVaultRelay.js's header: this is what lets an
-    // already-running sandbox keep working across a later lock+re-unlock
-    // without a restart.
-    const relaySockets = gpgVaultRelay.getRelaySocketPaths();
-    for (const src of Object.values(relaySockets)) {
-      args.push('--bind-try', src, join(targetDir, basename(src)));
-    }
-    // Without rootlesskit the sandbox keeps the host uid and has /run/user/<uid>
-    // (XDG_RUNTIME_DIR above), so GnuPG looks for the agent socket of this
-    // non-default GNUPGHOME under /run/user/<uid>/gnupg/d.<hash>/, NOT in
-    // GNUPGHOME. The bind above alone would leave gpg unable to reach the relay:
-    // it starts an empty agent of its own inside the sandbox and signing fails
-    // with "No secret key" (see gnupgRunUserAgentSocket). Under rootlesskit the
-    // uid is 0, /run/user/0 does not exist, and the GNUPGHOME bind is the one
-    // GnuPG uses -- left exactly as it was.
-    if (!usesRootlesskit) {
-      args.push('--bind-try', relaySockets.agent, gpgVaultRelay.gnupgRunUserAgentSocket(targetDir, process.getuid()));
-    }
-    args.push('--setenv', 'GNUPGHOME', targetDir);
-    // Unlike authSock above (bind source==dest, a live host path), the
-    // vault's ssh socket lands at a different in-sandbox path, so
-    // SSH_AUTH_SOCK must point at the bind TARGET here.
-    args.push('--setenv', 'SSH_AUTH_SOCK', join(targetDir, basename(relaySockets.agentSsh)));
-  }
-
   // gh: replace wherever it resolves (host PATH or common install paths)
   // with a wrapper that relays to the git-broker instead of running for
   // real inside the sandbox (see sandbox-gh-wrapper.cjs / ghAllowlist.js).
@@ -1847,8 +1767,8 @@ function buildBwrapArgs({ cwd, docker, usesRootlesskit = docker, gpg, gpgVault =
   // LOCAL commit records -- no network/credential scope involved -- so it's
   // wired independently and stays active even when gitBroker is disabled.
   //
-  // core.hooksPath (commit-guard, below) and user.signingkey/commit.gpgsign/
-  // gpg.program/user.name/user.email (GPG vault, below) are set via the
+  // core.hooksPath (commit-guard, below) and the commit-signing identity /
+  // gpg.program (below) are set via the
   // GIT_CONFIG_COUNT/KEY/VALUE env mechanism (git 2.31+) instead of
   // overwriting ~/.gitconfig the way GENERATED_GITCONFIG does above:
   // gitBroker's ro-bind is safe to always apply (it replaces a file this
@@ -1875,23 +1795,14 @@ function buildBwrapArgs({ cwd, docker, usesRootlesskit = docker, gpg, gpgVault =
     gitConfigEntries.push(['core.hooksPath', SANDBOX_COMMIT_GUARD_HOOKS_DIR]);
   }
 
-  // GPG vault (plan: gpg-agent-vault): signs commits with the vault's key
-  // and sets the committer identity to the SAME name/email used as the
-  // key's own UID (see db.js v8's migration comment for why -- an unset
-  // user.name/user.email would break `git commit` outright in an ephemeral
-  // sandbox HOME, and a mismatched identity would be a confusing signed
-  // commit whose author doesn't match the signing key). gpg.program is left
-  // as the bare command name -- it resolves via the sandbox's own PATH to
-  // /usr/bin/gpg (already ro-bound via /usr).
-  if (gpgVault) {
-    const vault = gpgVault;
-    gitConfigEntries.push(
-      ['user.signingkey', vault.fingerprint],
-      ['commit.gpgsign', 'true'],
-      ['gpg.program', 'gpg'],
-      ['user.name', vault.nameReal],
-      ['user.email', vault.nameEmail],
-    );
+  // Commit signing (ws/commitSignService.js): gpg.program is the wrapper
+  // that hands each commit to the host over the git broker socket; the
+  // sandbox gets the key's PUBLIC part only, for verifying.
+  if (signing && gitBroker) {
+    args.push('--ro-bind', GPG_SIGN_WRAPPER_SCRIPT, SANDBOX_GPG_SIGN_PATH);
+    args.push('--ro-bind', signing.pubkeyPath, SANDBOX_SIGNING_PUBKEY_PATH);
+    args.push('--setenv', 'CCSANDBOX_SIGNING_PUBKEY', SANDBOX_SIGNING_PUBKEY_PATH);
+    gitConfigEntries.push(...signingGitConfig(signing.key));
   }
 
   if (gitConfigEntries.length > 0) {
@@ -1980,7 +1891,6 @@ export function buildMinimalSandboxSpawn({ cwd, targetCommand, app = 'claude' })
   const bwrapArgs = buildBwrapArgs({
     cwd,
     docker: false,
-    gpg: false,
     extraBinds: [],
     extraEnv: {},
     authSock: null,
@@ -2010,7 +1920,7 @@ export function buildMinimalSandboxSpawn({ cwd, targetCommand, app = 'claude' })
 // (e.g. ['claude', '--resume', id] or ['/bin/bash']) in the sandbox.
 //   app         - selects which agent the install-dir resolution applies to.
 //   sandboxOpts - optional per-launch override for the opt-in flags
-//                 ({ gpg, sshAgent }, either key omittable). Lets a caller
+//                 ({ sshAgent, commitSigning, ... }, any key omittable). Lets a caller
 //                 (the client, via the launch UI) pick these per session/
 //                 directory instead of only through the shared config file;
 //                 an omitted key falls back to loadSandboxConfig()'s value.
@@ -2273,23 +2183,46 @@ export function qemuLaunchPoolKey(sandboxOpts = null, deps = {}) {
   }
 }
 
+// Host paths of the helper files a VM session gets (buildGuestRuntime).
+function guestRuntimeScripts() {
+  const userKnownHosts = join(HOME, '.ssh', 'known_hosts');
+  return {
+    credHelper: CRED_HELPER_SCRIPT,
+    ghWrapper: GH_WRAPPER_SCRIPT,
+    sshWrapper: SSH_WRAPPER_SCRIPT,
+    mcpBridge: MCP_BRIDGE_SCRIPT,
+    commitMsgHook: COMMIT_MSG_HOOK_SCRIPT,
+    gpgSignWrapper: GPG_SIGN_WRAPPER_SCRIPT,
+    gitconfig: GENERATED_GITCONFIG,
+    knownHostsDefault: DEFAULT_KNOWN_HOSTS,
+    sshConfig: SSH_CONFIG_FILE,
+    knownHostsUser: existsSync(userKnownHosts) ? userKnownHosts : null,
+  };
+}
+
+// The signing key's public part, next to the git broker's other per-launch
+// files (removed with its dir): what the sandbox verifies signatures with.
+function writeSigningPubkey(gitBroker, signing) {
+  const path = join(gitBroker.dir, 'signing-pubkey.asc');
+  writeFileSync(path, signing.publicKey || '', { mode: 0o644 });
+  return path;
+}
+
 // The qemu branch of buildSandboxSpawn. Returns the same handle shape as the
 // bwrap branch plus qemuRunDir for sessionManager's teardown.
 //
 // Host services reach the VM the way bwrap binds them, only over the
 // broker's service addresses (see buildGuestRuntime in sandbox-qemu.js):
-// the git broker, commit-msg guard, GPG vault relay, ssh-agent (opt-in) and
-// the MCP bridge sockets. Start order and cleanup mirror the bwrap branch:
+// the git broker (also commit signing), commit-msg guard, ssh-agent
+// (opt-in) and the MCP bridge sockets. Start order and cleanup mirror the bwrap branch:
 // anything started before a later step throws is stopped and removed.
 //
-// Not available in the VM (warned, launched without): the legacy `gpg`
-// host-agent forwarding (it would hand the VM the host's whole keyring --
-// gpgVault replaces it), docker, tools.
+// Not available in the VM (warned, launched without): docker, tools.
 //
 // vmTemplateId (sandboxOpts.vmTemplateId) picks the VM template (see
 // vmTemplates.js): its resources and cloud-config. null means the default
 // template, or sandbox.config.json's qemu values when there is none.
-async function buildQemuSpawn({ cwd, targetCommand, app, homeDir, netCfg, extraEnv, gpg, sshAgent, gpgVault, gpgVaultInfo, tools, gitBrokerEnabled, commitMessageGuard, ghUsageRecording, notifySocketPath, usageSocketPath, vmTemplateId = null, chat = null }, deps = {}) {
+async function buildQemuSpawn({ cwd, targetCommand, app, homeDir, netCfg, extraEnv, sshAgent, signing = null, tools, gitBrokerEnabled, commitMessageGuard, ghUsageRecording, notifySocketPath, usageSocketPath, vmTemplateId = null, chat = null }, deps = {}) {
   const {
     startGitBroker: startGitBrokerFn = startGitBroker,
     startCommitGuard: startCommitGuardFn = startCommitGuard,
@@ -2300,7 +2233,7 @@ async function buildQemuSpawn({ cwd, targetCommand, app, homeDir, netCfg, extraE
   // Before any broker starts: a deleted or broken template refuses the launch.
   const vmTemplate = resolveVmTemplateFn(vmTemplateId);
   const unsupported = [
-    gpg && 'gpg', tools?.rtk && 'tools.rtk', tools?.codeReviewGraph && 'tools.code-review-graph',
+    tools?.rtk && 'tools.rtk', tools?.codeReviewGraph && 'tools.code-review-graph',
   ].filter(Boolean);
   if (unsupported.length) {
     console.warn(`[sandbox] qemu backend: ${unsupported.join(', ')} not available inside the VM; launching without them.`);
@@ -2317,12 +2250,12 @@ async function buildQemuSpawn({ cwd, targetCommand, app, homeDir, netCfg, extraE
   }
   if (qemuCfg.persistent) {
     return await buildPooledQemuSpawn({
-      cwd, targetCommand, homeDir, netCfg, gpgVault, sshAgent,
-      gitBrokerEnabled, notifySocketPath, usageSocketPath, vmTemplate, qemuCfg, agentLaunch, chat,
+      cwd, targetCommand, app, homeDir, netCfg, sshAgent, signing,
+      gitBrokerEnabled, commitMessageGuard, ghUsageRecording, notifySocketPath, usageSocketPath, vmTemplate, qemuCfg, agentLaunch, chat,
     }, deps);
   }
-  const sshAgentSock = sshAgent && !gpgVault ? (extraEnv.SSH_AUTH_SOCK || discoverSshAuthSock()) : null;
-  if (sshAgent && !gpgVault && !sshAgentSock) {
+  const sshAgentSock = sshAgent ? (extraEnv.SSH_AUTH_SOCK || discoverSshAuthSock()) : null;
+  if (sshAgent && !sshAgentSock) {
     console.warn('[sandbox] qemu backend: sshAgent is enabled but no host ssh-agent socket was found; launching without it.');
   }
   const { agent, guestEnv } = agentLaunch;
@@ -2342,29 +2275,19 @@ async function buildQemuSpawn({ cwd, targetCommand, app, homeDir, netCfg, extraE
     if (commitGuard) { try { rmSync(commitGuard.dir, { recursive: true, force: true }); } catch { /* best effort */ } }
   };
   let plan;
+  let signingRt = null;
   try {
     // Same broker inputs as the bwrap branch (see there).
     gitBroker = gitBrokerEnabled
-      ? await startGitBrokerFn({ cwd, app, blockedPatterns: commitMessageGuard.enabled ? commitMessageGuard.blockedPatterns : null, ghUsageRecording })
+      ? await startGitBrokerFn({ cwd, app, blockedPatterns: commitMessageGuard.enabled ? commitMessageGuard.blockedPatterns : null, ghUsageRecording, signHandler: signing?.handler ?? null })
       : null;
     commitGuard = commitMessageGuard.enabled ? startCommitGuardFn(commitMessageGuard.blockedPatterns) : null;
-    const userKnownHosts = join(HOME, '.ssh', 'known_hosts');
+    signingRt = signing && gitBroker ? { key: signing.key, pubkeyPath: writeSigningPubkey(gitBroker, signing) } : null;
     const runtime = buildGuestRuntime({
-      scripts: {
-        credHelper: CRED_HELPER_SCRIPT,
-        ghWrapper: GH_WRAPPER_SCRIPT,
-        sshWrapper: SSH_WRAPPER_SCRIPT,
-        mcpBridge: MCP_BRIDGE_SCRIPT,
-        commitMsgHook: COMMIT_MSG_HOOK_SCRIPT,
-        gitconfig: GENERATED_GITCONFIG,
-        knownHostsDefault: DEFAULT_KNOWN_HOSTS,
-        sshConfig: SSH_CONFIG_FILE,
-        knownHostsUser: existsSync(userKnownHosts) ? userKnownHosts : null,
-      },
+      scripts: guestRuntimeScripts(),
       gitBroker,
       commitGuard,
-      // The relay's FIXED socket paths, as bwrap binds (see gpgVaultRelay.js).
-      gpgVault: gpgVaultInfo ? { ...gpgVaultInfo, sockets: gpgVaultRelay.getRelaySocketPaths() } : null,
+      signing: signingRt,
       sshAgentSock,
       mcp: { notify: notifySocketPath, usage: usageSocketPath },
       chat: chat ? { bridge: chatBridgeOf(chat), passwordFile: join(chat.hostDir, CHAT_PASSWORD_NAME) } : null,
@@ -2421,7 +2344,7 @@ async function buildQemuSpawn({ cwd, targetCommand, app, homeDir, netCfg, extraE
     command: process.execPath,
     args: [QEMU_LAUNCHER, plan.planPath],
     docker: false,
-    gpgVaultActive: !!gpgVaultInfo,
+    commitSigningActive: !!signingRt,
     stateDir: null,
     gitBrokerProc: gitBroker ? gitBroker.proc : null,
     gitBrokerDir: gitBroker ? gitBroker.dir : null,
@@ -2449,21 +2372,22 @@ async function buildQemuSpawn({ cwd, targetCommand, app, homeDir, netCfg, extraE
 // started by the pool with this launch's policy, which is part of the pool
 // key: a launch only ever joins a VM booted with exactly its own policy.
 //
-// chat (chat mode): the bridge and password go to the VM in a
-// read-only share of their own (chat.hostDir/vm, removed with the chat dir)
-// that the session's guest bwrap binds at GUEST_RT_DIR, where a per-session
-// VM has them; the pool forwards the relay socket (qemuVmPool.js attach).
-async function buildPooledQemuSpawn({ cwd, targetCommand, homeDir, netCfg, gpgVault, sshAgent, gitBrokerEnabled, notifySocketPath, usageSocketPath, vmTemplate, qemuCfg, agentLaunch, chat = null }, deps = {}) {
+// Host services: this session's own git broker (with commit signing) and
+// commit guard, as for a per-session VM. Their helper files go into a
+// per-session runtime dir the pool hot-plugs read-only and binds at
+// GUEST_RT_DIR inside this session's bwrap (removed on release); their
+// sockets are remote-forwarded over this session's ssh (qemuVmPool.js).
+// chat (chat mode): the bridge and password go into the same runtime dir;
+// the pool forwards the relay socket.
+async function buildPooledQemuSpawn({ cwd, targetCommand, app, homeDir, netCfg, sshAgent, signing = null, gitBrokerEnabled, commitMessageGuard, ghUsageRecording, notifySocketPath, usageSocketPath, vmTemplate, qemuCfg, agentLaunch, chat = null }, deps = {}) {
   const {
     startGoNetworkBroker: startGoNetworkBrokerFn = startGoNetworkBroker,
+    startGitBroker: startGitBrokerFn = startGitBroker,
+    startCommitGuard: startCommitGuardFn = startCommitGuard,
     qemuVmPool = defaultQemuVmPool,
   } = deps;
-  // An explicitly requested signing key must never silently disappear.
-  if (gpgVault) {
-    throw new Error('gpgVault is not available in a persistent (shared) VM yet -- turn it off for this launch or use a template without "persistent".');
-  }
   const missing = [
-    gitBrokerEnabled && 'gitBroker', sshAgent && 'sshAgent',
+    sshAgent && 'sshAgent',
     (notifySocketPath || usageSocketPath) && 'MCP sockets',
   ].filter(Boolean);
   if (missing.length) {
@@ -2471,58 +2395,96 @@ async function buildPooledQemuSpawn({ cwd, targetCommand, homeDir, netCfg, gpgVa
   }
   const { key, configDigest, net, vm, opMode, lists, extraAllowedHosts } = pooledVmKey({ vmTemplate, qemuCfg, netCfg, agentNet: agentLaunch });
   const { agent, guestEnv } = agentLaunch;
-  let chatFilesDir = null;
-  if (chat) {
-    chatFilesDir = join(chat.hostDir, 'vm');
-    mkdirSync(chatFilesDir, { recursive: true, mode: 0o700 });
-    copyFileSync(chatBridgeOf(chat), join(chatFilesDir, GUEST_CHAT_BRIDGE_NAME));
-    chmodSync(join(chatFilesDir, GUEST_CHAT_BRIDGE_NAME), 0o755);
-    copyFileSync(join(chat.hostDir, CHAT_PASSWORD_NAME), join(chatFilesDir, GUEST_CHAT_PASSWORD_NAME));
-    chmodSync(join(chatFilesDir, GUEST_CHAT_PASSWORD_NAME), 0o600);
+
+  let gitBroker = null;
+  let commitGuard = null;
+  let rtDir = null;
+  const cleanup = () => {
+    if (gitBroker) {
+      try { gitBroker.proc.kill('SIGTERM'); } catch { /* already dead */ }
+      try { rmSync(gitBroker.dir, { recursive: true, force: true }); } catch { /* best effort */ }
+    }
+    if (commitGuard) { try { rmSync(commitGuard.dir, { recursive: true, force: true }); } catch { /* best effort */ } }
+    if (rtDir) { try { rmSync(rtDir, { recursive: true, force: true }); } catch { /* best effort */ } }
+  };
+  let lease;
+  let signingRt = null;
+  try {
+    gitBroker = gitBrokerEnabled
+      ? await startGitBrokerFn({ cwd, app, blockedPatterns: commitMessageGuard.enabled ? commitMessageGuard.blockedPatterns : null, ghUsageRecording, signHandler: signing?.handler ?? null })
+      : null;
+    commitGuard = commitMessageGuard.enabled ? startCommitGuardFn(commitMessageGuard.blockedPatterns) : null;
+    signingRt = signing && gitBroker ? { key: signing.key, pubkeyPath: writeSigningPubkey(gitBroker, signing) } : null;
+    const runtime = buildGuestRuntime({
+      scripts: guestRuntimeScripts(),
+      gitBroker,
+      commitGuard,
+      signing: signingRt,
+      chat: chat ? { bridge: chatBridgeOf(chat), passwordFile: join(chat.hostDir, CHAT_PASSWORD_NAME) } : null,
+    });
+    const hasRuntime = runtime.files.length > 0;
+    if (hasRuntime) {
+      ensureHostRuntimeDir();
+      rtDir = join(hostRuntimeDir(), `ccs-prt-${randomUUID()}`);
+      materializeGuestRuntime(runtime, rtDir);
+    }
+    lease = await qemuVmPool.attach({
+      key,
+      opMode,
+      lists,
+      configDigest,
+      extraAllowedHosts,
+      spec: {
+        startBroker: () => ({
+          ...startGoNetworkBrokerFn({ session: randomUUID(), ...net, services: [], env: agentLaunch.brokerEnv }),
+          pipeBin: netbrokerBin(),
+        }),
+        vm,
+      },
+      info: {
+        templateId: vmTemplate ? vmTemplate.template.id : null,
+        templateName: vmTemplate ? vmTemplate.template.name : null,
+        memoryMiB: qemuCfg.memoryMiB,
+        cpus: qemuCfg.cpus,
+        diskGiB: qemuCfg.diskGiB,
+      },
+      session: {
+        cwd,
+        home: HOME,
+        homeHostPath: homeDir,
+        argv: chat ? chatBridgeArgv({
+          node: '/usr/bin/node',
+          script: GUEST_CHAT_BRIDGE,
+          sock: GUEST_CHAT_SOCK,
+          passwordFile: GUEST_CHAT_PASSWORD,
+          bridgeArgs: chat.bridgeArgs,
+        }, agentLaunch.argv) : agentLaunch.argv,
+        fallbackArgv: agent || APP_IDS.includes(targetCommand[0]) ? null : ['bash', '-l', '-i'],
+        env: guestEnv,
+        agent: agent ? { hostDir: agent.hostDir, guestDir: agent.guestDir } : null,
+        runtime: hasRuntime ? {
+          hostDir: rtDir,
+          links: runtime.links,
+          sockets: runtime.services.map((sv) => ({ name: sv.name, hostSock: sv.unix, guestPath: sv.guestPath })),
+          env: runtime.env,
+          gitConfig: runtime.gitConfig,
+        } : null,
+        chat: chat ? { hostSock: join(chat.hostDir, CHAT_SOCK_NAME) } : null,
+      },
+    });
+  } catch (e) {
+    cleanup();
+    throw e;
   }
-  const lease = await qemuVmPool.attach({
-    key,
-    opMode,
-    lists,
-    configDigest,
-    extraAllowedHosts,
-    spec: {
-      startBroker: () => ({
-        ...startGoNetworkBrokerFn({ session: randomUUID(), ...net, services: [], env: agentLaunch.brokerEnv }),
-        pipeBin: netbrokerBin(),
-      }),
-      vm,
-    },
-    info: {
-      templateId: vmTemplate ? vmTemplate.template.id : null,
-      templateName: vmTemplate ? vmTemplate.template.name : null,
-      memoryMiB: qemuCfg.memoryMiB,
-      cpus: qemuCfg.cpus,
-      diskGiB: qemuCfg.diskGiB,
-    },
-    session: {
-      cwd,
-      home: HOME,
-      homeHostPath: homeDir,
-      argv: chat ? chatBridgeArgv({
-        node: '/usr/bin/node',
-        script: GUEST_CHAT_BRIDGE,
-        sock: GUEST_CHAT_SOCK,
-        passwordFile: GUEST_CHAT_PASSWORD,
-        bridgeArgs: chat.bridgeArgs,
-      }, agentLaunch.argv) : agentLaunch.argv,
-      fallbackArgv: agent || APP_IDS.includes(targetCommand[0]) ? null : ['bash', '-l', '-i'],
-      env: guestEnv,
-      agent: agent ? { hostDir: agent.hostDir, guestDir: agent.guestDir } : null,
-      chat: chat ? { filesHostDir: chatFilesDir, hostSock: join(chat.hostDir, CHAT_SOCK_NAME) } : null,
-    },
-  });
   return {
     command: process.execPath,
     args: [QEMU_LAUNCHER, lease.planPath],
     docker: false,
-    gpgVaultActive: false,
+    commitSigningActive: !!signingRt,
     stateDir: null,
+    gitBrokerProc: gitBroker ? gitBroker.proc : null,
+    gitBrokerDir: gitBroker ? gitBroker.dir : null,
+    commitGuardDir: commitGuard ? commitGuard.dir : null,
     // The running-session toggle flips the whole VM's broker
     // (setPooledVmNetworkMode in sessionManager.js); a joining session shows
     // whatever mode the VM is in now. No networkExtraAllowedHosts: the
@@ -2540,7 +2502,14 @@ async function buildPooledQemuSpawn({ cwd, targetCommand, homeDir, netCfg, gpgVa
 // CHAT_BRIDGE_SCRIPT): targetCommand is then the agent in its chat form
 // (`opencode serve ...` / `claude ...`), run under the app's chat bridge.
 export async function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, notifySocketPath = null, usageSocketPath = null, reuseSandboxHome = true, sandboxHomeCreatedBy = null, chat = null }, deps = {}) {
-  const { dockerSandboxAvailable: dockerSandboxAvailableFn = dockerSandboxAvailable } = deps || {};
+  const {
+    dockerSandboxAvailable: dockerSandboxAvailableFn = dockerSandboxAvailable,
+    startGitBroker: startGitBrokerFn = startGitBroker,
+    resolveLaunchSigningKey: resolveLaunchSigningKeyFn = resolveLaunchSigningKey,
+    requestLaunchApproval: requestLaunchApprovalFn = requestLaunchApproval,
+    exportPublicKey: exportPublicKeyFn = exportPublicKey,
+    createSignHandler: createSignHandlerFn = createSignHandler,
+  } = deps || {};
   // Normalize the app id up front: a nullish `app` resolves to 'claude' in
   // resolveApp(), so every later `app === 'claude'` / `app === 'opencode'`
   // check must see the same value.
@@ -2551,7 +2520,7 @@ export async function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, 
   if (resolve(cwd) === '/') {
     throw new Error('Cannot build a sandbox for the filesystem root (/) -- the project rule would grant the whole filesystem. Choose a working directory first.');
   }
-  const { docker: cfgDocker, persistentHome, gpg: cfgGpg, sshAgent: cfgSshAgent, gpgVault: cfgGpgVault, gitBroker: gitBrokerEnabled, commitMessageGuard, ghUsageRecording, network: netCfg, binds, env, tools: cfgTools, claudeBin, browseRoots, browseRootsInvalid } = loadSandboxConfig();
+  const { docker: cfgDocker, persistentHome, sshAgent: cfgSshAgent, commitSigning: cfgCommitSigning, gitBroker: gitBrokerEnabled, commitMessageGuard, ghUsageRecording, network: netCfg, binds, env, tools: cfgTools, claudeBin, browseRoots, browseRootsInvalid } = loadSandboxConfig();
   // Defense in depth behind sessionManager's browseRoots cwd check (issue
   // #189): same reasoning as the '/' guard just above.
   if (browseRootsInvalid) {
@@ -2564,76 +2533,31 @@ export async function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, 
   // Network isolation is qemu-only (see buildQemuSpawn below): the Go broker
   // always starts 'open'. The bwrap backend launches with open egress and
   // starts no broker.
-  const gpg = sandboxOpts?.gpg ?? cfgGpg;
   const sshAgent = sandboxOpts?.sshAgent ?? cfgSshAgent;
-  const gpgVault = sandboxOpts?.gpgVault ?? cfgGpgVault;
-  // Opt-in tool provisioning (rtk / code-review-graph), merged like gpg/sshAgent
+  const commitSigning = (sandboxOpts?.commitSigning ?? cfgCommitSigning) === true;
+  // Opt-in tool provisioning (rtk / code-review-graph), merged like sshAgent
   // from the config default + the client's per-session sandboxOpts.tools.
   // Thread cfgTools through instead of re-reading the config file.
   const tools = resolveTools(sandboxOpts, cfgTools);
 
-  // GPG vault (plan: gpg-agent-vault): fail loudly and early, before any
-  // broker starts (gitBroker/commitGuard below all leak a live
-  // child process + runtime dir if a LATER step throws -- see their own
-  // cleanup blocks -- so refusing here, first, needs none of that dance).
-  // A missing/legacy vault must never silently degrade to "no GPG" -- this
-  // session explicitly asked to sign/push with a specific key, and launching without
-  // it would be a silent downgrade of what the caller requested. These two
-  // are recoverable only by operator action (set up / recreate the vault),
-  // so they still hard-fail the launch.
-  if (gpgVault && !gpgVaultAgent.vaultExists()) {
-    throw new Error('gpgVault was requested but no GPG vault has been set up yet -- set one up from Settings first.');
+  // Commit signing (ws/commitSignService.js): decided before anything is
+  // started or wiped, because it can refuse the launch -- no key, no git
+  // broker to carry the requests, or the user saying no. A session that
+  // asked for signing never silently launches without it. The approval
+  // waits for the user (up to approvals.js's timeout).
+  let signing = null;
+  if (commitSigning) {
+    if (!gitBrokerEnabled) {
+      throw new Error('commit signing needs the git broker (sandbox.config.json "gitBroker" is false) -- launch without signing or turn the broker on.');
+    }
+    const key = await resolveLaunchSigningKeyFn();
+    await requestLaunchApprovalFn({ cwd, app, backend: resolveSandboxBackend(sandboxOpts), key });
+    signing = {
+      key,
+      publicKey: await exportPublicKeyFn(),
+      handler: createSignHandlerFn({ cwd, app, key }),
+    };
   }
-  if (gpgVault && gpgVaultAgent.isLegacyVault()) {
-    // Security audit F1.4: pre-fix vaults are disabled for good.
-    throw new Error(
-      'gpgVault was requested but the GPG vault was created before the security fix and has been disabled '
-      + '(its secret key may have leaked) -- delete and recreate it from Settings.',
-    );
-  }
-  // A vault that is merely LOCKED at this exact instant is NOT treated as
-  // "no GPG" either, but it is also not a launch-time hard failure any more
-  // (issue #185): gpgVaultRelay.js already tolerates lock/unlock cycles for
-  // an already-running sandbox (its sockets resolve the current agent fresh
-  // per connection), so gating the launch itself on isUnlocked() just
-  // rejects a race that resolves itself moments later. The launch proceeds
-  // with gpgVault still enabled; signing/SSH push will fail (relay refuses
-  // the connection, "agent unavailable" to gpg/ssh) until the vault is
-  // unlocked, and this is logged so a locked launch is never silently
-  // unnoticed.
-  if (gpgVault && !gpgVaultAgent.isUnlocked()) {
-    console.warn(
-      '[sandbox] gpgVault was requested but the vault is currently locked -- launching anyway; '
-      + 'signing/SSH push will fail until it is unlocked from Settings.',
-    );
-  }
-  // gpgVault uses its own target path (~/.gnupg-vault / XDG_RUNTIME_DIR/
-  // gnupg-vault, see buildBwrapArgs) specifically so it cannot collide
-  // on-path with the legacy gpg/sshAgent host-forwarding flags -- but having
-  // both active is still almost certainly a mistake (two different agents
-  // both offering SSH auth, whichever bind runs last inside buildBwrapArgs
-  // wins on SSH_AUTH_SOCK), so warn instead of silently accepting it, same
-  // posture as the docker+gitBroker+sshAgent warning below.
-  if (gpgVault && (gpg || sshAgent)) {
-    console.warn(
-      '[sandbox] gpgVault is enabled alongside the legacy gpg/sshAgent host-forwarding flags for the same '
-      + 'launch -- gpgVault wins for SSH_AUTH_SOCK. Turn off gpg/sshAgent for this launch if that is not intended.',
-    );
-  }
-  // Resolved once here (like gitBroker/commitGuard below) and
-  // passed down as a plain object -- null when not requested -- rather than
-  // having buildBwrapArgs each independently reach into
-  // gpgVaultAgent.js. Lock-independent (issue #185): getPublicIdentity()
-  // only ever returns fingerprint/nameReal/nameEmail (never homeDir/
-  // sockets), which is why it is safe to call even while the vault above is
-  // locked -- the vaultExists() check above guarantees it returns non-null
-  // when gpgVault is true.
-  const gpgVaultInfo = gpgVault ? gpgVaultAgent.getPublicIdentity() : null;
-  // Must exist before buildBwrapArgs bind its FIXED
-  // socket paths below (see gpgVaultRelay.js's header for why sandboxes bind
-  // those instead of gpgVaultInfo.sockets directly). Idempotent/lazy: a
-  // no-op on every launch after the first gpgVault:true one this server run.
-  if (gpgVault) gpgVaultRelay.ensureStarted();
 
   // ssh-agent forwarding is opt-in (see loadSandboxConfig). When on, an
   // explicit env.SSH_AUTH_SOCK in the config wins; otherwise auto-discover.
@@ -2680,7 +2604,7 @@ export async function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, 
   // sandboxOpts.backend picks it per launch; the config sets the default.
   if (resolveSandboxBackend(sandboxOpts) === 'qemu') {
     return await buildQemuSpawn({
-      cwd, targetCommand, app, homeDir, netCfg, extraEnv: env, gpg, sshAgent, gpgVault, gpgVaultInfo, tools,
+      cwd, targetCommand, app, homeDir, netCfg, extraEnv: env, sshAgent, signing, tools,
       gitBrokerEnabled, commitMessageGuard, ghUsageRecording, notifySocketPath, usageSocketPath,
       vmTemplateId: sandboxOpts?.vmTemplateId ?? null, chat,
     }, deps);
@@ -2695,7 +2619,7 @@ export async function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, 
   // null when commitMessageGuard is disabled, which the broker treats as
   // "no PR-body check", matching pre-plan8 behavior exactly.
   const gitBroker = gitBrokerEnabled
-    ? await startGitBroker({ cwd, app, blockedPatterns: commitMessageGuard.enabled ? commitMessageGuard.blockedPatterns : null, ghUsageRecording })
+    ? await startGitBrokerFn({ cwd, app, blockedPatterns: commitMessageGuard.enabled ? commitMessageGuard.blockedPatterns : null, ghUsageRecording, signHandler: signing?.handler ?? null })
     : null;
 
   // Commit-message guard (see commitGuard.js / startCommitGuard above):
@@ -2731,8 +2655,10 @@ export async function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, 
   // runtime dirs leak.
   let bwrapArgs;
   let innerCmd;
+  let signingRt = null;
   try {
-    bwrapArgs = buildBwrapArgs({ cwd, docker, usesRootlesskit: docker, gpg, gpgVault: gpgVaultInfo, extraBinds: binds, extraEnv: env, authSock, stateDir, claudeDir: installDir, gitBroker, commitGuard, notifySocketPath, usageSocketPath, homeDir, app, tools, chat });
+    signingRt = signing && gitBroker ? { key: signing.key, pubkeyPath: writeSigningPubkey(gitBroker, signing) } : null;
+    bwrapArgs = buildBwrapArgs({ cwd, docker, usesRootlesskit: docker, signing: signingRt, extraBinds: binds, extraEnv: env, authSock, stateDir, claudeDir: installDir, gitBroker, commitGuard, notifySocketPath, usageSocketPath, homeDir, app, tools, chat });
     const agentCmd = withClaude(targetCommand, command);
     innerCmd = [BASH, '/ccserver-sandbox-entrypoint.sh', ...(chat ? chatBridgeArgv({
       node: SANDBOX_NODE_PATH,
@@ -2749,8 +2675,8 @@ export async function buildSandboxSpawn({ cwd, targetCommand, app, sandboxOpts, 
   }
 
   const gitBrokerFields = {
-    // Effective gpgVault flag for this launch.
-    gpgVaultActive: gpgVault,
+    // Whether this launch's commits are signed by the host.
+    commitSigningActive: !!signingRt,
     gitBrokerProc: gitBroker ? gitBroker.proc : null,
     gitBrokerDir: gitBroker ? gitBroker.dir : null,
     // No proc for the commit guard (see startCommitGuard) -- just a runtime

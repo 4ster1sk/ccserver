@@ -128,13 +128,15 @@ test('pool: the agent install is shared read-only and bound ro at its fixed path
   f.cleanup();
 });
 
-test('pool: a chat session gets its bridge files ro at the rt dir, a socket dir outside bwrap and an ssh -L to the host', async () => {
+test('pool: a chat session gets its runtime share ro at the rt dir, a socket dir outside bwrap and an ssh -L to the host', async () => {
   const f = fakeBooter();
   const pool = new QemuVmPool({ bootVm: f.bootVm, idleStopMs: 60000, log: () => {} });
-  const chat = { filesHostDir: '/run/ccs-chat-1/vm', hostSock: '/run/ccs-chat-1/oc.sock' };
-  const a = await pool.attach({ key: 'k', spec: {}, session: session('/p/a', { chat }) });
+  const rtDir = mkdtempSync(join(f.root, 'rt-'));
+  const chat = { hostSock: '/run/ccs-chat-1/oc.sock' };
+  const runtime = { hostDir: rtDir, links: [], sockets: [], env: {}, gitConfig: [] };
+  const a = await pool.attach({ key: 'k', spec: {}, session: session('/p/a', { chat, runtime }) });
   const plan = JSON.parse(readFileSync(a.planPath, 'utf-8'));
-  const share = pool.list()[0].shares.find((s) => s.hostPath === chat.filesHostDir);
+  const share = pool.list()[0].shares.find((s) => s.hostPath === rtDir);
   assert.equal(share.readonly, true);
   const args = plan.remote.bwrapArgs;
   const binds = (flag) => args.flatMap((x, i) => (x === flag ? [[args[i + 1], args[i + 2]]] : []));
@@ -147,10 +149,51 @@ test('pool: a chat session gets its bridge files ro at the rt dir, a socket dir 
   assert.deepEqual(plan.ssh.args.slice(-2), ['-tt', 'u@ccs-vm'], "the VM's own login args follow");
   const b = await pool.attach({ key: 'k', spec: {}, session: session('/p/b') });
   const planB = JSON.parse(readFileSync(b.planPath, 'utf-8'));
-  assert.deepEqual(planB.ssh.args, ['-tt', 'u@ccs-vm'], 'a non-chat session has no forward');
+  assert.deepEqual(planB.ssh.args, ['-tt', 'u@ccs-vm'], 'a session without chat or host services has no forward');
   assert.deepEqual(planB.remote.preDirs, []);
   await a.release();
+  assert.ok(!existsSync(rtDir), 'the session runtime dir goes with the session');
   await b.release();
+  await pool.stopAll();
+  f.cleanup();
+});
+
+test('pool: host services ride the session ssh (-R to a per-session guest path), bound into place inside its bwrap only', async () => {
+  const f = fakeBooter();
+  const pool = new QemuVmPool({ bootVm: f.bootVm, idleStopMs: 60000, log: () => {} });
+  const rtDir = mkdtempSync(join(f.root, 'rt-'));
+  const runtime = {
+    hostDir: rtDir,
+    links: [['/ccserver-sandbox-node', '/usr/bin/node'], ['/ccserver-sandbox-gpg-sign.cjs', '/ccserver-sandbox/gpg-sign.cjs'], ['/usr/local/bin/gh', '/ccserver-sandbox/gh-wrapper.cjs']],
+    sockets: [{ name: 'git-broker', hostSock: '/run/u/gb/broker.sock', guestPath: '/ccserver-sandbox-git-broker.sock' }],
+    env: { CCSANDBOX_GIT_BROKER_TOKEN_FILE: '/ccserver-sandbox/git-broker-token' },
+    gitConfig: [['core.hooksPath', '/ccserver-sandbox-git-hooks'], ['gpg.program', '/ccserver-sandbox-gpg-sign.cjs']],
+  };
+  const a = await pool.attach({
+    key: 'k', spec: {},
+    session: session('/p/a', { runtime, env: { FOO: 'bar', GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'user.signingkey', GIT_CONFIG_VALUE_0: 'OPERATOR' } }),
+  });
+  const plan = JSON.parse(readFileSync(a.planPath, 'utf-8'));
+  const [fwd] = plan.remote.waitSockets;
+  assert.match(fwd, /^\/tmp\/ccs-svc-[0-9a-f-]{36}-git-broker\.sock$/);
+  const r = plan.ssh.args.indexOf('-R');
+  assert.equal(plan.ssh.args[r + 1], `${fwd}:/run/u/gb/broker.sock`);
+  assert.ok(plan.ssh.args.includes('ExitOnForwardFailure=yes'));
+  const args = plan.remote.bwrapArgs;
+  const i = args.indexOf(fwd);
+  assert.deepEqual(args.slice(i - 1, i + 2), ['--bind-try', fwd, '/ccserver-sandbox-git-broker.sock']);
+  const links = args.flatMap((x, j) => (x === '--symlink' ? [[args[j + 2], args[j + 1]]] : []))
+    .filter(([l]) => l.startsWith('/ccserver-sandbox') || l.startsWith('/usr/'));
+  assert.deepEqual(links, [['/ccserver-sandbox-node', '/usr/bin/node'], ['/ccserver-sandbox-gpg-sign.cjs', '/ccserver-sandbox/gpg-sign.cjs']], 'only top-level links: /usr is read-only');
+  const env = plan.remote.env;
+  assert.equal(env.CCSANDBOX_GIT_BROKER_TOKEN_FILE, '/ccserver-sandbox/git-broker-token');
+  assert.equal(env.FOO, 'bar');
+  assert.equal(env.GIT_CONFIG_COUNT, '3', "ccserver's entries first, the operator's after");
+  assert.equal(env.GIT_CONFIG_KEY_0, 'core.hooksPath');
+  assert.equal(env.GIT_CONFIG_KEY_2, 'user.signingkey');
+  const cmd = remote.buildConfinedRemoteCommand({ ...plan.remote });
+  assert.ok(cmd.indexOf(`[ ! -S ${fwd} ]`) < cmd.indexOf('exec bwrap'), 'waits for the forwarded socket before bwrap');
+  await a.release();
   await pool.stopAll();
   f.cleanup();
 });

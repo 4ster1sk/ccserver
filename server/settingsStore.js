@@ -23,9 +23,9 @@
 // moves it here; this table exists so it has somewhere to land.
 //
 // Not to be confused (the docs call this out too): sandbox.config.json's
-// `gpg` / `gpgVault` booleans are "forward the host agent into sandboxes",
-// while the Web UI's GPG連携 tab (GpgVaultSection.jsx) is the vault's own
-// setup and lock management. Different concepts, similar names.
+// `commitSigning` boolean is the per-launch default "sign this session's
+// commits", while the Web UI's コミット署名 tab (CommitSigningSection.jsx)
+// manages the host key itself. Different concepts, similar names.
 // ============================================================================
 //
 // Values round-trip through JSON in every case, including strings and

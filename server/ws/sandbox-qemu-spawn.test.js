@@ -61,7 +61,7 @@ function fakes({ prepareThrows = false } = {}) {
 }
 
 const launch = (deps, extra = {}) => buildSandboxSpawn({
-  cwd: dir, targetCommand: ['bash'], app: 'claude', sandboxOpts: { gpgVault: false, gpg: false, sshAgent: false },
+  cwd: dir, targetCommand: ['bash'], app: 'claude', sandboxOpts: { sshAgent: false },
   notifySocketPath: '/run/n/sock', ...extra,
 }, deps);
 
@@ -76,7 +76,7 @@ test('qemu spawn: git broker, commit guard and MCP reach the VM as broker servic
   assert.deepEqual(rt.gitConfig, [['core.hooksPath', '/ccserver-sandbox-git-hooks']]);
   assert.equal(calls.prepare.env.GIT_CONFIG_KEY_0, 'user.signingkey', 'operator env passed through for prepareQemuSession to merge');
   assert.ok(r.gitBrokerProc && r.gitBrokerDir && r.commitGuardDir, 'teardown handles returned');
-  assert.equal(r.gpgVaultActive, false);
+  assert.equal(r.commitSigningActive, false);
 });
 
 test('qemu spawn: a failure after the brokers started stops and removes all of them', { skip: process.platform !== 'linux' }, async () => {
@@ -100,7 +100,7 @@ test('qemu spawn: the VM template supplies resources and cloud-config; none -> s
       cloudConfig: { packages: ['htop'] },
     };
   };
-  const r = await launch(deps, { sandboxOpts: { gpgVault: false, gpg: false, sshAgent: false, vmTemplateId: 't1' } });
+  const r = await launch(deps, { sandboxOpts: { sshAgent: false, vmTemplateId: 't1' } });
   assert.deepEqual(asked, ['t1']);
   assert.equal(calls.prepare.memoryMiB, 8192);
   assert.equal(calls.prepare.cpus, 4);
@@ -166,12 +166,13 @@ function fakePool(network = { adminSock: '/run/vm/a.sock', mode: 'open' }) {
   };
 }
 
-test('qemu spawn, persistent: joins the pool by template with the launch policy; no per-session brokers', { skip: process.platform !== 'linux' }, withConfig({ qemu: { persistent: true } }, async () => {
+test('qemu spawn, persistent: joins the pool by template with the launch policy; its own git broker and commit guard', { skip: process.platform !== 'linux' }, withConfig({ qemu: { persistent: true } }, async () => {
   const { deps, calls } = fakes();
   const pool = fakePool();
   const r = await launch({ ...deps, ...pool });
-  assert.equal(calls.gitBroker, undefined, 'no git broker for a pooled session (not wired yet)');
+  assert.ok(calls.gitBroker, "a pooled session gets its own git broker");
   assert.equal(calls.broker, undefined, 'the broker is started by the pool, only when it boots a VM');
+  assert.ok(r.gitBrokerProc && r.gitBrokerDir && r.commitGuardDir, 'teardown handles returned');
   const a = pool.attaches[0];
   assert.equal(a.session.cwd, dir);
   assert.deepEqual(a.session.argv, ['bash']);
@@ -179,7 +180,13 @@ test('qemu spawn, persistent: joins the pool by template with the launch policy;
   assert.equal(a.session.env.GIT_CONFIG_KEY_0, 'user.signingkey');
   assert.equal(a.session.homeHostPath, null, 'persistentHome is off in this config');
   const broker = a.spec.startBroker();
-  assert.deepEqual(calls.broker.services, [], 'no host services in a shared VM');
+  assert.deepEqual(calls.broker.services, [], 'host services ride each session\'s ssh, not the VM broker');
+  const rt = a.session.runtime;
+  assert.deepEqual(rt.sockets.map((x) => [x.name, x.guestPath]), [['git-broker', '/ccserver-sandbox-git-broker.sock']]);
+  assert.ok(existsSync(join(rt.hostDir, 'git-broker-token')), 'helper files materialized in the per-session runtime dir');
+  assert.equal(statSync(join(rt.hostDir, 'git-broker-token')).mode & 0o777, 0o600);
+  assert.equal(rt.env.CCSANDBOX_GIT_BROKER_TOKEN_FILE, '/ccserver-sandbox/git-broker-token');
+  assert.deepEqual(rt.gitConfig, [['core.hooksPath', '/ccserver-sandbox-git-hooks']]);
   assert.equal(broker.pipeBin.endsWith('ccs-netbroker'), true);
   assert.deepEqual(r.args.slice(1), ['/run/vm/sessions/t.json']);
   assert.equal(r.qemuRunDir, undefined, "the VM's run dir is the pool's, never removed with a session");
@@ -248,13 +255,72 @@ test('qemuLaunchPoolKey: null for a non-persistent VM and for a launch that cann
   })();
 });
 
-test('qemu spawn, persistent: an explicit gpgVault request is refused, not dropped', { skip: process.platform !== 'linux' }, withConfig({ qemu: { persistent: true } }, async () => {
-  const { deps } = fakes();
+// --- commit signing ---------------------------------------------------------
+
+const SIGN_KEY = { nameReal: 'Bot', nameEmail: 'bot@example.com', signingFingerprint: 'F'.repeat(40), keyId: 'FFFFFFFFFFFFFFFF' };
+function withSigning(deps, { approve = true } = {}) {
+  const asked = [];
+  return {
+    asked,
+    deps: {
+      ...deps,
+      resolveLaunchSigningKey: async () => SIGN_KEY,
+      requestLaunchApproval: async (req) => {
+        asked.push(req);
+        if (!approve) throw new Error('commit signing launch approval was rejected -- launch refused');
+      },
+      exportPublicKey: async () => '-----BEGIN PGP PUBLIC KEY BLOCK-----\n',
+      createSignHandler: ({ key }) => Object.assign(async () => ({ ok: true }), { key }),
+    },
+  };
+}
+
+test('qemu spawn, signing: approved per launch; the VM gets the wrapper, the public key and the identity, no key', { skip: process.platform !== 'linux' }, async () => {
+  const { deps, calls } = fakes();
+  const sig = withSigning(deps);
+  const r = await launch(sig.deps, { sandboxOpts: { commitSigning: true } });
+  assert.equal(sig.asked.length, 1);
+  assert.equal(sig.asked[0].backend, 'qemu');
+  assert.equal(sig.asked[0].key, SIGN_KEY);
+  assert.equal(typeof calls.gitBroker.signHandler, 'function', 'the broker relays sign requests');
+  const rt = calls.prepare.runtime;
+  const cfg = Object.fromEntries(rt.gitConfig);
+  assert.equal(cfg['gpg.program'], '/ccserver-sandbox-gpg-sign.cjs');
+  assert.equal(cfg['user.email'], 'bot@example.com');
+  const pub = rt.files.find((f) => f.dest === 'signing-pubkey.asc');
+  assert.match(readFileSync(pub.src, 'utf-8'), /PUBLIC KEY/);
+  assert.ok(!rt.services.some((x) => /gpg/.test(x.name)), 'no signing socket into the VM');
+  assert.equal(r.commitSigningActive, true);
+});
+
+test('qemu spawn, signing: a rejected approval refuses the launch before anything starts', { skip: process.platform !== 'linux' }, async () => {
+  const { deps, calls } = fakes();
+  const sig = withSigning(deps, { approve: false });
+  await assert.rejects(launch(sig.deps, { sandboxOpts: { commitSigning: true } }), /rejected -- launch refused/);
+  assert.equal(calls.gitBroker, undefined);
+  assert.equal(calls.broker, undefined);
+});
+
+test('qemu spawn, persistent: signing reaches a shared VM through the session\'s own broker', { skip: process.platform !== 'linux' }, withConfig({ qemu: { persistent: true } }, async () => {
+  const { deps, calls } = fakes();
   const pool = fakePool();
-  const vault = await import('./gpgVaultAgent.js');
-  if (!vault.vaultExists()) return; // the earlier vault checks refuse first
-  await assert.rejects(launch({ ...deps, ...pool }, { sandboxOpts: { gpgVault: true } }), /not available in a persistent/);
-  assert.equal(pool.attaches.length, 0);
+  const sig = withSigning(deps);
+  const r = await launch({ ...sig.deps, ...pool }, { sandboxOpts: { commitSigning: true } });
+  assert.equal(typeof calls.gitBroker.signHandler, 'function');
+  const rt = pool.attaches[0].session.runtime;
+  assert.equal(Object.fromEntries(rt.gitConfig)['gpg.program'], '/ccserver-sandbox-gpg-sign.cjs');
+  assert.ok(rt.links.some(([l]) => l === '/ccserver-sandbox-gpg-sign.cjs'));
+  assert.ok(existsSync(join(rt.hostDir, 'gpg-sign.cjs')));
+  assert.equal(r.commitSigningActive, true);
+}));
+
+test('qemu spawn, persistent: a failed attach removes the session\'s brokers and runtime dir', { skip: process.platform !== 'linux' }, withConfig({ qemu: { persistent: true } }, async () => {
+  const { deps, killed } = fakes();
+  let seen = null;
+  const pool = { qemuVmPool: { async attach(opts) { seen = opts; throw new Error('VM boot failed'); } } };
+  await assert.rejects(launch({ ...deps, ...pool }), /VM boot failed/);
+  assert.deepEqual(killed, ['gitBroker']);
+  assert.ok(!existsSync(seen.session.runtime.hostDir));
 }));
 
 // --- agents (qemuAgents.js) ------------------------------------------------
@@ -510,7 +576,7 @@ test('qemu spawn: a Claude Code chat launch ships its own bridge and passes the 
   assert.equal(files['chat-bridge.cjs'].src, join(chatDir, 'bridge.cjs'));
 });
 
-test('qemu spawn, persistent: a chat launch runs the bridge from its own ro share and forwards its socket', { skip: process.platform !== 'linux' }, withConfig({ qemu: { persistent: true } }, async () => {
+test('qemu spawn, persistent: a chat launch runs the bridge from the session runtime share and forwards its socket', { skip: process.platform !== 'linux' }, withConfig({ qemu: { persistent: true } }, async () => {
   const { deps } = fakes();
   const pool = fakePool();
   deps.resolveQemuAgent = (app, targetCommand) => ({
@@ -527,8 +593,10 @@ test('qemu spawn, persistent: a chat launch runs the bridge from its own ro shar
     '--sock', '/tmp/ccserver-chat/oc.sock', '--password-file', '/ccserver-sandbox/chat-password', '--',
     '/opt/ccserver-agents/opencode/opencode', 'serve', '--stdio',
   ]);
-  assert.deepEqual(session.chat, { filesHostDir: join(chatDir, 'vm'), hostSock: join(chatDir, 'oc.sock') });
-  assert.equal(readFileSync(join(chatDir, 'vm', 'chat-password'), 'utf-8'), 'pw\n');
-  assert.equal(statSync(join(chatDir, 'vm', 'chat-password')).mode & 0o777, 0o600);
-  assert.ok(existsSync(join(chatDir, 'vm', 'chat-bridge.cjs')));
+  assert.deepEqual(session.chat, { hostSock: join(chatDir, 'oc.sock') });
+  // The bridge and password ride the session's runtime share (GUEST_RT_DIR).
+  const rtDir = session.runtime.hostDir;
+  assert.equal(readFileSync(join(rtDir, 'chat-password'), 'utf-8'), 'pw\n');
+  assert.equal(statSync(join(rtDir, 'chat-password')).mode & 0o777, 0o600);
+  assert.ok(existsSync(join(rtDir, 'chat-bridge.cjs')));
 }));

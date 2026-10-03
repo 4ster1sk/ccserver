@@ -118,11 +118,10 @@ export function attachTerminalHandler(chan) {
             cols: session.cols,
             rows: session.rows,
             isReconnect: false,
-            // Effective gpgVault flag THIS session actually launched with
-            // (server/ws/sandbox.js's resolved value, not just a requested
-            // override) -- lets the client show whether GPG Vault is really
-            // active for this specific session (gpgVaultBadge.js).
-            gpgVaultActive: !!session.gpgVaultActive,
+            // Whether the host signs THIS session's commits (sandbox.js's
+            // effective value, not just a requested override) -- the
+            // client's signing badge (commitSigningBadge.js).
+            commitSigningActive: !!session.commitSigningActive,
             // Effective sandbox flag, for the same reason and in the same
             // shape (issue #251). The client opens the tab optimistically
             // with the value it REQUESTED, but createSession overrides that
@@ -190,7 +189,7 @@ export function attachTerminalHandler(chan) {
             cols: session.cols,
             rows: session.rows,
             isReconnect: true,
-            gpgVaultActive: !!session.gpgVaultActive,
+            commitSigningActive: !!session.commitSigningActive,
             // Same effective value on re-attach (issue #251).
             sandbox: !!session.sandbox,
             ui: session.ui || 'terminal',

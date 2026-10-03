@@ -51,9 +51,8 @@ import { resolveAuthMode } from '../authMode.js';
 // passkey mode too), so this stays a clear 400 rather than a confusing
 // "invalid"/"verification failed" for every possible input.
 //
-// Exported for routes/gpgVault.js to reuse verbatim (rather than duplicating
-// the check) -- the GPG vault is itself a passkey-only feature (plan:
-// gpg-agent-vault), and two independent copies of this guard could drift.
+// Exported so other passkey-only routes can reuse it verbatim rather than
+// growing a second copy of the guard that could drift.
 export function requirePasskeyMode(reply) {
   if (resolveAuthMode() === 'passkey') return true;
   reply.code(400).send({ error: 'WebAuthn/one-time login tokens are only used when CCSERVER_AUTH_MODE=passkey' });
@@ -232,10 +231,10 @@ export async function authRoute(fastify, opts) {
       // ccserver passkeys it already has for this rpID.
       authenticatorSelection: { residentKey: 'required', userVerification: 'preferred' },
       // Requests the PRF (hmac-secret) extension's capability at creation
-      // time (plan: gpg-agent-vault) -- on most authenticators, PRF can only
-      // be evaluated later (at a get() ceremony) for a credential that
-      // requested it here at MakeCredential time. No eval salt needed yet;
-      // routes/gpgVault.js's step-up ceremonies supply one later. Harmless
+      // time -- on most authenticators, PRF can only be evaluated later (at a
+      // get() ceremony) for a credential that requested it here at
+      // MakeCredential time. No eval salt needed yet; the commit signing
+      // key's passkey unlock (routes/prfCeremony.js) supplies one. Harmless
       // no-op for an authenticator/browser that doesn't support PRF at all.
       extensions: { prf: {} },
     });

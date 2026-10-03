@@ -19,7 +19,7 @@ import { vmTemplatesRoute } from './routes/vmTemplates.js';
 import { vmsRoute } from './routes/vms.js';
 import { notificationsRoute } from './routes/notifications.js';
 import { authRoute } from './routes/auth.js';
-import { gpgVaultRoute } from './routes/gpgVault.js';
+import { commitSigningRoute } from './routes/commitSigning.js';
 import { setupRoute } from './routes/setup.js';
 import { opencodeChatRoute } from './routes/opencodeChat.js';
 import { terminalWs } from './ws/terminal.js';
@@ -33,13 +33,14 @@ import { expireStalePendingApprovals } from './ws/approvals.js';
 import { warmUsage } from './usage.js';
 import { warmCodexUsage } from './codexUsage.js';
 import { warmOpencodeUsage } from './opencodeUsage.js';
-import { initDb, dbPath } from './db.js';
+import { initDb, dbPath, getDb } from './db.js';
 import { selectableAppIds, installedApps, loadSandboxConfig } from './ws/sandbox.js';
 import { isCcserverScratchPath, isContained } from './pathPolicy.js';
 import { guardedPaths, allPaths, configRoot, dataRoot, stateRoot, layoutVersion, CURRENT_LAYOUT_VERSION } from './paths.js';
 import { verifySessionCookie } from './authSessions.js';
 import { resolveAuthMode } from './authMode.js';
-import { lockVault, isLegacyVault } from './ws/gpgVaultAgent.js';
+import { lockSigningKey, startAutoLockSweep, stopAutoLockSweep } from './commitSigning.js';
+import { installApprovalGuards } from './ws/commitSignService.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 // trustProxy scoped to loopback only (Issue #141 Step2): the documented HTTPS
@@ -103,16 +104,9 @@ try {
   // expire them (fail-safe -- nothing runs just because the server restarted).
   const swept = expireStalePendingApprovals();
   if (swept > 0) fastify.log.warn(`Expired ${swept} stale pending approval(s) left by a previous run`);
-  // Security audit F1.4: a GPG vault created before the relay fix may have
-  // had its secret key exported from a sandbox, so it is disabled for good.
-  // Nothing to actively do here -- the vault always boots locked, and every
-  // unlock/add path re-checks isLegacyVault() -- but say so loudly once.
-  if (isLegacyVault()) {
-    fastify.log.warn(
-      'GPG vault was created before the security fix (audit F1) and is DISABLED: its secret key may have leaked. '
-      + 'Remove its GPG/SSH keys from GitHub, then delete the vault (Settings, or `node server/cli/gpg-vault-reset.js`) and recreate it.',
-    );
-  }
+  // Commit signing (ws/commitSignService.js): the banner may only reject an
+  // unlock request; approving it is the unlock itself.
+  installApprovalGuards();
 } catch (err) {
   fastify.log.error({ err }, `Failed to initialize SQLite database (${dbPath()}): ${err.message}`);
   process.exit(1);
@@ -131,6 +125,17 @@ try {
 // effective mode.
 const AUTH_TOKEN = process.env.CCSERVER_TOKEN;
 const AUTH_MODE = resolveAuthMode();
+
+// Commit signing: a previous run's signing agent may still hold the cached
+// passphrase -- every boot starts locked. In passkey mode the key also locks
+// itself once no login session is left (nobody could answer an unlock or
+// launch approval anyway).
+lockSigningKey().catch((err) => fastify.log.warn(`could not lock the commit signing key at boot: ${err.message}`));
+if (AUTH_MODE === 'passkey') {
+  startAutoLockSweep({
+    hasActiveLogin: () => getDb().prepare('SELECT COUNT(*) AS c FROM auth_sessions WHERE expires_at > ?').get(Date.now()).c > 0,
+  });
+}
 
 // L3 fix (vuln_scan report): `!==` short-circuits at the first differing
 // byte, so its timing leaks how many leading characters of a guess matched
@@ -307,7 +312,7 @@ await fastify.register(vmTemplatesRoute, { prefix: '/api' });
 await fastify.register(vmsRoute, { prefix: '/api' });
 await fastify.register(notificationsRoute, { prefix: '/api' });
 await fastify.register(authRoute, { prefix: '/api' });
-await fastify.register(gpgVaultRoute, { prefix: '/api' });
+await fastify.register(commitSigningRoute, { prefix: '/api' });
 await fastify.register(setupRoute, { prefix: '/api' });
 await fastify.register(opencodeChatRoute, { prefix: '/api' });
 await fastify.register(terminalWs);
@@ -329,14 +334,11 @@ if (process.env.NODE_ENV === 'production') {
 const cleanup = () => {
   stopNotifyBroker();
   stopUsageBroker();
-  // GPG vault (plan: gpg-agent-vault): the in-memory Vault Key is this
-  // feature's entire "cannot decrypt without logging in" guarantee, so a
-  // graceful restart must not leave a stray gpg-agent process holding a
-  // decrypted key in its tmpfs homedir. Best-effort like the brokers above
-  // -- a failure here just means the next boot's homedir gets orphaned on
-  // tmpfs (gone on unmount/reboot regardless), not a secret leak.
-  try { lockVault(); } catch { /* best-effort */ }
-  gracefulShutdown().then(() => process.exit(0));
+  // Commit signing: the cached passphrase lives only in the signing home's
+  // gpg-agent, which outlives this process unless stopped. Lock it so a
+  // restart always comes back locked.
+  stopAutoLockSweep();
+  lockSigningKey().catch(() => {}).finally(() => gracefulShutdown().then(() => process.exit(0)));
 };
 process.on('SIGTERM', cleanup);
 process.on('SIGINT', cleanup);

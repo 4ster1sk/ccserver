@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir, homedir } from 'node:os';
-import { loadSandboxConfig, installedApps, selectableAppIds, APP_IDS, _resetVikunjaWarningForTests, _resetAllowUnsandboxedAgentsWarningForTests } from './sandbox.js';
+import { loadSandboxConfig, installedApps, selectableAppIds, APP_IDS, _resetVikunjaWarningForTests, _resetAllowUnsandboxedAgentsWarningForTests, _resetRetiredGpgWarningForTests } from './sandbox.js';
 
 // console.warn capture for the compatibility-warning tests below. Kept local
 // rather than global so an unrelated failing test still prints its own output.
@@ -67,19 +67,32 @@ test('persistentHome is false only for an explicit false value', () => {
   });
 });
 
-test('gpgVault (plan: gpg-agent-vault) is opt-in and only true for an explicit true value', () => {
-  withConfig({ gpgVault: true }, () => {
-    assert.equal(loadSandboxConfig().gpgVault, true);
+test('commitSigning is opt-in and only true for an explicit true value', () => {
+  withConfig({ commitSigning: true }, () => {
+    assert.equal(loadSandboxConfig().commitSigning, true);
   });
-  withConfig({ gpgVault: false }, () => {
-    assert.equal(loadSandboxConfig().gpgVault, false);
-  });
-  withConfig({ gpgVault: 'yes' }, () => {
-    assert.equal(loadSandboxConfig().gpgVault, false, 'non-boolean falls back to the default (off)');
+  withConfig({ commitSigning: 'yes' }, () => {
+    assert.equal(loadSandboxConfig().commitSigning, false, 'non-boolean falls back to the default (off)');
   });
   withConfig({}, () => {
-    assert.equal(loadSandboxConfig().gpgVault, false, 'absent defaults to off, like gpg/sshAgent');
+    assert.equal(loadSandboxConfig().commitSigning, false);
   });
+});
+
+test('the retired gpg / gpgVault keys are ignored, with one warning per process', () => {
+  _resetRetiredGpgWarningForTests();
+  withConfig({ gpg: true, gpgVault: true, gpgVaultLockPolicy: { idleTimeoutMinutes: 5 } }, () => {
+    const first = captureWarnings(() => {
+      const cfg = loadSandboxConfig();
+      assert.equal('gpg' in cfg, false);
+      assert.equal('gpgVault' in cfg, false);
+      assert.equal(cfg.commitSigning, false, 'a retired key does not turn signing on');
+    });
+    assert.equal(first.length, 1);
+    assert.match(first[0], /"gpg", "gpgVault", "gpgVaultLockPolicy" are retired/);
+    assert.deepEqual(captureWarnings(() => loadSandboxConfig()), [], 'said once');
+  });
+  _resetRetiredGpgWarningForTests();
 });
 
 test('forceSandbox is true only for an explicit true value', () => {

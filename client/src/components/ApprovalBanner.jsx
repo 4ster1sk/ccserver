@@ -1,6 +1,8 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { authFetch } from '../auth.js';
 import { useVisiblePolling } from '../hooks/useVisiblePolling.js';
+import { useCommitSigningStatusContext } from './CommitSigningStatusProvider.jsx';
+import CommitSigningUnlockForm from './CommitSigningUnlockForm.jsx';
 
 // Global banner for server-initiated destructive-operation approvals (see
 // ws/approvals.js). Polls GET /api/approvals?status=pending every few seconds
@@ -8,12 +10,12 @@ import { useVisiblePolling } from '../hooks/useVisiblePolling.js';
 // POST /api/approvals/:id/decision. Rendered at the App level (above the tab
 // bar) so it is visible from every tab.
 //
-// No current caller requests an approval (issue #189 removed the sole
-// consumer, the privileged meta-agent MCP toolset) -- this stays wired up as
-// generic infrastructure for a future feature that needs the same
-// human-in-the-loop gate, so any non-OK response or fetch error is treated
-// as "nothing pending" instead of surfacing errors, mirroring how App.jsx
-// handles older-server endpoints.
+// Current callers: commit signing (server/ws/commitSignService.js) -- a
+// launch with signing asks every time, and a commit waiting on a locked key
+// asks for an unlock. An unlock request is answered by unlocking (the form
+// below), never by "承認": the server refuses that decision for it. Any
+// non-OK response or fetch error is treated as "nothing pending" instead
+// of surfacing errors, mirroring how App.jsx handles older-server endpoints.
 
 const POLL_MS = 4000;
 // Must match the server's fixed approval timeout (plan §3.1-6): unanswered
@@ -24,6 +26,8 @@ const APPROVAL_TIMEOUT_MS = 5 * 60 * 1000;
 const KIND_LABELS = {
   close_session: 'セッション強制終了',
   delete_sandbox: 'サンドボックス削除',
+  commit_signing_launch: 'コミット署名ありで起動',
+  commit_signing_unlock: '署名鍵のロック解除',
 };
 
 function normalizeApproval(a) {
@@ -53,6 +57,7 @@ export default function ApprovalBanner() {
   const [now, setNow] = useState(() => Date.now());
   const [busyId, setBusyId] = useState(null);
   const [actionError, setActionError] = useState(null); // { id, message }
+  const signing = useCommitSigningStatusContext();
   // Same overlap guard as SettingsView's sandbox list polling: a slow stale
   // response must not clobber a newer one.
   const refreshingRef = useRef(false);
@@ -138,13 +143,20 @@ export default function ApprovalBanner() {
               </span>
             </div>
             <div className="approval-banner-actions">
-              <button
-                className="btn btn-primary"
-                disabled={busyId === a.id}
-                onClick={() => decide(a.id, 'approved')}
-              >
-                承認
-              </button>
+              {a.kind === 'commit_signing_unlock' ? (
+                <CommitSigningUnlockForm
+                  passkeys={signing?.data?.passkeys}
+                  onUnlocked={async () => { await signing?.refresh(); await refresh(); }}
+                />
+              ) : (
+                <button
+                  className="btn btn-primary"
+                  disabled={busyId === a.id}
+                  onClick={() => decide(a.id, 'approved')}
+                >
+                  承認
+                </button>
+              )}
               <button
                 className="btn btn-secondary approval-reject-btn"
                 disabled={busyId === a.id}

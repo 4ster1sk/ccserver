@@ -75,6 +75,7 @@ const REGISTRY_DEFAULTS = [
   // Under the operator's real $HOME before migration.
   ['CCSERVER_DB_PATH', 'ccserver.sqlite3'],
   ['CCSERVER_FEDERATION_HOME', 'federation'],
+  ['CCSERVER_COMMIT_SIGNING_GNUPGHOME', 'signing-gnupg'],
   ['CCSERVER_GROUP_FILES_ROOT', 'group-files'],
   ['CCSERVER_ORCHESTRATOR_GENERATED_ROOT', 'orchestrator-generated'],
   ['CCSERVER_USAGE_CWD', 'usage-cwd'],

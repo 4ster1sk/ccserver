@@ -81,32 +81,26 @@ test('fresh open runs migrations to the latest version', () => {
   db.prepare('INSERT INTO auth_sessions (id, created_at, expires_at, last_seen_at) VALUES (?,?,?,NULL)')
     .run('sess1', 1, 2);
   assert.equal(db.prepare('SELECT COUNT(*) AS c FROM auth_sessions').get().c, 1);
-  // v8 tables exist, usable, and enforce UNIQUE(fingerprint) + the
-  // credential_id -> webauthn_credentials CASCADE (see gpgVaultCrypto.js /
-  // gpgVaultDb.js).
-  db.prepare(`INSERT INTO gpg_vault
-      (id, fingerprint, key_id, name_real, name_email, public_key_armored, ssh_public_key, encrypted_secret_key, encryption_nonce, encryption_tag, created_at)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?)`)
-    .run('default', 'FPR1', 'KEYID1', 'ccserver', 'ccserver@example.com', '-----BEGIN PGP PUBLIC KEY-----', 'ssh-ed25519 AAAA...', Buffer.from('ct'), Buffer.from('nonce'), Buffer.from('tag'), 1);
-  assert.equal(db.prepare('SELECT COUNT(*) AS c FROM gpg_vault').get().c, 1);
-  assert.throws(() => {
-    db.prepare(`INSERT INTO gpg_vault
-        (id, fingerprint, key_id, name_real, name_email, public_key_armored, ssh_public_key, encrypted_secret_key, encryption_nonce, encryption_tag, created_at)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?)`)
-      .run('other', 'FPR1', 'KEYID2', 'ccserver', 'ccserver@example.com', '-----BEGIN PGP PUBLIC KEY-----', 'ssh-ed25519 AAAA...', Buffer.from('ct'), Buffer.from('nonce'), Buffer.from('tag'), 2);
-  }, /UNIQUE/, 'fingerprint must be unique');
+  // v15 (host-side commit signing) replaced v8's GPG vault tables: the
+  // vault tables are gone, the new ones exist, and a passkey wrap is
+  // dropped together with its webauthn credential (ON DELETE CASCADE).
+  for (const gone of ['gpg_vault', 'gpg_vault_credentials']) {
+    assert.equal(db.prepare("SELECT COUNT(*) AS c FROM sqlite_master WHERE type='table' AND name=?").get(gone).c, 0, `${gone} must be dropped by v15`);
+  }
   db.prepare('INSERT INTO webauthn_credentials (id, public_key, counter, label, created_at) VALUES (?,?,?,?,?)')
-    .run('cred-vault-1', Buffer.from('pubkey2'), 0, 'Vault Key', 1);
-  db.prepare(`INSERT INTO gpg_vault_credentials
-      (credential_id, vault_id, wrapped_key, wrap_nonce, wrap_tag, created_at)
-      VALUES (?,?,?,?,?,?)`)
-    .run('cred-vault-1', 'default', Buffer.from('wrapped'), Buffer.from('n'), Buffer.from('t'), 1);
-  assert.equal(db.prepare('SELECT COUNT(*) AS c FROM gpg_vault_credentials').get().c, 1);
-  db.prepare('DELETE FROM webauthn_credentials WHERE id = ?').run('cred-vault-1');
+    .run('cred-sign-1', Buffer.from('pubkey2'), 0, 'Signing', 1);
+  db.prepare(`INSERT INTO commit_signing_passkeys
+      (credential_id, key_fingerprint, prf_salt, wrapped, wrap_nonce, wrap_tag, created_at)
+      VALUES (?,?,?,?,?,?,?)`)
+    .run('cred-sign-1', 'FPR', Buffer.from('salt'), Buffer.from('w'), Buffer.from('n'), Buffer.from('t'), 1);
+  db.prepare('DELETE FROM webauthn_credentials WHERE id = ?').run('cred-sign-1');
   assert.equal(
-    db.prepare('SELECT COUNT(*) AS c FROM gpg_vault_credentials').get().c, 0,
-    'ON DELETE CASCADE must drop the vault wrap when its credential is deleted',
+    db.prepare('SELECT COUNT(*) AS c FROM commit_signing_passkeys').get().c, 0,
+    'ON DELETE CASCADE must drop the passphrase wrap when its credential is deleted',
   );
+  db.prepare(`INSERT INTO commit_signatures (created_at, cwd, app, key_fingerprint, tree, parents, subject, payload_sha256)
+      VALUES (?,?,?,?,?,?,?,?)`).run(1, '/p', 'claude', 'FPR', 'T', '', 's', 'h');
+  assert.equal(db.prepare('SELECT COUNT(*) AS c FROM commit_signatures').get().c, 1);
 });
 
 test('reopening is idempotent (migrations do not re-apply) and data survives', () => {
@@ -320,8 +314,8 @@ test('v9 migration: an existing vault becomes legacy; existing sessions/tokens g
   db.prepare('INSERT INTO auth_sessions (id, created_at, expires_at, last_seen_at) VALUES (?,?,?,NULL)').run('s1', now, now + 1000);
   db.prepare('INSERT INTO login_tokens (id, token_hash, created_at, expires_at, used_at) VALUES (?,?,?,?,NULL)').run('t1', 'h', now, now + 1000);
 
-  migrate(db);
-  assert.equal(db.prepare('PRAGMA user_version').get().user_version, MIGRATIONS[MIGRATIONS.length - 1].version);
+  migrate(db, MIGRATIONS.filter((m) => m.version <= 9));
+  assert.equal(db.prepare('PRAGMA user_version').get().user_version, 9);
   assert.equal(db.prepare('SELECT format_version FROM gpg_vault').get().format_version, 1);
   assert.equal(db.prepare('SELECT prf_salt FROM gpg_vault_credentials').get().prf_salt, null);
   const session = db.prepare('SELECT auth_method, stepup_at, registration_grant FROM auth_sessions').get();
@@ -396,11 +390,36 @@ test('v14 migration: pr_reviews is dropped on top of v13', () => {
 
   migrate(db, MIGRATIONS);
 
-  assert.equal(db.prepare('PRAGMA user_version').get().user_version, 14);
+  assert.equal(db.prepare('PRAGMA user_version').get().user_version, MIGRATIONS.at(-1).version);
   assert.equal(
     db.prepare("SELECT COUNT(*) AS c FROM sqlite_master WHERE type='table' AND name='pr_reviews'").get().c,
     0,
     'the reviewer job-history table is gone, history is not preserved',
   );
+  db.close();
+});
+
+test('v15 migration: the GPG vault tables are dropped, auth columns from v9 survive', () => {
+  const db = new DatabaseSync(':memory:');
+  db.exec('PRAGMA foreign_keys = ON');
+  migrate(db, MIGRATIONS.filter((m) => m.version <= 14));
+  const now = Date.now();
+  db.prepare('INSERT INTO webauthn_credentials (id, public_key, counter, label, created_at) VALUES (?,?,?,?,?)').run('c1', Buffer.from('pk'), 0, null, now);
+  db.prepare(`INSERT INTO gpg_vault (id, fingerprint, key_id, name_real, name_email, public_key_armored, ssh_public_key,
+    encrypted_secret_key, encryption_nonce, encryption_tag, created_at, format_version) VALUES (?,?,?,?,?,?,?,?,?,?,?,2)`)
+    .run('default', 'FPR', 'KID', 'n', 'e@x.y', 'pk', 'ssh-ed25519 A', Buffer.from('c'), Buffer.from('n'), Buffer.from('t'), now);
+  db.prepare('INSERT INTO gpg_vault_credentials (credential_id, vault_id, wrapped_key, wrap_nonce, wrap_tag, created_at, prf_salt) VALUES (?,?,?,?,?,?,?)')
+    .run('c1', 'default', Buffer.from('w'), Buffer.from('n'), Buffer.from('t'), now, Buffer.from('s'));
+  db.prepare('INSERT INTO auth_sessions (id, created_at, expires_at, last_seen_at, stepup_at) VALUES (?,?,?,NULL,?)').run('s1', now, now + 1000, now);
+
+  migrate(db, MIGRATIONS.filter((m) => m.version <= 15));
+
+  assert.equal(db.prepare('PRAGMA user_version').get().user_version, 15);
+  for (const gone of ['gpg_vault', 'gpg_vault_credentials']) {
+    assert.equal(db.prepare("SELECT COUNT(*) AS c FROM sqlite_master WHERE type='table' AND name=?").get(gone).c, 0);
+  }
+  assert.equal(db.prepare('SELECT stepup_at FROM auth_sessions').get().stepup_at, now, 'v9 auth columns are untouched');
+  assert.equal(db.prepare('SELECT COUNT(*) AS c FROM webauthn_credentials').get().c, 1, 'passkeys survive');
+  assert.equal(db.prepare('SELECT COUNT(*) AS c FROM commit_signing_passkeys').get().c, 0);
   db.close();
 });

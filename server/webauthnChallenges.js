@@ -59,8 +59,8 @@ function evictOldestIfFull() {
 // ('registration' | 'authentication') stops a flow cookie minted for one
 // ceremony from being replayed against the other's verify endpoint.
 // `data` (optional) is server-side-only state the verify step needs and the
-// client must never get to choose -- e.g. the GPG vault's per-ceremony PRF
-// salts and add-credential's second challenge (routes/gpgVault.js).
+// client must never get to choose -- e.g. the server-chosen PRF salt of the
+// commit signing key's passkey enrolment (routes/commitSigning.js).
 export function startChallengeFlow(kind, challenge, data = null) {
   const now = Date.now();
   sweepExpired(now);

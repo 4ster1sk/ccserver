@@ -6,7 +6,7 @@
 //                                 [--force] [--json] [--help]
 //        (or: npm run setup [-- --yes])
 //
-// Dry run by default -- the contract gpg-vault-reset.js established and
+// Dry run by default -- the contract the server/cli tools share and
 // cli.test.js already pins: print exactly what would happen, change nothing,
 // make the operator re-run with --yes. No interactive prompt, deliberately:
 // this gets run over ssh and from systemd units where there is no TTY, and
@@ -254,14 +254,12 @@ function writeMarker() {
 
 // A fresh sandbox.config.json is a POINTER, not a copy of the example.
 //
-// server/sandbox.config.example.json sets "gpg": true, and sandbox.js reads
-// it as `raw.gpg === true` -- i.e. false when the file is absent. Copying
-// the example verbatim would therefore silently switch ON forwarding of the
-// host's gpg-agent and ~/.gnupg into every sandbox, as a side effect of
-// running a migration wizard. That is a security boundary moving without
-// anyone asking. (docker is `!== false` so it stays on either way;
-// gpgVault/forceSandbox are false in the example too.
-// gpg is the only one that actually flips -- and one is enough.)
+// The example is a reference of every key, not a recommended setup:
+// copying it verbatim would turn the wizard into a silent policy change
+// (it once set "gpg": true, which forwarded the host's gpg-agent into every
+// sandbox -- now retired). Whatever the example says, a migration must not
+// move a security boundary nobody asked to move, so a fresh file only
+// points at the example.
 //
 // --seed-example is there for anyone who does want the whole annotated file.
 function seedSandboxConfig() {
@@ -409,8 +407,8 @@ function printCreated() {
 function printSettingsGuidance() {
   console.log('設定の使い分け:');
   console.log('  - Web UI (設定タブ) から変更でき即時反映されるもの ... SQLite の settings テーブル');
-  console.log('  - sandbox.config.json を編集し再起動が必要なもの   ... docker / persistentHome / gpg /');
-  console.log('    sshAgent / gpgVault / browseRoots / hiddenApps /');
+  console.log('  - sandbox.config.json を編集し再起動が必要なもの   ... docker / persistentHome /');
+  console.log('    sshAgent / commitSigning / browseRoots / hiddenApps /');
   console.log('    usageMcp');
   console.log('    (実行中セッションの安全性がその値に依存するため、動的変更は行いません)');
   console.log('');

@@ -119,99 +119,45 @@ qemu バックエンドと netbroker の全体は [qemu-sandbox.md](qemu-sandbox
 
 | 機能 | いまの扱い |
 |---|---|
-| git broker / commit guard | 起動しない (警告して起動) |
+| git broker / commit guard / コミット署名 | **対応済み**。セッションごとに起動し、セッションの ssh で渡す (下記「1.」) |
 | ssh-agent 転送 | 起動しない (警告して起動) |
 | MCP ソケット (notify / usage) | 渡さない (警告して起動) |
-| GPG vault | 明示的に要求されたら起動を拒否する (黙って落とさない) |
 | セッション中のネットワーク切替 (🌐) | VM 単位で出す。押すと同じ VM の全セッションに効く。後から相乗りしたセッションは、VM の今の状態を引き継ぐ |
 | 許可リスト変更のライブ反映 | しない。キーが変わるので、次の起動は新しい VM になる |
 | 動作モード (enforce/audit) 変更のライブ反映 | する。設定の保存で全 VM のブローカーへ送る (`qemuVmPool.setOpModeAll`)。相乗りする起動は、VM のモードを自分のモードに合わせてから入り、合わせられなければ起動を拒否する |
 | `sandbox.config.json` の `binds` | 未対応 (使い捨て VM でも未対応) |
 
-### 1. セッションごとのホストサービス
+### 1. セッションごとのホストサービス (実装済み)
 
-#### 使い捨て VM の仕組みが常駐 VM に合わない理由
+使い捨て VM では、ホストのソケットを netbroker の `services` (`10.0.2.100:<port>`) に
+登録し、補助ファイルを起動時の rt 共有で渡している。常駐 VM ではセッションが VM の起動後に
+来るので、セッションごとに次のように渡す (`buildPooledQemuSpawn` / `qemuVmPool.attach`)。
 
-使い捨て VM では `buildGuestRuntime` / `buildGuestRuntimeUserData`
-(`server/ws/sandbox-qemu.js`) が次のことを行っている。すべて VM の起動時に
-1回だけ決まる。
+- **ブローカー**: git broker (コミット署名の中継を含む) と commit guard を、使い捨て VM と
+  同じ処理でセッションごとに起動する。戻り値の `gitBrokerProc` / `gitBrokerDir` /
+  `commitGuardDir` は既存の後始末がそのまま片付ける。
+- **補助ファイル**: `buildGuestRuntime` の結果をセッション専用のホストディレクトリ
+  (`<hostRuntimeDir>/ccs-prt-<uuid>`) に書き出し、読み取り専用でホットプラグして、
+  そのセッションの bwrap の中だけで `/ccserver-sandbox` に bind する。ほかのセッションの
+  bwrap からは見えない。セッションの終了 (lease の release) で消す。チャットモードの
+  ブリッジとパスワードも同じディレクトリに入る。
+- **ソケット**: セッションの ssh ログインのリモート転送 (`-R <ゲストのパス>:<ホストのソケット>`)
+  で渡す。ゲスト側のパスは `/tmp/ccs-svc-<token>-<name>.sock` とセッションごとに一意にし、
+  bwrap の中で決まったパス (`/ccserver-sandbox-git-broker.sock`) に bind する。
+  一意なので古いソケットを消す必要がなく、sshd の設定変更 (`StreamLocalBindUnlink`) も
+  要らない。sshd が作るソケットは `StreamLocalBindMask` の既定 (0177) で本人専用になる。
+  転送ソケットができる前に bwrap が走らないよう、リモートコマンドの前段で数秒まで待つ。
+- **決まったパスへのリンク**: ルート直下の `/ccserver-sandbox-*` は bwrap の `--symlink`
+  でセッションごとに作る。`/usr/local/bin/gh` と `/usr/local/bin/ssh` は `/usr` が
+  読み取り専用なので、常駐 VM の起動時に `/ccserver-sandbox/gh-wrapper.cjs` などへの
+  固定 symlink を張る (`POOL_FIXED_LINKS`)。git broker の無いセッションや VM の
+  ターミナルではリンク先が無く、PATH の検索は `/usr/bin/ssh` に進む。
+- **env と git 設定**: `runtime.env` を attach プランの env に入れ、git 設定は
+  `composeGitConfigEnv` で ccserver の分を先、VM の env (運用者の分) を後ろに並べる。
 
-- ホストのソケットを netbroker の `services` (`10.0.2.100:<port>`) に登録する。
-  ゲストでは systemd ソケットユニットと `systemd-socket-proxyd` で、決まった
-  パスに出す。
-- 補助ファイル (wrapper・トークン・allowlist・gitconfig など) を run
-  ディレクトリの `rt/` にコピーする。それを読み取り専用で `/ccserver-sandbox`
-  にマウントし、決まったパスへ bootcmd で symlink を張る。
-- env と `GIT_CONFIG_*` は ssh のリモートコマンドで渡す。
-
-常駐 VM ではセッションごとに中身が違ううえ、セッションは VM の起動後に来るので、
-このやり方がそのままでは使えない。
-
-#### 提案する設計
-
-**ソケット**
-
-- セッションの ssh 接続のストリームローカル転送 (`ssh -R <ゲストのパス>:<ホストのソケット>`)
-  で渡す。寿命がセッションの ssh と一致し、netbroker 側の変更も要らない。
-- ゲスト側の転送先は、ユーザー所有で 0700 の `/ccs/sock/` (起動時に作る) の下に、
-  セッションごとの名前 (`<token>-<name>.sock`) で作る。
-- bwrap で、従来と同じ決まったパスに bind する。
-  - `/ccserver-sandbox-git-broker.sock`
-  - `/run/ccserver/gnupg-vault/S.gpg-agent` など
-  - `/ccserver-sandbox-<kind>.d/sock`
-- sshd に `StreamLocalBindUnlink yes` が要る。`AllowStreamLocalForwarding` は既定で yes。
-  - sshd の設定を後から変えると再読み込みが要るので、ゴールデンイメージの
-    `90-ccserver.conf` に入れる。
-- 転送ソケットができる前にリモートコマンドが走る可能性がある。そこで、
-  `ExitOnForwardFailure=yes` に加えて、bwrap の前で数秒だけソケットの出現を待つ。
-- 別案: netbroker の admin API に `services` を動的に追加・削除する操作を足す
-  (ccserver-netbroker 側の変更)。ゲスト側は socket-proxyd ユニットを動的に作る
-  必要があり、手間が増えるので第2案。
-
-**補助ファイル**
-
-- VM 全体で1本だけ、読み取り専用の共有を足す。ホストは `<runDir>/rt-sessions/`、
-  ゲストは `/ccs/rt` (ホットプラグ1スロット、または起動時の共有)。
-- セッションごとに `rt-sessions/<token>/` を作り、bwrap で `/ccserver-sandbox`
-  に bind する。他のセッションからは `/ccs` が見えないので読めない。
-- トークンのファイルは今と同じく 0600。
-- セッションの終了 (lease の release) で `rt-sessions/<token>/` を消す。
-
-**決まったパスへのリンク**
-
-- `/ccserver-sandbox-*` はルート直下なので、bwrap の `--symlink` で毎回作れる。
-- `/usr/local/bin/gh` と `/usr/local/bin/ssh` は読み取り専用の `/usr` の中にあり、
-  bwrap の中では作れない。対策として、ゴールデンイメージか常駐 VM の起動時に、
-  固定の symlink (`/usr/local/bin/gh -> /ccserver-sandbox/gh-wrapper.cjs` など) を張っておく。
-  - git broker を使わないセッションでは、リンク先が無くなる。
-    - `ssh` は、`rt` に素通しのスタブ (`exec /usr/bin/ssh "$@"`) を必ず置いて壊さない。
-    - `gh` はイメージに無いので、無くても今と同じ挙動になる。
-  - `/ccserver-sandbox-node -> /usr/bin/node` は、起動時に固定で張ってよい。
-
-**env と git 設定**
-
-- `runtime.env` と、`composeGitConfigEnv(runtime.gitConfig, extraEnv)` の結果を、
-  attach プランの `remote.env` に入れる (仕組みはもうある)。
-
-**GPG vault**
-
-- `GNUPGHOME` (`/run/ccserver/gnupg-vault`) は bwrap の `--tmpfs` にする。
-- リモートコマンドの前段で、`/ccserver-sandbox/gnupg/*` (公開情報だけ) をそこへコピーする。
-- エージェントのソケットは、上の転送で `S.gpg-agent` / `S.gpg-agent.ssh` に置く。
-
-**ブローカーの寿命**
-
-- `buildPooledQemuSpawn` で、git broker と commit guard をセッションごとに起動する。
-  `buildQemuSpawn` と同じ処理を使い回す。
-- 戻り値の `gitBrokerProc` / `gitBrokerDir` / `commitGuardDir` で、既存の
-  `releaseSandboxArtifacts` が片付ける。
-
-**テスト**
-
-- `sandbox-qemu-spawn.test.js`: 常駐 VM の起動でブローカーが起動し、attach プランに
-  転送の指定と bind が入ること。
-- 実機 E2E: 2つのセッションが別々の git broker トークンを使い、互いのソケットや
-  トークンが見えないこと。
+**テスト**: `qemuVmPool.test.js` (転送・bind・symlink・env の組み立て)、
+`sandbox-qemu-spawn.test.js` (ブローカーの起動、失敗時の後始末、署名)。
+実機 E2E (2 セッションが別々のトークンを使い、互いのソケットが見えないこと) は未実施。
 
 ### 2. セッション中のネットワーク切替
 

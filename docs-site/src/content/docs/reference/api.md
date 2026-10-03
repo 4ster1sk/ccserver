@@ -36,8 +36,15 @@ CCSERVER_TOKEN=some-secret NODE_ENV=production node server/index.js
 | PUT | `/api/vm-templates-default` | `{ id }` で既定テンプレートを設定 (`null` で解除) |
 | GET | `/api/vms` | 稼働中の qemu VM 一覧 (`{ sessionId, cwd, app, customLabel, templateId, templateName, cpus, memoryMiB, diskGiB, startedAt, diskUsedBytes }`) |
 | DELETE | `/api/vms/:sessionId` | その VM を停止する (セッション終了、overlay 破棄)。204、VM が無ければ 404 |
-| GET | `/api/approvals?status=pending` | 承認待ち破壊的操作一覧。ブラウザのグローバルバナーが数秒間隔でポーリング |
+| GET | `/api/approvals?status=pending` | 承認待ち操作一覧 (コミット署名ありの起動、署名鍵のロック解除依頼など)。ブラウザのグローバルバナーが数秒間隔でポーリング |
 | POST | `/api/approvals/:id/decision` | `{ decision: 'approved' \| 'rejected' }` で承認待ち操作を承認/却下する。5 分未応答のリクエストはサーバー側で expired (拒否扱い) になる |
+| GET | `/api/commit-signing/status` | ホストのコミット署名鍵の状態 (設定済みか・鍵の identity とフィンガープリント・ロック中か・パスキー登録数) |
+| GET | `/api/commit-signing/public-key` | GitHub 登録用の ASCII 公開鍵 |
+| GET | `/api/commit-signing/signatures?limit=` | ホストが署名したコミットの監査ログ (tree / parents / 件名 / ペイロードのハッシュ) |
+| POST | `/api/commit-signing/import` / `generate` | 署名鍵の登録 (`{ keyArmored }`: `--export-secret-subkeys` の出力) / 生成 (`{ nameReal, nameEmail, passphrase }`) |
+| POST | `/api/commit-signing/unlock` / `lock` | パスフレーズでロック解除 (署名待ちのコミットがあればそのまま進む) / ロック。パスフレーズは記録しない |
+| POST | `/api/commit-signing/passkeys/enroll-options` / `enroll-verify` / `unlock-options` / `unlock-verify` / `clear` | パスキー (PRF) でのロック解除の登録・実行・解除 (`passkey` モード限定。登録にはパスフレーズが必要) |
+| POST | `/api/commit-signing/delete-key` | 署名鍵の削除 (`passkey` モードでは 5 分以内のステップアップが必要) |
 | GET | `/api/notify-settings` | 通知ブリッジの設定 (`settings`)、GUI が描画に使う語彙 (`choices`)、このホストで実際に到達可能なチャネル (`channelsAvailable`)、Web Push の公開鍵 (`vapidPublicKey`)、購読中の端末一覧 (`pushSubscriptions`、endpoint は含まない)、可観測カウンタ (`stats`) |
 | PUT | `/api/notify-settings` | 通知ブリッジ設定の部分更新。未知のキー・範囲外の数値・未知の app/channel/level は 400 で名指し。設定ファイルが壊れている場合は 500 で内容を保持 |
 | POST | `/api/notify-settings/test` | 設定中のチャネルへテスト通知を1件送り、チャネルごとの結果を返す (`{ delivered, channels }`) |
@@ -46,7 +53,7 @@ CCSERVER_TOKEN=some-secret NODE_ENV=production node server/index.js
 | GET | `/api/auth/mode` | `{ mode: 'none' \| 'token' \| 'passkey' }` — 現在の `CCSERVER_AUTH_MODE`。認証不要 (`token` モードのみ、他の `/api` と同様にトークン必須) |
 | GET | `/api/auth/session` | セッション Cookie の有効性確認専用 (200/401 のみが意味を持つ)。`passkey` モード限定 |
 | POST | `/api/auth/login-token` | `{ token }` — `node server/cli/issue-login-token.js` が発行したワンタイムトークンを検証し、セッション Cookie を発行する (`passkey` モード限定、use-once)。`--allow-passkey-registration` 付きで発行したトークンなら、そのセッションはパスキーを1つ登録できる |
-| POST | `/api/auth/webauthn/stepup-options` / `stepup-verify` | セッションのステップアップ: 登録済みパスキーでのユーザー検証付き認証 (要セッション、`passkey` モード限定)。以後 5 分間、パスキー登録と修正前GPG Vaultの削除が可能になる |
+| POST | `/api/auth/webauthn/stepup-options` / `stepup-verify` | セッションのステップアップ: 登録済みパスキーでのユーザー検証付き認証 (要セッション、`passkey` モード限定)。以後 5 分間、パスキー登録とコミット署名鍵の削除が可能になる |
 | POST | `/api/auth/webauthn/register-options` / `register-verify` | パスキー登録 (要セッション + 5 分以内のステップアップ、またはトークン由来の登録権限。満たさなければ 403 `PASSKEY_REGISTRATION_NOT_ALLOWED`。[認証ガイド](/ccserver/guides/auth/) フロー2、`passkey` モード限定) |
 | POST | `/api/auth/webauthn/authenticate-options` / `authenticate-verify` | パスキー認証 (未ログインで許可、フロー3、`passkey` モード限定) |
 | GET | `/api/auth/webauthn/credentials` | 登録済みパスキー一覧 (要セッション、`{ id, label, createdAt, lastUsedAt }[]`、`passkey` モード限定) |

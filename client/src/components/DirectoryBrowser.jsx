@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useMemo, useRef, lazy, Suspense } from 'react';
-import { authFetch, getToken, resolveAuthMode } from '../auth.js';
+import { authFetch, getToken } from '../auth.js';
 import { displayPath } from '../displayPath.js';
 import { formatSize } from '../formatSize.js';
 import { isPreviewable } from '../previewExts.js';
@@ -38,14 +38,13 @@ const TOOL_UNAVAILABLE_NOTE = 'この ccserver ホストでは非対応です';
 // server would silently drop. `avail` is /api/dirs/home's toolsAvailable
 // ({ rtk, codeReviewGraph }) or null (older server / not fetched -> untouched).
 // `backend` is the backend this launch will use ('bwrap' | 'qemu' | null):
-// the VM supports neither the tools nor the legacy host-gpg forwarding, so a
-// VM launch carries them as off.
+// the VM does not support the tools, so a VM launch carries them as off.
 function sanitizeSandboxOpts(opts, avail, backend = null) {
   if (!opts) return opts;
   const next = { ...(opts.tools || {}) };
   if (avail?.rtk === false || backend === 'qemu') next.rtk = false;
   if (avail?.codeReviewGraph === false || backend === 'qemu') next.codeReviewGraph = false;
-  return { ...opts, gpg: backend === 'qemu' ? false : opts.gpg, tools: next };
+  return { ...opts, tools: next };
 }
 
 // The backend a launch with these opts uses: its own pick, else the
@@ -68,13 +67,13 @@ const LAUNCHES_BLOCKED_TITLE = 'サーバー設定でサンドボックスが強
 // Same picker set + labels as single mode, so the two can't drift apart.
 const APP_LABELS = { claude: 'Claude Code', opencode: 'opencode', codex: 'OpenAI Codex' };
 
-// Per-directory opt-in sandbox flags (gpg / sshAgent / tools), remembered
+// Per-directory opt-in sandbox flags (sshAgent / commitSigning / tools), remembered
 // separately per cwd rather than as one server-wide default -- see
-// server/sandbox.config.json's `gpg`/`sshAgent`/`tools` for the fallback these
+// server/sandbox.config.json's `sshAgent`/`commitSigning`/`tools` for the fallback these
 // override at launch. `tools` (rtk / code-review-graph) provisions the tool
 // into the sandbox HOME at launch instead of installing it on the host.
 // 記憶が無い場合の初期値は Settings > 一般のグローバル既定値
-// (client/src/sandboxDefaults.js) を使う。gpg/sshAgent は既定オフ。
+// (client/src/sandboxDefaults.js) を使う。sshAgent/commitSigning は既定オフ。
 // tools (rtk / code-review-graph) もキー不在時はグローバル既定値に
 // フォールバックする (旧形式の記憶には tools が無いため); a stored
 // explicit false turns them back off for that directory.
@@ -90,14 +89,13 @@ function loadSandboxOpts(path, globalDefaults) {
     const raw = localStorage.getItem(SANDBOX_OPTS_PREFIX + path);
     if (raw) {
       const parsed = JSON.parse(raw);
-      // 旧形式の記憶 ({gpg, sshAgent} のみ) では tools キーが不在。
+      // 旧形式の記憶 ({sshAgent} など) では tools キーが不在。
       // 不在 = 未選択なので一律 true にせずグローバル既定値にフォールバックする
       // (明示保存された true/false は引き続き尊重される)。
       const fallbackTools = defaultSandboxOpts(globalDefaults || loadSandboxDefaults()).tools;
       return {
-        gpg: !!parsed.gpg,
         sshAgent: !!parsed.sshAgent,
-        gpgVault: !!parsed.gpgVault,
+        commitSigning: !!parsed.commitSigning,
         tools: {
           rtk: parsed.tools?.rtk ?? fallbackTools.rtk,
           codeReviewGraph: parsed.tools?.codeReviewGraph ?? fallbackTools.codeReviewGraph,
@@ -166,18 +164,6 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, initialPath, san
   // null = older server: no picker, the server default applies.
   const [sandboxBackends, setSandboxBackends] = useState(null);
   const [vmTemplates, setVmTemplates] = useState([]);
-  // gpgVault (plan: gpg-agent-vault) is a passkey-login-only feature -- this
-  // component has no other reason to know authMode, so it resolves it
-  // locally rather than threading a new prop through App.jsx, same
-  // independent-resolution pattern GeneralSection.jsx/PasskeysSection.jsx
-  // already use. null until resolved (checkbox stays enabled meanwhile,
-  // same old-server-fallback posture as availableApps/sandboxAvailable).
-  const [authMode, setAuthMode] = useState(null);
-  useEffect(() => {
-    let cancelled = false;
-    resolveAuthMode().then((m) => { if (!cancelled) setAuthMode(m); });
-    return () => { cancelled = true; };
-  }, []);
   // Which agent CLIs the server can actually launch ({ claude, opencode,
   // codex } booleans), from /api/dirs/home. null until
   // the fetch resolves; while null every picker entry stays enabled
@@ -235,7 +221,7 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, initialPath, san
     localStorage.setItem(APP_KEY, val);
   }, [availableApps, hiddenApps]);
 
-  // gpg/sshAgent/tools はディレクトリ別に記憶し、記憶が無い場合のみ
+  // sshAgent/commitSigning/tools はディレクトリ別に記憶し、記憶が無い場合のみ
   // Settings > 一般のグローバル既定値を使う。ディレクトリ移動時と
   // グローバル既定値の変更時に再読込するが、記憶済みの場所は上書きしない。
   useEffect(() => {
@@ -548,7 +534,7 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, initialPath, san
   // above corrects it) they'd launch a hidden or uninstalled app with no
   // guard at all, unlike every other launch affordance this feature added.
   const effectiveAppHidden = hiddenApps.includes(appDefault) || (availableApps && !availableApps[appDefault]);
-  // Sandbox choice + gpg/sshAgent suboptions for the single-launch pane.
+  // Sandbox choice + sshAgent/commitSigning suboptions for the single-launch pane.
   // Sandbox choice unavailable when no sandbox backend exists on the server host.
   // When the
   // server mandates a sandbox the toggle stays locked on -- launches will fail
@@ -596,15 +582,6 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, initialPath, san
             </select>
           </label>
         )}
-        <label className={`open-menu-suboption${inVm ? ' open-menu-suboption-disabled' : ''}`} title={inVm ? 'VMでは GPG Vault を使ってください' : ''}>
-          <input
-            type="checkbox"
-            disabled={inVm}
-            checked={inVm ? false : sandboxOpts.gpg}
-            onChange={(e) => updateSandboxOpts(currentPath, { ...sandboxOpts, gpg: e.target.checked })}
-          />
-          GPG署名を使う{inVm ? `（${VM_UNSUPPORTED_NOTE}）` : ''}
-        </label>
         <label className="open-menu-suboption">
           <input
             type="checkbox"
@@ -613,14 +590,13 @@ export default function DirectoryBrowser({ onOpen, onOpenShell, initialPath, san
           />
           ssh-agentを転送する
         </label>
-        <label className={`open-menu-suboption${authMode !== 'passkey' ? ' open-menu-suboption-disabled' : ''}`} title={authMode !== 'passkey' ? 'パスキーログイン限定機能です' : ''}>
+        <label className="open-menu-suboption" title="コミットはホストの署名鍵で署名されます (起動のたびに承認が必要)">
           <input
             type="checkbox"
-            disabled={authMode !== 'passkey'}
-            checked={authMode !== 'passkey' ? false : sandboxOpts.gpgVault}
-            onChange={(e) => updateSandboxOpts(currentPath, { ...sandboxOpts, gpgVault: e.target.checked })}
+            checked={!!sandboxOpts.commitSigning}
+            onChange={(e) => updateSandboxOpts(currentPath, { ...sandboxOpts, commitSigning: e.target.checked })}
           />
-          GPG Vaultで署名・SSH pushする
+          コミットに署名する (ホストの署名鍵)
         </label>
         <label className={`open-menu-suboption${toolDisabled('rtk') ? ' open-menu-suboption-disabled' : ''}`} title={toolDisabled('rtk') ? toolNote : ''}>
           <input

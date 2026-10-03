@@ -29,6 +29,16 @@
 //     <- {"ok":true,"exitCode":0,"stdout":"<base64>","stderr":"<base64>"}
 //     <- {"ok":false,"reason":"subcommand-not-allowed"|"ambiguous-flags"|"repo-unresolved"|"repo-must-be-explicit"|"not-allowlisted"|"blocked-message"|"file-arg-requires-stdin"|"unrecognized-flag"|"release-assets-not-allowed"|"release-download-dir-not-allowed"|"release-download-output-not-stdout"|"workflow-field-file-not-allowed"|"attach-not-allowed"|"checkout-worktree-not-allowed"|"bad-request"|"exec-failed"|"timeout"}
 //
+//   Commit signing (see sandbox-gpg-sign-wrapper.cjs and
+//   ws/commitSignService.js): payload is the commit object git hands its
+//   gpg.program, base64; dir is the caller's cwd (must be inside the
+//   project). This process only authenticates the caller and relays the
+//   request over IPC to the main ccserver process, which checks and signs
+//   (it may wait for a human to unlock the key, hence the long timeout).
+//     -> {"op":"sign-commit","payload":"<base64>","dir":"/abs/path"}
+//     <- {"ok":true,"signature":"<base64>","status":["[GNUPG:] SIG_CREATED ..."]}
+//     <- {"ok":false,"reason":"signing-disabled"|"not-a-commit"|"identity-mismatch"|"locked"|...,"message":"..."}
+//
 // SSH allow/deny does NOT go through this socket — the allow-list isn't
 // secret, so it's ro-bound into the sandbox as a plain file and checked
 // directly by sandbox-ssh-wrapper.cjs. That means a crashed/killed broker
@@ -61,6 +71,12 @@ import { classifyGhUsage, recordGhUsage } from '../ghUsageRecording.js';
 import { hardenedGitEnv } from './hostGitEnv.js';
 
 const GH_EXEC_TIMEOUT_MS = 30_000;
+// Longer than the approval timeout (approvals.js, 5 min): a commit may wait
+// for the signing key to be unlocked.
+export const SIGN_TIMEOUT_MS = 6 * 60 * 1000;
+// A request line larger than this is not a request (the biggest is a 1 MiB
+// commit payload in base64).
+const MAX_REQUEST_LINE = 2 * 1024 * 1024;
 const GH_EXEC_MAX_BYTES = 10 * 1024 * 1024;
 
 const __filename = fileURLToPath(import.meta.url);
@@ -364,6 +380,49 @@ async function handleGhExec(req, conn, ctx) {
   conn.end(`${JSON.stringify(result)}\n`);
 }
 
+// sign-commit: relay to the parent (startGitBroker's signHandler) over IPC.
+const pendingSigns = new Map(); // id -> { conn, timer }
+let signSeq = 0;
+
+function handleSignCommit(req, conn, ctx) {
+  if (!ctx.signing || typeof process.send !== 'function') {
+    conn.end(`${JSON.stringify({ ok: false, reason: 'signing-disabled', message: 'commit signing is not enabled for this session' })}\n`);
+    return;
+  }
+  if (typeof req.payload !== 'string' || (req.dir != null && typeof req.dir !== 'string')) {
+    conn.end(`${JSON.stringify({ ok: false, reason: 'bad-request' })}\n`);
+    return;
+  }
+  const id = ++signSeq;
+  const timer = setTimeout(() => {
+    pendingSigns.delete(id);
+    conn.end(`${JSON.stringify({ ok: false, reason: 'timeout', message: 'the host did not answer the signing request in time' })}\n`);
+  }, SIGN_TIMEOUT_MS);
+  pendingSigns.set(id, { conn, timer });
+  conn.on('close', () => {
+    // The caller gave up (git killed, ^C): nothing to answer any more.
+    const p = pendingSigns.get(id);
+    if (p) { clearTimeout(p.timer); pendingSigns.delete(id); }
+  });
+  try {
+    process.send({ type: 'sign', id, req: { payload: req.payload, dir: req.dir ?? null } });
+  } catch {
+    clearTimeout(timer);
+    pendingSigns.delete(id);
+    conn.end(`${JSON.stringify({ ok: false, reason: 'signing-unavailable' })}\n`);
+  }
+}
+
+function onParentMessage(msg) {
+  if (!msg || msg.type !== 'sign-result') return;
+  const p = pendingSigns.get(msg.id);
+  if (!p) return;
+  clearTimeout(p.timer);
+  pendingSigns.delete(msg.id);
+  const result = msg.result && typeof msg.result === 'object' ? msg.result : { ok: false, reason: 'sign-failed' };
+  try { p.conn.end(`${JSON.stringify(result)}\n`); } catch { /* caller gone */ }
+}
+
 // Constant-time compare that never throws and rejects length mismatches
 // (timingSafeEqual requires equal-length buffers).
 function tokenEq(a, b) {
@@ -399,10 +458,14 @@ function handleRequest(line, conn, ctx) {
     handleGhExec(req, conn, ctx).catch(() => { try { conn.destroy(); } catch { /* ignore */ } });
     return;
   }
+  if (req && req.op === 'sign-commit') {
+    handleSignCommit(req, conn, ctx);
+    return;
+  }
   conn.end(`${JSON.stringify({ ok: false, reason: 'bad-request' })}\n`);
 }
 
-function runServer({ sock, allowlist, cwd, commitGuard, app }) {
+function runServer({ sock, allowlist, cwd, commitGuard, app, signing = false }) {
   let allowSet;
   try {
     allowSet = new Set(JSON.parse(readFileSync(allowlist, 'utf-8')));
@@ -426,7 +489,13 @@ function runServer({ sock, allowlist, cwd, commitGuard, app }) {
   // Per-session connection token (see handleRequest). Delivered via env, not
   // argv: the broker process is unsandboxed, but keeping it out of the command
   // line avoids incidental exposure via crash reports / process listings.
-  const ctx = { allowSet, cwd, guardPatterns, app, token: process.env.CCSANDBOX_BROKER_TOKEN || '' };
+  const ctx = { allowSet, cwd, guardPatterns, app, signing, token: process.env.CCSANDBOX_BROKER_TOKEN || '' };
+  if (signing && typeof process.send === 'function') {
+    process.on('message', onParentMessage);
+    // The parent is the only one who can answer sign requests; without it
+    // this broker has no reason to live.
+    process.on('disconnect', () => process.exit(0));
+  }
 
   try { unlinkSync(sock); } catch { /* fresh dir, usually not present */ }
 
@@ -447,7 +516,10 @@ function runServer({ sock, allowlist, cwd, commitGuard, app }) {
       if (handled) return;
       buf += chunk;
       const nl = buf.indexOf('\n');
-      if (nl === -1) return;
+      if (nl === -1) {
+        if (buf.length > MAX_REQUEST_LINE) { handled = true; conn.destroy(); }
+        return;
+      }
       handled = true;
       handleRequest(buf.slice(0, nl), conn, ctx);
     });
@@ -617,12 +689,18 @@ export function brokerStartFailureReason({ spawnError, proc, waitedMs, budgetMs,
 // `spawnProcess` is injectable because the launch FAILURE paths (a child that dies at once, a child
 // that never publishes its socket) cannot be produced with the real broker,
 // and they are the paths #248 is about.
+//
+// signHandler (commit signing, ws/commitSignService.js createSignHandler):
+// when given, the broker also serves sign-commit, relaying each request to
+// this function over an IPC channel -- and it is started even for a cwd
+// with no remotes (an empty allow-list still denies every credential), since
+// a local-only repository still makes commits to sign.
 export async function startGitBroker(
-  { cwd, app = 'shell', blockedPatterns = null, ghUsageRecording = null },
+  { cwd, app = 'shell', blockedPatterns = null, ghUsageRecording = null, signHandler = null },
   { spawnProcess = spawn } = {},
 ) {
-  const allowlist = computeGitAllowlist(cwd);
-  if (!allowlist || allowlist.length === 0) return null;
+  const allowlist = computeGitAllowlist(cwd) || [];
+  if (allowlist.length === 0 && !signHandler) return null;
 
   const dir = join(runtimeBase(), `ccserver-git-broker-${randomUUID()}`);
   try {
@@ -660,8 +738,9 @@ export async function startGitBroker(
   const token = randomBytes(24).toString('base64url');
   const serveArgs = [__filename, '--serve', '--sock', sockPath, '--allowlist', allowlistPath, '--cwd', cwd, '--app', app];
   if (commitGuardPath) serveArgs.push('--commit-guard', commitGuardPath);
+  if (signHandler) serveArgs.push('--signing');
   const proc = spawnProcess(process.execPath, serveArgs, {
-    stdio: ['ignore', 'pipe', 'pipe'],
+    stdio: signHandler ? ['ignore', 'pipe', 'pipe', 'ipc'] : ['ignore', 'pipe', 'pipe'],
     env: {
       ...process.env,
       CCSANDBOX_BROKER_TOKEN: token,
@@ -672,6 +751,18 @@ export async function startGitBroker(
 
   proc.stdout.on('data', (d) => process.stdout.write(`[git-broker] ${d}`));
   proc.stderr.on('data', (d) => process.stderr.write(`[git-broker] ${d}`));
+
+  if (signHandler) {
+    proc.on('message', (msg) => {
+      if (!msg || msg.type !== 'sign') return;
+      Promise.resolve()
+        .then(() => signHandler(msg.req))
+        .catch((err) => ({ ok: false, reason: 'sign-failed', message: err.message }))
+        .then((result) => {
+          try { proc.send({ type: 'sign-result', id: msg.id, result }); } catch { /* broker gone */ }
+        });
+    });
+  }
 
   let spawnError = null;
   proc.on('error', (err) => { spawnError = err; });
@@ -754,6 +845,7 @@ function parseServeArgs(argv) {
     else if (argv[i] === '--cwd') out.cwd = argv[++i];
     else if (argv[i] === '--app') out.app = argv[++i];
     else if (argv[i] === '--commit-guard') out.commitGuard = argv[++i];
+    else if (argv[i] === '--signing') out.signing = true;
   }
   return out;
 }

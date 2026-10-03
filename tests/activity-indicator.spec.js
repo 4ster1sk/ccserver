@@ -16,19 +16,19 @@ const unopenedItems = (page) => leftSidebar(page).locator('[data-section="unopen
 const SESSIONS = [
   {
     id: 'sess-idle', cwd: '/srv/idle', connected: false, shell: false,
-    sandbox: true, sandboxOpts: null, gpgVaultActive: false, app: 'claude', model: null,
+    sandbox: true, sandboxOpts: null, commitSigningActive: false, app: 'claude', model: null,
     permissionMode: 'standard', customLabel: 'idle-one',
     activity: { level: 'idle', reason: 'quiet', marker: null, markerVerified: true, screenIdleMs: 60000, changeRate: 0 },
   },
   {
     id: 'sess-low', cwd: '/srv/low', connected: false, shell: false,
-    sandbox: true, sandboxOpts: null, gpgVaultActive: false, app: 'claude', model: null,
+    sandbox: true, sandboxOpts: null, commitSigningActive: false, app: 'claude', model: null,
     permissionMode: 'standard', customLabel: 'low-one',
     activity: { level: 'low', reason: 'marker', marker: 'esc to interrupt', markerVerified: true, screenIdleMs: 120, changeRate: 4.5 },
   },
   {
     id: 'sess-busy', cwd: '/srv/busy', connected: false, shell: false,
-    sandbox: true, sandboxOpts: null, gpgVaultActive: false, app: 'codex', model: null,
+    sandbox: true, sandboxOpts: null, commitSigningActive: false, app: 'codex', model: null,
     permissionMode: 'standard', customLabel: 'busy-one',
     activity: { level: 'busy', reason: 'movement', marker: null, markerVerified: false, screenIdleMs: 30, changeRate: 31.5 },
   },
@@ -37,13 +37,13 @@ const SESSIONS = [
     // return for one of its own sessions (the peer computes the level and we
     // render it). It must not resolve through Object.prototype.
     id: 'sess-hostile', cwd: '/srv/hostile', connected: false, shell: false,
-    sandbox: true, sandboxOpts: null, gpgVaultActive: false, app: 'claude', model: null,
+    sandbox: true, sandboxOpts: null, commitSigningActive: false, app: 'claude', model: null,
     permissionMode: 'standard', customLabel: 'hostile-one',
     activity: { level: '__proto__', reason: 'constructor', marker: null, markerVerified: true, screenIdleMs: 0, changeRate: 0 },
   },
   {
     id: 'sess-shell', cwd: '/srv/shell', connected: false, shell: true,
-    sandbox: false, sandboxOpts: null, gpgVaultActive: false, app: null, model: null,
+    sandbox: false, sandboxOpts: null, commitSigningActive: false, app: null, model: null,
     permissionMode: 'standard', customLabel: 'shell-one',
     activity: { level: null, reason: 'shell', marker: null, markerVerified: false, screenIdleMs: null, changeRate: 0 },
   },

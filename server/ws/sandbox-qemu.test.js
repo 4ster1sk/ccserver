@@ -180,13 +180,13 @@ test('prepareQemuSession: refuses to plan a VM without a broker', () => {
 
 const scripts = {
   credHelper: '/repo/cred.cjs', ghWrapper: '/repo/gh.cjs', sshWrapper: '/repo/ssh.cjs', mcpBridge: '/repo/mcp.cjs',
-  commitMsgHook: '/repo/hook.cjs', gitconfig: '/repo/gitconfig', knownHostsDefault: '/repo/kh', sshConfig: '/repo/ssh-config',
+  commitMsgHook: '/repo/hook.cjs', gpgSignWrapper: '/repo/gpg-sign.cjs', gitconfig: '/repo/gitconfig', knownHostsDefault: '/repo/kh', sshConfig: '/repo/ssh-config',
   knownHostsUser: null,
 };
 
 test('buildGuestRuntime: nothing requested -> nothing in the VM', () => {
   const r = buildGuestRuntime({ scripts });
-  assert.deepEqual(r, { files: [], links: [], services: [], gnupgFiles: [], env: {}, gitConfig: [] });
+  assert.deepEqual(r, { files: [], links: [], services: [], env: {}, gitConfig: [] });
 });
 
 test('buildGuestRuntime: git broker -> fixed bwrap paths, token in a 0600 file (never the env)', () => {
@@ -208,22 +208,16 @@ test('buildGuestRuntime: git broker -> fixed bwrap paths, token in a 0600 file (
   assert.ok(r.files.find((f) => f.dest === 'known-hosts-user' && f.data === ''), 'empty user known_hosts when the host has none');
 });
 
-test('buildGuestRuntime: commit guard, vault, ssh-agent and MCP sockets', () => {
-  const vault = { homeDir: '/nonexistent-vault', fingerprint: 'FPR', nameReal: 'N', nameEmail: 'e@x', sockets: { agent: '/run/r/S.gpg-agent', agentSsh: '/run/r/S.gpg-agent.ssh' } };
+test('buildGuestRuntime: commit guard, ssh-agent and MCP sockets', () => {
   const r = buildGuestRuntime({
-    scripts, commitGuard: { configPath: '/run/u/cg.json' }, gpgVault: vault, sshAgentSock: '/tmp/agent.sock',
+    scripts, commitGuard: { configPath: '/run/u/cg.json' }, sshAgentSock: '/tmp/agent.sock',
     mcp: { notify: '/run/n/sock', usage: '/run/u/sock' },
   });
-  assert.deepEqual(r.gitConfig, [
-    ['core.hooksPath', '/ccserver-sandbox-git-hooks'],
-    ['user.signingkey', 'FPR'], ['commit.gpgsign', 'true'], ['gpg.program', 'gpg'], ['user.name', 'N'], ['user.email', 'e@x'],
-  ]);
+  assert.deepEqual(r.gitConfig, [['core.hooksPath', '/ccserver-sandbox-git-hooks']]);
   const byName = Object.fromEntries(r.services.map((s) => [s.name, s]));
-  assert.equal(byName['gpg-agent'].addr, `${SERVICE_IP}:7010`);
-  assert.equal(byName['gpg-agent-ssh'].guestPath, '/run/ccserver/gnupg-vault/S.gpg-agent.ssh');
-  assert.equal(byName['ssh-agent'], undefined, 'the vault wins SSH_AUTH_SOCK');
-  assert.equal(r.env.SSH_AUTH_SOCK, '/run/ccserver/gnupg-vault/S.gpg-agent.ssh');
-  assert.equal(r.env.GNUPGHOME, '/run/ccserver/gnupg-vault');
+  assert.equal(byName['ssh-agent'].guestPath, '/run/ccserver/ssh-agent.sock');
+  assert.equal(r.env.SSH_AUTH_SOCK, '/run/ccserver/ssh-agent.sock');
+  assert.equal(r.env.GNUPGHOME, undefined, 'no GPG agent of any kind in the VM');
   assert.equal(byName['mcp-notify'].addr, `${SERVICE_IP}:7020`);
   assert.equal(byName['mcp-usage'].addr, `${SERVICE_IP}:7021`);
   assert.equal(r.env.CCSANDBOX_NOTIFY_MCP_SOCK, '/ccserver-sandbox-notify.d/sock');
@@ -236,10 +230,31 @@ test('buildGuestRuntime: commit guard, vault, ssh-agent and MCP sockets', () => 
   assert.deepEqual(agentOnly.links, [], 'no node needed for the agent alone');
 });
 
+test('buildGuestRuntime: commit signing goes over the git broker, the VM gets only the public key', () => {
+  const key = { nameReal: 'Bot', nameEmail: 'bot@example.com', signingFingerprint: 'ABCDEF' };
+  const gitBroker = { sockPath: '/h/b.sock', allowlistPath: '/h/a.json', token: 't' };
+  const r = buildGuestRuntime({ scripts, gitBroker, signing: { key, pubkeyPath: '/h/pub.asc' } });
+  assert.deepEqual(r.services.map((s) => s.name), ['git-broker'], 'no signing socket of its own');
+  assert.ok(r.files.some((f) => f.src === '/repo/gpg-sign.cjs' && f.dest === 'gpg-sign.cjs' && f.mode === 0o755));
+  assert.ok(r.files.some((f) => f.src === '/h/pub.asc' && f.dest === 'signing-pubkey.asc'));
+  const links = Object.fromEntries(r.links);
+  assert.equal(links['/ccserver-sandbox-gpg-sign.cjs'], '/ccserver-sandbox/gpg-sign.cjs');
+  assert.equal(r.env.CCSANDBOX_SIGNING_PUBKEY, '/ccserver-sandbox-signing-pubkey.asc');
+  const cfg = Object.fromEntries(r.gitConfig);
+  assert.equal(cfg['gpg.program'], '/ccserver-sandbox-gpg-sign.cjs');
+  assert.equal(cfg['user.signingkey'], 'ABCDEF!');
+  assert.equal(cfg['commit.gpgsign'], 'true');
+  assert.equal(cfg['user.email'], 'bot@example.com');
+  assert.equal(cfg['tag.gpgSign'], 'false');
+
+  // Without the broker there is nothing to carry the requests: no signing.
+  const noBroker = buildGuestRuntime({ scripts, signing: { key, pubkeyPath: '/h/pub.asc' } });
+  assert.deepEqual(noBroker.gitConfig, []);
+});
+
 test('buildGuestRuntimeUserData: symlinks after mounts, socket units, services started before READY', () => {
   const rt = buildGuestRuntime({
-    scripts, gitBroker: { sockPath: '/h/b.sock', allowlistPath: '/h/a.json', token: 't' },
-    gpgVault: { homeDir: '/nonexistent', fingerprint: 'F', nameReal: 'N', nameEmail: 'e', sockets: { agent: '/r/a', agentSsh: '/r/s' } },
+    scripts, gitBroker: { sockPath: '/h/b.sock', allowlistPath: '/h/a.json', token: 't' }, sshAgentSock: '/h/agent.sock',
   });
   const ud = buildGuestRuntimeUserData(rt, { uid: 1000, gid: 1000 });
   const sock = ud.writeFiles.find((f) => f.path === '/etc/systemd/system/ccs-svc-git-broker.socket');
@@ -249,8 +264,7 @@ test('buildGuestRuntimeUserData: symlinks after mounts, socket units, services s
   const svc = ud.writeFiles.find((f) => f.path === '/etc/systemd/system/ccs-svc-git-broker.service');
   assert.match(svc.content, /^ExecStart=\/usr\/lib\/systemd\/systemd-socket-proxyd 10\.0\.2\.100:7001$/m);
   assert.match(svc.content, /^DynamicUser=yes$/m);
-  assert.ok(ud.bootLines.some((l) => l.cmd.includes('install -d -o 1000 -g 1000 -m 0700 /run/ccserver/gnupg-vault')));
-  assert.deepEqual(ud.runLines, [{ what: 'services', cmd: 'systemctl daemon-reload && systemctl start ccs-svc-git-broker.socket ccs-svc-gpg-agent.socket ccs-svc-gpg-agent-ssh.socket' }]);
+  assert.deepEqual(ud.runLines, [{ what: 'services', cmd: 'systemctl daemon-reload && systemctl start ccs-svc-git-broker.socket ccs-svc-ssh-agent.socket' }]);
 
   const cc = parseCloudConfig(buildSessionUserData({ ...sessionOpts, ...ud }));
   const boot = cc.bootcmd[0][2];
@@ -258,7 +272,7 @@ test('buildGuestRuntimeUserData: symlinks after mounts, socket units, services s
   assert.match(boot, /ln -sfn \/usr\/bin\/node \/ccserver-sandbox-node \|\| \{ echo CCSERVER-FAIL-tok123 link:\/ccserver-sandbox-node/);
   const run = cc.runcmd[0][2];
   assert.ok(run.indexOf('systemctl start') < run.indexOf(`${READY_PREFIX}tok123`));
-  assert.ok(cc.write_files.some((f) => f.path === '/etc/systemd/system/ccs-svc-gpg-agent.socket'));
+  assert.ok(cc.write_files.some((f) => f.path === '/etc/systemd/system/ccs-svc-ssh-agent.socket'));
 });
 
 test('composeGitConfigEnv: ccserver entries first, operator entries renumbered after, never erased', () => {
@@ -286,7 +300,7 @@ test('composeGitConfigEnv: ccserver entries first, operator entries renumbered a
     { GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'a.b', GIT_CONFIG_VALUE_0: 'c' });
 });
 
-test('golden image carries gpg for vault signing', () => {
+test('golden image carries gpg for verifying host-signed commits', () => {
   assert.ok(GOLDEN_PACKAGES.includes('gnupg'));
 });
 

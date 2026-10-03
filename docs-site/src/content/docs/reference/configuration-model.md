@@ -21,18 +21,18 @@ ccserver の設定は 2 種類あります。どちらに属するかは好み�
 | 置き場所 | SQLite の `settings` テーブル | `~/.config/ccserver/sandbox.config.json` |
 | 変更方法 | Web UI の設定タブ | テキストエディタ |
 | 反映 | 即時 | **ccserver の再起動が必要** |
-| 例 | パスキー、GPG Vault、通知設定 | `docker` / `persistentHome` / `gpg` / `sshAgent` / `gpgVault` / `browseRoots` / `hiddenApps` / `reviewerMcp` / `usageMcp` |
+| 例 | パスキー、コミット署名鍵のロック解除、通知設定 | `docker` / `persistentHome` / `sshAgent` / `commitSigning` / `browseRoots` / `hiddenApps` / `reviewerMcp` / `usageMcp` |
 
 ### 現時点での既知の例外
 
 **ネットワーク隔離 (network allowlist)** は Web UI に設定タブを持ちながら、保存先が `sandbox.config.json` です (`server/ws/networkAllowlist.js` が JSON を read-modify-write しています)。これは原則に反しており、[#205](https://github.com/nananek/ccserver/issues/205) で `settings` テーブルへ移す予定です。
 
-### `gpg` という名前の紛らわしさ
+### `commitSigning` と「コミット署名」タブ
 
 名前が似ていますが**別の概念**です。混同しないでください。
 
-- `sandbox.config.json` の `gpg` / `gpgVault` — ホストの gpg-agent や Vault をサンドボックスへ**転送するかどうか**の on/off。静的設定。
-- Web UI の「GPG連携」タブ — **Vault 自体**のセットアップとロック管理 (鍵の生成、パスキーによるアンロック、削除)。動的。
+- `sandbox.config.json` の `commitSigning` — 起動時に「このセッションのコミットをホストで署名するか」の既定値。静的設定 (起動メニューで上書き可)。
+- Web UI の「コミット署名」タブ — **ホストの署名鍵そのもの**の登録・ロック解除・削除 (鍵自体は専用の GNUPGHOME にあり、DB にはパスキー用のラップと監査ログだけが入ります)。
 
 ## ファイルの置き場所
 

@@ -59,7 +59,7 @@ async function setup(page, { backend, status, vmTemplateId = null }) {
   await page.addInitScript(({ dir, backend, vmTemplateId }) => {
     localStorage.setItem('ccserver-last-dir', dir);
     localStorage.setItem('ccserver-sandbox-default', '1');
-    localStorage.setItem(`ccserver-sandbox-opts:${dir}`, JSON.stringify({ backend, vmTemplateId, gpg: false, sshAgent: false }));
+    localStorage.setItem(`ccserver-sandbox-opts:${dir}`, JSON.stringify({ backend, vmTemplateId, sshAgent: false }));
   }, { dir: CWD, backend, vmTemplateId });
   await page.goto('/');
   await expect(page.locator('.open-split-main')).toBeEnabled();

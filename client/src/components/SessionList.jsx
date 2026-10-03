@@ -1,6 +1,6 @@
 import TabIcon from './TabIcon.jsx';
-import { useGpgVaultStatusContext } from './GpgVaultStatusProvider.jsx';
-import { gpgVaultBadgeState } from '../gpgVaultBadge.js';
+import { useCommitSigningStatusContext } from './CommitSigningStatusProvider.jsx';
+import { commitSigningBadgeState } from '../commitSigningBadge.js';
 import { activityInfo } from '../activityLevel.js';
 
 // エージェントの稼働度 (緑=待機中 / 黄=低活動 / 赤=稼働中)。行の左端の縦線は
@@ -62,7 +62,7 @@ export default function SessionList({
   customLabels,
   onRowContextMenu,
 }) {
-  const vaultStatus = useGpgVaultStatusContext();
+  const signingStatus = useCommitSigningStatusContext();
   const handleRowContextMenu = (e, id, currentLabel) => {
     if (!id || !onRowContextMenu) return;
     e.preventDefault();
@@ -107,10 +107,10 @@ export default function SessionList({
                     <TabIcon type={tab.type} app={tab.app} shell={tab.shell} ui={tab.ui} />
                     <span className="session-menu-label">{displayLabel}</span>
                     {(() => {
-                      // 一覧では Vault ありで起動したセッションにだけ鍵を出す。
-                      const badge = tab.gpgVaultActive ? gpgVaultBadgeState(tab, vaultStatus?.data) : null;
+                      // 一覧ではホスト署名ありで起動したセッションにだけ鍵を出す。
+                      const badge = commitSigningBadgeState(tab, signingStatus?.data);
                       if (!badge) return null;
-                      return <span className={`session-badge gpg-vault-${badge.state}`} title={badge.reason}>🔑</span>;
+                      return <span className={`session-badge commit-signing-${badge.state}`} title={badge.reason}>🔑</span>;
                     })()}
                     {!tab.shell && !tab.sandbox && <span className="session-badge no-sandbox">no sandbox</span>}
                     {tab.sandbox && <SandboxBadge backend={tab.sandboxBackend} />}
@@ -158,9 +158,9 @@ export default function SessionList({
                   <TabIcon type="terminal" app={s.app} shell={!!s.shell} ui={s.ui} />
                   <span className="session-menu-label">{s.customLabel || baseName(s.cwd) || s.id.slice(0, 8)}</span>
                   {(() => {
-                    const badge = s.gpgVaultActive ? gpgVaultBadgeState(s, vaultStatus?.data) : null;
+                    const badge = commitSigningBadgeState(s, signingStatus?.data);
                     if (!badge) return null;
-                    return <span className={`session-badge gpg-vault-${badge.state}`} title={badge.reason}>🔑</span>;
+                    return <span className={`session-badge commit-signing-${badge.state}`} title={badge.reason}>🔑</span>;
                   })()}
                   {s.sandbox
                     ? <SandboxBadge backend={s.sandboxBackend} />

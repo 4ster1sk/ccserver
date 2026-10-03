@@ -647,6 +647,50 @@ export const MIGRATIONS = [
       db.exec('DROP TABLE IF EXISTS pr_reviews');
     },
   },
+  {
+    // v15: host-side commit signing replaces the GPG vault (plan:
+    // sandbox-no-secrets). The vault's tables go (its key material is not
+    // migrated: that key was handed to sandboxes as a signing oracle). Only
+    // the two vault tables are dropped -- v9's auth_sessions/login_tokens
+    // columns (step-up, registration grants) are general auth and stay.
+    //
+    // commit_signing_passkeys: the signing key's passphrase wrapped under a
+    //   passkey's PRF output (commitSigningCrypto.js), one row per passkey.
+    //   key_fingerprint ties a wrap to the key it unlocks; wraps of any
+    //   other key are deleted when the key changes.
+    // commit_signatures: what the host signed, for scoping a revocation
+    //   (no secrets: tree/parents/subject/payload digest).
+    version: 15,
+    up(db) {
+      db.exec(`
+        DROP TABLE IF EXISTS gpg_vault_credentials;
+        DROP TABLE IF EXISTS gpg_vault;
+
+        CREATE TABLE commit_signing_passkeys (
+          credential_id    TEXT PRIMARY KEY REFERENCES webauthn_credentials(id) ON DELETE CASCADE,
+          key_fingerprint  TEXT NOT NULL,
+          prf_salt         BLOB NOT NULL,
+          wrapped          BLOB NOT NULL,
+          wrap_nonce       BLOB NOT NULL,
+          wrap_tag         BLOB NOT NULL,
+          created_at       INTEGER NOT NULL
+        );
+
+        CREATE TABLE commit_signatures (
+          id               INTEGER PRIMARY KEY AUTOINCREMENT,
+          created_at       INTEGER NOT NULL,
+          cwd              TEXT NOT NULL,
+          app              TEXT,
+          key_fingerprint  TEXT NOT NULL,
+          tree             TEXT NOT NULL,
+          parents          TEXT NOT NULL,
+          subject          TEXT NOT NULL,
+          payload_sha256   TEXT NOT NULL
+        );
+        CREATE INDEX idx_commit_signatures_created ON commit_signatures(created_at);
+      `);
+    },
+  },
 ];
 
 // Runs pending migrations in order. Each one executes inside BEGIN IMMEDIATE

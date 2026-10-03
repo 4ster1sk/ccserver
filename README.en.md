@@ -120,8 +120,7 @@ $EDITOR ~/.config/ccserver/sandbox.config.json
 ```
 
 The generated file is minimal on purpose. Copying `server/sandbox.config.example.json` verbatim
-would enable `"gpg": true`, silently forwarding the host gpg-agent and `~/.gnupg` into every
-sandbox; use `npm run setup -- --yes --seed-example` if you want the full annotated example
+would make a reference file's choices your policy without anyone deciding so; use `npm run setup -- --yes --seed-example` if you want the full annotated example
 anyway. `server/sandbox.config.example.json` documents every key and its default.
 
 Example:
@@ -130,8 +129,8 @@ Example:
 {
   "docker": true,
   "persistentHome": true,
-  "gpg": false,
   "sshAgent": false,
+  "commitSigning": false,
   "gitBroker": true,
   "forceSandbox": false,
   "defaultApp": "claude",
@@ -143,7 +142,7 @@ Example:
 }
 ```
 
-Important options include `docker`, `persistentHome`, `gpg`, `sshAgent`, `gitBroker`, `forceSandbox`, `defaultApp`, `showUsage`, `usageMcp`, `binds`, and `env`. See the Japanese README for the complete option reference and security limitations.
+Important options include `docker`, `persistentHome`, `sshAgent`, `commitSigning` (commits signed by the host; the sandbox never gets a key), `gitBroker`, `forceSandbox`, `defaultApp`, `showUsage`, `usageMcp`, `binds`, and `env`. See the Japanese README for the complete option reference and security limitations.
 
 Every path ccserver uses can be overridden with an environment variable
 (`CCSERVER_DB_PATH`, `CCSERVER_SCHEDULES_PATH`, ...); a path with an

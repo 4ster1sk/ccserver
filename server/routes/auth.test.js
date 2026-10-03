@@ -271,7 +271,7 @@ test('POST /api/auth/webauthn/register-options: returns discoverable-credential 
   assert.ok(typeof options.challenge === 'string' && options.challenge.length > 0);
   assert.ok(flowIdFrom(res), 'a flow cookie was set');
   // plan: gpg-agent-vault -- new passkeys must request PRF capability at
-  // creation time so a later GPG-vault step-up ceremony can evaluate it.
+  // creation time so a later PRF ceremony (the commit signing key's passkey unlock) can evaluate it.
   // (options.extensions also carries simplewebauthn's own credProps:true
   // default -- irrelevant to this feature, not asserted on here.)
   assert.deepEqual(options.extensions.prf, {});

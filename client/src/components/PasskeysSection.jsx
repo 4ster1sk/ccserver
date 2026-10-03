@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { startRegistration, browserSupportsWebAuthn } from '@simplewebauthn/browser';
 import { authFetch, resolveAuthMode } from '../auth.js';
-import { runPasskeyStepUp } from '../gpgVaultStepUp.js';
+import { runPasskeyStepUp } from '../passkeyStepUp.js';
 
 // "パスキー" section (SettingsView.jsx 左メニュー, Issue #141 Step4). The
 // third of the Issue's three login導線 -- パスキー登録 (フロー2) -- lives

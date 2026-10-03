@@ -101,7 +101,7 @@ export function createSession({ authMethod = null, credentialId = null, registra
 
 // How long a step-up (a fresh user-verified passkey assertion) authorizes
 // sensitive operations on the same session: registering another passkey
-// (routes/auth.js) and deleting a pre-fix GPG vault (routes/gpgVault.js).
+// (routes/auth.js) and deleting the commit signing key (routes/commitSigning.js).
 export const STEPUP_WINDOW_MS = 5 * 60 * 1000;
 
 // The session id from the request's cookie, or null. Routes behind

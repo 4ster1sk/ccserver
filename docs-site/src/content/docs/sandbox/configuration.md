@@ -27,14 +27,14 @@ $EDITOR ~/.config/ccserver/sandbox.config.json
 ```
 
 :::caution
-`server/sandbox.config.example.json` を**そのままコピーしないでください**。このファイルは全キーの既定値を解説するリファレンスであり、`"gpg": true` を含みます。実装は「ファイルが無ければ `false`」なので、丸ごとコピーするとホストの gpg-agent と `~/.gnupg` のサンドボックスへの転送が**黙って有効になります**。ウィザードが生成するのはコメント 1 行だけの最小ファイルです。どうしても全文が欲しい場合は `npm run setup -- --yes --seed-example` を使ってください。
+`server/sandbox.config.example.json` を**そのままコピーしないでください**。このファイルは全キーを解説するリファレンスで、あなたの環境向けの推奨値ではありません。丸ごとコピーすると、意図しない値で境界が変わり得ます。ウィザードが生成するのはコメント 1 行だけの最小ファイルです。どうしても全文が欲しい場合は `npm run setup -- --yes --seed-example` を使ってください。
 :::
 
 ```json
 {
   "docker": true,
-  "gpg": true,
   "sshAgent": false,
+  "commitSigning": false,
   "gitBroker": true,
   "ghUsageRecording": {
     "enabled": false,
@@ -70,8 +70,8 @@ $EDITOR ~/.config/ccserver/sandbox.config.json
 |------|------|------|
 | `docker` | `true` | サンドボックス内部で rootless dockerd を起動。`false` で無効 (軽量・rootlesskit 不要)。 |
 | `persistentHome` | `true` | プロジェクト毎の永続 HOME を有効化 (詳細は [概要と永続 HOME](/ccserver/sandbox/overview/#サンドボックスの再利用-永続-home))。`false` で従来どおり毎回まっさらな tmpfs HOME。 |
-| `gpg` | `false` | コミット署名用に gpg-agent を転送 ([認証情報の受け渡し](/ccserver/sandbox/credentials/) 参照)。UI で上書き可。 |
-| `sshAgent` | `false` | ssh-agent を転送 (同上)。UI で上書き可。 |
+| `sshAgent` | `false` | ssh-agent を転送 ([認証情報の受け渡し](/ccserver/sandbox/credentials/) 参照)。UI で上書き可。 |
+| `commitSigning` | `false` | コミットをホストの署名鍵で署名する ([コミット署名](/ccserver/sandbox/commit-signing/) 参照)。サンドボックスには鍵もソケットも渡さない。起動のたびに承認を求め、鍵が無い・`gitBroker: false` なら起動を拒否。UI で上書き可。旧 `gpg` / `gpgVault` / `gpgVaultLockPolicy` は廃止 (無視して警告)。 |
 | `gitBroker` | `true` | git/gh の認証情報スコープ制限 (同上)。 |
 | `ghUsageRecording` | 未設定（無効） | Issue #198 の任意・ローカル集計。`{ "enabled": true, "file": "/absolute/path/gh-usage-recording.json" }` を指定した新規サンドボックスセッションだけが、gh ブローカー経由の結果を固定カテゴリのカウンタとして保存する。コマンドライン・リポジトリ名・本文・パス・出力・認証情報・識別子は記録せず、ccserver が送信・アップロードすることもない。`node server/cli/gh-usage-report.js enable --file /absolute/path/gh-usage-recording.json`、`show`、`reset`、`disable` で管理できる。 |
 | `commitMessageGuard` | `{ enabled: true, blockedPatterns: [] }` | サンドボックス内の `git commit` を、メッセージが禁止パターンに一致する場合ブロックする commit-msg フック ([認証情報の受け渡し](/ccserver/sandbox/credentials/) 参照)。組み込みパターン (常時有効、設定不要): `Claude-Session:` 行、`https://claude.ai/code/session_...` の裸URL。`gitBroker` とは独立のフラグで、`gitBroker: false` でも有効なまま。`blockedPatterns` に正規表現の文字列を追加すると (例: `Co-Authored-By: ... noreply@anthropic.com` の行)、組み込みパターンに加えてブロックできる。`gitBroker` も有効な場合は、同じ禁止パターンで `gh pr create`/`edit`/`comment`/`review` の title/body/body-file もチェックされる (gh はローカルの commit-msg フックを通らないため別経路が必要 — 詳細は [認証情報の受け渡し](/ccserver/sandbox/credentials/) の gh CLI 節)。 |
@@ -185,7 +185,7 @@ Linux では、サンドボックス起動の方式をセッションごとに�
 
 - `既定` は `sandbox.config.json` の `backend` (環境変数 `CCSERVER_SANDBOX_BACKEND` が優先) に従います
 - 選んだ方式がこのホストで使えない場合 (例: `/dev/kvm` が無いホストで VM を選んだ場合) は、もう一方の方式やサンドボックスなしに切り替えずに、理由付きのエラーで起動を拒否します
-- VM では、旧方式の GPG 署名 (ホストの gpg-agent 転送)・rtk・code-review-graph を使えません。起動メニューでは無効表示になります。署名には GPG Vault を使ってください
+- VM では rtk・code-review-graph を使えません。起動メニューでは無効表示になります。コミット署名は VM (常駐 VM を含む) でも使えます
 - 再開・予約実行は、起動時に選んだ方式で起動し直します
 
 ## QEMU VM テンプレート

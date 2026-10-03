@@ -104,8 +104,8 @@ ccserver (Node)
 1. **テンプレートの解決**: `resolveVmTemplate(vmTemplateId)`。削除済み・壊れた
    テンプレートは、ブローカーを起動する前に起動を拒否する。テンプレートが無ければ
    `sandbox.config.json` の `qemu` の値を使う。
-2. **使えない機能の警告**: 旧方式の `gpg` (ホストの gpg-agent 転送)、`tools.rtk`、
-   `tools.code-review-graph` は VM では使えないので、警告して外す。
+2. **使えない機能の警告**: `tools.rtk`、`tools.code-review-graph` は VM では使えないので、
+   警告して外す。
 3. **エージェントの準備** (`qemuAgentLaunch`): ホストのインストールを読み取り専用で共有する
    場所を決め、認証情報の注入設定 (`inject`) とゲストに渡すプレースホルダを作る。
    注入できない設定ならここで拒否する。`~/.claude.json` を VM 用に整える
@@ -251,9 +251,7 @@ bwrap では決まったパスにホストのソケットや補助スクリプ�
   | name | port | ゲストのパス |
   |---|---|---|
   | `git-broker` | 7001 | `/ccserver-sandbox-git-broker.sock` |
-  | `gpg-agent` | 7010 | `/run/ccserver/gnupg-vault/S.gpg-agent` |
-  | `gpg-agent-ssh` | 7011 | `/run/ccserver/gnupg-vault/S.gpg-agent.ssh` |
-  | `ssh-agent` | 7012 | `/run/ccserver/ssh-agent.sock` (gpgVault が無いときだけ) |
+  | `ssh-agent` | 7012 | `/run/ccserver/ssh-agent.sock` |
   | `mcp-notify` / `mcp-usage` | 7020 / 7021 | `/ccserver-sandbox-<kind>.d/sock` |
 
   `services` に入れるのは ccserver 自身のソケットだけ。`sandbox.config.json` 由来の
@@ -263,9 +261,10 @@ bwrap では決まったパスにホストのソケットや補助スクリプ�
   `/usr/local/bin/gh`、`/usr/local/bin/ssh`) に symlink を張る。git broker のトークンは
   env ではなく 0600 のファイルで渡す (env はホストの ssh のコマンドラインに載り、
   同じユーザーの全プロセスから見えるため)。
-- **GPG vault**: 公開情報 (`pubring.kbx` / `trustdb.gpg` / `gpg.conf`) だけを
-  `/run/ccserver/gnupg-vault` にコピーし、署名はソケット越しにホストの vault が行う。
-  秘密鍵は VM に入らない。
+- **コミット署名**: VM には鍵もエージェントのソケットも入れない。`gpg.program` に
+  署名ラッパー (`/ccserver-sandbox-gpg-sign.cjs`) を、検証用に公開鍵
+  (`/ccserver-sandbox-signing-pubkey.asc`) だけを置き、署名依頼は git broker の
+  ソケット (`sign-commit`) でホストに送る (`server/ws/commitSignService.js`)。
 
 ### テンプレートの cloud-config
 

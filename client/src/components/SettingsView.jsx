@@ -2,7 +2,7 @@ import { useState } from 'react';
 import SandboxSection from './SandboxSection.jsx';
 import GeneralSection from './GeneralSection.jsx';
 import PasskeysSection from './PasskeysSection.jsx';
-import GpgVaultSection from './GpgVaultSection.jsx';
+import CommitSigningSection from './CommitSigningSection.jsx';
 import NetworkIsolationSection from './NetworkIsolationSection.jsx';
 import NotificationsSection from './NotificationsSection.jsx';
 import VmSection from './VmSection.jsx';
@@ -17,7 +17,7 @@ const SETTINGS_MENUS = [
   { key: 'network', label: 'ネットワーク隔離' },
   { key: 'notifications', label: '通知' },
   { key: 'passkeys', label: 'パスキー' },
-  { key: 'gpgVault', label: 'GPG連携' },
+  { key: 'commitSigning', label: 'コミット署名' },
 ];
 
 export default function SettingsView({
@@ -89,7 +89,7 @@ export default function SettingsView({
           {activeKey === 'network' && <NetworkIsolationSection />}
           {activeKey === 'notifications' && <NotificationsSection />}
           {activeKey === 'passkeys' && <PasskeysSection />}
-          {activeKey === 'gpgVault' && <GpgVaultSection />}
+          {activeKey === 'commitSigning' && <CommitSigningSection />}
         </div>
       </div>
     </div>

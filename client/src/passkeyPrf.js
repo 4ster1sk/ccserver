@@ -1,32 +1,18 @@
-// GPG vault (plan: gpg-agent-vault) PRF step-up ceremony helper.
+// WebAuthn PRF ceremony helper (the commit signing key's passkey unlock,
+// routes/commitSigning.js on the server).
 //
 // This CANNOT reuse @simplewebauthn/browser's startAuthentication(): that
 // library converts every other binary field (challenge, allowCredentials[].id,
 // response buffers) between base64url strings and ArrayBuffers, but does NOT
-// touch the `extensions` field at all -- verified against
-// @simplewebauthn/browser@14.0.0's actual source while building this
-// feature. optionsJSON.extensions.prf.eval.first arrives from the server as
-// a base64url STRING; passed straight through to navigator.credentials.get()
-// it would be rejected (a WebIDL BufferSource cannot be a plain string), and
-// prf.results.first comes back as a raw ArrayBuffer that still needs
-// encoding for the fetch() body. Every other field below IS still converted
-// by hand for the same reason.
-//
-// Used for setup / add-credential / unlock / delete (see routes/gpgVault.js)
-// -- every ceremony that needs a live PRF evaluation, as opposed to ordinary
-// login (routes/auth.js), which never touches PRF at all.
-//
-// Security audit F6: the server sends per-credential salts
-// (prf.evalByCredential) so the authenticator evaluates PRF over each
-// credential's own salt. A `second` salt (next-salt rotation) used to be
-// requested for unlock; that rotation is disabled (vuln_scan M4, see
-// rotationFor in routes/gpgVault.js), so the server no longer sends it --
-// this helper still handles a `second` input/result if one ever appears
-// again, purely as a passthrough.
+// touch the `extensions` field at all. optionsJSON.extensions.prf.eval.first
+// arrives from the server as a base64url STRING; passed straight through to
+// navigator.credentials.get() it would be rejected (a WebIDL BufferSource
+// cannot be a plain string), and prf.results.first comes back as a raw
+// ArrayBuffer that still needs encoding for the fetch() body.
 
 import { base64URLStringToBuffer, bufferToBase64URLString } from '@simplewebauthn/browser';
 
-// optionsJSON is exactly what one of the gpg-vault *-options endpoints
+// optionsJSON is exactly what one of the PRF *-options endpoints
 // returns (generateAuthenticationOptions() output, with extensions.prf.eval.first
 // as a base64url string). Returns a JSON-serializable response body shaped
 // for the matching *-verify endpoint, or throws with a human-readable

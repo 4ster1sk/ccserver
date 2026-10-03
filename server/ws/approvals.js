@@ -14,15 +14,19 @@
 //
 // requestedBy is attribution only (shown in the dialog) -- never an
 // authorization input; the caller's own trust boundary (whatever that is)
-// gates whether it may request an approval at all. No current caller uses
-// this (issue #189 removed the sole consumer, the privileged meta-agent MCP
-// toolset); kept as generic infrastructure for a future feature that needs
-// the same human-in-the-loop gate.
+// gates whether it may request an approval at all. Current callers: the
+// commit signing service (ws/commitSignService.js) -- its launch gate and
+// its "unlock the signing key" request.
 
 import { randomUUID } from 'node:crypto';
 import { getDb } from '../db.js';
 
-export const APPROVAL_KINDS = ['close_session', 'delete_sandbox'];
+// commit_signing_launch: a sandbox launch that would get the host commit
+//   signing service asks first, every launch (ws/commitSignService.js).
+// commit_signing_unlock: a sandboxed commit is waiting for the signing key
+//   to be unlocked. "approved" is only ever set by the unlock itself (see
+//   setApprovalDecisionGuard); the passphrase never touches this table.
+export const APPROVAL_KINDS = ['close_session', 'delete_sandbox', 'commit_signing_launch', 'commit_signing_unlock'];
 export const APPROVAL_DECISIONS = ['approved', 'rejected'];
 
 // Fixed per plan decision 4 [2026-08-24]: not configurable in v1.
@@ -35,6 +39,16 @@ const HISTORY_LIMIT = 20;
 
 // approvalId -> { resolve, timer }
 const waiters = new Map();
+
+// kind -> (decision, approval) => null | error message. Lets a feature
+// refuse a browser decision the generic banner cannot honour on its own
+// (e.g. "approve" an unlock without unlocking anything).
+const decisionGuards = new Map();
+
+export function setApprovalDecisionGuard(kind, guard) {
+  if (guard) decisionGuards.set(kind, guard);
+  else decisionGuards.delete(kind);
+}
 
 function rowToApproval(row) {
   if (!row) return null;
@@ -137,12 +151,19 @@ export function requestApproval(input, { timeoutMs = APPROVAL_TIMEOUT_MS } = {})
 // Apply the browser's decision. Result object semantics (user-facing REST):
 //   { ok: true, approval } -- the waiter (if any) was resolved with this status
 //   { ok:false, code:'not-found' | 'already-resolved', message }
-export function decideApproval(id, decision) {
+// guards: false for server-internal callers that resolve an approval
+// themselves (the guard is about what the browser may claim).
+export function decideApproval(id, decision, { guards = true } = {}) {
   if (!APPROVAL_DECISIONS.includes(decision)) {
     return { ok: false, code: 'validation', message: `decision must be one of: ${APPROVAL_DECISIONS.join(', ')}` };
   }
   if (typeof id !== 'string' || !id) {
     return { ok: false, code: 'not-found', message: 'approval not found' };
+  }
+  const guard = guards && decisionGuards.get(getApprovalRow(id)?.kind);
+  if (guard) {
+    const refusal = guard(decision, rowToApproval(getApprovalRow(id)));
+    if (refusal) return { ok: false, code: 'validation', message: refusal };
   }
   try {
     const res = getDb()
@@ -165,6 +186,15 @@ export function decideApproval(id, decision) {
   } catch (err) {
     return { ok: false, code: 'internal', message: err.message };
   }
+}
+
+// Pending approvals of one kind (server-internal: e.g. resolving every
+// waiting unlock request once the key is unlocked).
+export function listPendingApprovalIds(kind) {
+  return getDb()
+    .prepare("SELECT id FROM pending_approvals WHERE status = 'pending' AND kind = ? ORDER BY created_at ASC")
+    .all(kind)
+    .map((r) => r.id);
 }
 
 // Pending first (oldest first -- what the banner should show), then the most

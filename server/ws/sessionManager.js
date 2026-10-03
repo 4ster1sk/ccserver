@@ -14,7 +14,6 @@ import { qemuVmPool } from './qemuVmPool.js';
 import { LAUNCHER_SCRIPT as QEMU_LAUNCHER } from './sandbox-qemu.js';
 import { buildSandboxSpawn, resolveApp, sandboxAvailable, sandboxUnavailableReason, forceSandboxUnavailableReason, loadSandboxConfig, resolveSandboxBackend, persistentHomeDir, dockerSandboxAvailable, dockerdStatus, dockerdLockHeld, resolveTools, opencodeSupportsStandalone, chatBridgeArgv, CHAT_PASSWORD_NAME } from './sandbox.js';
 import { prepareChatDir, removeChatDir, createChatState, publicChatState, feedChatOutput, failChat, initChatSession, sendChatPrompt, startChatMonitor, stopChatMonitor } from './opencodeChat.js';
-import * as gpgVaultRelay from './gpgVaultRelay.js';
 import { brokerArmed, setSessionBrokerLists, setSessionBrokerOpMode } from './netbrokerClient.js';
 import { buildMcpConfigArgsAndEnv } from './mcpConfig.js';
 import { shouldInjectNotify, notifyEnabled, getNotifySockPath, notifyBrokerRunning } from './notify.js';
@@ -223,9 +222,9 @@ function buildSessionRecord(id, ptyProcess, meta) {
     // so a display string must not ride along with them.
     customLabel: normalizeCustomLabel(meta.customLabel),
     sandbox: !!meta.sandbox,
-    sandboxOpts: meta.sandbox ? (meta.sandboxOpts || null) : null, // per-launch gpg/sshAgent override, for schedule/resume replay
+    sandboxOpts: meta.sandbox ? (meta.sandboxOpts || null) : null, // per-launch sshAgent/commitSigning override, for schedule/resume replay
     docker: !!meta.docker, // whether THIS session's sandbox launched with docker (see dockerAvailability)
-    gpgVaultActive: !!meta.gpgVaultActive, // effective gpgVault flag at launch (server/ws/sandbox.js's resolved `gpgVault`, not just the raw sandboxOpts override) -- see terminal.js's `session` WS message / listSessions()
+    commitSigningActive: !!meta.commitSigningActive, // whether the host signs this session's commits (sandbox.js's effective value, not just the raw sandboxOpts request) -- see terminal.js's `session` WS message / listSessions()
     dockerTag: meta.docker && meta.sandboxStateDir ? basename(meta.sandboxStateDir) : null, // matches CCSANDBOX_DOCKERD_TAG (sandbox.js), identifies this session's dockerd in the status file
     sandboxStateDir: meta.sandboxStateDir ?? null, // rootlesskit state dir to remove on teardown (docker only)
     sandboxGitBrokerProc: meta.sandboxGitBrokerProc ?? null, // host-side git-broker child process, killed on teardown
@@ -875,7 +874,7 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
   // See sandbox.js.
   let useSandbox = false;
   let sandboxDocker = false;
-  let gpgVaultActive = false;
+  let commitSigningActive = false;
   let sandboxStateDir = null;
   let sandboxGitBrokerProc = null;
   let sandboxGitBrokerDir = null;
@@ -940,7 +939,7 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
       command = spawn.command;
       args = spawn.args;
       sandboxDocker = !!spawn.docker;
-      gpgVaultActive = !!spawn.gpgVaultActive;
+      commitSigningActive = !!spawn.commitSigningActive;
       sandboxStateDir = spawn.stateDir || null;
       sandboxGitBrokerProc = spawn.gitBrokerProc || null;
       sandboxGitBrokerDir = spawn.gitBrokerDir || null;
@@ -1071,7 +1070,7 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
     sandbox: useSandbox,
     sandboxOpts,
     docker: sandboxDocker,
-    gpgVaultActive,
+    commitSigningActive,
     sandboxStateDir,
     sandboxGitBrokerProc,
     sandboxGitBrokerDir,
@@ -1931,7 +1930,7 @@ export function listSessions() {
       sandbox: session.sandbox,
       sandboxOpts: session.sandboxOpts || null,
       sandboxBackend: session.sandboxBackend || null,
-      gpgVaultActive: !!session.gpgVaultActive,
+      commitSigningActive: !!session.commitSigningActive,
       app: session.app,
       model: session.model || null,
       permissionMode: 'standard',
@@ -2214,9 +2213,6 @@ export function destroyAllSessions() {
 // Kills every live pty, waits up to 3s for them to exit, then tears down all
 // local bookkeeping.
 export function gracefulShutdown() {
-  // The relay isn't tied to any session's ptys, just this process's own
-  // listeners.
-  gpgVaultRelay.stop();
   return new Promise((resolve) => {
     const pendingSessions = [];
 

@@ -29,9 +29,15 @@
 // when it was the VM's last session, starts the idle timer that stops it
 // (the Settings GUI's idle time, 2 hours by default).
 //
-// What a per-session VM has and a pooled one does not yet: the host
-// services (git broker, commit guard, gpg vault, ssh-agent, MCP sockets),
-// and sandbox.config.json binds. The planned design for these is in
+// Host services (git broker -- also commit signing --, commit guard): each
+// session brings its own. Its helper files are a per-session runtime dir,
+// hot-plugged read-only and bound at GUEST_RT_DIR inside its bwrap only; its
+// host sockets ride its own ssh login as remote forwards (-R) to unique
+// guest paths, bound into place inside its bwrap. Both live exactly as long
+// as the session, and no other session's bwrap can see them.
+//
+// What a per-session VM has and a pooled one does not yet: ssh-agent
+// forwarding, the MCP sockets, and sandbox.config.json binds. The planned design for these is in
 // docs/qemu-persistent-vm.md. The running-session network toggle is offered,
 // but per VM: the broker is the whole VM's, so setNetworkMode() flips it for
 // every session on it, and a session joining later inherits its current mode.
@@ -39,8 +45,8 @@
 import { spawn } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { closeSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
-import { buildVirtiofsdArgs, prepareQemuPoolVm, sshForwardArgs, GUEST_RT_DIR, GUEST_CHAT_SOCK } from './sandbox-qemu.js';
+import { dirname, join } from 'node:path';
+import { buildVirtiofsdArgs, prepareQemuPoolVm, sshForwardArgs, sshRemoteForwardArgs, composeGitConfigEnv, GUEST_RT_DIR, GUEST_CHAT_SOCK } from './sandbox-qemu.js';
 import { setGoBrokerLists, setGoBrokerMode, setGoBrokerOpMode } from './netbrokerClient.js';
 import { openHotplugShares } from './qemuShares.js';
 import { getPoolIdleStopMinutes } from '../vmTemplates.js';
@@ -202,10 +208,15 @@ export class QemuVmPool {
   //   session: { cwd, home, homeHostPath (null = tmpfs HOME), argv,
   //              fallbackArgv, env, agent ({ hostDir, guestDir }: the
   //              agent install, shared read-only; null for none),
-  //              chat ({ filesHostDir, hostSock }: opencode chat mode -- the
-  //              dir holding the bridge and password, shared read-only at
-  //              GUEST_RT_DIR, and the host socket the session's ssh forwards
-  //              the bridge's relay socket to; null for none) }
+  //              runtime ({ hostDir, links, sockets, env, gitConfig }: the
+  //              session's host services and helper files, from
+  //              buildGuestRuntime -- hostDir (removed on release) is shared
+  //              read-only at GUEST_RT_DIR, top-level links are made inside
+  //              bwrap, sockets [{ name, hostSock, guestPath }] are
+  //              forwarded; null for none),
+  //              chat ({ hostSock }: opencode chat mode -- the host socket
+  //              the session's ssh forwards the bridge's relay socket to;
+  //              the bridge files are in runtime; null for none) }
   //   opMode:  the launch's operating mode ('enforce' | 'audit'); a VM in
   //            another one is switched to it first (see the file comment).
   //   lists:   the launch's { allowedHosts, deniedHosts } (without the inject
@@ -224,6 +235,7 @@ export class QemuVmPool {
     const { token, release } = this.#join(vm, async () => {
       if (planPath) { try { rmSync(planPath, { force: true }); } catch { /* run dir already gone */ } }
       await Promise.all(leases.map((l) => l.release().catch((e) => this.#log(`releasing ${l.guestPath}: ${e.message}`))));
+      if (session.runtime?.hostDir) { try { rmSync(session.runtime.hostDir, { recursive: true, force: true }); } catch { /* best effort */ } }
     });
     try {
       const rt = await vm.ready;
@@ -244,34 +256,51 @@ export class QemuVmPool {
         leases.push(lease);
         return lease.guestPath;
       };
-      const [cwdSource, homeSource, agentSource, chatSource] = await Promise.all([
+      const runtime = session.runtime || null;
+      const [cwdSource, homeSource, agentSource, rtSource] = await Promise.all([
         share(session.cwd),
         session.homeHostPath ? share(session.homeHostPath) : null,
         session.agent ? share(session.agent.hostDir, true) : null,
-        session.chat ? share(session.chat.filesHostDir, true) : null,
+        runtime?.hostDir ? share(runtime.hostDir, true) : null,
       ]);
       const chatSockDir = session.chat ? `${GUEST_CHAT_ROOT}/${token}` : null;
+      // Each host socket at a guest path unique to this session (outside
+      // every bwrap; only this session binds it into place).
+      const sockets = (runtime?.sockets || []).map((s) => ({ ...s, forwardPath: `/tmp/ccs-svc-${token}-${s.name}.sock` }));
       const bwrapArgs = remote.buildGuestBwrapArgs({
         cwd: session.cwd, cwdSource, home: session.home, homeSource,
         agent: agentSource ? { source: agentSource, target: session.agent.guestDir } : null,
-        extraBinds: session.chat ? [
-          { source: chatSource, target: GUEST_RT_DIR, readonly: true },
-          { source: chatSockDir, target: GUEST_CHAT_SOCK_DIR },
-        ] : [],
+        extraBinds: [
+          ...(rtSource ? [{ source: rtSource, target: GUEST_RT_DIR, readonly: true }] : []),
+          ...(chatSockDir ? [{ source: chatSockDir, target: GUEST_CHAT_SOCK_DIR }] : []),
+          ...sockets.map((s) => ({ source: s.forwardPath, target: s.guestPath, optional: true })),
+        ],
+        // Only the top-level ones: the /usr/local/bin links are made at boot
+        // (prepareQemuPoolVm), /usr being read-only here.
+        symlinks: (runtime?.links || []).filter(([link]) => dirname(link) === '/'),
       });
+      const forwards = [
+        ...sshRemoteForwardArgs(sockets.map((s) => [s.forwardPath, s.hostSock])),
+        ...(session.chat ? sshForwardArgs([[session.chat.hostSock, `${chatSockDir}/${GUEST_CHAT_SOCK_NAME}`]]) : []),
+      ];
+      // ccserver's git config entries (commit guard hook, signing identity)
+      // first, then whatever the VM's own env (the operator's) carries, as
+      // in a per-session VM.
+      const baseEnv = { ...rt.plan.remote.env, ...(runtime?.env || {}), ...(session.env || {}) };
+      const git = composeGitConfigEnv(runtime?.gitConfig || [], baseEnv);
+      for (const w of git.warnings) this.#log(w);
       planPath = join(rt.plan.runDir, 'sessions', `${token}.json`);
       writeFileSync(planPath, JSON.stringify({
         attach: true,
-        ssh: session.chat
-          ? { ...rt.plan.ssh, args: [...sshForwardArgs([[session.chat.hostSock, `${chatSockDir}/${GUEST_CHAT_SOCK_NAME}`]]), ...rt.plan.ssh.args] }
-          : rt.plan.ssh,
+        ssh: forwards.length ? { ...rt.plan.ssh, args: [...forwards, ...rt.plan.ssh.args] } : rt.plan.ssh,
         remote: {
           bwrapArgs,
           preDirs: chatSockDir ? [chatSockDir] : [],
+          waitSockets: sockets.map((s) => s.forwardPath),
           cwd: session.cwd,
           argv: session.argv,
           fallbackArgv: session.fallbackArgv || null,
-          env: { ...rt.plan.remote.env, ...(session.env || {}) },
+          env: { ...git.env, ...git.gitEnv },
         },
       }), { mode: 0o600 });
       return {

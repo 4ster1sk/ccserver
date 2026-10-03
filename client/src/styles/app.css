@@ -602,7 +602,7 @@ body {
   border-color: var(--border);
 }
 
-.gpg-vault-unlock-btn {
+.commit-signing-unlock-btn {
   align-self: center;
   margin-right: 4px;
   padding: 6px 10px;
@@ -619,13 +619,49 @@ body {
   white-space: nowrap;
 }
 
-.gpg-vault-unlock-btn:hover:not(:disabled) {
+.commit-signing-unlock-btn:hover:not(:disabled) {
   background: rgba(249, 226, 175, 0.1);
 }
 
-.gpg-vault-unlock-btn:disabled {
+.commit-signing-unlock-btn:disabled {
   opacity: 0.6;
   cursor: not-allowed;
+}
+
+.commit-signing-unlock {
+  position: relative;
+  align-self: center;
+  display: flex;
+}
+
+.commit-signing-unlock-popover {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 50;
+  width: min(320px, calc(100vw - 32px));
+  padding: 10px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.3);
+}
+
+.commit-signing-unlock-form {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+
+.commit-signing-unlock-form input[type="password"] {
+  flex: 1 1 160px;
+  min-width: 0;
+}
+
+.commit-signing-unlock-form .settings-error {
+  flex-basis: 100%;
+  margin: 0;
 }
 
 .right-sidebar {
@@ -1145,7 +1181,7 @@ body {
   padding: 16px 0;
 }
 
-/* GPG vault (plan: gpg-agent-vault): GitHub registration info panel. */
+/* Commit signing (CommitSigningSection.jsx): public key / code panel. */
 .settings-subsection {
   margin-top: 16px;
   padding-top: 12px;
@@ -1761,16 +1797,16 @@ body {
   border: 1px solid rgba(243, 139, 168, 0.35);
 }
 
-/* GPG vault per-session badge (SessionList.jsx) -- same active/inactive
-   judgment as .gpg-vault-indicator (TerminalView.jsx header), see
-   gpgVaultBadge.js. */
-.session-badge.gpg-vault-active {
+/* Commit signing per-session badge (SessionList.jsx) -- same active/inactive
+   judgment as .commit-signing-indicator (TerminalView.jsx header), see
+   commitSigningBadge.js. */
+.session-badge.commit-signing-active {
   color: var(--success, #a6e3a1);
   background: rgba(166, 227, 161, 0.12);
   border: 1px solid rgba(166, 227, 161, 0.35);
 }
 
-.session-badge.gpg-vault-inactive {
+.session-badge.commit-signing-inactive {
   filter: grayscale(1);
   opacity: 0.6;
   color: var(--text-muted, #6c7086);
@@ -2577,11 +2613,11 @@ body {
   background: rgba(243, 139, 168, 0.1);
 }
 
-/* GPG vault per-session indicator (TerminalView.jsx header) -- grey means
-   "vault exists but isn't effective for this session right now" (never
-   requested, vault locked, or -- pre-gpgVaultRelay.js -- stale; see
-   gpgVaultBadge.js), colored green means it will actually sign/push. */
-.gpg-vault-indicator {
+/* Commit signing per-session indicator (TerminalView.jsx header) -- shown
+   only for a session whose commits the host signs; grey while the key is
+   locked (commits will ask for an unlock), green when signing works now.
+   See commitSigningBadge.js. */
+.commit-signing-indicator {
   display: flex;
   align-items: center;
   justify-content: center;
@@ -2596,13 +2632,13 @@ body {
   border-radius: 4px;
 }
 
-.gpg-vault-indicator:not(.active) {
+.commit-signing-indicator:not(.active) {
   /* 🔑 is a color emoji -- `color` doesn't tint it, so gray it out. */
   filter: grayscale(1);
   opacity: 0.6;
 }
 
-.gpg-vault-indicator.active {
+.commit-signing-indicator.active {
   color: var(--success);
   border-color: var(--success);
   background: rgba(166, 227, 161, 0.1);
@@ -3208,11 +3244,11 @@ body {
   }
 
   .auto-yes-toggle,
-  .gpg-vault-indicator {
+  .commit-signing-indicator {
     line-height: 20px;
   }
 
-  .gpg-vault-indicator {
+  .commit-signing-indicator {
     min-width: calc(20px + 16px + 2px);
   }
 

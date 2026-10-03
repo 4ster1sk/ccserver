@@ -1,4 +1,4 @@
-// Host-side CLIs touched by the security audit remediation (P0): runs each
+// Host-side CLIs (login tokens, the commit signing key): runs each
 // as a real child process against a throwaway DB, the way an operator would.
 
 import { test, before, after } from 'node:test';
@@ -9,7 +9,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { getDb, closeDb } from '../db.js';
 import { hashLoginToken } from '../loginTokens.js';
-import { createVault, addCredentialWrap, vaultExists, countCredentialWraps } from '../gpgVaultDb.js';
+import { signingToolsAvailable } from '../commitSigning.js';
 
 const CLI_DIR = import.meta.dirname;
 let tmpRoot;
@@ -61,33 +61,49 @@ test('issue-login-token rejects unknown arguments (a typo must not silently issu
   assert.equal(res.status, 2);
 });
 
-test('gpg-vault-reset: dry run by default, deletes with --yes, flags a legacy vault (security audit F1.4)', () => {
-  const db = getDb();
-  db.prepare('INSERT INTO webauthn_credentials (id, public_key, counter, label, created_at) VALUES (?,?,?,?,?)')
-    .run('cred-cli', Buffer.from('pk'), 0, null, Date.now());
-  createVault({
-    fingerprint: 'CLIFPR0000000000000000000000000000000000', keyId: 'CLIKEYID',
-    nameReal: 'ccserver cli', nameEmail: 'cli@example.invalid',
-    publicKeyArmored: '-----BEGIN-----', sshPublicKey: 'ssh-ed25519 AAAACLI',
-    encryptedSecretKey: Buffer.from('ct'), encryptionNonce: Buffer.from('n'), encryptionTag: Buffer.from('t'),
-  });
-  addCredentialWrap({ credentialId: 'cred-cli', wrappedKey: Buffer.from('w'), wrapNonce: Buffer.from('n'), wrapTag: Buffer.from('t'), prfSalt: Buffer.alloc(32, 1) });
-  db.prepare('UPDATE gpg_vault SET format_version = 1').run(); // pre-fix vault
+test('commit-signing-key: status, import of a subkey export, dry-run delete, delete --yes', { skip: !signingToolsAvailable() && 'gpg not installed' }, () => {
+  const gnupg = mkdtempSync(join('/tmp', 'ccs-cli-'));
+  const master = mkdtempSync(join('/tmp', 'ccs-cli-m-'));
+  const signHome = join(gnupg, 'g');
+  try {
+    env.CCSERVER_COMMIT_SIGNING_GNUPGHOME = signHome;
+    const empty = runCli('commit-signing-key.js', ['status']);
+    assert.equal(empty.status, 0, empty.stderr);
+    assert.match(empty.stdout, /設定されていません/);
 
-  const dry = runCli('gpg-vault-reset.js');
-  assert.equal(dry.status, 0, dry.stderr);
-  assert.match(dry.stdout, /CLIFPR0000000000000000000000000000000000/);
-  assert.match(dry.stdout, /ssh-ed25519 AAAACLI/);
-  assert.match(dry.stdout, /無効化/);
-  assert.match(dry.stdout, /--yes/);
-  assert.equal(vaultExists(), true, 'dry run deletes nothing');
+    const g = (args) => spawnSync('gpg', ['--homedir', master, '--batch', '--pinentry-mode', 'loopback', '--passphrase', 'cli test pass', ...args], { encoding: 'utf8' });
+    g(['--quick-generate-key', 'CLI Test <cli@example.com>', 'ed25519', 'cert', '1y']);
+    const fpr = spawnSync('gpg', ['--homedir', master, '--batch', '--with-colons', '--list-keys'], { encoding: 'utf8' })
+      .stdout.split('\n').find((l) => l.startsWith('fpr:')).split(':')[9];
+    g(['--quick-add-key', fpr, 'ed25519', 'sign', '1y']);
+    const keyFile = join(master, 'sub.asc');
+    g(['--armor', '--output', keyFile, '--export-secret-subkeys', fpr]);
 
-  const real = runCli('gpg-vault-reset.js', ['--yes']);
-  assert.equal(real.status, 0, real.stderr);
-  assert.equal(vaultExists(), false);
-  assert.equal(countCredentialWraps(), 0);
+    const imported = runCli('commit-signing-key.js', ['import', keyFile]);
+    assert.equal(imported.status, 0, imported.stderr);
+    assert.match(imported.stdout, /CLI Test <cli@example.com>/);
+    assert.match(imported.stdout, /サブキー/);
 
-  const again = runCli('gpg-vault-reset.js', ['--yes']);
-  assert.equal(again.status, 0);
-  assert.match(again.stdout, /存在しません/);
+    const pub = runCli('commit-signing-key.js', ['export-public']);
+    assert.match(pub.stdout, /BEGIN PGP PUBLIC KEY BLOCK/);
+
+    const dry = runCli('commit-signing-key.js', ['delete']);
+    assert.equal(dry.status, 0);
+    assert.match(dry.stdout, /--yes/);
+    assert.match(runCli('commit-signing-key.js', ['status']).stdout, /ロック中/, 'dry run deletes nothing');
+
+    const real = runCli('commit-signing-key.js', ['delete', '--yes']);
+    assert.equal(real.status, 0, real.stderr);
+    assert.match(runCli('commit-signing-key.js', ['status']).stdout, /設定されていません/);
+  } finally {
+    delete env.CCSERVER_COMMIT_SIGNING_GNUPGHOME;
+    for (const d of [join(gnupg, 'g'), master]) spawnSync('gpgconf', ['--homedir', d, '--kill', 'all']);
+    rmSync(gnupg, { recursive: true, force: true });
+    rmSync(master, { recursive: true, force: true });
+  }
+});
+
+test('commit-signing-key rejects unknown commands and arguments', () => {
+  assert.equal(runCli('commit-signing-key.js', ['frobnicate']).status, 2);
+  assert.equal(runCli('commit-signing-key.js', ['delete', '--yse']).status, 2);
 });

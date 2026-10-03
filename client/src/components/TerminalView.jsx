@@ -7,8 +7,8 @@ import { authWsUrl, authFetch } from '../auth.js';
 import { createOsc52Handler } from '../osc52.js';
 import { dewrapSelection } from '../dewrap.js';
 import { displayPath } from '../displayPath.js';
-import { useGpgVaultStatusContext } from './GpgVaultStatusProvider.jsx';
-import { gpgVaultBadgeState } from '../gpgVaultBadge.js';
+import { useCommitSigningStatusContext } from './CommitSigningStatusProvider.jsx';
+import { commitSigningBadgeState } from '../commitSigningBadge.js';
 
 const ALL_SPECIAL_KEYS = [
   { id: 'bs', label: 'BS', data: '\x7f' },
@@ -281,12 +281,11 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
   // 'vm' on a persistent VM: its one broker serves every session on it, so
   // the toggle flips them all (the server broadcasts the new state to each).
   const [networkIsolateScope, setNetworkIsolateScope] = useState('session');
-  // Effective gpgVault flag THIS session actually launched with (arrives
-  // live over the WS `session` message, server/ws/terminal.js) -- see
-  // gpgVaultBadge.js for why "active" here means "will work right now", not
-  // just "was requested at launch".
-  const [gpgVaultActive, setGpgVaultActive] = useState(false);
-  const vaultStatus = useGpgVaultStatusContext();
+  // Whether the host signs THIS session's commits (decided at launch,
+  // arrives over the WS `session` message, server/ws/terminal.js); the
+  // badge also reflects whether the key is unlocked (commitSigningBadge.js).
+  const [commitSigningActive, setCommitSigningActive] = useState(false);
+  const signingStatus = useCommitSigningStatusContext();
   // Non-sandbox Auto-Y confirmation: enabling Auto-Y outside a sandbox means
   // permission prompts are auto-approved straight on the host (no bwrap
   // isolation), so a first-time "are you sure" dialog with a dismiss flag
@@ -837,7 +836,7 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
             sessionIdRef.current = msg.sessionId;
             sessionStorage.setItem(storageKey, msg.sessionId);
             if (onSessionIdRef.current) onSessionIdRef.current(msg.sessionId);
-            if (typeof msg.gpgVaultActive === 'boolean') setGpgVaultActive(msg.gpgVaultActive);
+            if (typeof msg.commitSigningActive === 'boolean') setCommitSigningActive(msg.commitSigningActive);
             // The sandbox flag the session ACTUALLY launched with. The tab was
             // opened with the value this client requested, and the server
             // overrides it whenever forceSandbox/browseRoots mandate a sandbox
@@ -1469,13 +1468,13 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
             </button>
           )}
           {(() => {
-            const badge = gpgVaultBadgeState({ gpgVaultActive }, vaultStatus?.data);
+            const badge = commitSigningBadgeState({ commitSigningActive }, signingStatus?.data);
             if (!badge) return null;
             return (
               <span
-                className={`gpg-vault-indicator${badge.state === 'active' ? ' active' : ''}`}
+                className={`commit-signing-indicator${badge.state === 'active' ? ' active' : ''}`}
                 title={badge.reason}
-                aria-label={`GPG Vault: ${badge.reason}`}
+                aria-label={`コミット署名: ${badge.reason}`}
               >🔑</span>
             );
           })()}

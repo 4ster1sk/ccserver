@@ -59,10 +59,14 @@ function forwardedEnv(source) {
 //   agent:      { source, target } -- the hot-plugged read-only agent
 //               install (qemuAgents.js) and where it goes, or null. The
 //               target dir must already exist in the guest (/opt is ro).
-//   extraBinds: [{ source, target, readonly }] bound after everything else
-//               (opencode chat mode's bridge files and relay socket dir).
-//               A target must be creatable: under /tmp or at the top level.
-function buildGuestBwrapArgs({ cwd, cwdSource = cwd, home, homeSource = null, agent = null, extraBinds = [] }) {
+//   extraBinds: [{ source, target, readonly, optional }] bound after
+//               everything else (the session's runtime share, its forwarded
+//               host sockets, opencode chat mode's relay socket dir). A
+//               target must be creatable: under /tmp or at the top level.
+//               optional binds are skipped when the source is missing.
+//   symlinks:   [[link, target]] created at the top level (the fixed
+//               /ccserver-sandbox-* paths the helper scripts use)
+function buildGuestBwrapArgs({ cwd, cwdSource = cwd, home, homeSource = null, agent = null, extraBinds = [], symlinks = [] }) {
   return [
     '--die-with-parent',
     '--unshare-pid', '--unshare-ipc', '--unshare-uts', '--unshare-cgroup-try',
@@ -84,7 +88,8 @@ function buildGuestBwrapArgs({ cwd, cwdSource = cwd, home, homeSource = null, ag
     ...(homeSource ? ['--bind', homeSource, home] : ['--tmpfs', home]),
     // After HOME: the project usually lives under it.
     '--bind', cwdSource, cwd,
-    ...extraBinds.flatMap((b) => [b.readonly ? '--ro-bind' : '--bind', b.source, b.target]),
+    ...extraBinds.flatMap((b) => [`${b.readonly ? '--ro-bind' : '--bind'}${b.optional ? '-try' : ''}`, b.source, b.target]),
+    ...symlinks.flatMap(([link, target]) => ['--symlink', target, link]),
     '--setenv', 'HOME', home,
     '--chdir', cwd,
   ];
@@ -93,11 +98,14 @@ function buildGuestBwrapArgs({ cwd, cwdSource = cwd, home, homeSource = null, ag
 // The ssh remote command for a pooled session: bwrap, then inside it the
 // usual cd/env/exec of buildRemoteCommand. preDirs: guest dirs created
 // (private to the guest user) before bwrap starts, for extraBinds sources
-// that live outside it.
-function buildConfinedRemoteCommand({ bwrapArgs, cwd, argv, env = {}, fallbackArgv = null, preDirs = [] }) {
+// that live outside it. waitSockets: guest socket paths created by the
+// session's own ssh remote forwards (-R), waited for (a few seconds at most)
+// so bwrap does not start before sshd has bound them.
+function buildConfinedRemoteCommand({ bwrapArgs, cwd, argv, env = {}, fallbackArgv = null, preDirs = [], waitSockets = [] }) {
   const inner = buildRemoteCommand({ cwd, argv, env, fallbackArgv });
   const pre = preDirs.length ? `umask 077 && mkdir -p ${preDirs.map(shellQuote).join(' ')} && ` : '';
-  return `${pre}exec bwrap ${bwrapArgs.map(shellQuote).join(' ')} -- /bin/sh -c ${shellQuote(inner)}`;
+  const wait = waitSockets.map((p) => `i=0; while [ ! -S ${shellQuote(p)} ] && [ $i -lt 50 ]; do sleep 0.1; i=$((i+1)); done; `).join('');
+  return `${pre}${wait}exec bwrap ${bwrapArgs.map(shellQuote).join(' ')} -- /bin/sh -c ${shellQuote(inner)}`;
 }
 
 module.exports = { shellQuote, buildRemoteCommand, forwardedEnv, buildGuestBwrapArgs, buildConfinedRemoteCommand };

@@ -45,6 +45,7 @@ export default defineConfig({
 					items: [
 						{ label: '概要と永続 HOME', slug: 'sandbox/overview' },
 						{ label: '認証情報の受け渡し', slug: 'sandbox/credentials' },
+						{ label: 'コミット署名', slug: 'sandbox/commit-signing' },
 						{ label: '設定ファイルと内部の仕組み', slug: 'sandbox/configuration' },
 					],
 				},

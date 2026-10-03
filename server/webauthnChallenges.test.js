@@ -119,17 +119,17 @@ test('clearFlowCookieHeader: empties the value and expires immediately', () => {
 });
 
 test('consumeChallengeFlowData: returns the server-side data stored with the flow, one-time', () => {
-  const flowId = startChallengeFlow('gpg-vault-unlock', 'chal-d', { nextSalts: { c1: 'salt' } });
-  assert.deepEqual(consumeChallengeFlowData(requestWithFlowCookie(flowId), 'gpg-vault-unlock'), {
+  const flowId = startChallengeFlow('commit-signing-unlock', 'chal-d', { nextSalts: { c1: 'salt' } });
+  assert.deepEqual(consumeChallengeFlowData(requestWithFlowCookie(flowId), 'commit-signing-unlock'), {
     challenge: 'chal-d', data: { nextSalts: { c1: 'salt' } },
   });
-  assert.equal(consumeChallengeFlowData(requestWithFlowCookie(flowId), 'gpg-vault-unlock'), null);
+  assert.equal(consumeChallengeFlowData(requestWithFlowCookie(flowId), 'commit-signing-unlock'), null);
 });
 
 test('consumeChallengeFlowData: kind mismatch is rejected and still consumes the flow', () => {
-  const flowId = startChallengeFlow('gpg-vault-setup', 'chal-e', { salt: 'x' });
-  assert.equal(consumeChallengeFlowData(requestWithFlowCookie(flowId), 'gpg-vault-add-credential'), null);
-  assert.equal(consumeChallengeFlowData(requestWithFlowCookie(flowId), 'gpg-vault-setup'), null);
+  const flowId = startChallengeFlow('commit-signing-enroll', 'chal-e', { salt: 'x' });
+  assert.equal(consumeChallengeFlowData(requestWithFlowCookie(flowId), 'commit-signing-other'), null);
+  assert.equal(consumeChallengeFlowData(requestWithFlowCookie(flowId), 'commit-signing-enroll'), null);
 });
 
 // L1 (vuln_scan report): startChallengeFlow is reachable from the
