@@ -1,6 +1,6 @@
 // Builds the MCP server registration injected into a session -- never written
-// to a file on the host or in the repo. Process-global notify, usage and
-// reviewer servers are added when their descriptors are passed.
+// to a file on the host or in the repo. Process-global notify and usage
+// servers are added when their descriptors are passed.
 //   ccserver-notify - the process-global notification server (see notify.js),
 //                     registered when the `{ notify }` descriptor is passed.
 //   ccserver-usage  - the process-global usage server (see usageMcp.js),
@@ -46,16 +46,6 @@
 // attribution). Only ever passed for claude sessions (sessionManager gates
 // it on shouldInjectUsage), but the assembly here doesn't need to know that.
 //
-// The optional `{ reviewer }` descriptor adds the ccserver-reviewer MCP
-// server (run_review/list_reviews/get_review/finish_review, see
-// reviewer.js): `{ mode, sockPath, identity? }`, same shape as notify.
-// The identity here carries just `{ sessionId }` -- unlike notify it is
-// only ever set for the ONE session a review job itself launches, and its
-// sole purpose is finish_review's caller-verification (the job's own
-// sessionId, recorded in pr_reviews, must match the calling connection's
-// identity). Injected as CCSERVER_REVIEWER_IDENTITY, same bridge-wrapper
-// mechanism as CCSERVER_NOTIFY_IDENTITY.
-//
 // Returns { args, env } for sessionManager to splice into the pty spawn.
 
 import { dirname, join } from 'node:path';
@@ -66,7 +56,6 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const MCP_BRIDGE_COMMAND = '/ccserver-sandbox-mcp-bridge';
 const NOTIFY_BRIDGE_SCRIPT = join(__dirname, 'sandbox-mcp-wrapper.cjs');
 const USAGE_BRIDGE_ARG = ['usage'];
-const REVIEWER_BRIDGE_ARG = ['reviewer'];
 
 // The { base, args } invocation for the notify server: the in-sandbox bridge
 // when the session is sandboxed, else the host node binary running the bridge
@@ -88,14 +77,6 @@ function usageInvocation(usage) {
   return { command: MCP_BRIDGE_COMMAND, args: USAGE_BRIDGE_ARG };
 }
 
-// Same shape again, for the ccserver-reviewer bridge (wrapper arg 'reviewer').
-function reviewerInvocation(reviewer) {
-  if (reviewer.mode === 'host') {
-    return { command: process.execPath, args: [NOTIFY_BRIDGE_SCRIPT, ...REVIEWER_BRIDGE_ARG] };
-  }
-  return { command: MCP_BRIDGE_COMMAND, args: REVIEWER_BRIDGE_ARG };
-}
-
 // The code-review-graph MCP server registration for a sandboxed session that
 // enabled the opt-in tool (see resolveTools in sandbox.js). `command` is the
 // bare console script the provisioner symlinks into $HOME/.local/bin, which is
@@ -109,12 +90,10 @@ function crgMcpServer(tools, cwd) {
   return { command: 'code-review-graph', args };
 }
 
-export function buildMcpConfigArgsAndEnv(app, { notify, usage, reviewer, tools = null, cwd = null } = {}) {
+export function buildMcpConfigArgsAndEnv(app, { notify, usage, tools = null, cwd = null } = {}) {
   const notifySockEnv = notify ? { CCSANDBOX_NOTIFY_MCP_SOCK: notify.sockPath } : {};
   const notifyIdentityEnv = notify?.identity ? { CCSERVER_NOTIFY_IDENTITY: JSON.stringify(notify.identity) } : {};
   const usageSockEnv = usage ? { CCSANDBOX_USAGE_MCP_SOCK: usage.sockPath } : {};
-  const reviewerSockEnv = reviewer ? { CCSANDBOX_REVIEWER_MCP_SOCK: reviewer.sockPath } : {};
-  const reviewerIdentityEnv = reviewer?.identity ? { CCSERVER_REVIEWER_IDENTITY: JSON.stringify(reviewer.identity) } : {};
   const crg = crgMcpServer(tools, cwd);
 
 
@@ -141,14 +120,6 @@ export function buildMcpConfigArgsAndEnv(app, { notify, usage, reviewer, tools =
         env_vars: ['CCSANDBOX_USAGE_MCP_SOCK'],
       };
     }
-    if (reviewer) {
-      const inv = reviewerInvocation(reviewer);
-      servers['ccserver-reviewer'] = {
-        command: inv.command,
-        args: inv.args,
-        env_vars: ['CCSANDBOX_REVIEWER_MCP_SOCK', 'CCSERVER_REVIEWER_IDENTITY'],
-      };
-    }
     if (crg) {
       servers['code-review-graph'] = {
         command: crg.command,
@@ -171,8 +142,6 @@ export function buildMcpConfigArgsAndEnv(app, { notify, usage, reviewer, tools =
         ...notifySockEnv,
         ...notifyIdentityEnv,
         ...usageSockEnv,
-        ...reviewerSockEnv,
-        ...reviewerIdentityEnv,
       },
     };
   }
@@ -187,10 +156,6 @@ export function buildMcpConfigArgsAndEnv(app, { notify, usage, reviewer, tools =
       const inv = usageInvocation(usage);
       mcp['ccserver-usage'] = { type: 'local', command: [inv.command, ...inv.args] };
     }
-    if (reviewer) {
-      const inv = reviewerInvocation(reviewer);
-      mcp['ccserver-reviewer'] = { type: 'local', command: [inv.command, ...inv.args] };
-    }
     if (crg) mcp['code-review-graph'] = { type: 'local', command: [crg.command, ...crg.args] };
     return {
       args: [],
@@ -202,8 +167,6 @@ export function buildMcpConfigArgsAndEnv(app, { notify, usage, reviewer, tools =
         ...notifySockEnv,
         ...notifyIdentityEnv,
         ...usageSockEnv,
-        ...reviewerSockEnv,
-        ...reviewerIdentityEnv,
       },
     };
   }
@@ -217,10 +180,6 @@ export function buildMcpConfigArgsAndEnv(app, { notify, usage, reviewer, tools =
     const inv = usageInvocation(usage);
     mcpServers['ccserver-usage'] = { type: 'stdio', command: inv.command, args: inv.args };
   }
-  if (reviewer) {
-    const inv = reviewerInvocation(reviewer);
-    mcpServers['ccserver-reviewer'] = { type: 'stdio', command: inv.command, args: inv.args };
-  }
   if (crg) mcpServers['code-review-graph'] = { type: 'stdio', command: crg.command, args: crg.args };
   return {
     args: [
@@ -231,8 +190,6 @@ export function buildMcpConfigArgsAndEnv(app, { notify, usage, reviewer, tools =
       ...notifySockEnv,
       ...notifyIdentityEnv,
       ...usageSockEnv,
-      ...reviewerSockEnv,
-      ...reviewerIdentityEnv,
     },
   };
 }

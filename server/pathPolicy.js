@@ -89,12 +89,10 @@ export function resolveWithinRoots(requestedPath, roots, fallback = '/') {
   return { ok: isContained(path, roots), path };
 }
 
-// browseRoots session-cwd exemption for trusted code-review jobs. Reviewer
-// jobs run in disposable worktrees under ccserver's scratch roots, outside
-// the operator's project roots. The caller must be trusted and the resolved
-// path is checked again below to prevent a symlink from escaping the scratch
-// tree. This applies only to launch cwd validation; file and directory APIs
-// remain bounded by browseRoots.
+// Recognizes ccserver's scratch tree (session worktrees) under the current
+// data root. Used to keep CLI reports and guards from treating scratch paths
+// as project paths. This applies only where the caller opts into it; file
+// and directory APIs remain bounded by browseRoots.
 //
 // Both the legacy and XDG scratch roots remain recognized so worktrees from
 // sessions already running during a data-directory migration continue to work.

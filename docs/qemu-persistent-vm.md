@@ -121,7 +121,7 @@ qemu バックエンドと netbroker の全体は [qemu-sandbox.md](qemu-sandbox
 |---|---|
 | git broker / commit guard | 起動しない (警告して起動) |
 | ssh-agent 転送 | 起動しない (警告して起動) |
-| MCP ソケット (notify / usage / reviewer) | 渡さない (警告して起動) |
+| MCP ソケット (notify / usage) | 渡さない (警告して起動) |
 | GPG vault | 明示的に要求されたら起動を拒否する (黙って落とさない) |
 | セッション中のネットワーク切替 (🌐) | VM 単位で出す。押すと同じ VM の全セッションに効く。後から相乗りしたセッションは、VM の今の状態を引き継ぐ |
 | 許可リスト変更のライブ反映 | しない。キーが変わるので、次の起動は新しい VM になる |

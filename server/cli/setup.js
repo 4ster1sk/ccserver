@@ -410,7 +410,7 @@ function printSettingsGuidance() {
   console.log('設定の使い分け:');
   console.log('  - Web UI (設定タブ) から変更でき即時反映されるもの ... SQLite の settings テーブル');
   console.log('  - sandbox.config.json を編集し再起動が必要なもの   ... docker / persistentHome / gpg /');
-  console.log('    sshAgent / gpgVault / browseRoots / hiddenApps / reviewerMcp /');
+  console.log('    sshAgent / gpgVault / browseRoots / hiddenApps /');
   console.log('    usageMcp');
   console.log('    (実行中セッションの安全性がその値に依存するため、動的変更は行いません)');
   console.log('');
@@ -452,7 +452,7 @@ function usage() {
     '',
     '  (なし)            ドライラン。プランを表示して終了 (何も変えません)',
     '  --yes             実際に移行し、レイアウトマーカーを書き込みます',
-    '  --move-large      home/ worktrees/ review-worktrees/ orchestrator/ dind/ も移動します',
+    '  --move-large      home/ worktrees/ orchestrator/ dind/ も移動します',
     '                    (移動後、各リポジトリで `git worktree repair` が必要です)',
     '  --seed-example    sandbox.config.json を example の全文から生成します',
     '                    (既定はポインタコメントだけの最小ファイル)',

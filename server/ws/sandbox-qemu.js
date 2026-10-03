@@ -542,14 +542,12 @@ export const SERVICE_PORTS = Object.freeze({
   'ssh-agent': 7012,
   'mcp-notify': 7020,
   'mcp-usage': 7021,
-  'mcp-reviewer': 7023,
 });
 const GUEST_REAL_SSH = '/usr/bin/ssh';
 const GUEST_SSH_WRAPPER = '/usr/local/bin/ssh';
 const MCP_SOCKETS = [
   ['notify', 'CCSANDBOX_NOTIFY_MCP_SOCK'],
   ['usage', 'CCSANDBOX_USAGE_MCP_SOCK'],
-  ['reviewer', 'CCSANDBOX_REVIEWER_MCP_SOCK'],
 ];
 
 // What to bring into the VM, from buildQemuSpawn's started brokers. Pure:
@@ -563,7 +561,7 @@ const MCP_SOCKETS = [
 //   gpgVault:     { homeDir, fingerprint, nameReal, nameEmail, sockets:
 //                 { agent, agentSsh } (the relay's fixed paths) } or null
 //   sshAgentSock: host ssh-agent socket or null (ignored with gpgVault)
-//   mcp:          { notify, usage, reviewer } host socket paths
+//   mcp:          { notify, usage } host socket paths
 //
 // Returns { files: [{ src | data, dest, mode }] (dest relative to rt/),
 // links: [[guestPath, target]], services: [{ name, addr, unix, guestPath }],

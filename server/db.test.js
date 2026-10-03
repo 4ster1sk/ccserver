@@ -60,12 +60,13 @@ test('fresh open runs migrations to the latest version', () => {
         VALUES (?,?,?,?,?,?,?,?,?)`)
       .run('pi2', null, 'FP:X', 'PEM2', 'host-b', '10.0.0.2:3210', 'outbound_initiated', 'pending_local_approval', 2);
   }, /UNIQUE/, 'remote_fingerprint is the sole trust anchor -- a duplicate must be impossible at the schema level');
-  // v6 table exists and is usable (see ws/reviewer.js).
-  db.prepare(`INSERT INTO pr_reviews
-      (id, project_cwd, base_ref, head_ref, mode, app, status, created_at)
-      VALUES (?,?,?,?,?,?,?,?)`)
-    .run('r1', '/srv/proj', 'origin/master', 'feature/x', 'branch', 'claude', 'running', 1);
-  assert.equal(db.prepare('SELECT COUNT(*) AS c FROM pr_reviews').get().c, 1);
+  // v6's pr_reviews table was dropped by the v14 migration (reviewer
+  // extracted to an external server) -- assert it is gone, not usable.
+  assert.equal(
+    db.prepare("SELECT COUNT(*) AS c FROM sqlite_master WHERE type='table' AND name='pr_reviews'").get().c,
+    0,
+    'pr_reviews must not exist after the v14 migration',
+  );
   // v7 tables exist and are usable (Issue #141 Step1: new auth system).
   db.prepare('INSERT INTO login_tokens (id, token_hash, created_at, expires_at, used_at) VALUES (?,?,?,?,NULL)')
     .run('lt1', 'HASH:X', 1, 2);
@@ -379,7 +380,27 @@ test('v13 migration: existing VM templates stay throwaway (persistent = 0)', () 
 
   migrate(db, MIGRATIONS);
 
-  assert.equal(db.prepare('PRAGMA user_version').get().user_version, 13);
+  assert.equal(db.prepare('PRAGMA user_version').get().user_version, MIGRATIONS.at(-1).version);
   assert.equal(db.prepare('SELECT persistent FROM vm_templates WHERE id = ?').get('t1').persistent, 0);
+  db.close();
+});
+
+test('v14 migration: pr_reviews is dropped on top of v13', () => {
+  const path = join(tmpRoot, 'v13-to-v14.sqlite3');
+  const db = new DatabaseSync(path);
+  migrate(db, MIGRATIONS.filter((m) => m.version <= 13));
+  db.prepare(`INSERT INTO pr_reviews
+      (id, project_cwd, base_ref, head_ref, mode, app, status, created_at)
+      VALUES (?,?,?,?,?,?,?,?)`)
+    .run('r1', '/srv/proj', 'origin/master', 'feature/x', 'branch', 'claude', 'done', 1);
+
+  migrate(db, MIGRATIONS);
+
+  assert.equal(db.prepare('PRAGMA user_version').get().user_version, 14);
+  assert.equal(
+    db.prepare("SELECT COUNT(*) AS c FROM sqlite_master WHERE type='table' AND name='pr_reviews'").get().c,
+    0,
+    'the reviewer job-history table is gone, history is not preserved',
+  );
   db.close();
 });

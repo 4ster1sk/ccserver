@@ -8,8 +8,6 @@ import { tmpdir, homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { spawn as spawnProcess } from 'node:child_process';
-import Fastify from 'fastify';
-import { sessionsRoute } from '../routes/sessions.js';
 import { persistentHomeDir, sandboxAvailable, loadSandboxConfig } from './sandbox.js';
 import { findSessionLimitReset } from './sessionLimitDetect.js';
 import { getLatestSessionLimitReset } from '../sessionLimitState.js';
@@ -378,7 +376,7 @@ test('createSession refuses a cwd outside browseRoots, for both shells and agent
   }
 });
 
-test('createSession accepts a scratch-tree cwd only via the trusted isReviewJob flag', async () => {
+test('createSession refuses a scratch-tree cwd under browseRoots (no exemption)', async () => {
   const cfgDir = mkdtempSync(join(tmpdir(), 'ccserver-sess-cfg-'));
   const cfgPath = join(cfgDir, 'sandbox.config.json');
   const allowed = mkdtempSync(join(tmpdir(), 'ccserver-sess-allowed-'));
@@ -391,29 +389,12 @@ test('createSession accepts a scratch-tree cwd only via the trusted isReviewJob 
   const prevCfg = process.env.CCSERVER_SANDBOX_CONFIG;
   process.env.CCSERVER_SANDBOX_CONFIG = cfgPath;
   try {
-    // Client-style call (no flag): the path alone must NOT be exempt, or any
-    // REST/WS caller could point a session at the scratch tree (sandbox
-    // HOME credentials and GPG vault DB) and have it rw-bound
-    // into the sandbox.
-    const client = await sessionManager.createSession({ cwd: scratchDir, cols: 80, rows: 24, shell: true, sandbox: false });
-    assert.equal(client.session, null, 'a client-supplied scratch cwd must be refused');
-    assert.match(client.error, /outside the allowed browseRoots/);
-
-    // Trusted in-process call (review job):
-    // not refused by the cwd check, and still forced sandboxed.
-    const res = await sessionManager.createSession({ cwd: scratchDir, cols: 80, rows: 24, shell: true, sandbox: false, isReviewJob: true });
-    assert.doesNotMatch(res.error || '', /outside the allowed browseRoots/,
-      'a server-synthesized scratch cwd must not be refused by browseRoots');
-    if (sandboxAvailable()) {
-      assert.ok(res.session, 'a scratch-tree cwd spawns when a sandbox backend exists');
-      // Still forced sandboxed like any other shell under browseRoots.
-      assert.equal(res.session.sandbox, true);
-      sessionManager.destroySession(res.sessionId, { keepSchedule: false });
-    } else {
-      // No backend: refused by the sandbox mandate, never by the cwd check.
-      assert.equal(res.session, null);
-      assert.match(res.error, /every session must run sandboxed/);
-    }
+    // No exemption exists anymore: the reviewer (the only trusted
+    // in-process synthesizer of scratch cwds) was extracted, so a scratch
+    // cwd is refused like any other path outside the roots.
+    const res = await sessionManager.createSession({ cwd: scratchDir, cols: 80, rows: 24, shell: true, sandbox: false });
+    assert.equal(res.session, null, 'a scratch cwd must be refused');
+    assert.match(res.error, /outside the allowed browseRoots/);
   } finally {
     if (prevCfg === undefined) delete process.env.CCSERVER_SANDBOX_CONFIG;
     else process.env.CCSERVER_SANDBOX_CONFIG = prevCfg;
@@ -461,7 +442,7 @@ test('createSession refuses a cwd that is a scratch-internal symlink pointing ou
   const allowed = mkdtempSync(join(tmpdir(), 'ccserver-sess-allowed-'));
   const outside = mkdtempSync(join(tmpdir(), 'ccserver-sess-outside-'));
   // A temp scratch root rather than the operator's real one -- see the
-  // trusted review-job test above.
+  // scratch-tree refusal test above.
   const scratchHome = mkdtempSync(join(tmpdir(), 'ccserver-sess-scratchroot-'));
   const prevData = process.env.XDG_DATA_HOME;
   process.env.XDG_DATA_HOME = scratchHome;
@@ -472,9 +453,9 @@ test('createSession refuses a cwd that is a scratch-internal symlink pointing ou
   const prevCfg = process.env.CCSERVER_SANDBOX_CONFIG;
   process.env.CCSERVER_SANDBOX_CONFIG = cfgPath;
   try {
-    // isReviewJob:true simulates the trusted in-process callers: even THEY
-    // must not follow a scratch-internal symlink out of the tree.
-    const res = await sessionManager.createSession({ cwd: escapeLink, cols: 80, rows: 24, shell: true, sandbox: false, isReviewJob: true });
+    // A scratch-internal symlink pointing outside must never launch a
+    // session, exemption or not (there is none anymore).
+    const res = await sessionManager.createSession({ cwd: escapeLink, cols: 80, rows: 24, shell: true, sandbox: false });
     assert.equal(res.session, null, 'a scratch symlink pointing outside must never launch a session');
     assert.match(res.error, /outside the allowed browseRoots/);
   } finally {
@@ -989,120 +970,6 @@ test('createSession notify identity uses the cwd basename', async () => {
   } finally {
     for (const id of ids) sessionManager.destroySession(id, { keepSchedule: false });
     notify.stopNotifyBroker();
-    if (prevBin === undefined) delete process.env.CCSERVER_CLAUDE_BIN;
-    else process.env.CCSERVER_CLAUDE_BIN = prevBin;
-    if (prevCfg === undefined) delete process.env.CCSERVER_SANDBOX_CONFIG;
-    else process.env.CCSERVER_SANDBOX_CONFIG = prevCfg;
-    try { rmSync(binDir, { recursive: true, force: true }); } catch { /* ignore */ }
-    try { rmSync(cfgDir, { recursive: true, force: true }); } catch { /* ignore */ }
-  }
-});
-
-// isReviewJob forces reviewer-MCP identity injection into a review job's OWN
-// session even while reviewerMcp is off in the live config (see
-// sessionManager.js's useReviewer comment, and reviewer.js's runReview, which
-// passes isReviewJob: true when launching a job's session). This matters
-// because the reviewer broker, once started, is never torn down on a config
-// edit (only at boot) -- without the bypass, flipping reviewerMcp off after
-// boot would silently strand every review job started afterward with no way
-// to reach finish_review, its authoritative completion signal. A NORMAL
-// (non-review-job) session must still be refused it under the same off
-// config, or the bypass would defeat the opt-in flag entirely.
-test('createSession isReviewJob bypasses a disabled reviewerMcp flag for the review job\'s own session only', async () => {
-  const binDir = mkdtempSync(join(tmpdir(), 'ccserver-fake-agent-'));
-  const fakeBin = join(binDir, 'fake-claude');
-  writeFileSync(fakeBin, '#!/bin/bash\nprintf "%s\\n" "$CCSERVER_REVIEWER_IDENTITY"\n', { mode: 0o755 });
-  const cfgDir = mkdtempSync(join(tmpdir(), 'ccserver-fake-cfg-'));
-  const cfgPath = join(cfgDir, 'sandbox.config.json');
-  writeFileSync(cfgPath, JSON.stringify({ docker: false, gitBroker: false, reviewerMcp: false }));
-  const prevBin = process.env.CCSERVER_CLAUDE_BIN;
-  const prevCfg = process.env.CCSERVER_SANDBOX_CONFIG;
-  process.env.CCSERVER_CLAUDE_BIN = fakeBin;
-  process.env.CCSERVER_SANDBOX_CONFIG = cfgPath;
-  const reviewer = await import('./reviewer.js');
-  // ensureReviewerBroker() itself does not gate on reviewerMcp (only
-  // index.js's boot code does) -- calling it directly here reproduces the
-  // "broker started while the flag was on, then the flag got edited off"
-  // scenario without needing an actual server restart.
-  await reviewer.ensureReviewerBroker();
-  const ids = [];
-  try {
-    assert.equal(reviewer.reviewerEnabled(), false, 'sanity: reviewerMcp really is off in this config');
-
-    const forced = await sessionManager.createSession({
-      cwd: '/tmp', cols: 80, rows: 24, shell: false, sandbox: false, app: 'claude', isReviewJob: true,
-    });
-    assert.ok(forced.session, 'agent session should spawn');
-    ids.push(forced.sessionId);
-    await sleep(500);
-    const forcedIdentity = forced.session.outputBuffer.join('').trim();
-    assert.notEqual(forcedIdentity, '', 'isReviewJob:true must get the reviewer identity even with reviewerMcp off');
-    assert.deepEqual(JSON.parse(forcedIdentity), { sessionId: forced.sessionId });
-
-    const normal = await sessionManager.createSession({
-      cwd: '/tmp', cols: 80, rows: 24, shell: false, sandbox: false, app: 'claude',
-    });
-    assert.ok(normal.session);
-    ids.push(normal.sessionId);
-    await sleep(500);
-    assert.equal(normal.session.outputBuffer.join('').trim(), '', 'a normal session must NOT get it while reviewerMcp is off');
-  } finally {
-    for (const id of ids) sessionManager.destroySession(id, { keepSchedule: false });
-    reviewer.stopReviewerBroker();
-    if (prevBin === undefined) delete process.env.CCSERVER_CLAUDE_BIN;
-    else process.env.CCSERVER_CLAUDE_BIN = prevBin;
-    if (prevCfg === undefined) delete process.env.CCSERVER_SANDBOX_CONFIG;
-    else process.env.CCSERVER_SANDBOX_CONFIG = prevCfg;
-    try { rmSync(binDir, { recursive: true, force: true }); } catch { /* ignore */ }
-    try { rmSync(cfgDir, { recursive: true, force: true }); } catch { /* ignore */ }
-  }
-});
-
-// The bypass above is deliberately only safe because isReviewJob can never
-// arrive from a network caller: reviewer.js's runReview sets it on a direct,
-// in-process call to createSessionViaApi (see reviewer.js's loadSessionDeps),
-// but POST /api/sessions is the SAME createSessionViaApi wired up to accept
-// an arbitrary request body from anyone holding CCSERVER_TOKEN. isReviewJob
-// has a real effect, so routes/sessions.js's POST handler must strip it from
-// request.body before it ever reaches createSession. This exercises that
-// boundary specifically (the test above only covers the safe, trusted,
-// in-process call shape).
-test('POST /api/sessions ignores a client-supplied isReviewJob -- reviewerMcp stays off for it', async () => {
-  const binDir = mkdtempSync(join(tmpdir(), 'ccserver-fake-agent-'));
-  const fakeBin = join(binDir, 'fake-claude');
-  writeFileSync(fakeBin, '#!/bin/bash\nprintf "%s\\n" "$CCSERVER_REVIEWER_IDENTITY"\n', { mode: 0o755 });
-  const cfgDir = mkdtempSync(join(tmpdir(), 'ccserver-fake-cfg-'));
-  const cfgPath = join(cfgDir, 'sandbox.config.json');
-  writeFileSync(cfgPath, JSON.stringify({ docker: false, gitBroker: false, reviewerMcp: false }));
-  const prevBin = process.env.CCSERVER_CLAUDE_BIN;
-  const prevCfg = process.env.CCSERVER_SANDBOX_CONFIG;
-  process.env.CCSERVER_CLAUDE_BIN = fakeBin;
-  process.env.CCSERVER_SANDBOX_CONFIG = cfgPath;
-  const reviewer = await import('./reviewer.js');
-  await reviewer.ensureReviewerBroker();
-  const app = Fastify();
-  await app.register(sessionsRoute, { prefix: '/api' });
-  let sessionId = null;
-  try {
-    assert.equal(reviewer.reviewerEnabled(), false, 'sanity: reviewerMcp really is off in this config');
-    const res = await app.inject({
-      method: 'POST',
-      url: '/api/sessions',
-      payload: { cwd: '/tmp', shell: false, sandbox: false, app: 'claude', isReviewJob: true },
-    });
-    assert.equal(res.statusCode, 200, res.body);
-    sessionId = res.json().sessionId;
-    await sleep(500);
-    const session = sessionManager.getSession(sessionId);
-    assert.equal(
-      session.outputBuffer.join('').trim(),
-      '',
-      'isReviewJob in an HTTP request body must be ignored -- only reviewer.js\'s own in-process call may set it',
-    );
-  } finally {
-    await app.close();
-    if (sessionId) sessionManager.destroySession(sessionId, { keepSchedule: false });
-    reviewer.stopReviewerBroker();
     if (prevBin === undefined) delete process.env.CCSERVER_CLAUDE_BIN;
     else process.env.CCSERVER_CLAUDE_BIN = prevBin;
     if (prevCfg === undefined) delete process.env.CCSERVER_SANDBOX_CONFIG;

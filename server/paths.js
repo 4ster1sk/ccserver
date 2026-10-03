@@ -342,17 +342,6 @@ const REGISTRY = [
     stickyLegacy: true,
   },
   {
-    id: 'reviewWorktrees',
-    label: 'review-worktrees/',
-    envVar: 'CCSERVER_REVIEW_WORKTREE_ROOT',
-    kind: 'data',
-    type: 'dir',
-    target: () => join(dataRoot(), 'review-worktrees'),
-    legacy: () => [join(legacyDataRoot(), 'review-worktrees')],
-    guard: true,
-    stickyLegacy: true,
-  },
-  {
     id: 'orchestrator',
     label: 'orchestrator/',
     envVar: 'CCSERVER_ORCHESTRATOR_ROOT',

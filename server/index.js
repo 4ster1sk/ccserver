@@ -29,7 +29,6 @@ import {
 } from './ws/notify.js';
 import { ensureVapidKeys, countSubscriptions } from './ws/pushSubscriptions.js';
 import { ensureUsageBroker, stopUsageBroker, usageEnabled } from './ws/usageMcp.js';
-import { ensureReviewerBroker, stopReviewerBroker, reviewerEnabled } from './ws/reviewer.js';
 import { expireStalePendingApprovals } from './ws/approvals.js';
 import { warmUsage } from './usage.js';
 import { warmCodexUsage } from './codexUsage.js';
@@ -330,7 +329,6 @@ if (process.env.NODE_ENV === 'production') {
 const cleanup = () => {
   stopNotifyBroker();
   stopUsageBroker();
-  stopReviewerBroker();
   // GPG vault (plan: gpg-agent-vault): the in-memory Vault Key is this
   // feature's entire "cannot decrypt without logging in" guarantee, so a
   // graceful restart must not leave a stray gpg-agent process holding a
@@ -554,19 +552,6 @@ try {
   }
 } catch (err) {
   fastify.log.error({ err }, 'Failed to start ccserver-usage broker');
-}
-
-// ccserver-reviewer: host the process-global run_review/list_reviews/
-// get_review MCP socket when explicitly enabled (reviewerMcp in
-// sandbox.config.json). Same bind-before-listen ordering requirement as
-// notify/usage above.
-try {
-  if (reviewerEnabled()) {
-    await ensureReviewerBroker();
-    fastify.log.info('ccserver-reviewer MCP broker started');
-  }
-} catch (err) {
-  fastify.log.error({ err }, 'Failed to start ccserver-reviewer broker');
 }
 
 await fastify.listen({ port: PORT, host: HOST });

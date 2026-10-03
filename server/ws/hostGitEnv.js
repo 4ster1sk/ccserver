@@ -1,6 +1,5 @@
 // Environment for every git / gh process ccserver runs ON THE HOST against
-// a project repository (git broker's gh relay, gitAllowlist's rev-parse,
-// the reviewer's fetch/worktree/apply).
+// a project repository (git broker's gh relay, gitAllowlist's rev-parse).
 //
 // The project directory is writable from inside the sandbox (bwrap or VM),
 // so its .git/config and .git/hooks are attacker-controlled once an agent
@@ -12,14 +11,13 @@
 //
 // External diff / textconv drivers cannot be pinned off this way (an empty
 // diff.external is executed as a command named ""), so callers that run
-// `git diff` must pass --no-ext-diff --no-textconv themselves (reviewer.js
-// does). uploadpack.packObjectsHook is never read from repo config by git.
+// `git diff` must pass --no-ext-diff --no-textconv themselves.
+// uploadpack.packObjectsHook is never read from repo config by git.
 //
 // Known residual risk (documented, not fixable by key pinning): filter
 // drivers (filter.<name>.smudge/clean) and multi-valued credential.helper
 // entries defined in the repo config. Prefer read-only operations on
-// sandbox-written repos; the reviewer only checks out into throwaway
-// worktrees.
+// sandbox-written repos.
 
 const PINNED = [
   ['core.hooksPath', '/dev/null'],

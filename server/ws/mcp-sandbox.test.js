@@ -1,5 +1,5 @@
-// Sandbox argument building for process-wide notification, usage, and
-// reviewer MCP bridges.
+// Sandbox argument building for process-wide notification and usage
+// MCP bridges.
 
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
@@ -87,7 +87,7 @@ test('buildSandboxSpawn without notifySocketPath adds no notify bindings', async
 
 // ccserver-usage (see usageMcp.js): same shape as the notify socket bindings
 // above, independent of the notify socket -- a
-// claude session may carry any combination of the three.
+// claude session may carry either or both.
 test('buildSandboxSpawn binds the usage socket + wrapper when usageSocketPath is set (no notify socket)', async () => {
   const prev = process.env.CCSERVER_SANDBOX_CONFIG;
   process.env.CCSERVER_SANDBOX_CONFIG = cfgPath;

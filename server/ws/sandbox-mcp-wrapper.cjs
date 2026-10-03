@@ -6,10 +6,9 @@
 // byte pipe with no protocol logic.
 //
 // Which broker this reaches is decided by argv + which host socket was bound
-// in (see mcpBroker.js / notify.js / usageMcp.js / reviewer.js):
+// in (see mcpBroker.js / notify.js / usageMcp.js):
 //   'notify'   -> CCSANDBOX_NOTIFY_MCP_SOCK (the process-global notify socket)
 //   'usage'    -> CCSANDBOX_USAGE_MCP_SOCK (the process-global usage socket)
-//   'reviewer' -> CCSANDBOX_REVIEWER_MCP_SOCK (the process-global reviewer socket)
 // The wrapper itself is role-agnostic.
 //
 // In notify mode the wrapper additionally writes a single JSON line
@@ -17,25 +16,20 @@
 // MCP bytes -- so the server can attribute this connection's notifications
 // (see mcpBroker.js). The identity comes from the CCSERVER_NOTIFY_IDENTITY
 // env set by mcpConfig.js; absent or unparseable it sends an empty object
-// (host-only attribution). Reviewer mode writes the same kind of frame from
-// CCSERVER_REVIEWER_IDENTITY: the per-connection sessionId there is how
-// finish_review verifies the caller IS the review job it claims to be (see
-// reviewer.js). Usage mode carries no identity at all (get_usage answers the
-// same regardless of caller).
+// (host-only attribution). Usage mode carries no identity at all (get_usage
+// answers the same regardless of caller).
 //
 'use strict';
 const net = require('net');
 const mode = process.argv[2];
 const IDENTITY_ENV = {
   notify: 'CCSERVER_NOTIFY_IDENTITY',
-  reviewer: 'CCSERVER_REVIEWER_IDENTITY',
 };
 const wantsIdentityFrame = !!IDENTITY_ENV[mode];
 const wantsFirstFrame = wantsIdentityFrame;
 const MODE_SOCK_ENV = {
   notify: 'CCSANDBOX_NOTIFY_MCP_SOCK',
   usage: 'CCSANDBOX_USAGE_MCP_SOCK',
-  reviewer: 'CCSANDBOX_REVIEWER_MCP_SOCK',
 };
 const sockEnv = MODE_SOCK_ENV[mode];
 const sockPath = sockEnv ? process.env[sockEnv] : null;

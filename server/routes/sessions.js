@@ -82,27 +82,11 @@ export async function sessionsRoute(fastify, opts) {
 //     resume?, reuseSandboxHome?, requestedBy?, ui? ('terminal' | 'chat') }
 // `cwd` is required and must be an existing directory.
 //
-// `isReviewJob` (2nd param) is DELIBERATELY not part of `body`. It forces
-// reviewer MCP injection regardless of the live reviewerMcp config (see
-// sessionManager.js's useReviewer comment) -- a real privilege bypass, unlike
-// every field actually read from `body`. Every caller of this function
-// forwards a network- or IPC-facing request body more or less as-is (REST
-// route above) -- if isReviewJob
-// were just another body key, each of those boundaries would have to
-// remember to strip it, and missing even one could hand an untrusted caller
-// an MCP injection it was never meant to have. Keeping it a separate parameter that
-// only an in-process caller can pass (reviewer.js's runReview -- the ONLY
-// legitimate setter) makes that whole class of boundary omission impossible
-// instead of relying on every boundary remembering to filter its input.
-// A trusted `isReviewJob` parameter allows reviewer.js to launch a
-// server-synthesized review worktree under the ccserver scratch tree. It is
-// not read from the request body and is unreachable from network callers.
-// any network-facing caller.
 // Returns { ok:true, body } or { ok:false, code:'validation'|'internal',
 // message }. Spawning happens synchronously inside createSession; a failed
 // spawn surfaces as validation-shaped 400 (the client-visible contract of
 // every other launch path).
-export async function createSessionViaApi(body, { isReviewJob = false } = {}) {
+export async function createSessionViaApi(body) {
   const cwd = typeof body.cwd === 'string' && body.cwd ? body.cwd : null;
   let cwdIsDir = false;
   try { cwdIsDir = statSync(cwd).isDirectory(); } catch { /* missing */ }
@@ -121,9 +105,6 @@ export async function createSessionViaApi(body, { isReviewJob = false } = {}) {
   if (body.sandboxOpts && body.sandboxOpts.vmShellId !== undefined) {
     return { ok: false, code: 'validation', message: 'sandboxOpts.vmShellId is not accepted here' };
   }
-  // isReviewJob is deliberately NOT read from `body` here --
-  // see this function's header comment. They come only from the trusted 2nd
-  // parameter, so no network-facing caller can mint a scratch-cwd exemption.
   const result = await createSession({
     cwd,
     cols: 80,
@@ -137,7 +118,6 @@ export async function createSessionViaApi(body, { isReviewJob = false } = {}) {
     resumeLast: !!body.resume,
     reuseSandboxHome: body.reuseSandboxHome !== false,
     ui: body.ui === 'chat' ? 'chat' : 'terminal',
-    isReviewJob: isReviewJob === true,
     // Attribution for the sandbox HOME bookkeeping row ('user' | ...).
     // Display only.
     sandboxHomeCreatedBy: typeof body.requestedBy === 'string' && body.requestedBy ? body.requestedBy : 'user',

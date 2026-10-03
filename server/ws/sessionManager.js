@@ -21,7 +21,6 @@ import { shouldInjectNotify, notifyEnabled, getNotifySockPath, notifyBrokerRunni
 import { buildAgentNotifyArgsAndEnv, shouldCaptureNotifications } from './agentNotifyConfig.js';
 import { attachNotifyDetector, handleAgentNotification } from './notifyBridge.js';
 import { shouldInjectUsage, usageEnabled, getUsageSockPath, usageBrokerRunning } from './usageMcp.js';
-import { shouldInjectReviewer, reviewerEnabled, getReviewerSockPath, reviewerBrokerRunning } from './reviewer.js';
 import { createScreenModel, SCREEN_ROWS } from './screenModel.js';
 import {
   MAX_ROWS_PER_SAMPLE,
@@ -36,7 +35,7 @@ import {
 } from './activity.js';
 import { bunTmpdirEnv } from './bunTmpdir.js';
 import { buildSessionEnv } from './sessionEnv.js';
-import { isContained, isCcserverScratchPath } from '../pathPolicy.js';
+import { isContained } from '../pathPolicy.js';
 import {
   isValidApp,
   appLaunchArgs,
@@ -552,7 +551,7 @@ function buildSessionRecord(id, ptyProcess, meta) {
   return session;
 }
 
-export async function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox, sandboxOpts, app, model, resumeLast, reuseSandboxHome = true, isReviewJob = false, sandboxHomeCreatedBy = null, customLabel = null, ui = 'terminal' }) {
+export async function createSession({ cwd, cols, rows, claudeSessionId, shell, sandbox, sandboxOpts, app, model, resumeLast, reuseSandboxHome = true, sandboxHomeCreatedBy = null, customLabel = null, ui = 'terminal' }) {
   const id = randomUUID();
   // Read once and thread through: this hot path (every session launch) was
   // otherwise re-reading + re-parsing sandbox.config.json up to four times
@@ -600,15 +599,7 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
   // Checked unconditionally, not just when sandboxRequested below: a launch
   // that is refused for lacking a sandbox backend must still be refused for
   // a cwd outside the roots, and the two failures want different messages.
-  //
-  // The scratch-tree exemption is gated on the trusted `isReviewJob` flag,
-  // never read from a client body. External callers supply cwd themselves,
-  // so a path-only exemption could expose the sandbox HOME credentials and
-  // GPG Vault DB through the sandbox's rw bind. Only reviewer.js synthesizes
-  // a scratch worktree and sets isReviewJob; isCcserverScratchPath still
-  // checks its real path as defense in depth.
   const absCwd = resolve('/', cwd);
-  const reviewJobCwdExempt = isReviewJob === true && isCcserverScratchPath(absCwd);
   // Fail closed on a present-but-unusable browseRoots (or an unparseable
   // config): see loadSandboxConfig's browseRootsInvalid. Silently falling
   // back to host-wide here would turn a config typo into a security
@@ -620,7 +611,7 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
       error: 'Cannot launch: sandbox.config.json\'s "browseRoots" is invalid (must be an array of directory paths), so the allowed working directories cannot be determined. Fix the config and reload.',
     };
   }
-  if (cfg.browseRoots.length > 0 && !reviewJobCwdExempt && !isContained(absCwd, cfg.browseRoots)) {
+  if (cfg.browseRoots.length > 0 && !isContained(absCwd, cfg.browseRoots)) {
     return {
       sessionId: id,
       session: null,
@@ -729,36 +720,6 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
     usageEnabled: usageEnabled(),
   });
   const usageSocketPath = useUsage ? getUsageSockPath() : null;
-
-  // ccserver-reviewer injection (see reviewer.js): unlike notify, ANY session
-  // gets it. Shells are excluded outright;
-  // the feature is off by default
-  // (sandbox.config.json's reviewerMcp) and requires the broker to actually be
-  // listening, same gating as notify/usage.
-  //
-  // isReviewJob (true ONLY for the one session runReview() itself launches
-  // for a given job, see reviewer.js) bypasses reviewerEnabled() specifically
-  // -- never the broker-running check, there being no live broker means there
-  // is genuinely no socket to bind. Without this override, a live edit to
-  // sandbox.config.json flipping reviewerMcp to false after the broker
-  // already started (the broker itself is never torn down on a config edit,
-  // only at boot) would silently leave a review job's OWN session unable to
-  // reach finish_review -- the tool that must be its authoritative completion
-  // signal (see completeReviewJob) -- breaking the design for every job
-  // started after that edit until a restart. shell/app are structurally
-  // guaranteed sane for a review job already (VALID_APPS in reviewer.js
-  // covers supported CLIs, and a review job is never a shell), so this never
-  // actually bypasses those two checks in practice.
-  const useReviewer = reviewerBrokerRunning() && (isReviewJob === true || shouldInjectReviewer({
-    shell: !!shell,
-    app: sessionApp,
-    reviewerEnabled: reviewerEnabled(),
-  }));
-  const reviewerSocketPath = useReviewer ? getReviewerSockPath() : null;
-  // Per-connection identity for finish_review's caller verification (see
-  // reviewer.js's finishReview): only the sessionId matters here, unlike
-  // notify's richer identity object.
-  const reviewerIdentity = useReviewer ? { sessionId: id } : null;
 
   // Server-only variables (NODE_ENV, PORT, CCSERVER_*, forwarded ssh-agent)
   // must not reach the session; see sessionEnv.js.
@@ -879,7 +840,7 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
   // provisioner); the qemu VM never gets the binary, so injecting the
   // MCP server there would fail every session.
   const crgInjectable = sandboxRequested && backend !== 'qemu' && tools.codeReviewGraph;
-  if (sessionApp && (useNotify || useUsage || useReviewer || crgInjectable)) {
+  if (sessionApp && (useNotify || useUsage || crgInjectable)) {
     const injected = buildMcpConfigArgsAndEnv(sessionApp, {
       notify: useNotify ? {
         mode: mcpBridgeMode,
@@ -889,11 +850,6 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
       usage: useUsage ? {
         mode: mcpBridgeMode,
         sockPath: usageSocketPath,
-      } : undefined,
-      reviewer: useReviewer ? {
-        mode: mcpBridgeMode,
-        sockPath: reviewerSocketPath,
-        identity: reviewerIdentity,
       } : undefined,
       // code-review-graph MCP is injected only into sandboxed sessions that
       // can actually provision it (sandboxed sessions only).
@@ -980,7 +936,7 @@ export async function createSession({ cwd, cols, rows, claudeSessionId, shell, s
       reservedSandboxHomePath = targetPath;
     }
     try {
-      const spawn = await buildSandboxSpawn({ cwd, targetCommand: [command, ...args], app: sessionApp, sandboxOpts, notifySocketPath, usageSocketPath, reviewerSocketPath, reuseSandboxHome, sandboxHomeCreatedBy, isReviewJob, chat: chatDir ? { hostDir: chatDir.dir, bridgeScript: chatDir.bridgeScript, bridgeArgs: chatDir.bridgeArgs } : null });
+      const spawn = await buildSandboxSpawn({ cwd, targetCommand: [command, ...args], app: sessionApp, sandboxOpts, notifySocketPath, usageSocketPath, reuseSandboxHome, sandboxHomeCreatedBy, chat: chatDir ? { hostDir: chatDir.dir, bridgeScript: chatDir.bridgeScript, bridgeArgs: chatDir.bridgeArgs } : null });
       command = spawn.command;
       args = spawn.args;
       sandboxDocker = !!spawn.docker;

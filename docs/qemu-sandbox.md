@@ -254,7 +254,7 @@ bwrap では決まったパスにホストのソケットや補助スクリプ�
   | `gpg-agent` | 7010 | `/run/ccserver/gnupg-vault/S.gpg-agent` |
   | `gpg-agent-ssh` | 7011 | `/run/ccserver/gnupg-vault/S.gpg-agent.ssh` |
   | `ssh-agent` | 7012 | `/run/ccserver/ssh-agent.sock` (gpgVault が無いときだけ) |
-  | `mcp-notify` / `mcp-usage` / `mcp-reviewer` | 7020 / 7021 / 7023 | `/ccserver-sandbox-<kind>.d/sock` |
+  | `mcp-notify` / `mcp-usage` | 7020 / 7021 | `/ccserver-sandbox-<kind>.d/sock` |
 
   `services` に入れるのは ccserver 自身のソケットだけ。`sandbox.config.json` 由来の
   ものは入れない。

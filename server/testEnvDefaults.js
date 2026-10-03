@@ -81,7 +81,6 @@ const REGISTRY_DEFAULTS = [
   ['CCSERVER_CODEX_USAGE_CWD', 'codex-usage-cwd'],
   ['CCSERVER_SANDBOX_HOME_ROOT', 'home'],
   ['CCSERVER_WORKTREE_ROOT', 'worktrees'],
-  ['CCSERVER_REVIEW_WORKTREE_ROOT', 'review-worktrees'],
   ['CCSERVER_ORCHESTRATOR_ROOT', 'orchestrator'],
   ['CCSERVER_SANDBOX_DIND_ROOT', 'dind'],
 ];

@@ -25,7 +25,7 @@ const CC_VARS = [
   'CCSERVER_GROUP_FILES_PATH', 'CCSERVER_NOTIFY_PATH', 'CCSERVER_VIKUNJA_TASKS_PATH',
   'CCSERVER_FEDERATION_HOME', 'CCSERVER_GROUP_FILES_ROOT', 'CCSERVER_ORCHESTRATOR_ROOT',
   'CCSERVER_ORCHESTRATOR_GENERATED_ROOT', 'CCSERVER_USAGE_CWD', 'CCSERVER_CODEX_USAGE_CWD',
-  'CCSERVER_SANDBOX_HOME_ROOT', 'CCSERVER_WORKTREE_ROOT', 'CCSERVER_REVIEW_WORKTREE_ROOT',
+  'CCSERVER_SANDBOX_HOME_ROOT', 'CCSERVER_WORKTREE_ROOT',
   'CCSERVER_SANDBOX_DIND_ROOT',
 ];
 const ENV_VARS = [...XDG_VARS, ...CC_VARS];
@@ -96,7 +96,6 @@ const LEGACY_EXPECTATIONS = {
   codexUsageCwd: () => join(homedir(), '.local', 'share', 'ccserver-sandbox', 'codex-usage-cwd'),
   sandboxHome: () => join(homedir(), '.local', 'share', 'ccserver-sandbox', 'home'),
   worktrees: () => join(homedir(), '.local', 'share', 'ccserver-sandbox', 'worktrees'),
-  reviewWorktrees: () => join(homedir(), '.local', 'share', 'ccserver-sandbox', 'review-worktrees'),
   orchestrator: () => join(homedir(), '.local', 'share', 'ccserver-sandbox', 'orchestrator'),
   dind: () => join(homedir(), '.local', 'share', 'ccserver-sandbox', 'dind'),
 };
@@ -405,7 +404,7 @@ test('pathEntry rejects an unknown id rather than returning undefined', () => {
 
 test('the sticky and ephemeral sets are exactly what the wizard expects', () => {
   const sticky = allPaths().filter((e) => e.stickyLegacy).map((e) => e.id).sort();
-  assert.deepEqual(sticky, ['dind', 'orchestrator', 'reviewWorktrees', 'sandboxHome', 'worktrees']);
+  assert.deepEqual(sticky, ['dind', 'orchestrator', 'sandboxHome', 'worktrees']);
   const ephemeral = allPaths().filter((e) => e.ephemeral).map((e) => e.id).sort();
   assert.deepEqual(ephemeral, ['codexUsageCwd', 'usageCwd']);
 });

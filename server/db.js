@@ -342,7 +342,8 @@ export const MIGRATIONS = [
     },
   },
   {
-    // v6: ccserver-reviewer job history (see ws/reviewer.js). One row per
+    // v6: ccserver-reviewer job history (removed in v14 when the reviewer
+    // was extracted to an external server). One row per
     // run_review call -- a disposable headless session running /code-review
     // against a local git ref/branch/PR/uncommitted diff. Unlike the
     // in-memory-mirrored JSON stores (.scheduled-prompts.json,
@@ -635,6 +636,15 @@ export const MIGRATIONS = [
     version: 13,
     up(db) {
       db.exec('ALTER TABLE vm_templates ADD COLUMN persistent INTEGER NOT NULL DEFAULT 0');
+    },
+  },
+  {
+    // v14: ccserver-reviewer was extracted to an external review server --
+    // drop its job-history table. History is not preserved; dropping the
+    // table drops its indexes too.
+    version: 14,
+    up(db) {
+      db.exec('DROP TABLE IF EXISTS pr_reviews');
     },
   },
 ];

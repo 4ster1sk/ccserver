@@ -212,7 +212,7 @@ test('buildGuestRuntime: commit guard, vault, ssh-agent and MCP sockets', () => 
   const vault = { homeDir: '/nonexistent-vault', fingerprint: 'FPR', nameReal: 'N', nameEmail: 'e@x', sockets: { agent: '/run/r/S.gpg-agent', agentSsh: '/run/r/S.gpg-agent.ssh' } };
   const r = buildGuestRuntime({
     scripts, commitGuard: { configPath: '/run/u/cg.json' }, gpgVault: vault, sshAgentSock: '/tmp/agent.sock',
-    mcp: { notify: '/run/n/sock', reviewer: '/run/r/sock' },
+    mcp: { notify: '/run/n/sock', usage: '/run/u/sock' },
   });
   assert.deepEqual(r.gitConfig, [
     ['core.hooksPath', '/ccserver-sandbox-git-hooks'],
@@ -225,9 +225,9 @@ test('buildGuestRuntime: commit guard, vault, ssh-agent and MCP sockets', () => 
   assert.equal(r.env.SSH_AUTH_SOCK, '/run/ccserver/gnupg-vault/S.gpg-agent.ssh');
   assert.equal(r.env.GNUPGHOME, '/run/ccserver/gnupg-vault');
   assert.equal(byName['mcp-notify'].addr, `${SERVICE_IP}:7020`);
-  assert.equal(byName['mcp-reviewer'].addr, `${SERVICE_IP}:7023`);
+  assert.equal(byName['mcp-usage'].addr, `${SERVICE_IP}:7021`);
   assert.equal(r.env.CCSANDBOX_NOTIFY_MCP_SOCK, '/ccserver-sandbox-notify.d/sock');
-  assert.equal(r.env.CCSANDBOX_USAGE_MCP_SOCK, undefined);
+  assert.equal(r.env.CCSANDBOX_USAGE_MCP_SOCK, '/ccserver-sandbox-usage.d/sock');
   assert.ok(r.links.some(([l]) => l === '/ccserver-sandbox-mcp-bridge'));
   assert.equal(new Set(r.services.map((s) => s.addr)).size, r.services.length, 'ports unique');
 

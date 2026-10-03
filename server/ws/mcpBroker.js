@@ -1,10 +1,10 @@
-// Unix-socket MCP brokers for process-wide notification, usage and reviewer
+// Unix-socket MCP brokers for process-wide notification and usage
 // servers. They share a transport and bind a fresh MCP server per connection.
 
 import { createServer } from 'node:net';
 import { rmSync, existsSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
-import { SocketTransport, buildNotifyMcpServer, buildUsageMcpServer, buildReviewerMcpServer, MAX_TRANSPORT_BUFFER_CHARS } from './mcpServer.js';
+import { SocketTransport, buildNotifyMcpServer, buildUsageMcpServer, MAX_TRANSPORT_BUFFER_CHARS } from './mcpServer.js';
 import { ensureHostRuntimeDir } from './git-broker.js';
 
 // How long to wait (non-blocking) for the socket file after listen() reports
@@ -199,21 +199,6 @@ export async function startUsageBroker({ usageApi, sockPath }) {
     sockPath,
     tag: 'usage',
     buildServer: () => buildUsageMcpServer({ usageApi }),
-  });
-}
-
-// The process-global reviewer broker (ccserver-reviewer, see reviewer.js).
-// One per server process. It carries a per-connection
-// identity frame (CCSERVER_REVIEWER_IDENTITY, same mechanism as notify)
-// -- unlike run_review/list_reviews/get_review (whose attribution, if any,
-// rides in run_review's own `requestedBy` argument), finish_review needs to
-// verify the CALLER is the very session the job launched, and the identity
-// frame's sessionId is what it checks against.
-export async function startReviewerBroker({ reviewerApi, sockPath }) {
-  return listenMcp({
-    sockPath,
-    tag: 'reviewer',
-    buildServer: (identity) => buildReviewerMcpServer({ reviewerApi, identity }),
   });
 }
 
