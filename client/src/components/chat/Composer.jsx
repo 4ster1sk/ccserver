@@ -30,6 +30,7 @@ export default function Composer({ draftKey, disabled, busy, onSend, onCommand, 
   });
   const [cmdIndex, setCmdIndex] = useState(0);
   const ref = useRef(null);
+  const listRef = useRef(null);
 
   useEffect(() => {
     try {
@@ -50,6 +51,11 @@ export default function Composer({ draftKey, disabled, busy, onSend, onCommand, 
   const suggestions = cmdMatch
     ? commands.filter((c) => c.name.toLowerCase().startsWith(cmdMatch[1].toLowerCase())).slice(0, 8)
     : [];
+
+  // Keep the highlighted command visible when the list scrolls.
+  useEffect(() => {
+    listRef.current?.querySelector('li.active')?.scrollIntoView({ block: 'nearest' });
+  }, [cmdIndex, suggestions.length]);
 
   const submit = () => {
     const value = text.trim();
@@ -89,7 +95,7 @@ export default function Composer({ draftKey, disabled, busy, onSend, onCommand, 
   return (
     <div className="chat-composer">
       {suggestions.length > 0 && (
-        <ul className="chat-cmd-list" role="listbox">
+        <ul ref={listRef} className="chat-cmd-list" role="listbox">
           {suggestions.map((c, i) => (
             <li key={c.name} role="option" aria-selected={i === cmdIndex} className={i === cmdIndex ? 'active' : ''}>
               <button type="button" onMouseDown={(e) => { e.preventDefault(); setText(`/${c.name} `); ref.current?.focus(); }}>

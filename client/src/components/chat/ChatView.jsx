@@ -126,13 +126,17 @@ export default function ChatView({ app = 'opencode', cwd, sandbox, sandboxOpts, 
 
       {live && (
         <div className="chat-dock">
-          {chat.permissions.map((p) => (
-            <PermissionPrompt key={p.id} request={p} onReply={chat.replyPermission} />
-          ))}
-          {chat.forms.map((f) => (
-            <FormPrompt key={f.id} form={f} onSubmit={chat.replyForm} onCancel={guard(chat.cancelForm)} />
-          ))}
-          {(actionError || chat.error) && <div className="chat-banner chat-banner--error">{actionError || chat.error}</div>}
+          {(chat.permissions.length > 0 || chat.forms.length > 0 || actionError || chat.error) && (
+            <div className="chat-dock-prompts">
+              {chat.permissions.map((p) => (
+                <PermissionPrompt key={p.id} request={p} onReply={chat.replyPermission} />
+              ))}
+              {chat.forms.map((f) => (
+                <FormPrompt key={f.id} form={f} onSubmit={chat.replyForm} onCancel={guard(chat.cancelForm)} />
+              ))}
+              {(actionError || chat.error) && <div className="chat-banner chat-banner--error">{actionError || chat.error}</div>}
+            </div>
+          )}
           <Composer
             draftKey={session.sessionId || cwd}
             disabled={!chat.loaded}

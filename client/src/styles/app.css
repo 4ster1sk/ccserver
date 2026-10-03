@@ -4392,9 +4392,13 @@ body {
   box-shadow: 0 2px 8px rgb(0 0 0 / 0.25);
 }
 
-/* Bottom dock: pending prompts + composer */
+/* Bottom dock: pending prompts + composer. The dock itself must not clip:
+   the composer's command list pops up above it, over .chat-body. Only the
+   prompts scroll. */
 
 .chat-dock {
+  position: relative;
+  z-index: 1;
   flex-shrink: 0;
   border-top: 1px solid var(--border);
   background: var(--bg-secondary);
@@ -4402,14 +4406,21 @@ body {
   display: flex;
   flex-direction: column;
   gap: 8px;
-  max-height: 70%;
-  overflow-y: auto;
 }
 
 .chat-dock > * {
   width: 100%;
   max-width: 860px;
   margin: 0 auto;
+}
+
+.chat-dock-prompts {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 0;
+  max-height: 60vh;
+  overflow-y: auto;
 }
 
 .chat-prompt-card {
@@ -4555,7 +4566,8 @@ body {
   background: var(--bg-surface);
   border: 1px solid var(--border);
   border-radius: 8px;
-  overflow: hidden;
+  max-height: 40vh;
+  overflow-y: auto;
   z-index: 5;
   box-shadow: 0 4px 16px rgb(0 0 0 / 0.3);
 }
