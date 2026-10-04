@@ -15,6 +15,8 @@ import {
   networkIsolationStateMsg,
   setPooledVmNetworkMode,
   chatStateMsg,
+  autoApprovePendingChatPermissions,
+  switchChatConversation,
 } from './sessionManager.js';
 import { brokerArmed, setSessionBrokerMode } from './netbrokerClient.js';
 import { setupRequired } from '../paths.js';
@@ -262,6 +264,21 @@ export function attachTerminalHandler(chan) {
               enabled: session.autoYes,
               log: session.autoYesLog,
             }));
+            // A chat session's requests already on screen get answered too.
+            if (session.autoYes && session.chat) {
+              autoApprovePendingChatPermissions(session).catch(() => {});
+            }
+          }
+        }
+        break;
+      }
+
+      case 'chat_switch_session': {
+        if (currentSessionId) {
+          const session = getSession(currentSessionId);
+          if (session?.chat) {
+            const ok = await switchChatConversation(session, msg.ocSessionId);
+            chan.send(JSON.stringify({ type: 'chat_switch_result', ok, ocSessionId: msg.ocSessionId ?? null }));
           }
         }
         break;

@@ -261,6 +261,51 @@ export async function sendChatPrompt(chat, text) {
   return res.status === 200;
 }
 
+// ---- auto-approval (Auto-Y) ----------------------------------------------
+//
+// A chat session has no TUI prompt for the pty detector to answer: Auto-Y
+// replies to the permission request over the API instead. Only tool
+// permissions -- a plan approval (Claude Code's ExitPlanMode, `plan` set by
+// the adapter) and a question form stay with the user.
+
+export function isAutoApprovable(request) {
+  return !!request?.id && typeof request.plan !== 'string';
+}
+
+// The auto-yes log line for a permission request.
+export function chatPermissionLabel(request) {
+  const resources = Array.isArray(request?.resources) ? request.resources : [];
+  return [request?.action, ...resources].filter(Boolean).join(' ').slice(0, 80) || 'permission';
+}
+
+export async function replyChatPermission(chat, requestId, decision) {
+  if (!chat?.ready || !chat.ocSessionId) return false;
+  const ses = encodeURIComponent(chat.ocSessionId);
+  const res = await chatRequest(chat, 'POST', `/api/session/${ses}/permission/${encodeURIComponent(requestId)}/reply`, { decision });
+  return res.status === 200;
+}
+
+// The requests of the current conversation still waiting for an answer.
+export async function pendingChatPermissions(chat) {
+  if (!chat?.ready || !chat.ocSessionId) return [];
+  const res = await chatRequest(chat, 'GET', `/api/session/${encodeURIComponent(chat.ocSessionId)}/permission`);
+  return res.status === 200 && Array.isArray(res.body?.data) ? res.body.data : [];
+}
+
+// Points the chat at another conversation of the same serve (the chat
+// view's history). Resolves false for an id serve does not know.
+export async function switchChatSession(chat, ocSessionId) {
+  if (!chat?.ready || typeof ocSessionId !== 'string' || !ocSessionId) return false;
+  const res = await chatRequest(chat, 'GET', `/api/session/${encodeURIComponent(ocSessionId)}`);
+  if (res.status !== 200) return false;
+  chat.ocSessionId = ocSessionId;
+  // busy / waiting belonged to the previous conversation.
+  chat.busy = false;
+  chat.waiting = 0;
+  chat.monitor?.reset?.();
+  return true;
+}
+
 // ---- server-side monitor --------------------------------------------------
 //
 // ccserver follows each chat session's event stream itself, independent of
@@ -274,10 +319,12 @@ export async function sendChatPrompt(chat, text) {
 // onNotify(event) gets { title, body } for a finished turn and for anything
 // that starts waiting on the user. onModelSelected(model) gets the model ref
 // whenever the conversation switches model / effort, from any browser.
+// onPermissionAsked(request) returns true when it answers the request by
+// itself (Auto-Y): no "許可が必要です" notification then.
 
 const MONITOR_RETRY_MS = [500, 1000, 2000, 5000, 10000];
 
-export function startChatMonitor(chat, { onChange, onNotify, onModelSelected, isAlive }) {
+export function startChatMonitor(chat, { onChange, onNotify, onModelSelected, onPermissionAsked, isAlive }) {
   if (chat.monitor) return chat.monitor;
   const waiting = new Set();
   let req = null;
@@ -317,6 +364,7 @@ export function startChatMonitor(chat, { onChange, onNotify, onModelSelected, is
       case 'permission.asked':
         waiting.add(`per:${d.id}`);
         setWaiting();
+        if (onPermissionAsked?.(d)) break;
         onNotify?.({ title: '許可が必要です', body: [d.action, ...(Array.isArray(d.resources) ? d.resources : [])].filter(Boolean).join(' ').slice(0, 200) });
         break;
       case 'permission.replied':
@@ -387,6 +435,11 @@ export function startChatMonitor(chat, { onChange, onNotify, onModelSelected, is
   chat.waiting = 0;
   connect();
   chat.monitor = {
+    // After switchChatSession: forget the old conversation's requests.
+    reset() {
+      waiting.clear();
+      chat.waiting = 0;
+    },
     stop() {
       stopped = true;
       if (retryTimer) clearTimeout(retryTimer);

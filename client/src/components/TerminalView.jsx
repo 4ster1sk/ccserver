@@ -9,6 +9,9 @@ import { dewrapSelection } from '../dewrap.js';
 import { displayPath } from '../displayPath.js';
 import { useCommitSigningStatusContext } from './CommitSigningStatusProvider.jsx';
 import { commitSigningBadgeState } from '../commitSigningBadge.js';
+import SchedulerPanel, { useScheduledPrompt } from './SchedulerPanel.jsx';
+import { AutoYesLogPanel, useAutoYesToggle } from './AutoYesControls.jsx';
+import NetworkIsolationToggle from './NetworkIsolationToggle.jsx';
 
 const ALL_SPECIAL_KEYS = [
   { id: 'bs', label: 'BS', data: '\x7f' },
@@ -47,7 +50,6 @@ const DEFAULT_KEY_IDS = [
 
 const STORAGE_KEY = 'ccserver-special-keys';
 const CUSTOM_KEYS_STORAGE = 'ccserver-custom-keys';
-const SKIP_NOSANDBOX_AUTOY_WARNING_KEY = 'ccserver-skip-nosandbox-autoy-warning';
 
 function loadCustomKeys() {
   try {
@@ -179,21 +181,6 @@ function appLabel(app) {
   return 'opencode';
 }
 
-// Format an absolute epoch as the zero-padded 24h "HH:MM" the scheduler
-// panel's <input type="time"> requires, in `timeZone` (server-local if
-// omitted). Unlike fmtServer(), this must not go through toLocaleString --
-// its output is locale-dependent, while the <input> value format is not.
-function toServerHHMM(epochMs, timeZone) {
-  const parts = new Intl.DateTimeFormat('en-US', {
-    timeZone: timeZone || undefined,
-    hourCycle: 'h23',
-    hour: '2-digit',
-    minute: '2-digit',
-  }).formatToParts(new Date(epochMs));
-  const map = Object.fromEntries(parts.map((p) => [p.type, p.value]));
-  return `${map.hour}:${map.minute}`;
-}
-
 // OSC 52 clipboard writes (sent by apps like opencode): update the browser
 // clipboard, falling back to a hidden-textarea copy when the async Clipboard
 // API is unavailable (non-secure context, denied permission, ...).
@@ -286,23 +273,22 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
   // badge also reflects whether the key is unlocked (commitSigningBadge.js).
   const [commitSigningActive, setCommitSigningActive] = useState(false);
   const signingStatus = useCommitSigningStatusContext();
+  const sendWs = useCallback((obj) => {
+    const ws = wsRef.current;
+    if (!ws || ws.readyState !== WebSocket.OPEN) return false;
+    ws.send(JSON.stringify(obj));
+    return true;
+  }, []);
   // Non-sandbox Auto-Y confirmation: enabling Auto-Y outside a sandbox means
   // permission prompts are auto-approved straight on the host (no bwrap
   // isolation), so a first-time "are you sure" dialog with a dismiss flag
   // mirrors App.jsx's skip-close-confirm pattern.
-  const [showSandboxWarning, setShowSandboxWarning] = useState(false);
-  const [dontAskNoSandboxWarning, setDontAskNoSandboxWarning] = useState(false);
-  const [skipNoSandboxWarning, setSkipNoSandboxWarning] = useState(
-    () => localStorage.getItem(SKIP_NOSANDBOX_AUTOY_WARNING_KEY) === '1'
-  );
-  const [schedule, setSchedule] = useState(null); // { at, text } | null
+  const autoYesToggle = useAutoYesToggle({ sandbox, send: sendWs });
   const [showScheduler, setShowScheduler] = useState(false);
-  const [scheduleTime, setScheduleTime] = useState('');
-  const [schedulePromptText, setSchedulePromptText] = useState('');
-  const [scheduleError, setScheduleError] = useState('');
-  const [serverTz, setServerTz] = useState(null);
-  const serverOffsetRef = useRef(0); // serverNow - clientNow (ms)
-  const [nowTick, setNowTick] = useState(() => Date.now());
+  const sched = useScheduledPrompt({ send: sendWs, app, open: showScheduler });
+  const schedule = sched.schedule;
+  const schedMessageRef = useRef(sched.handleMessage);
+  schedMessageRef.current = sched.handleMessage;
   const notifyRef = useRef(notify);
   useEffect(() => { notifyRef.current = notify; }, [notify]);
   const onFocusTabRef = useRef(onFocusTab);
@@ -878,15 +864,10 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
             setNetworkIsolateScope(msg.scope === 'vm' ? 'vm' : 'session');
             break;
           case 'schedule_state':
-            setSchedule(msg.scheduled || null);
-            setScheduleError(msg.error || '');
-            if (msg.serverTz) setServerTz(msg.serverTz);
-            if (typeof msg.serverNow === 'number') {
-              serverOffsetRef.current = msg.serverNow - Date.now();
-            }
+            schedMessageRef.current(msg);
             break;
           case 'schedule_fired': {
-            setSchedule(null);
+            schedMessageRef.current(msg);
             if (notifyRef.current) {
               const n = notifyRef.current(appLabel(appRef.current), {
                 body: `Scheduled prompt sent in ${displayPath(cwd, homeDirRef.current)}`,
@@ -1333,82 +1314,6 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
     sendInput(key.data);
   }, [sendInput]);
 
-  // Format an absolute epoch in the SERVER's timezone (matching Claude Code's
-  // rate-limit reset times), falling back to the browser locale if unknown.
-  const fmtServer = useCallback((epoch, opts) => {
-    try {
-      return new Date(epoch).toLocaleString([], { timeZone: serverTz || undefined, ...opts });
-    } catch {
-      return new Date(epoch).toLocaleString([], opts);
-    }
-  }, [serverTz]);
-
-  const submitSchedule = useCallback(() => {
-    if (!/^(\d{1,2}):(\d{2})$/.test(scheduleTime.trim())) {
-      setScheduleError('時刻を HH:MM 形式で入力してください');
-      return;
-    }
-    if (!schedulePromptText.trim()) {
-      setScheduleError('プロンプト文面を入力してください');
-      return;
-    }
-    const ws = wsRef.current;
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      // Send the HH:MM string; the server interprets it in its own timezone.
-      ws.send(JSON.stringify({ type: 'schedule_prompt', time: scheduleTime, text: schedulePromptText }));
-      setScheduleError('');
-    }
-  }, [scheduleTime, schedulePromptText]);
-
-  const cancelSchedule = useCallback(() => {
-    const ws = wsRef.current;
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ type: 'cancel_schedule' }));
-    }
-  }, []);
-
-  // Confirm the non-sandbox Auto-Y warning: persist the dismiss flag if
-  // checked, then send the enable exactly as the toggle would have.
-  const confirmNoSandboxAutoYes = useCallback(() => {
-    if (dontAskNoSandboxWarning) {
-      localStorage.setItem(SKIP_NOSANDBOX_AUTOY_WARNING_KEY, '1');
-      setSkipNoSandboxWarning(true);
-    }
-    setShowSandboxWarning(false);
-    const ws = wsRef.current;
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ type: 'set_auto_yes', enabled: true }));
-    }
-  }, [dontAskNoSandboxWarning]);
-
-  // Tick a live clock while the scheduler panel is open so the displayed
-  // server time stays current.
-  useEffect(() => {
-    if (!showScheduler) return;
-    const t = setInterval(() => setNowTick(Date.now()), 1000);
-    return () => clearInterval(t);
-  }, [showScheduler]);
-
-  // On opening a fresh (no active schedule, untouched time field) scheduler
-  // panel, prefill the time with the last-known session-limit reset time --
-  // a passive lookup, it never triggers a new /usage capture. Only "claude"
-  // sessions have a session limit to speak of. Requiring serverTz first
-  // (rather than falling back to the browser's zone) avoids a wrong initial
-  // value on a server in a different timezone; schedule_state normally
-  // delivers it well before a user could open this panel.
-  useEffect(() => {
-    if (!showScheduler || schedule || scheduleTime || !serverTz || app !== 'claude') return;
-    let cancelled = false;
-    authFetch('/api/session-limit-reset')
-      .then((res) => res.json())
-      .then((data) => {
-        if (cancelled || !data?.resetAtMs) return;
-        setScheduleTime((prev) => (prev ? prev : toServerHHMM(data.resetAtMs, data.timeZone || serverTz)));
-      })
-      .catch(() => { /* best effort */ });
-    return () => { cancelled = true; };
-  }, [showScheduler, schedule, scheduleTime, serverTz, app]);
-
   return (
     <div className={`terminal-view${keyboardOpen ? ' keyboard-open' : ''}${selectionMode ? ' selection-mode' : ''}`} ref={terminalViewRef}>
       <div className={`terminal-header${!sandbox && !shell ? ' no-sandbox' : ''}`}>
@@ -1421,20 +1326,7 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
             <>
               <button
                 className={`btn auto-yes-toggle${autoYes ? ' active' : ''}`}
-                onClick={() => {
-                  const ws = wsRef.current;
-                  const next = !autoYes;
-                  // Outside a sandbox there is no bwrap isolation to catch
-                  // auto-approved destructive operations — require an explicit
-                  // (dismissable) confirmation before enabling.
-                  if (next && !sandbox && !skipNoSandboxWarning) {
-                    setShowSandboxWarning(true);
-                    return;
-                  }
-                  if (ws && ws.readyState === WebSocket.OPEN) {
-                    ws.send(JSON.stringify({ type: 'set_auto_yes', enabled: next }));
-                  }
-                }}
+                onClick={() => autoYesToggle.toggle(!autoYes)}
                 title={autoYes ? 'Auto-yes enabled (click to disable)' : 'Auto-yes disabled (click to enable)'}
               >
                 Auto-Y
@@ -1451,21 +1343,11 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
             </>
           )}
           {networkIsolateArmed && (
-            <button
-              className={`btn network-isolate-toggle${networkIsolateEnabled ? ' active' : ''}`}
-              onClick={() => {
-                const ws = wsRef.current;
-                if (ws && ws.readyState === WebSocket.OPEN) {
-                  ws.send(JSON.stringify({ type: 'set_network_isolation', enabled: !networkIsolateEnabled }));
-                }
-              }}
-              title={(networkIsolateEnabled
-                ? 'ネットワーク隔離: 有効 (許可リストのみ通信可、クリックで一時解除)'
-                : 'ネットワーク隔離: 一時解除中 (全通信許可、クリックで再度有効化)')
-                + (networkIsolateScope === 'vm' ? '\nこの常駐VMの全セッションに効きます' : '')}
-            >
-              <svg className="header-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" style={{ color: 'var(--text-muted)' }} strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><circle cx="8" cy="8" r="6"/><ellipse cx="8" cy="8" rx="2.8" ry="6"/><path d="M2 8h12"/>{networkIsolateEnabled && <line x1="2" y1="2" x2="14" y2="14" strokeWidth="2"/>}</svg>
-            </button>
+            <NetworkIsolationToggle
+              enabled={networkIsolateEnabled}
+              scope={networkIsolateScope}
+              onToggle={() => sendWs({ type: 'set_network_isolation', enabled: !networkIsolateEnabled })}
+            />
           )}
           {(() => {
             const badge = commitSigningBadgeState({ commitSigningActive }, signingStatus?.data);
@@ -1482,7 +1364,7 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
             className={`btn schedule-toggle${schedule ? ' active' : ''}`}
             onClick={() => setShowScheduler((v) => !v)}
             title={schedule
-              ? `Scheduled prompt at ${fmtServer(schedule.at)} (click to view)`
+              ? `Scheduled prompt at ${sched.fmtServer(schedule.at)} (click to view)`
               : 'Schedule a prompt'}
           >
             <svg className="header-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><circle cx="8" cy="8" r="6"/><path d="M8 4.5V8l2.5 1.5"/></svg>
@@ -1507,76 +1389,9 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
         </div>
       </div>
       {showAutoYesLog && autoYesLog.length > 0 && (
-        <div className="auto-yes-log">
-          <div className="auto-yes-log-header">
-            <span>Auto-Yes Log ({autoYesLog.length})</span>
-            <button className="btn btn-secondary btn-sm" onClick={() => setShowAutoYesLog(false)}>&#10005;</button>
-          </div>
-          <div className="auto-yes-log-list">
-            {[...autoYesLog].reverse().map((entry, i) => (
-              <div key={autoYesLog.length - 1 - i} className="auto-yes-log-entry">
-                <span className="auto-yes-log-time">{new Date(entry.time).toLocaleTimeString()}</span>
-                <span className="auto-yes-log-prompt">{entry.prompt}</span>
-              </div>
-            ))}
-          </div>
-        </div>
+        <AutoYesLogPanel log={autoYesLog} onClose={() => setShowAutoYesLog(false)} />
       )}
-      {showScheduler && (
-        <div className="scheduler-panel">
-          <div className="scheduler-header">
-            <span>予約プロンプト</span>
-            <button className="btn btn-secondary btn-sm" onClick={() => setShowScheduler(false)}>&#10005;</button>
-          </div>
-          <div className="scheduler-servertime">
-            サーバー現在時刻: {fmtServer(nowTick + serverOffsetRef.current)}
-            {serverTz ? ` (${serverTz})` : ' (タイムゾーン取得中…)'}
-          </div>
-          {schedule ? (
-            <div className="scheduler-active">
-              <div className="scheduler-active-info">
-                <span className="scheduler-active-time">
-                  {fmtServer(schedule.at)} に送信予定
-                </span>
-                <span className="scheduler-active-text">{schedule.text}</span>
-              </div>
-              <button className="btn btn-secondary btn-sm" onClick={cancelSchedule}>キャンセル</button>
-            </div>
-          ) : (
-            <div className="scheduler-form">
-              <div className="scheduler-form-row">
-                <input
-                  type="time"
-                  className="key-config-input scheduler-time"
-                  value={scheduleTime}
-                  onChange={(e) => setScheduleTime(e.target.value)}
-                />
-                <span className="scheduler-hint">サーバー時刻で送信(過ぎていれば翌日)</span>
-              </div>
-              <textarea
-                className="terminal-input scheduler-text"
-                value={schedulePromptText}
-                onChange={(e) => setSchedulePromptText(e.target.value)}
-                placeholder="送信するプロンプト文面..."
-                rows={2}
-                autoComplete="off"
-                autoCorrect="off"
-                spellCheck={false}
-              />
-              <div className="scheduler-form-actions">
-                <button
-                  className="btn btn-primary btn-sm"
-                  onClick={submitSchedule}
-                  disabled={!scheduleTime || !schedulePromptText.trim()}
-                >
-                  予約する
-                </button>
-              </div>
-            </div>
-          )}
-          {scheduleError && <div className="scheduler-error">{scheduleError}</div>}
-        </div>
-      )}
+      {showScheduler && <SchedulerPanel sched={sched} onClose={() => setShowScheduler(false)} />}
       {/* opencode's TUI owns the conversation: the container hides xterm.js's
           empty scrollbar (.tui-scroll) and pinToBottom keeps the viewport at
           the bottom. */}
@@ -1862,30 +1677,7 @@ export default function TerminalView({ cwd, onClose, claudeSessionId, shell, san
           Send
         </button>
       </div>
-      {showSandboxWarning && (
-        <div className="resume-overlay" onClick={() => setShowSandboxWarning(false)}>
-          <div className="resume-dialog" onClick={(e) => e.stopPropagation()}>
-            <h3>サンドボックス外でAuto-Yを有効にしますか?</h3>
-            <p>このセッションはサンドボックスで隔離されていません。Auto-Yは権限確認プロンプトをすべて自動承認するため、ファイル削除やコマンド実行などの操作が確認なしにホスト環境へ直接反映されます。</p>
-            <label className="close-confirm-checkbox">
-              <input
-                type="checkbox"
-                checked={dontAskNoSandboxWarning}
-                onChange={(e) => setDontAskNoSandboxWarning(e.target.checked)}
-              />
-              次回以降確認しない
-            </label>
-            <div className="resume-actions">
-              <button className="btn btn-secondary" onClick={() => setShowSandboxWarning(false)}>
-                キャンセル
-              </button>
-              <button className="btn btn-primary" onClick={confirmNoSandboxAutoYes}>
-                有効にする
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      {autoYesToggle.dialog}
     </div>
   );
 }

@@ -13,7 +13,7 @@ import { homedir } from 'node:os';
 import { qemuVmPool } from './qemuVmPool.js';
 import { LAUNCHER_SCRIPT as QEMU_LAUNCHER } from './sandbox-qemu.js';
 import { buildSandboxSpawn, resolveApp, sandboxAvailable, sandboxUnavailableReason, forceSandboxUnavailableReason, loadSandboxConfig, resolveSandboxBackend, persistentHomeDir, dockerSandboxAvailable, dockerdStatus, dockerdLockHeld, resolveTools, opencodeSupportsStandalone, chatBridgeArgv, CHAT_PASSWORD_NAME } from './sandbox.js';
-import { prepareChatDir, removeChatDir, createChatState, publicChatState, feedChatOutput, failChat, initChatSession, sendChatPrompt, startChatMonitor, stopChatMonitor } from './opencodeChat.js';
+import { prepareChatDir, removeChatDir, createChatState, publicChatState, feedChatOutput, failChat, initChatSession, sendChatPrompt, startChatMonitor, stopChatMonitor, isAutoApprovable, chatPermissionLabel, replyChatPermission, pendingChatPermissions, switchChatSession } from './opencodeChat.js';
 import { brokerArmed, setSessionBrokerLists, setSessionBrokerOpMode } from './netbrokerClient.js';
 import { buildMcpConfigArgsAndEnv } from './mcpConfig.js';
 import { shouldInjectNotify, notifyEnabled, getNotifySockPath, notifyBrokerRunning } from './notify.js';
@@ -335,6 +335,12 @@ function buildSessionRecord(id, ptyProcess, meta) {
                 // The last model / effort picked becomes what the app's next
                 // chat session starts with (chatDefaults.js).
                 onModelSelected: (model) => setChatDefaultModel(session.app, model),
+                // Auto-Y: answered here, so no notification for it.
+                onPermissionAsked: (request) => {
+                  if (!session.autoYes || !isAutoApprovable(request)) return false;
+                  autoApproveChatPermission(session, request);
+                  return true;
+                },
               });
             }
             broadcastChatState(session);
@@ -1992,6 +1998,47 @@ export function listPooledQemuSessions() {
 // The chat view's startup list / readiness (see opencodeChat.js).
 export function chatStateMsg(session) {
   return { type: 'chat_state', chat: publicChatState(session.chat) };
+}
+
+// Auto-Y for a chat session: "allow once" over the API, logged like the
+// pty detector's answers (session.autoYesLog, the auto_yes broadcast).
+// `deps.reply` is replyChatPermission, swappable in tests.
+export async function autoApproveChatPermission(session, request, deps = {}) {
+  const reply = deps.reply || replyChatPermission;
+  let ok = false;
+  try {
+    ok = await reply(session.chat, request.id, 'once');
+  } catch (err) {
+    console.warn(`[chat] ${session.id}: auto-approve failed: ${err.message}`);
+  }
+  if (!ok) return false;
+  const entry = { time: Date.now(), prompt: chatPermissionLabel(request) };
+  session.autoYesLog.push(entry);
+  if (session.autoYesLog.length > 100) session.autoYesLog.shift();
+  broadcast(session, { type: 'auto_yes', entry });
+  return true;
+}
+
+// Turning Auto-Y on also answers what is already waiting.
+export async function autoApprovePendingChatPermissions(session, deps = {}) {
+  if (!session?.chat?.ready || !session.autoYes) return 0;
+  const list = deps.pending ? await deps.pending(session.chat) : await pendingChatPermissions(session.chat).catch(() => []);
+  let n = 0;
+  for (const request of list) {
+    if (!session.autoYes || !isAutoApprovable(request)) continue;
+    if (await autoApproveChatPermission(session, request, deps)) n++;
+  }
+  return n;
+}
+
+// The chat view's history: another conversation of the same serve
+// (opencode). Claude Code's adapter holds one conversation per process, so
+// it is not switched here -- the client relaunches with the id instead.
+export async function switchChatConversation(session, ocSessionId) {
+  if (!session?.chat || session.exited || session.app === 'claude') return false;
+  const ok = await switchChatSession(session.chat, ocSessionId).catch(() => false);
+  if (ok) broadcastChatState(session);
+  return ok;
 }
 
 function broadcastChatState(session) {

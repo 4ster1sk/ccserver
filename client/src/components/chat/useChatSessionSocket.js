@@ -11,8 +11,10 @@ const MAX_LOG_CHARS = 200_000;
 // protocol TerminalView speaks: `init` launches (ui: 'chat'), `attach`
 // rejoins, SESSION_NOT_FOUND re-launches (resuming the last conversation of
 // the directory), and the pty output becomes the log. The conversation
-// itself does not travel here -- see useOpencodeChat.
-export function useChatSessionSocket({ app = 'opencode', cwd, sandbox, sandboxOpts, reuseSandboxHome, model, resume, attachSessionId, onSessionId, onSandboxResolved, onExited }) {
+// itself does not travel here -- see useOpencodeChat. The session-level
+// controls ride along as in TerminalView: Auto-Y, network isolation, and
+// (through onMessage) the scheduled prompt.
+export function useChatSessionSocket({ app = 'opencode', cwd, sandbox, sandboxOpts, reuseSandboxHome, model, resume, attachSessionId, onSessionId, onSandboxResolved, onExited, onMessage }) {
   const [sessionId, setSessionId] = useState(attachSessionId || null);
   const [chat, setChat] = useState(null); // server's publicChatState
   const [log, setLog] = useState('');
@@ -21,12 +23,17 @@ export function useChatSessionSocket({ app = 'opencode', cwd, sandbox, sandboxOp
   const [disconnected, setDisconnected] = useState(false);
   const [launching, setLaunching] = useState(!attachSessionId);
   const [sandboxResolved, setSandboxResolved] = useState(!!sandbox);
+  const [autoYes, setAutoYes] = useState(false);
+  const [autoYesLog, setAutoYesLog] = useState([]);
+  // { armed, enabled, scope } -- see TerminalView / networkIsolationStateMsg.
+  const [networkIsolation, setNetworkIsolation] = useState({ armed: false, enabled: false, scope: 'session' });
 
-  const cbRef = useRef({ onSessionId, onSandboxResolved, onExited });
-  cbRef.current = { onSessionId, onSandboxResolved, onExited };
-  const launchRef = useRef({ app, cwd, sandbox, sandboxOpts, reuseSandboxHome, model, resume });
+  const cbRef = useRef({ onSessionId, onSandboxResolved, onExited, onMessage });
+  cbRef.current = { onSessionId, onSandboxResolved, onExited, onMessage };
+  const launchRef = useRef({ app, cwd, sandbox, sandboxOpts, reuseSandboxHome, model, resume, resumeId: null });
   const reconnectNowRef = useRef(() => {});
   const relaunchRef = useRef(() => {});
+  const wsRef = useRef(null);
 
   useEffect(() => {
     let ws = null;
@@ -48,7 +55,7 @@ export function useChatSessionSocket({ app = 'opencode', cwd, sandbox, sandboxOp
         sandbox: !!l.sandbox, sandboxOpts: l.sandboxOpts || null,
         reuseSandboxHome: l.reuseSandboxHome !== false,
         app: l.app || 'opencode', model: l.model || null, ui: 'chat',
-        ...(resumeLast ? { resume: true } : {}),
+        ...(l.resumeId ? { claudeSessionId: l.resumeId } : resumeLast ? { resume: true } : {}),
       };
     };
 
@@ -58,6 +65,7 @@ export function useChatSessionSocket({ app = 'opencode', cwd, sandbox, sandboxOp
       const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
       const sock = new WebSocket(authWsUrl(`${protocol}//${window.location.host}/ws/terminal`));
       ws = sock;
+      wsRef.current = sock;
       sock.onopen = () => {
         attempts = 0;
         setDisconnected(false);
@@ -118,7 +126,19 @@ export function useChatSessionSocket({ app = 'opencode', cwd, sandbox, sandboxOp
             stopped = true;
             setDisconnected(true);
             break;
+          case 'auto_yes_state':
+            setAutoYes(!!msg.enabled);
+            setAutoYesLog(msg.log || []);
+            break;
+          case 'auto_yes':
+            // Capped like the server's own session.autoYesLog.
+            setAutoYesLog((prev) => [...prev, msg.entry].slice(-100));
+            break;
+          case 'network_isolation_state':
+            setNetworkIsolation({ armed: !!msg.armed, enabled: !!msg.enabled, scope: msg.scope === 'vm' ? 'vm' : 'session' });
+            break;
           default:
+            cbRef.current.onMessage?.(msg);
             break;
         }
       };
@@ -139,18 +159,21 @@ export function useChatSessionSocket({ app = 'opencode', cwd, sandbox, sandboxOp
       stopped = false;
       connect();
     };
-    // After an exit: a fresh launch that resumes the conversation.
-    relaunchRef.current = () => {
+    // After an exit: a fresh launch that resumes the conversation -- the
+    // directory's latest one, or `resumeId` (Claude Code's history).
+    relaunchRef.current = (resumeId = null) => {
       clearTimeout(reconnectTimer);
       attempts = 0;
       stopped = false;
       sid = null;
-      launchRef.current = { ...launchRef.current, resume: true };
+      launchRef.current = { ...launchRef.current, resume: true, ...(resumeId ? { resumeId } : {}) };
       setSessionId(null);
       setChat(null);
       setLog('');
       setExited(null);
       setError(null);
+      setAutoYes(false);
+      setAutoYesLog([]);
       connect();
     };
 
@@ -180,7 +203,17 @@ export function useChatSessionSocket({ app = 'opencode', cwd, sandbox, sandboxOp
   }, []);
 
   const reconnect = useCallback(() => reconnectNowRef.current(), []);
-  const relaunch = useCallback(() => relaunchRef.current(), []);
+  const relaunch = useCallback((resumeId) => relaunchRef.current(typeof resumeId === 'string' ? resumeId : null), []);
+  // A message on the session's socket; false while it is not open.
+  const send = useCallback((obj) => {
+    const sock = wsRef.current;
+    if (!sock || sock.readyState !== WebSocket.OPEN) return false;
+    sock.send(JSON.stringify(obj));
+    return true;
+  }, []);
 
-  return { sessionId, chat, log, exited, error, disconnected, launching, sandbox: sandboxResolved, reconnect, relaunch };
+  return {
+    sessionId, chat, log, exited, error, disconnected, launching, sandbox: sandboxResolved,
+    autoYes, autoYesLog, networkIsolation, reconnect, relaunch, send,
+  };
 }

@@ -4,7 +4,7 @@ import http from 'node:http';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createChatState, initChatSession, startChatMonitor, stopChatMonitor } from './opencodeChat.js';
+import { createChatState, initChatSession, startChatMonitor, stopChatMonitor, isAutoApprovable, chatPermissionLabel, switchChatSession } from './opencodeChat.js';
 
 const cleanups = [];
 afterEach(async () => {
@@ -121,4 +121,48 @@ test('the monitor reports model switches of its own conversation', async () => {
   serve.emit({ type: 'session.model.selected', data: { sessionID: 'ses1', model: DEFAULT } });
   while (picked.length === 0) await new Promise((r) => setTimeout(r, 10));
   assert.deepEqual(picked, [DEFAULT]);
+});
+
+test('the monitor lets onPermissionAsked answer a request and skips its notification', async () => {
+  const serve = await fakeServe({});
+  const chat = chatFor(serve.sock);
+  chat.ocSessionId = 'ses1';
+  const asked = [];
+  const notified = [];
+  startChatMonitor(chat, {
+    isAlive: () => true,
+    onNotify: (n) => notified.push(n.title),
+    onPermissionAsked: (d) => { asked.push(d.id); return d.id === 'auto'; },
+  });
+  cleanups.push(async () => stopChatMonitor(chat));
+  while (serve.streams.length === 0) await new Promise((r) => setTimeout(r, 10));
+  serve.emit({ type: 'permission.asked', data: { sessionID: 'ses1', id: 'auto', action: 'bash' } });
+  serve.emit({ type: 'permission.asked', data: { sessionID: 'ses1', id: 'manual', action: 'edit' } });
+  while (asked.length < 2) await new Promise((r) => setTimeout(r, 10));
+  assert.deepEqual(asked, ['auto', 'manual']);
+  assert.deepEqual(notified, ['許可が必要です']);
+});
+
+test('plan approvals are not auto-approvable', () => {
+  assert.equal(isAutoApprovable({ id: 'p1', action: 'bash' }), true);
+  assert.equal(isAutoApprovable({ id: 'p2', plan: '# plan' }), false);
+  assert.equal(isAutoApprovable({}), false);
+});
+
+test('the auto-yes log label is the action and its resources', () => {
+  assert.equal(chatPermissionLabel({ action: 'bash', resources: ['npm test'] }), 'bash npm test');
+  assert.equal(chatPermissionLabel({}), 'permission');
+});
+
+test('switchChatSession moves to a conversation serve knows, and only that', async () => {
+  const serve = await fakeServe({ 'GET /api/session/ses2': () => [200, { data: { id: 'ses2' } }] });
+  const chat = chatFor(serve.sock);
+  chat.ready = true;
+  chat.ocSessionId = 'ses1';
+  chat.busy = true;
+  assert.equal(await switchChatSession(chat, 'missing'), false);
+  assert.equal(chat.ocSessionId, 'ses1');
+  assert.equal(await switchChatSession(chat, 'ses2'), true);
+  assert.equal(chat.ocSessionId, 'ses2');
+  assert.equal(chat.busy, false);
 });

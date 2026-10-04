@@ -833,6 +833,9 @@ export default function App() {
                     resume={!!tab.resume}
                     customLabel={resolveTabLabel(tab)}
                     notify={notify}
+                    notifyEnabled={notifyEnabled}
+                    notifyPermission={notifyPermission}
+                    onToggleNotify={toggleNotify}
                     visible={activeTabId === tab.id}
                     onSessionId={(sid) => handleTabSessionId(tab.id, sid)}
                     onSandboxResolved={(sb) => handleTabSandboxResolved(tab.id, sb)}

@@ -8,6 +8,11 @@ import ChatLogPanel from './ChatLogPanel.jsx';
 import MessageList from './MessageList.jsx';
 import Composer from './Composer.jsx';
 import { FormPrompt, PermissionPrompt } from './PermissionPrompt.jsx';
+import ChatHeaderMenu from './ChatHeaderMenu.jsx';
+import ChatHistoryPanel from './ChatHistoryPanel.jsx';
+import SchedulerPanel, { useScheduledPrompt } from '../SchedulerPanel.jsx';
+import { AutoYesLogPanel, useAutoYesToggle } from '../AutoYesControls.jsx';
+import NetworkIsolationToggle from '../NetworkIsolationToggle.jsx';
 
 const APP_NAMES = { opencode: 'opencode', claude: 'Claude Code' };
 
@@ -15,15 +20,25 @@ const APP_NAMES = { opencode: 'opencode', claude: 'Claude Code' };
 // over the terminal WebSocket, the conversation over opencode's v2 API
 // through ccserver's proxy -- opencode's own, or Claude Code's through the
 // claude-chat-adapter. See server/ws/opencodeChat.js.
-export default function ChatView({ app = 'opencode', cwd, sandbox, sandboxOpts, reuseSandboxHome = true, model = null, resume = false, customLabel = null, notify, visible, onSessionId, onSandboxResolved, onExited, attachSessionId, onFocusTab }) {
+export default function ChatView({ app = 'opencode', cwd, sandbox, sandboxOpts, reuseSandboxHome = true, model = null, resume = false, customLabel = null, notify, notifyEnabled, notifyPermission, onToggleNotify, visible, onSessionId, onSandboxResolved, onExited, attachSessionId, onFocusTab }) {
   const appName = APP_NAMES[app] || app;
-  const session = useChatSessionSocket({ app, cwd, sandbox, sandboxOpts, reuseSandboxHome, model, resume, attachSessionId, onSessionId, onSandboxResolved, onExited });
+  // The socket's messages the hook itself does not keep (scheduled prompt,
+  // conversation switch); a ref, since the handlers below need `session`.
+  const socketMessageRef = useRef(() => {});
+  const onSocketMessage = useCallback((msg) => socketMessageRef.current(msg), []);
+  const session = useChatSessionSocket({ app, cwd, sandbox, sandboxOpts, reuseSandboxHome, model, resume, attachSessionId, onSessionId, onSandboxResolved, onExited, onMessage: onSocketMessage });
   // The conversation stays on screen after opencode exits (read-only, with
   // a relaunch banner); only a live session takes input.
   const ready = !!session.chat?.ready;
   const live = ready && !session.exited;
   const chat = useOpencodeChat({ sessionId: session.sessionId, ocSessionId: session.chat?.ocSessionId, enabled: live });
-  const [logOpen, setLogOpen] = useState(false);
+  // The one panel open over the conversation: 'history' | 'timer' |
+  // 'autoYesLog' | 'log' | null (the header menu opens them).
+  const [panel, setPanel] = useState(null);
+  const logOpen = panel === 'log';
+  const [switching, setSwitching] = useState(false);
+  const sched = useScheduledPrompt({ send: session.send, app, open: panel === 'timer' });
+  const autoYesToggle = useAutoYesToggle({ sandbox: session.sandbox, send: session.send });
   const [homeDir, setHomeDir] = useState(null);
   const [actionError, setActionError] = useState(null);
 
@@ -33,7 +48,7 @@ export default function ChatView({ app = 'opencode', cwd, sandbox, sandboxOpts, 
 
   // A failed start opens the log by itself: that is where the cause is.
   const failed = !!session.error || !!session.chat?.error || (!!session.exited && !ready);
-  useEffect(() => { if (failed) setLogOpen(true); }, [failed]);
+  useEffect(() => { if (failed) setPanel('log'); }, [failed]);
 
   // Browser notifications while this tab is not the one being looked at: a
   // finished turn, and anything waiting on the user.
@@ -60,6 +75,34 @@ export default function ChatView({ app = 'opencode', cwd, sandbox, sandboxOpts, 
     prevPerm.current = permCount;
   }, [permCount, cwd, homeDir, notifyUser]);
 
+  socketMessageRef.current = (msg) => {
+    if (sched.handleMessage(msg)) {
+      if (msg.type === 'schedule_fired') notifyUser(`予約プロンプトを送信しました — ${displayPath(cwd, homeDir)}`, `schedule-fired-${cwd}`);
+      return;
+    }
+    if (msg.type === 'chat_switch_result') {
+      setSwitching(false);
+      if (msg.ok) setPanel(null);
+      else setActionError('会話を切り替えられませんでした');
+    }
+  };
+
+  // History: opencode's serve holds every conversation of the directory and
+  // switches in place; Claude Code's adapter holds one per process, so the
+  // session is relaunched on the picked transcript.
+  const selectConversation = async (id) => {
+    setActionError(null);
+    if (app === 'claude') {
+      setPanel(null);
+      if (session.sessionId) {
+        await authFetch(`/api/sessions/${encodeURIComponent(session.sessionId)}`, { method: 'DELETE' }).catch(() => {});
+      }
+      session.relaunch(id);
+      return;
+    }
+    if (session.send({ type: 'chat_switch_session', ocSessionId: id })) setSwitching(true);
+  };
+
   const guard = (fn) => async (...args) => {
     setActionError(null);
     try { await fn(...args); } catch (err) { setActionError(err.message); }
@@ -67,7 +110,6 @@ export default function ChatView({ app = 'opencode', cwd, sandbox, sandboxOpts, 
 
   const title = chat.info?.title && chat.info.title !== 'New session' ? chat.info.title : null;
   const effectiveSandbox = session.sandbox;
-  const status = !live ? null : chat.busy ? 'busy' : 'idle';
 
   return (
     <div className="chat-view">
@@ -76,22 +118,45 @@ export default function ChatView({ app = 'opencode', cwd, sandbox, sandboxOpts, 
           {effectiveSandbox ? '🔒 ' : '⚠️ '}💬 {customLabel ? `${customLabel} — ` : ''}{appName}{title ? ` · ${title}` : ''} &mdash; {displayPath(cwd, homeDir)}
         </span>
         <div className="header-actions">
-          {status && (
-            <span className={`chat-status chat-status--${status}`} title={status === 'busy' ? '実行中' : '待機中'}>
-              {status === 'busy' ? '● 実行中' : '○ 待機中'}
-            </span>
-          )}
           {live && !chat.streamConnected && <span className="chat-status chat-status--warn" title="イベントストリームに再接続中">再接続中…</span>}
-          <button
-            type="button"
-            className={`btn chat-header-btn${logOpen ? ' active' : ''}`}
-            onClick={() => setLogOpen((v) => !v)}
-            title={`起動ログ（${appName} / ブリッジの出力）`}
-          >
-            ログ
-          </button>
+          {session.networkIsolation.armed && (
+            <NetworkIsolationToggle
+              enabled={session.networkIsolation.enabled}
+              scope={session.networkIsolation.scope}
+              onToggle={() => session.send({ type: 'set_network_isolation', enabled: !session.networkIsolation.enabled })}
+            />
+          )}
+          <ChatHeaderMenu
+            panel={panel}
+            onPanel={setPanel}
+            live={live}
+            hasSession={!!session.sessionId && !session.exited}
+            schedule={sched.schedule}
+            fmtServer={sched.fmtServer}
+            autoYes={session.autoYes}
+            autoYesLogCount={session.autoYesLog.length}
+            onToggleAutoYes={() => autoYesToggle.toggle(!session.autoYes)}
+            notifyEnabled={notifyEnabled}
+            notifyPermission={notifyPermission}
+            onToggleNotify={onToggleNotify}
+          />
         </div>
       </div>
+
+      {panel === 'history' && live && (
+        <ChatHistoryPanel
+          sessionId={session.sessionId}
+          currentId={session.chat?.ocSessionId}
+          busy={chat.busy}
+          switching={switching}
+          onSelect={selectConversation}
+          onClose={() => setPanel(null)}
+        />
+      )}
+      {panel === 'timer' && <SchedulerPanel sched={sched} onClose={() => setPanel(null)} />}
+      {panel === 'autoYesLog' && session.autoYesLog.length > 0 && (
+        <AutoYesLogPanel log={session.autoYesLog} onClose={() => setPanel(null)} />
+      )}
 
       {session.disconnected && (
         <div className="chat-banner chat-banner--warn">
@@ -109,7 +174,7 @@ export default function ChatView({ app = 'opencode', cwd, sandbox, sandboxOpts, 
               launchError={session.error}
               exited={session.exited}
               logOpen={logOpen}
-              onShowLog={() => setLogOpen((v) => !v)}
+              onShowLog={() => setPanel((v) => (v === 'log' ? null : 'log'))}
               onRelaunch={session.error || session.exited ? session.relaunch : null}
             />
           </div>
@@ -121,7 +186,7 @@ export default function ChatView({ app = 'opencode', cwd, sandbox, sandboxOpts, 
             onDismissPending={chat.dismissPending}
           />
         )}
-        {logOpen && <ChatLogPanel log={session.log} onClose={() => setLogOpen(false)} />}
+        {logOpen && <ChatLogPanel log={session.log} onClose={() => setPanel(null)} />}
       </div>
 
       {live && (
@@ -162,6 +227,7 @@ export default function ChatView({ app = 'opencode', cwd, sandbox, sandboxOpts, 
           <button type="button" className="btn chat-link-btn" onClick={session.relaunch}>再起動して続きから</button>
         </div>
       )}
+      {autoYesToggle.dialog}
     </div>
   );
 }
